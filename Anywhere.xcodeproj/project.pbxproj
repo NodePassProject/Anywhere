@@ -10,11 +10,6 @@
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		CB2B9C922F77722600F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C912F77722600F24AC2 /* BLAKE3 */; };
-		CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8532F7821F400F24AC2 /* YAML */; };
-		CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8552F78220C00F24AC2 /* YAML */; };
-		CB3D0E0030F0000000000001 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB3D0E0130F0000000000001 /* BLAKE3 */; };
-		CB3D0E0230F0000000000001 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB3D0E0330F0000000000001 /* BLAKE3 */; };
 		CB71CDC52F837D11002B9E1D /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC42F837D11002B9E1D /* WidgetKit.framework */; };
 		CB71CDC72F837D11002B9E1D /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC62F837D11002B9E1D /* SwiftUI.framework */; };
 		CB71CDD42F837D11002B9E1D /* Anywhere Widget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -181,7 +176,10 @@
 				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,
 				Networking/Protocols/Core/UDPFraming.swift,
-				Networking/Protocols/Crypto/Blake3Hasher.swift,
+				Networking/Protocols/Crypto/BLAKE3/blake3_dispatch.c,
+				Networking/Protocols/Crypto/BLAKE3/blake3_portable.c,
+				Networking/Protocols/Crypto/BLAKE3/blake3.c,
+				Networking/Protocols/Crypto/BLAKE3Hasher.swift,
 				Networking/Protocols/Direct/DirectProxyConnection.swift,
 				Networking/Protocols/Direct/DirectUDPProxyConnection.swift,
 				Networking/Protocols/HTTP3/HTTP3Framer.swift,
@@ -398,8 +396,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB3D0E0030F0000000000001 /* BLAKE3 in Frameworks */,
-				CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -407,7 +403,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB2B9C922F77722600F24AC2 /* BLAKE3 in Frameworks */,
 				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -416,8 +411,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB3D0E0230F0000000000001 /* BLAKE3 in Frameworks */,
-				CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -491,8 +484,6 @@
 			);
 			name = Anywhere;
 			packageProductDependencies = (
-				CB3D0E0130F0000000000001 /* BLAKE3 */,
-				CB2BA8532F7821F400F24AC2 /* YAML */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -515,7 +506,6 @@
 			);
 			name = "Anywhere Network Extension";
 			packageProductDependencies = (
-				CB2B9C912F77722600F24AC2 /* BLAKE3 */,
 			);
 			productName = "Network Extension";
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
@@ -541,8 +531,6 @@
 			);
 			name = "Anywhere TV";
 			packageProductDependencies = (
-				CB3D0E0330F0000000000001 /* BLAKE3 */,
-				CB2BA8552F78220C00F24AC2 /* YAML */,
 			);
 			productName = Anywhere;
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
@@ -611,8 +599,6 @@
 			mainGroup = CB1C105C2F23B81500B74CD8;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */,
-				CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -848,9 +834,18 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"BLAKE3_NO_SSE2=1",
+					"BLAKE3_NO_SSE41=1",
+					"BLAKE3_NO_AVX2=1",
+					"BLAKE3_NO_AVX512=1",
+					"BLAKE3_USE_NEON=0",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/Networking/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
+					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -894,9 +889,18 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"BLAKE3_NO_SSE2=1",
+					"BLAKE3_NO_SSE41=1",
+					"BLAKE3_NO_AVX2=1",
+					"BLAKE3_NO_AVX512=1",
+					"BLAKE3_USE_NEON=0",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/Networking/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
+					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -938,12 +942,18 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"BLAKE3_NO_SSE2=1",
+					"BLAKE3_NO_SSE41=1",
+					"BLAKE3_NO_AVX2=1",
+					"BLAKE3_NO_AVX512=1",
+					"BLAKE3_USE_NEON=0",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -983,12 +993,18 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"BLAKE3_NO_SSE2=1",
+					"BLAKE3_NO_SSE41=1",
+					"BLAKE3_NO_AVX2=1",
+					"BLAKE3_NO_AVX512=1",
+					"BLAKE3_USE_NEON=0",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -1029,9 +1045,18 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"BLAKE3_NO_SSE2=1",
+					"BLAKE3_NO_SSE41=1",
+					"BLAKE3_NO_AVX2=1",
+					"BLAKE3_NO_AVX512=1",
+					"BLAKE3_USE_NEON=0",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/Networking/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
+					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1071,9 +1096,18 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"BLAKE3_NO_SSE2=1",
+					"BLAKE3_NO_SSE41=1",
+					"BLAKE3_NO_AVX2=1",
+					"BLAKE3_NO_AVX512=1",
+					"BLAKE3_USE_NEON=0",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/Networking/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
+					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1214,53 +1248,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Argsment/BLAKE3.git";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
-		CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Argsment/YAML.git";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		CB2B9C912F77722600F24AC2 /* BLAKE3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
-			productName = BLAKE3;
-		};
-		CB2BA8532F7821F400F24AC2 /* YAML */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */;
-			productName = YAML;
-		};
-		CB2BA8552F78220C00F24AC2 /* YAML */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */;
-			productName = YAML;
-		};
-		CB3D0E0130F0000000000001 /* BLAKE3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
-			productName = BLAKE3;
-		};
-		CB3D0E0330F0000000000001 /* BLAKE3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
-			productName = BLAKE3;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = CB1C105D2F23B81500B74CD8 /* Project object */;
 }

@@ -143,7 +143,7 @@ enum CloudBlobSync {
             logger.info("[iCloud] Store changed remotely; reloading synced stores")
             Task { @MainActor in scheduleRefresh() }
         }
-        Task.detached(priority: .utility) { await JSONBlobStore.shared.compactDuplicates() }
+        Task.detached(priority: .utility) { JSONBlobStore.shared.compactDuplicates() }
     }
 
     @MainActor
@@ -164,6 +164,6 @@ enum CloudBlobSync {
         await ConfigurationStore.shared.reload()   // after chains: coordinate() reads configs + chains
         await RoutingRuleSetStore.shared.reload()
         await MITMRuleSetStore.shared.reload()
-        Task.detached(priority: .utility) { await JSONBlobStore.shared.compactDuplicates() }
+        Task.detached(priority: .utility) { JSONBlobStore.shared.compactDuplicates() }
     }
 }

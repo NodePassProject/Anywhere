@@ -81,13 +81,13 @@ enum ShadowsocksKeyDerivation {
     }
 
     static func blake3Hash16(_ data: Data) -> Data {
-        Blake3Hasher.hash(data, count: 16)
+        BLAKE3Hasher.hash(data, count: 16)
     }
 
     static func deriveIdentitySubkey(psk: Data, salt: Data, keySize: Int) -> Data {
         var input = Data(psk)
         input.append(salt)
-        return Blake3Hasher.deriveKey(context: "shadowsocks 2022 identity subkey",
+        return BLAKE3Hasher.deriveKey(context: "shadowsocks 2022 identity subkey",
                                      input: input, count: keySize)
     }
 
@@ -95,7 +95,7 @@ enum ShadowsocksKeyDerivation {
     static func deriveSessionKey(psk: Data, salt: Data, keySize: Int) -> Data {
         var input = Data(psk)
         input.append(salt)
-        return Blake3Hasher.deriveKey(context: "shadowsocks 2022 session subkey",
+        return BLAKE3Hasher.deriveKey(context: "shadowsocks 2022 session subkey",
                                      input: input, count: keySize)
     }
 

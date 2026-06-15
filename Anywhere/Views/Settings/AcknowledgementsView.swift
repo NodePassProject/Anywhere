@@ -28,6 +28,31 @@ struct AcknowledgementsView: View {
 
     private static let libraries: [OpenSourceLibrary] = [
         OpenSourceLibrary(
+            name: "BLAKE3",
+            licenseType: "CC0 1.0 / Apache 2.0",
+            licenseText: """
+                BLAKE3 reference C implementation, version 1.8.5, by Jack O'Connor, Jean-Philippe Aumasson, Samuel Neves, and Zooko Wilcox-O'Hearn.
+
+                This work is dual-licensed under the Creative Commons Zero v1.0 Universal (CC0 1.0) public domain dedication and the Apache License, Version 2.0. You may use it under the terms of either license.
+
+                Unless required by applicable law or agreed to in writing, the software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+                """
+        ),
+        OpenSourceLibrary(
+            name: "libyaml",
+            licenseType: "MIT License",
+            licenseText: """
+                Copyright (c) 2017-2020 Ingy döt Net
+                Copyright (c) 2006-2016 Kirill Simonov
+
+                Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+                The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+                THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+                """
+        ),
+        OpenSourceLibrary(
             name: "lwIP",
             licenseType: "BSD License",
             licenseText: """

@@ -10,5 +10,6 @@
 
 #include "./lwip/lwip_bridge.h"
 #include "ngtcp2_bridge.h"
+#include "blake3.h"
 
 #endif /* BridgingHeader_h */

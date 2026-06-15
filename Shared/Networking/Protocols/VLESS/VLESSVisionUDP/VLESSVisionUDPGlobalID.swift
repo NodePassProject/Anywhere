@@ -17,7 +17,7 @@ enum VLESSVisionUDPGlobalID {
 
     /// Source address format: "udp:host:port"
     static func generateGlobalID(sourceAddress: String) -> Data {
-        var hasher = Blake3Hasher(key: baseKey)
+        var hasher = BLAKE3Hasher(key: baseKey)
         hasher.update(Array(sourceAddress.utf8))
         return hasher.finalizeData(count: 8)
     }

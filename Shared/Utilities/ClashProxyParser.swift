@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import YAML
 
 struct ClashProxyParser {
     struct ParseResult {
@@ -29,9 +28,9 @@ struct ClashProxyParser {
     }
 
     static func parse(yaml yamlString: String) throws -> ParseResult {
-        let root: Node
+        let root: YAML.Node
         do {
-            root = try load(yamlString)
+            root = try YAML.load(yamlString)
         } catch {
             throw ParseError.invalidYAML(error.localizedDescription)
         }
@@ -62,7 +61,7 @@ struct ClashProxyParser {
     // MARK: - Dispatch
 
     /// Clash `type:` values without a matching outbound are silently skipped.
-    private static func parseProxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard let type = getString(node, key: "type") else { return nil }
         switch type {
         case "vless":     return parseVLESSProxy(node)
@@ -78,18 +77,18 @@ struct ClashProxyParser {
 
     // MARK: - Node access helpers
 
-    private static func getString(_ node: Node, key: String) -> String? {
+    private static func getString(_ node: YAML.Node, key: String) -> String? {
         let value = node[key]
         guard value.type == .scalar else { return nil }
         return value.scalar
     }
 
-    private static func getInt(_ node: Node, key: String) -> Int? {
+    private static func getInt(_ node: YAML.Node, key: String) -> Int? {
         guard let s = getString(node, key: key) else { return nil }
         return Int(s)
     }
 
-    private static func getBool(_ node: Node, key: String) -> Bool? {
+    private static func getBool(_ node: YAML.Node, key: String) -> Bool? {
         guard let s = getString(node, key: key) else { return nil }
         switch s.lowercased() {
         case "true", "yes", "1": return true
@@ -98,7 +97,7 @@ struct ClashProxyParser {
         }
     }
 
-    private static func getStringSequence(_ node: Node, key: String) -> [String]? {
+    private static func getStringSequence(_ node: YAML.Node, key: String) -> [String]? {
         let seq = node[key]
         guard seq.type == .sequence else { return nil }
         var result: [String] = []
@@ -110,7 +109,7 @@ struct ClashProxyParser {
         return result.isEmpty ? nil : result
     }
 
-    private static func parseBasics(_ node: Node) -> (name: String, server: String, port: UInt16)? {
+    private static func parseBasics(_ node: YAML.Node) -> (name: String, server: String, port: UInt16)? {
         guard
             let name = getString(node, key: "name"),
             let server = getString(node, key: "server"),
@@ -134,7 +133,7 @@ struct ClashProxyParser {
     /// unused, since the cover SNI comes from the config's public_name). With an
     /// inline `config:` it is honored directly; `enable: true` without a config
     /// becomes opportunistic discovery.
-    private static func parseECHOpts(_ node: Node) -> ClashECHOpts {
+    private static func parseECHOpts(_ node: YAML.Node) -> ClashECHOpts {
         let opts = node["ech-opts"]
         guard opts.type == .map, getBool(opts, key: "enable") == true else { return .disabled }
         if let config = getString(opts, key: "config"), !config.isEmpty {
@@ -146,7 +145,7 @@ struct ClashProxyParser {
     /// Maps a parsed `ech-opts` outcome onto `TLSConfiguration`'s ECH fields:
     /// `enabled` is the master switch, `config` the inline ECHConfigList (nil when
     /// the config is to be discovered opportunistically).
-    private static func echSettings(_ node: Node) -> (config: String?, enabled: Bool) {
+    private static func echSettings(_ node: YAML.Node) -> (config: String?, enabled: Bool) {
         switch parseECHOpts(node) {
         case .disabled:             return (nil, false)
         case .enabled(let config):  return (config, true)
@@ -154,7 +153,7 @@ struct ClashProxyParser {
         }
     }
 
-    private static func parseVLESSProxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseVLESSProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
             let uuidString = getString(node, key: "uuid"),
@@ -231,7 +230,7 @@ struct ClashProxyParser {
 
     /// Our Hysteria client lacks Salamander obfuscation, so obfuscated nodes are skipped. The
     /// `ports` (multi-port hop range) and `hop-interval` fields are imported as `portHopping`.
-    private static func parseHysteria2Proxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseHysteria2Proxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
         if let obfs = getString(node, key: "obfs"), !obfs.isEmpty { return nil }
@@ -282,7 +281,7 @@ struct ClashProxyParser {
     /// Nodes using Reality, gRPC, the Trojan-Go SS layer, or any non-TCP transport are skipped —
     /// silently downgrading would speak a different wire format than the server expects. ECH is
     /// imported when it carries an inline ECHConfigList; see `parseECHOpts`.
-    private static func parseTrojanProxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseTrojanProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
             let password = getString(node, key: "password")
@@ -317,7 +316,7 @@ struct ClashProxyParser {
     // MARK: - AnyTLS
 
     /// Warm-pool knobs are stored raw; `AnyTLSMultiplexerPool` clamps them at use time.
-    private static func parseAnyTLSProxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseAnyTLSProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
         let password = getString(node, key: "password") ?? ""
@@ -354,7 +353,7 @@ struct ClashProxyParser {
 
     /// Only bare Shadowsocks is supported — nodes with a plugin, non-TCP transport,
     /// or TLS wrapper are skipped rather than silently downgraded.
-    private static func parseShadowsocksProxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseShadowsocksProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
             let password = getString(node, key: "password"),
@@ -377,7 +376,7 @@ struct ClashProxyParser {
 
     // MARK: - SOCKS5
 
-    private static func parseSOCKS5Proxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseSOCKS5Proxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
         // Reject SOCKS5-over-TLS rather than silently downgrading it.
         if getBool(node, key: "tls") == true { return nil }
@@ -394,7 +393,7 @@ struct ClashProxyParser {
 
     // MARK: - Sudoku
 
-    private static func parseSudokuProxy(_ node: Node) -> ProxyConfiguration? {
+    private static func parseSudokuProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
             let key = getString(node, key: "key")
@@ -452,13 +451,13 @@ struct ClashProxyParser {
     // MARK: - Shared option parsing
 
     /// Clash spells SNI `servername` for VLESS and `sni` for Trojan/Hysteria; accept either on any protocol.
-    private static func parseSNI(_ node: Node, server: String) -> String {
+    private static func parseSNI(_ node: YAML.Node, server: String) -> String {
         getString(node, key: "servername")
             ?? getString(node, key: "sni")
             ?? server
     }
 
-    private static func parseFingerprint(_ node: Node) -> TLSFingerprint {
+    private static func parseFingerprint(_ node: YAML.Node) -> TLSFingerprint {
         let raw = getString(node, key: "client-fingerprint")
         return TLSFingerprint(rawValue: mapFingerprint(raw)) ?? .chrome120
     }
@@ -472,7 +471,7 @@ struct ClashProxyParser {
         return Int(leading) ?? def
     }
 
-    private static func parseWSTransportLayer(from node: Node, server: String) -> TransportLayer {
+    private static func parseWSTransportLayer(from node: YAML.Node, server: String) -> TransportLayer {
         var wsPath = "/"
         var wsHost = server
         var wsHeaders: [String: String] = [:]
@@ -515,7 +514,7 @@ struct ClashProxyParser {
         }
     }
 
-    private static func parseSudokuHTTPMask(_ node: Node) -> SudokuHTTPMaskConfiguration {
+    private static func parseSudokuHTTPMask(_ node: YAML.Node) -> SudokuHTTPMaskConfiguration {
         guard node.type == .map else { return .init() }
         return SudokuHTTPMaskConfiguration(
             disable: getBool(node, key: "disable") ?? false,

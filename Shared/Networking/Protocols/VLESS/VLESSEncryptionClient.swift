@@ -71,7 +71,7 @@ private final class VLESSEncryptionAEAD {
 
     /// BLAKE3 key derivation from `(ctx, key)`; context is hashed as raw bytes to match Go's `NewAEAD`.
     init(context: Data, key: Data, useAES: Bool) {
-        let derived = Blake3Hasher.deriveKey(
+        let derived = BLAKE3Hasher.deriveKey(
             contextBytes: context,
             input: key,
             count: 32
@@ -321,7 +321,7 @@ nonisolated final class VLESSEncryptionClient {
         for k in config.publicKeys {
             keys.append(try VLESSNfsPublicKey.parse(k))
             raw.append(k)
-            hashes.append(Blake3Hasher.hash(k))
+            hashes.append(BLAKE3Hasher.hash(k))
         }
         self.nfsKeys = keys
         self.nfsKeysRaw = raw
