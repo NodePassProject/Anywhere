@@ -1,5 +1,5 @@
 //
-//  AnyTLSSession.swift
+//  AnyTLSMultiplexer.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/16/26.
@@ -7,10 +7,12 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AnyTLSSession")
+private let logger = AnywhereLogger(category: "AnyTLSMultiplexer")
 
 /// Owns one TLS connection and multiplexes logical streams over it via AnyTLS framing.
-nonisolated final class AnyTLSSession {
+nonisolated final class AnyTLSMultiplexer: Multiplexer {
+
+    // MARK: - Properties
 
     private let inner: ProxyConnection
     private let outerTLSVersion: TLSVersion?
@@ -44,8 +46,10 @@ nonisolated final class AnyTLSSession {
 
     private var closed: Bool = false
 
-    /// Invoked once when the session transitions to closed.
+    /// Invoked once when the multiplexer transitions to closed.
     var onClose: (() -> Void)?
+
+    // MARK: - Init
 
     init(inner: ProxyConnection, passwordHash: Data, padding: AnyTLSPaddingScheme) {
         self.inner = inner
@@ -54,9 +58,13 @@ nonisolated final class AnyTLSSession {
         self.padding = padding
     }
 
-    var isAlive: Bool { lock.withLock { !closed } }
+    // MARK: - Capacity
 
-    // MARK: - Start
+    var isAlive: Bool { lock.withLock { !closed } }
+    var isClosed: Bool { lock.withLock { closed } }
+    var activeStreamCount: Int { lock.withLock { streams.count } }
+
+    // MARK: - Lifecycle
 
     /// Sends the prologue + buffered cmdSettings, then starts the recv loop.
     /// pktCounter intentionally stays 0 here so the padding schedule aligns with the server.
@@ -75,13 +83,13 @@ nonisolated final class AnyTLSSession {
         if paddingLen > 0 {
             prologue.append(Data(repeating: 0, count: paddingLen))
         }
-        logger.debug("[AnyTLSSession] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
+        logger.debug("[AnyTLSMultiplexer] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
         inner.send(data: prologue) { [weak self] error in
             if let error {
-                logger.debug("[AnyTLSSession] prologue write failed: \(error.localizedDescription)")
+                logger.debug("[AnyTLSMultiplexer] prologue write failed: \(error.localizedDescription)")
                 self?.handleTransportFailure(error)
             } else {
-                logger.debug("[AnyTLSSession] prologue write completed")
+                logger.debug("[AnyTLSMultiplexer] prologue write completed")
             }
         }
 
@@ -92,13 +100,29 @@ nonisolated final class AnyTLSSession {
             "padding-md5": padding.md5Hex,
         ]
         let payload = AnyTLSProtocol.encodeStringMap(settings)
-        logger.debug("[AnyTLSSession] cmdSettings buffered (\(payload.count)B payload)")
+        logger.debug("[AnyTLSMultiplexer] cmdSettings buffered (\(payload.count)B payload)")
         writeControl(cmd: AnyTLSProtocol.cmdSettings, sid: 0, payload: payload, completion: { _ in })
 
-        startRecvLoop()
+        startReadLoop()
     }
 
-    // MARK: - Stream open / close
+    private func armSynDoneTimerLocked() {
+        synDoneTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
+        timer.schedule(deadline: .now() + .seconds(3))
+        timer.setEventHandler { [weak self] in
+            self?.close(error: ProxyError.connectionFailed("AnyTLS SYN-ACK timeout"))
+        }
+        timer.resume()
+        synDoneTimer = timer
+    }
+
+    private func cancelSynDoneTimerLocked() {
+        synDoneTimer?.cancel()
+        synDoneTimer = nil
+    }
+
+    // MARK: - Streams
 
     /// Opens a new logical stream; the caller's first write (the destination address)
     /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
@@ -106,16 +130,16 @@ nonisolated final class AnyTLSSession {
         lock.lock()
         if closed {
             lock.unlock()
-            logger.debug("[AnyTLSSession] openStream rejected — session closed")
+            logger.debug("[AnyTLSMultiplexer] openStream rejected — multiplexer closed")
             return nil
         }
         nextStreamID &+= 1
         if nextStreamID == 0 { nextStreamID = 1 }    // skip 0 (reserved for control)
         let sid = nextStreamID
-        let stream = AnyTLSStream(sid: sid, session: self, outerTLSVersion: outerTLSVersion)
+        let stream = AnyTLSStream(sid: sid, multiplexer: self, outerTLSVersion: outerTLSVersion)
         streams[sid] = stream
 
-        // v2 watchdog: close the session if no SYNACK within 3 s (cleared on cmdSYNACK).
+        // v2 watchdog: close the multiplexer if no SYNACK within 3 s (cleared on cmdSYNACK).
         let armWatchdog = sid >= 2 && peerVersion >= 2
         if armWatchdog {
             armSynDoneTimerLocked()
@@ -124,7 +148,7 @@ nonisolated final class AnyTLSSession {
         let pv = peerVersion
         lock.unlock()
 
-        logger.debug("[AnyTLSSession] openStream sid=\(sid) peerVersion=\(pv) watchdog=\(armWatchdog) buffered=\(bufferedBytes)B")
+        logger.debug("[AnyTLSMultiplexer] openStream sid=\(sid) peerVersion=\(pv) watchdog=\(armWatchdog) buffered=\(bufferedBytes)B")
 
         let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: sid, length: 0)
         writeConnLocked(synFrame, completion: { _ in })
@@ -136,7 +160,7 @@ nonisolated final class AnyTLSSession {
     }
 
     /// Removes the stream and emits cmdFIN.
-    func streamClosed(sid: UInt32) {
+    func removeStream(sid: UInt32) {
         lock.lock()
         guard !closed, let stream = streams.removeValue(forKey: sid) else {
             lock.unlock()
@@ -151,7 +175,7 @@ nonisolated final class AnyTLSSession {
         stream.deliverClose(error: nil)
     }
 
-    // MARK: - Outbound writes
+    // MARK: - Send
 
     func writeData(sid: UInt32, data: Data, completion: @escaping (Error?) -> Void) {
         guard !data.isEmpty else { completion(nil); return }
@@ -186,15 +210,15 @@ nonisolated final class AnyTLSSession {
         lock.lock()
         if closed {
             lock.unlock()
-            logger.debug("[AnyTLSSession] writeConn rejected — session closed (\(bytes.count)B)")
-            completion(ProxyError.connectionFailed("AnyTLS session closed"))
+            logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
+            completion(ProxyError.connectionFailed("AnyTLS multiplexer closed"))
             return
         }
         if buffering {
             outboundBuffer.append(bytes)
             let total = outboundBuffer.count
             lock.unlock()
-            logger.debug("[AnyTLSSession] writeConn buffered \(bytes.count)B (total=\(total)B)")
+            logger.debug("[AnyTLSMultiplexer] writeConn buffered \(bytes.count)B (total=\(total)B)")
             completion(nil)
             return
         }
@@ -208,7 +232,7 @@ nonisolated final class AnyTLSSession {
         if !sendPadding {
             lock.unlock()
             if prependedBufferSize > 0 {
-                logger.debug("[AnyTLSSession] writeConn flush+raw \(pending.count)B (was buffered=\(prependedBufferSize))")
+                logger.debug("[AnyTLSMultiplexer] writeConn flush+raw \(pending.count)B (was buffered=\(prependedBufferSize))")
             }
             inner.send(data: pending, completion: completion)
             return
@@ -220,13 +244,13 @@ nonisolated final class AnyTLSSession {
         if pkt >= scheme.stop {
             sendPadding = false
             lock.unlock()
-            logger.debug("[AnyTLSSession] writeConn pkt=\(pkt) ≥ stop=\(scheme.stop) — sending raw, padding off")
+            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(pkt) ≥ stop=\(scheme.stop) — sending raw, padding off")
             inner.send(data: pending, completion: completion)
             return
         }
         let schedule = scheme.generateRecordPayloadSizes(packet: pkt)
         lock.unlock()
-        logger.debug("[AnyTLSSession] writeConn pkt=\(pkt) bytes=\(pending.count) (was buffered=\(prependedBufferSize)) schedule=\(schedule)")
+        logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(pkt) bytes=\(pending.count) (was buffered=\(prependedBufferSize)) schedule=\(schedule)")
 
         if schedule.isEmpty {
             inner.send(data: pending, completion: completion)
@@ -274,22 +298,32 @@ nonisolated final class AnyTLSSession {
         inner.send(data: output, completion: completion)
     }
 
-    // MARK: - Receive loop
+    // MARK: - Read Loop
 
-    private func startRecvLoop() {
-        logger.debug("[AnyTLSSession] recv loop started")
+    private func startReadLoop() {
+        logger.debug("[AnyTLSMultiplexer] recv loop started")
         inner.startReceiving { [weak self] data in
             self?.handleInbound(data)
         } errorHandler: { [weak self] error in
             if let error {
-                logger.debug("[AnyTLSSession] inner transport error: \(error.localizedDescription)")
+                logger.debug("[AnyTLSMultiplexer] inner transport error: \(error.localizedDescription)")
                 self?.handleTransportFailure(error)
             } else {
-                logger.debug("[AnyTLSSession] inner transport EOF")
+                logger.debug("[AnyTLSMultiplexer] inner transport EOF")
                 self?.handleTransportEOF()
             }
         }
     }
+
+    private func handleTransportEOF() {
+        close(error: nil)
+    }
+
+    private func handleTransportFailure(_ error: Error) {
+        close(error: error)
+    }
+
+    // MARK: - Demux
 
     private func handleInbound(_ data: Data) {
         lock.lock()
@@ -306,20 +340,20 @@ nonisolated final class AnyTLSSession {
         lock.unlock()
 
         for frame in dispatched {
-            dispatchFrame(cmd: frame.cmd, sid: frame.sid, payload: frame.payload)
+            routeFrame(cmd: frame.cmd, sid: frame.sid, payload: frame.payload)
         }
     }
 
-    private func dispatchFrame(cmd: UInt8, sid: UInt32, payload: Data) {
+    private func routeFrame(cmd: UInt8, sid: UInt32, payload: Data) {
         switch cmd {
         case AnyTLSProtocol.cmdPSH:
             lock.lock()
             let stream = streams[sid]
             lock.unlock()
             if stream == nil {
-                logger.warning("[AnyTLSSession] cmdPSH for unknown sid=\(sid) (\(payload.count)B) — dropping")
+                logger.warning("[AnyTLSMultiplexer] cmdPSH for unknown sid=\(sid) (\(payload.count)B) — dropping")
             } else {
-                logger.debug("[AnyTLSSession] cmdPSH sid=\(sid) \(payload.count)B")
+                logger.debug("[AnyTLSMultiplexer] cmdPSH sid=\(sid) \(payload.count)B")
             }
             stream?.deliverData(payload)
 
@@ -330,47 +364,47 @@ nonisolated final class AnyTLSSession {
             lock.unlock()
             if !payload.isEmpty {
                 let msg = String(data: payload, encoding: .utf8) ?? "<binary>"
-                logger.debug("[AnyTLSSession] cmdSYNACK error sid=\(sid): \(msg)")
+                logger.debug("[AnyTLSMultiplexer] cmdSYNACK error sid=\(sid): \(msg)")
                 stream?.deliverClose(error: ProxyError.protocolError("AnyTLS remote: \(msg)"))
                 lock.withLock { streams[sid] = nil }
             } else {
-                logger.debug("[AnyTLSSession] cmdSYNACK ok sid=\(sid)")
+                logger.debug("[AnyTLSMultiplexer] cmdSYNACK ok sid=\(sid)")
             }
 
         case AnyTLSProtocol.cmdFIN:
             lock.lock()
             let stream = streams.removeValue(forKey: sid)
             lock.unlock()
-            logger.debug("[AnyTLSSession] cmdFIN sid=\(sid) (had stream=\(stream != nil))")
+            logger.debug("[AnyTLSMultiplexer] cmdFIN sid=\(sid) (had stream=\(stream != nil))")
             stream?.deliverClose(error: nil)
 
         case AnyTLSProtocol.cmdWaste:
-            logger.debug("[AnyTLSSession] cmdWaste sid=\(sid) \(payload.count)B (drained)")
+            logger.debug("[AnyTLSMultiplexer] cmdWaste sid=\(sid) \(payload.count)B (drained)")
 
         case AnyTLSProtocol.cmdServerSettings:
             let map = AnyTLSProtocol.decodeStringMap(payload)
             if let v = map["v"], let parsed = UInt8(v) {
                 lock.withLock { peerVersion = parsed }
-                logger.debug("[AnyTLSSession] cmdServerSettings peerVersion=\(parsed) keys=\(Array(map.keys))")
+                logger.debug("[AnyTLSMultiplexer] cmdServerSettings peerVersion=\(parsed) keys=\(Array(map.keys))")
             } else {
-                logger.warning("[AnyTLSSession] cmdServerSettings missing or invalid v: \(map)")
+                logger.warning("[AnyTLSMultiplexer] cmdServerSettings missing or invalid v: \(map)")
             }
 
         case AnyTLSProtocol.cmdAlert:
             let msg = String(data: payload, encoding: .utf8) ?? "<binary>"
-            logger.debug("[AnyTLSSession] cmdAlert from server: \(msg)")
-            close(reason: ProxyError.protocolError("AnyTLS alert: \(msg)"))
+            logger.debug("[AnyTLSMultiplexer] cmdAlert from server: \(msg)")
+            close(error: ProxyError.protocolError("AnyTLS alert: \(msg)"))
 
         case AnyTLSProtocol.cmdUpdatePaddingScheme:
             if let new = AnyTLSPaddingScheme.parse(payload) {
                 lock.withLock { padding = new }
-                logger.debug("[AnyTLSSession] cmdUpdatePaddingScheme applied md5=\(new.md5Hex) stop=\(new.stop)")
+                logger.debug("[AnyTLSMultiplexer] cmdUpdatePaddingScheme applied md5=\(new.md5Hex) stop=\(new.stop)")
             } else {
-                logger.warning("[AnyTLSSession] cmdUpdatePaddingScheme: failed to parse payload (\(payload.count)B)")
+                logger.warning("[AnyTLSMultiplexer] cmdUpdatePaddingScheme: failed to parse payload (\(payload.count)B)")
             }
 
         case AnyTLSProtocol.cmdHeartRequest:
-            logger.debug("[AnyTLSSession] cmdHeartRequest sid=\(sid) — replying")
+            logger.debug("[AnyTLSMultiplexer] cmdHeartRequest sid=\(sid) — replying")
             let pong = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdHeartResponse, sid: sid, length: 0)
             writeConnLocked(pong, completion: { _ in })
 
@@ -379,22 +413,14 @@ nonisolated final class AnyTLSSession {
             break
 
         default:
-            logger.warning("[AnyTLSSession] unknown cmd=\(cmd) sid=\(sid) \(payload.count)B — ignoring")
+            logger.warning("[AnyTLSMultiplexer] unknown cmd=\(cmd) sid=\(sid) \(payload.count)B — ignoring")
         }
     }
 
-    // MARK: - Teardown
+    // MARK: - Close
 
-    private func handleTransportEOF() {
-        close(reason: nil)
-    }
-
-    private func handleTransportFailure(_ error: Error) {
-        close(reason: error)
-    }
-
-    /// Idempotent; a non-nil reason propagates to every live stream.
-    func close(reason: Error? = nil) {
+    /// Idempotent; a non-nil error propagates to every live stream.
+    func close(error: Error? = nil) {
         lock.lock()
         guard !closed else { lock.unlock(); return }
         closed = true
@@ -404,35 +430,17 @@ nonisolated final class AnyTLSSession {
         outboundBuffer.removeAll(keepingCapacity: false)
         lock.unlock()
 
-        let reasonText = reason.map { $0.localizedDescription } ?? "clean"
-        logger.debug("[AnyTLSSession] close seq=\(seq) streams=\(liveStreams.count) reason=\(reasonText)")
+        let reasonText = error.map { $0.localizedDescription } ?? "clean"
+        logger.debug("[AnyTLSMultiplexer] close seq=\(seq) streams=\(liveStreams.count) reason=\(reasonText)")
         for stream in liveStreams {
-            stream.deliverClose(error: reason)
+            stream.deliverClose(error: error)
         }
         inner.cancel()
         onClose?()
     }
 
     deinit {
-        // Reclaim the SYN-done watchdog if the session was dropped without close().
+        // Reclaim the SYN-done watchdog if the multiplexer was dropped without close().
         synDoneTimer?.cancel()
-    }
-
-    // MARK: - SynDone watchdog
-
-    private func armSynDoneTimerLocked() {
-        synDoneTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
-        timer.schedule(deadline: .now() + .seconds(3))
-        timer.setEventHandler { [weak self] in
-            self?.close(reason: ProxyError.connectionFailed("AnyTLS SYN-ACK timeout"))
-        }
-        timer.resume()
-        synDoneTimer = timer
-    }
-
-    private func cancelSynDoneTimerLocked() {
-        synDoneTimer?.cancel()
-        synDoneTimer = nil
     }
 }

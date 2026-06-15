@@ -1,5 +1,5 @@
 //
-//  HTTP11Connection.swift
+//  NaiveHTTP11Connection.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/10/26.
@@ -7,13 +7,13 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HTTP11")
+private let logger = AnywhereLogger(category: "NaiveHTTP11")
 
-// MARK: - HTTP11Connection
+// MARK: - NaiveHTTP11Connection
 
 /// HTTP/1.1 CONNECT tunnel through a TLS proxy. Parses only the status line,
 /// so `responseHeaders` is always empty.
-nonisolated class HTTP11Connection: HTTPTunnel {
+nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
     // MARK: Properties
 
@@ -113,7 +113,7 @@ nonisolated class HTTP11Connection: HTTPTunnel {
             var accumulated = buffer
             accumulated.append(data)
 
-            guard let headerEnd = accumulated.findHTTP11HeaderEnd() else {
+            guard let headerEnd = accumulated.findNaiveHTTP11HeaderEnd() else {
                 self.receiveConnectResponse(buffer: accumulated, completion: completion)
                 return
             }
@@ -163,7 +163,7 @@ nonisolated class HTTP11Connection: HTTPTunnel {
 
 extension Data {
     /// Returns the index of the leading `\r` of the `\r\n\r\n` header terminator, or `nil` if not yet present.
-    func findHTTP11HeaderEnd() -> Int? {
+    func findNaiveHTTP11HeaderEnd() -> Int? {
         let marker: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
         guard count >= 4 else { return nil }
         for i in 0...(count - 4) {

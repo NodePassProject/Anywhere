@@ -50,7 +50,7 @@ class UDPFlow {
     private var ssUDPSessionToken: ShadowsocksUDPSession.Token?
 
     // Mux path
-    private var muxSession: MuxSession?
+    private var udpStream: VLESSVisionUDPStream?
 
     private var proxyConnecting = false
 
@@ -182,7 +182,7 @@ class UDPFlow {
             return
         }
 
-        if let session = muxSession {
+        if let session = udpStream {
             session.send(data: payload) { [weak self] error in
                 if let error {
                     self?.logTransientSendFailure(error)
@@ -225,7 +225,7 @@ class UDPFlow {
     // MARK: - Proxy Connection
 
     private func connectProxy() {
-        guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directSocket == nil && ssUDPSession == nil && !closed else { return }
+        guard !proxyConnecting && proxyConnection == nil && udpStream == nil && directSocket == nil && ssUDPSession == nil && !closed else { return }
 
         if bypass {
             connectDirectUDP()
@@ -237,9 +237,9 @@ class UDPFlow {
         // Fast paths bypass ProxyClient, so they must only run when no chain is configured.
         if !hasChain {
             let isDefaultConfiguration = TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
-            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = TunnelStack.shared?.muxManager {
+            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let udpMultiplexerPool = TunnelStack.shared?.udpMultiplexerPool {
                 proxyConnecting = true
-                connectViaMux(muxManager: muxManager)
+                connectViaMultiplexer(udpMultiplexerPool: udpMultiplexerPool)
                 return
             }
             
@@ -256,11 +256,11 @@ class UDPFlow {
 
     // MARK: - Connection Strategies
 
-    private func connectViaMux(muxManager: MuxManager) {
+    private func connectViaMultiplexer(udpMultiplexerPool: VLESSVisionUDPMultiplexerPool) {
         // Stable per-source globalID lets the server pin one upstream session
         // (Full Cone NAT); nil keeps sessions per-datagram (Symmetric NAT).
-        let globalID = configuration.xudpEnabled ? XUDP.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)") : nil
-        muxManager.dispatch(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
+        let globalID = configuration.xudpEnabled ? VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)") : nil
+        udpMultiplexerPool.acquireStream(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
             guard let self else { return }
 
             self.flowQueue.async {
@@ -291,7 +291,7 @@ class UDPFlow {
                         return
                     }
 
-                    self.muxSession = session
+                    self.udpStream = session
 
                     let buffered = self.pendingData
                     self.pendingData.removeAll()
@@ -554,13 +554,13 @@ class UDPFlow {
         let ssToken = ssUDPSessionToken
         let connection = proxyConnection
         let client = proxyClient
-        let session = muxSession
+        let session = udpStream
         directSocket = nil
         ssUDPSession = nil
         ssUDPSessionToken = nil
         proxyConnection = nil
         proxyClient = nil
-        muxSession = nil
+        udpStream = nil
         proxyConnecting = false
         pendingData.removeAll()
         pendingBufferSize = 0

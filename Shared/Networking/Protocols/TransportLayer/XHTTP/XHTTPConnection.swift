@@ -48,7 +48,7 @@ nonisolated class XHTTPConnection {
 
     /// Non-nil when the transport is a pooled, shared xmux connection; teardown then
     /// releases the lease instead of closing the shared transport (others may still use it).
-    var xmuxLease: XMUXLease?
+    var xmuxLease: XHTTPXMUXMultiplexerLease?
 
     // State
     var nextSeq: Int64 = 0
@@ -100,19 +100,19 @@ nonisolated class XHTTPConnection {
     /// `.uploadOnly` leg so its POST responses are drained, not delivered.
     var h2DownloadStreamId: UInt32 = 1
 
-    // HTTP/3 state (modes multiplexed onto QUIC streams via HTTP3Session)
-    var h3Session: HTTP3Session?
+    // HTTP/3 state (modes multiplexed onto QUIC streams via HTTP3Multiplexer)
+    var h3Multiplexer: HTTP3Multiplexer?
     /// Download stream: the GET response body, or the full-duplex stream in stream-one.
-    var h3Download: HTTP3RequestStream?
+    var h3Download: XHTTPH3RequestStream?
     /// Persistent upload POST stream (stream-up only).
-    var h3Upload: HTTP3RequestStream?
+    var h3Upload: XHTTPH3RequestStream?
     var h3Closed = false
 
-    var useHTTP3: Bool { h3Session != nil }
+    var useHTTP3: Bool { h3Multiplexer != nil }
 
     // Pooled shared-H2 multiplexing state (xmux). When `sharedH2` is set, this session's
     // streams ride a shared connection instead of running its own 1:1 H2 framing.
-    var sharedH2: XHTTPSharedH2Connection?
+    var sharedH2: XHTTPH2Multiplexer?
     /// GET download stream, or the full-duplex stream in stream-one.
     var sharedH2Download: XHTTPH2Stream?
     /// Persistent upload POST stream (stream-up only).
@@ -313,14 +313,14 @@ nonisolated class XHTTPConnection {
     }
 
     /// Over HTTP/3, byte I/O is multiplexed by the session, so the download closures are the no-op `.unused`.
-    convenience init(h3Session: HTTP3Session, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
+    convenience init(h3Multiplexer: HTTP3Multiplexer, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
         self.init(download: .unused, configuration: configuration, mode: mode, sessionId: sessionId)
-        self.h3Session = h3Session
+        self.h3Multiplexer = h3Multiplexer
     }
 
     /// Over a shared multiplexing H2 connection (xmux), streams are virtual, so the download
     /// closures are the no-op `.unused` and `useHTTP2` stays false (the shared path is used instead).
-    convenience init(sharedH2: XHTTPSharedH2Connection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
+    convenience init(sharedH2: XHTTPH2Multiplexer, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
         self.init(download: .unused, configuration: configuration, mode: mode, sessionId: sessionId)
         self.sharedH2 = sharedH2
     }
@@ -488,7 +488,7 @@ nonisolated class XHTTPConnection {
         h3Closed = true
         let h3Dl = h3Download
         let h3Up = h3Upload
-        let h3Sess = h3Session
+        let h3Sess = h3Multiplexer
         let sh2Dl = sharedH2Download
         let sh2Up = sharedH2Upload
         sharedH2Download = nil
@@ -649,7 +649,7 @@ nonisolated class XHTTPConnection {
 
 /// A poolable underlying XHTTP transport that multiple XHTTP sessions can share
 /// (a multiplexing H2 connection or an H3/QUIC session).
-protocol XMUXPoolable: AnyObject {
+protocol XHTTPXMUXMultiplexerPoolable: AnyObject {
     /// True once the connection can no longer carry new sessions.
     var isPoolClosed: Bool { get }
     /// Tears down the underlying connection once the pool retires it with no active leases.
@@ -658,15 +658,15 @@ protocol XMUXPoolable: AnyObject {
 
 /// A reserved slot on a pooled connection. The holder drives one XHTTP session over
 /// `connection`, calls `noteRequest()` per HTTP request, and `release()` once when done.
-nonisolated final class XMUXLease {
-    let connection: XMUXPoolable
-    private weak var manager: XMUXManager?
+nonisolated final class XHTTPXMUXMultiplexerLease {
+    let connection: XHTTPXMUXMultiplexerPoolable
+    private weak var manager: XHTTPXMUXMultiplexerManager?
     /// Strong so the connection outlives all its sessions, even after the pool retires it.
-    private let client: XMUXClient
+    private let client: XHTTPXMUXMultiplexerClient
     private var released = false
     private let lock = UnfairLock()
 
-    init(connection: XMUXPoolable, manager: XMUXManager, client: XMUXClient) {
+    init(connection: XHTTPXMUXMultiplexerPoolable, manager: XHTTPXMUXMultiplexerManager, client: XHTTPXMUXMultiplexerClient) {
         self.connection = connection
         self.manager = manager
         self.client = client
@@ -688,10 +688,10 @@ nonisolated final class XMUXLease {
 }
 
 /// One pooled connection plus its xmux usage/rotation counters.
-nonisolated final class XMUXClient {
+nonisolated final class XHTTPXMUXMultiplexerClient {
     enum State { case dialing, ready, failed }
     var state: State = .dialing
-    var connection: XMUXPoolable?
+    var connection: XHTTPXMUXMultiplexerPoolable?
     /// Concurrent sessions currently leased on this connection.
     var openUsage = 0
     /// Remaining session assignments (`cMaxReuseTimes - 1`); -1 = unlimited.
@@ -701,7 +701,7 @@ nonisolated final class XMUXClient {
     /// Wall-clock retirement time (`hMaxReusableSecs`); nil = never.
     let unreusableAt: CFAbsoluteTime?
     /// Completions waiting for this connection's in-flight dial to finish.
-    var waiters: [(XMUXPoolable?) -> Void] = []
+    var waiters: [(XHTTPXMUXMultiplexerPoolable?) -> Void] = []
 
     init(leftUsage: Int, leftRequests: Int, unreusableAt: CFAbsoluteTime?) {
         self.leftUsage = leftUsage
@@ -725,17 +725,17 @@ nonisolated final class XMUXClient {
 
 /// Pools and rotates underlying connections for one XHTTP destination.
 /// All state is guarded by `lock`.
-nonisolated final class XMUXManager {
-    private let config: XMUXConfiguration
+nonisolated final class XHTTPXMUXMultiplexerManager {
+    private let config: XHTTPXMUXMultiplexerConfiguration
     /// `maxConcurrency` range rolled once at creation, fixed for the manager's lifetime.
     private let concurrency: Int
     /// `maxConnections` resolved once at creation.
     private let connections: Int
-    private let newConnection: (@escaping (XMUXPoolable?) -> Void) -> Void
-    private var clients: [XMUXClient] = []
+    private let newConnection: (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void
+    private var clients: [XHTTPXMUXMultiplexerClient] = []
     private let lock = UnfairLock()
 
-    init(config: XMUXConfiguration, newConnection: @escaping (@escaping (XMUXPoolable?) -> Void) -> Void) {
+    init(config: XHTTPXMUXMultiplexerConfiguration, newConnection: @escaping (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void) {
         self.config = config
         self.concurrency = config.maxConcurrency.random()
         self.connections = config.maxConnections.random()
@@ -744,11 +744,11 @@ nonisolated final class XMUXManager {
 
     /// Acquires a slot, reusing a pooled connection or dialing a new one per policy.
     /// Completes with nil if a freshly-dialed connection fails.
-    func acquire(completion: @escaping (XMUXLease?) -> Void) {
+    func acquire(completion: @escaping (XHTTPXMUXMultiplexerLease?) -> Void) {
         // Prune retired clients; tear down those with no active sessions left.
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        var retiredIdle: [XMUXPoolable] = []
+        var retiredIdle: [XHTTPXMUXMultiplexerPoolable] = []
         clients.removeAll { client in
             guard client.isRetired(now: now) else { return false }
             if client.openUsage == 0, let conn = client.connection { retiredIdle.append(conn) }
@@ -788,7 +788,7 @@ nonisolated final class XMUXManager {
         let secsRand = config.hMaxReusableSecs.random()
         let unreusableAt: CFAbsoluteTime? = secsRand > 0 ? now + Double(secsRand) : nil
 
-        let client = XMUXClient(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
+        let client = XHTTPXMUXMultiplexerClient(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
         client.openUsage = 1
         clients.append(client)
         lock.unlock()
@@ -814,7 +814,7 @@ nonisolated final class XMUXManager {
     }
 
     /// Selects a reusable pooled connection (lock held); nil ⇒ dial a new connection.
-    private func selectReusable() -> XMUXClient? {
+    private func selectReusable() -> XHTTPXMUXMultiplexerClient? {
         if clients.isEmpty { return nil }
         if connections > 0 && clients.count < connections { return nil }
         let eligible = concurrency > 0 ? clients.filter { $0.openUsage < concurrency } : clients
@@ -822,11 +822,11 @@ nonisolated final class XMUXManager {
         return eligible.randomElement()
     }
 
-    private func makeLease(_ conn: XMUXPoolable, _ client: XMUXClient) -> XMUXLease {
-        XMUXLease(connection: conn, manager: self, client: client)
+    private func makeLease(_ conn: XHTTPXMUXMultiplexerPoolable, _ client: XHTTPXMUXMultiplexerClient) -> XHTTPXMUXMultiplexerLease {
+        XHTTPXMUXMultiplexerLease(connection: conn, manager: self, client: client)
     }
 
-    func releaseSlot(_ client: XMUXClient) {
+    func releaseSlot(_ client: XHTTPXMUXMultiplexerClient) {
         lock.lock()
         if client.openUsage > 0 { client.openUsage -= 1 }
         // A retired connection with no remaining sessions is dropped and torn down.
@@ -836,7 +836,7 @@ nonisolated final class XMUXManager {
         if shouldClose { client.connection?.poolClose() }
     }
 
-    func noteRequest(_ client: XMUXClient) {
+    func noteRequest(_ client: XHTTPXMUXMultiplexerClient) {
         lock.lock()
         if client.leftRequests > 0 && client.leftRequests != Int.max { client.leftRequests -= 1 }
         lock.unlock()
@@ -844,9 +844,9 @@ nonisolated final class XMUXManager {
 }
 
 /// Global registry of per-destination xmux managers.
-nonisolated final class XMUXRegistry {
-    static let shared = XMUXRegistry()
-    private var managers: [String: XMUXManager] = [:]
+nonisolated final class XHTTPXMUXMultiplexerRegistry {
+    static let shared = XHTTPXMUXMultiplexerRegistry()
+    private var managers: [String: XHTTPXMUXMultiplexerManager] = [:]
     private let lock = UnfairLock()
     private init() {}
 
@@ -854,21 +854,21 @@ nonisolated final class XMUXRegistry {
     /// connection factory. The factory must not capture per-session/per-flow state.
     func manager(
         key: String,
-        config: XMUXConfiguration,
-        makeFactory: () -> (@escaping (XMUXPoolable?) -> Void) -> Void
-    ) -> XMUXManager {
+        config: XHTTPXMUXMultiplexerConfiguration,
+        makeFactory: () -> (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void
+    ) -> XHTTPXMUXMultiplexerManager {
         lock.lock()
         defer { lock.unlock() }
         if let existing = managers[key] { return existing }
-        let manager = XMUXManager(config: config, newConnection: makeFactory())
+        let manager = XHTTPXMUXMultiplexerManager(config: config, newConnection: makeFactory())
         managers[key] = manager
         return manager
     }
 }
 
 /// An HTTP/3 session can carry many XHTTP sessions as independent QUIC streams.
-extension HTTP3Session: XMUXPoolable {
-    var isPoolClosed: Bool { poolIsClosed }
+extension HTTP3Multiplexer: XHTTPXMUXMultiplexerPoolable {
+    var isPoolClosed: Bool { isClosed }
     func poolClose() { close() }
 }
 
@@ -881,7 +881,7 @@ extension HTTP3Session: XMUXPoolable {
 /// All mutable state is guarded by the owning connection's lock.
 nonisolated final class XHTTPH2Stream {
     let streamId: UInt32
-    fileprivate weak var connection: XHTTPSharedH2Connection?
+    fileprivate weak var connection: XHTTPH2Multiplexer?
 
     fileprivate var receiveBuffer = Data()
     fileprivate var ended = false
@@ -893,7 +893,7 @@ nonisolated final class XHTTPH2Stream {
 
     fileprivate var sendWindow: Int
 
-    init(streamId: UInt32, connection: XHTTPSharedH2Connection, sendWindow: Int) {
+    init(streamId: UInt32, connection: XHTTPH2Multiplexer, sendWindow: Int) {
         self.streamId = streamId
         self.connection = connection
         self.sendWindow = sendWindow
@@ -917,12 +917,12 @@ nonisolated final class XHTTPH2Stream {
     /// Discards any further inbound data on this stream (an upload leg's response).
     func drainResponse() { connection?.drain(stream: self) }
 
-    func close() { connection?.closeStream(self) }
+    func close() { connection?.removeStream(self) }
 }
 
 /// A shared HTTP/2 connection multiplexing many XHTTP sessions (xmux). Owns one byte
 /// transport; one always-on read loop demuxes frames to per-stream buffers. State under `lock`.
-nonisolated final class XHTTPSharedH2Connection: XMUXPoolable {
+nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     private let transportSend: (Data, @escaping (Error?) -> Void) -> Void
     private let transportCancel: () -> Void
     /// Demuxes the shared socket into H2 frames; one always-on read loop drives it.
@@ -1022,7 +1022,7 @@ nonisolated final class XHTTPSharedH2Connection: XMUXPoolable {
             case .failure:
                 self.failAll(XHTTPError.connectionClosed)
             case .success(let f):
-                self.dispatch(f)
+                self.routeFrame(f)
                 self.lock.lock()
                 let closed = self.closedFlag
                 self.lock.unlock()
@@ -1031,7 +1031,7 @@ nonisolated final class XHTTPSharedH2Connection: XMUXPoolable {
         }
     }
 
-    private func dispatch(_ f: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
+    private func routeFrame(_ f: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
         switch f.type {
         case XHTTPConnection.h2FrameData:
             handleData(streamId: f.streamId, flags: f.flags, payload: f.payload)
@@ -1217,7 +1217,7 @@ nonisolated final class XHTTPSharedH2Connection: XMUXPoolable {
 
     // MARK: Streams
 
-    func makeStream() -> XHTTPH2Stream {
+    func openStream() -> XHTTPH2Stream {
         lock.lock()
         let id = nextStreamId
         nextStreamId += 2
@@ -1234,7 +1234,7 @@ nonisolated final class XHTTPSharedH2Connection: XMUXPoolable {
         lock.unlock()
     }
 
-    func closeStream(_ stream: XHTTPH2Stream) {
+    func removeStream(_ stream: XHTTPH2Stream) {
         lock.lock()
         let known = streams[stream.streamId] != nil
         streams.removeValue(forKey: stream.streamId)
@@ -1324,7 +1324,7 @@ nonisolated final class XHTTPSharedH2Connection: XMUXPoolable {
 // length-less, unexpected) marks it unreusable, so the worst case is a fresh dial, never a
 // mis-framed response.
 
-nonisolated final class XHTTPH1UploadConnection: XMUXPoolable {
+nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
     private let underlyingSend: (Data, @escaping (Error?) -> Void) -> Void
     private let underlyingReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     private let underlyingCancel: () -> Void
@@ -1340,7 +1340,7 @@ nonisolated final class XHTTPH1UploadConnection: XMUXPoolable {
     private var parseBuffer = Data()
 
     /// Lease for the current session; refreshed on each pool acquire.
-    var lease: XMUXLease?
+    var lease: XHTTPXMUXMultiplexerLease?
 
     init(transport: TransportClosures) {
         underlyingSend = transport.send

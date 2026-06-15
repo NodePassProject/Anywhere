@@ -15268,7 +15268,6 @@
       "shouldTranslate" : false
     },
     "XUDP" : {
-      "comment" : "XUDP for VLESS protocol TCP transport",
       "shouldTranslate" : false
     },
     "You" : {

@@ -243,7 +243,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         if case .vless(_, _, _, _, _, let m, _) = outbound { return m }
         return false
     }
-    /// Whether XUDP (GlobalID-based flow identification) is enabled for muxed UDP.
+    /// Whether VLESSVisionUDPGlobalID (GlobalID-based flow identification) is enabled for muxed UDP.
     var xudpEnabled: Bool {
         if case .vless(_, _, _, _, _, _, let x) = outbound { return x }
         return false
@@ -444,7 +444,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
         case .anytls:
             let password = try container.decodeIfPresent(String.self, forKey: .anytlsPassword) ?? ""
-            // Stored unclamped so the JSON round-trips exactly; AnyTLSClient clamps at use time.
+            // Stored unclamped so the JSON round-trips exactly; AnyTLSMultiplexerPool clamps at use time.
             let ici = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
             let it  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
             let mis = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0

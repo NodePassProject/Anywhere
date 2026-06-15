@@ -10,7 +10,7 @@ import Foundation
 // MARK: - HTTP/2 Frame Codec (RFC 7540 §4)
 //
 // Low-level frame I/O shared by the 1:1 H2 path (XHTTPConnection+H2*.swift) and the xmux
-// shared-multiplexing path (XHTTPSharedH2Connection). One copy of the byte layout means the
+// shared-multiplexing path (XHTTPH2Multiplexer). One copy of the byte layout means the
 // two paths can't drift.
 
 enum H2Framing {

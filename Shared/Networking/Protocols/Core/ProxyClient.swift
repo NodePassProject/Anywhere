@@ -134,7 +134,7 @@ nonisolated class ProxyClient {
         )
     }
     
-    func connectMux(completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+    func connectMultiplexer(completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
         connectThroughChainIfNeeded(
             command: .mux,
             destinationHost: "v1.mux.cool",
@@ -1331,7 +1331,7 @@ nonisolated class ProxyClient {
     /// The dialed transport for one XHTTP leg: a byte stream or an HTTP/3 QUIC session.
     private enum XHTTPDialedTransport {
         case byteStream(TransportClosures)
-        case http3(HTTP3Session)
+        case http3(HTTP3Multiplexer)
     }
 
     private func mainXHTTPEndpoint() -> XHTTPEndpoint {
@@ -1411,7 +1411,7 @@ nonisolated class ProxyClient {
                     )
                 case .http3(let session):
                     connection = XHTTPConnection(
-                        h3Session: session, configuration: xhttp, mode: mode, sessionId: sessionId
+                        h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
                     )
                 }
                 connection.role = role
@@ -1424,7 +1424,7 @@ nonisolated class ProxyClient {
     /// factory is destination-bound (captures no per-flow state) so the manager is reusable.
     private func acquirePooledH3(
         endpoint: XHTTPEndpoint,
-        xmux: XMUXConfiguration,
+        xmux: XHTTPXMUXMultiplexerConfiguration,
         xhttp: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
@@ -1435,19 +1435,19 @@ nonisolated class ProxyClient {
         let port = endpoint.port
         let serverName = endpoint.serverName
         let key = "h3|\(host)|\(port)|\(serverName)"
-        let manager = XMUXRegistry.shared.manager(key: key, config: xmux) {
+        let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: xmux) {
             { connectionCompletion in
                 // QUIC connects lazily, so a fresh session never fails at creation.
-                connectionCompletion(HTTP3Session(host: host, port: port, serverName: serverName))
+                connectionCompletion(HTTP3Multiplexer(host: host, port: port, serverName: serverName))
             }
         }
         manager.acquire { lease in
-            guard let lease, let session = lease.connection as? HTTP3Session else {
+            guard let lease, let session = lease.connection as? HTTP3Multiplexer else {
                 completion(.failure(ProxyError.connectionFailed("xmux H3 session acquisition failed")))
                 return
             }
             let connection = XHTTPConnection(
-                h3Session: session, configuration: xhttp, mode: mode, sessionId: sessionId
+                h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
             )
             connection.role = role
             connection.xmuxLease = lease
@@ -1459,7 +1459,7 @@ nonisolated class ProxyClient {
     /// factory is destination-bound (captures no per-flow state) so the manager is reusable.
     private func acquirePooledH2(
         endpoint: XHTTPEndpoint,
-        xmux: XMUXConfiguration,
+        xmux: XHTTPXMUXMultiplexerConfiguration,
         xhttp: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
@@ -1471,7 +1471,7 @@ nonisolated class ProxyClient {
         let security = endpoint.security
         let serverName = endpoint.serverName
         let key = "h2|\(host)|\(port)|\(serverName)"
-        let manager = XMUXRegistry.shared.manager(key: key, config: xmux) {
+        let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: xmux) {
             { connectionCompletion in
                 ProxyClient.dialSharedH2(host: host, port: port, security: security) { result in
                     switch result {
@@ -1482,7 +1482,7 @@ nonisolated class ProxyClient {
             }
         }
         manager.acquire { lease in
-            guard let lease, let shared = lease.connection as? XHTTPSharedH2Connection else {
+            guard let lease, let shared = lease.connection as? XHTTPH2Multiplexer else {
                 completion(.failure(ProxyError.connectionFailed("xmux H2 connection acquisition failed")))
                 return
             }
@@ -1500,10 +1500,10 @@ nonisolated class ProxyClient {
         host: String,
         port: UInt16,
         security: SecurityLayer,
-        completion: @escaping (Result<XHTTPSharedH2Connection, Error>) -> Void
+        completion: @escaping (Result<XHTTPH2Multiplexer, Error>) -> Void
     ) {
         func bringUp(_ closures: TransportClosures, retaining object: AnyObject?) {
-            let shared = XHTTPSharedH2Connection(transport: closures)
+            let shared = XHTTPH2Multiplexer(transport: closures)
             if let object { shared.retain(object) }
             shared.connect { error in
                 if let error { completion(.failure(error)) } else { completion(.success(shared)) }
@@ -1631,7 +1631,7 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
     ) {
         let makeSession: (String, QUICDatagramTransport?) -> XHTTPDialedTransport = { host, transport in
-            .http3(HTTP3Session(host: host, port: endpoint.port, serverName: endpoint.serverName, transport: transport))
+            .http3(HTTP3Multiplexer(host: host, port: endpoint.port, serverName: endpoint.serverName, transport: transport))
         }
         switch route {
         case .direct:
@@ -1664,7 +1664,7 @@ nonisolated class ProxyClient {
         security: SecurityLayer,
         httpVersion: XHTTPHTTPVersion,
         mode: XHTTPMode,
-        xmux: XMUXConfiguration
+        xmux: XHTTPXMUXMultiplexerConfiguration
     ) -> (@escaping (Result<TransportClosures, Error>) -> Void) -> Void {
         // xmux: pool the packet-up upload socket across sessions for direct routes.
         // stream-up's upload is one indefinite POST (never reusable); chained routes can't pool.
@@ -1678,9 +1678,9 @@ nonisolated class ProxyClient {
             // HTTP/1.1 can't multiplex: force exclusive use (concurrency 1) so a socket is never
             // handed to concurrent sessions. Rotation limits (connections/reuse/lifetime) still apply.
             var uploadXMUX = xmux
-            uploadXMUX.maxConcurrency = XMUXRange(from: 1, to: 1)
+            uploadXMUX.maxConcurrency = XHTTPXMUXMultiplexerRange(from: 1, to: 1)
             let key = "h1up|\(host)|\(port)|\(serverName)"
-            let manager = XMUXRegistry.shared.manager(key: key, config: uploadXMUX) {
+            let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: uploadXMUX) {
                 { connectionCompletion in
                     ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec) { conn in
                         connectionCompletion(conn)
@@ -1689,7 +1689,7 @@ nonisolated class ProxyClient {
             }
             return { completion in
                 manager.acquire { lease in
-                    guard let lease, let conn = lease.connection as? XHTTPH1UploadConnection else {
+                    guard let lease, let conn = lease.connection as? XHTTPH1Multiplexer else {
                         completion(.failure(ProxyError.connectionFailed("xmux H1 upload acquisition failed")))
                         return
                     }
@@ -1729,10 +1729,10 @@ nonisolated class ProxyClient {
         host: String,
         port: UInt16,
         security: SecurityLayer,
-        completion: @escaping (XHTTPH1UploadConnection?) -> Void
+        completion: @escaping (XHTTPH1Multiplexer?) -> Void
     ) {
         func wrap(_ closures: TransportClosures, retaining object: AnyObject?) {
-            let conn = XHTTPH1UploadConnection(transport: closures)
+            let conn = XHTTPH1Multiplexer(transport: closures)
             if let object { conn.retain(object) }
             completion(conn)
         }

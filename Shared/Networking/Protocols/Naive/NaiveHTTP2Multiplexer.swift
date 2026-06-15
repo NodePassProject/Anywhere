@@ -1,5 +1,5 @@
 //
-//  HTTP2Session.swift
+//  NaiveHTTP2Multiplexer.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/18/26.
@@ -7,11 +7,11 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HTTP2Session")
+private let logger = AnywhereLogger(category: "NaiveHTTP2Multiplexer")
 
-/// Multiplexed HTTP/2 session hosting many concurrent CONNECT tunnels on one TLS
+/// Multiplexed HTTP/2 multiplexer hosting many concurrent CONNECT tunnels on one TLS
 /// connection, with a read loop demultiplexing frames to individual streams.
-nonisolated class HTTP2Session: PoolableSession {
+nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
 
     // MARK: - State
 
@@ -41,17 +41,17 @@ nonisolated class HTTP2Session: PoolableSession {
 
     private(set) var state: State = .idle
 
-    // Pool-visible snapshot guarded by `_poolLock`: the pool reads off-queue, the session writes on `queue`.
+    // Pool-visible snapshot guarded by `_poolLock`: the pool reads off-queue, the multiplexer writes on `queue`.
     private let _poolLock = UnfairLock()
     private var _poolState: State = .idle
     private var _poolStreamCount: Int = 0
     private var _poolMaxConcurrent: UInt32 = 100
 
-    /// Serial queue guarding all mutable session + stream state; `.userInitiated` to match the data-plane chain.
+    /// Serial queue guarding all mutable multiplexer + stream state; `.userInitiated` to match the data-plane chain.
     let queue = DispatchQueue(label: AWCore.Identifier.http2SessionQueue, qos: .userInitiated)
 
     // Stream management
-    private var streams: [UInt32: HTTP2Stream] = [:]
+    private var streams: [UInt32: NaiveHTTP2Stream] = [:]
     private var nextStreamID: UInt32 = 1
     private var maxConcurrentStreams: UInt32 = 100
 
@@ -59,20 +59,20 @@ nonisolated class HTTP2Session: PoolableSession {
     let hpackDecoder = HPACKDecoder()
 
     // Connection-level flow control
-    private var connectionSendWindow: Int = HTTP2FlowControl.defaultInitialWindowSize
+    private var connectionSendWindow: Int = NaiveHTTP2FlowControl.defaultInitialWindowSize
     private var connectionRecvConsumed: Int = 0
-    private var connectionRecvWindowSize: Int = HTTP2FlowControl.naiveSessionMaxRecvWindow
+    private var connectionRecvWindowSize: Int = NaiveHTTP2FlowControl.naiveSessionMaxRecvWindow
     /// The INITIAL_WINDOW_SIZE the peer advertised (for new streams).
-    private(set) var peerInitialWindowSize: Int = HTTP2FlowControl.defaultInitialWindowSize
+    private(set) var peerInitialWindowSize: Int = NaiveHTTP2FlowControl.defaultInitialWindowSize
 
     // Read buffer
     private var receiveBuffer = Data()
     private static let maxReceiveBufferSize = 2_097_152
 
-    // Callbacks waiting for session to reach .ready
+    // Callbacks waiting for multiplexer to reach .ready
     private var readyCallbacks: [(Error?) -> Void] = []
 
-    /// Called when the session becomes permanently unusable so the pool can evict it.
+    /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
     var onClose: (() -> Void)?
 
     // MARK: - Initialization
@@ -96,23 +96,23 @@ nonisolated class HTTP2Session: PoolableSession {
 
     var activeStreamCount: Int { streams.count }
 
-    /// Whether the session can accept another stream (on-queue only).
+    /// Whether the multiplexer can accept another stream (on-queue only).
     var hasCapacity: Bool {
         state == .ready && UInt32(streams.count) < maxConcurrentStreams
     }
 
-    /// Thread-safe: whether this session appears closed to the pool.
-    var poolIsClosed: Bool {
+    /// Thread-safe: whether this multiplexer appears closed to the pool.
+    var isClosed: Bool {
         _poolLock.withLock { _poolState == .closed }
     }
 
-    /// Thread-safe: whether this session has received GOAWAY.
+    /// Thread-safe: whether this multiplexer has received GOAWAY.
     var poolIsGoingAway: Bool {
         _poolLock.withLock { _poolState == .goingAway }
     }
 
-    /// Atomically checks capacity and reserves a stream slot; accepts in-progress sessions
-    /// so burst requests coalesce behind one handshake. Caller must follow up with `createStream` on `queue`.
+    /// Atomically checks capacity and reserves a stream slot; accepts in-progress multiplexers
+    /// so burst requests coalesce behind one handshake. Caller must follow up with `openStream` on `queue`.
     func tryReserveStream() -> Bool {
         _poolLock.withLock {
             switch _poolState {
@@ -138,7 +138,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - Session Setup
 
-    /// Ensures the session is connected and SETTINGS-exchanged; must be called on `queue`.
+    /// Ensures the multiplexer is connected and SETTINGS-exchanged; must be called on `queue`.
     func ensureReady(completion: @escaping (Error?) -> Void) {
         switch state {
         case .ready:
@@ -149,7 +149,7 @@ nonisolated class HTTP2Session: PoolableSession {
         case .connecting, .prefaceSent:
             readyCallbacks.append(completion)
         case .goingAway, .closed:
-            completion(HTTP2Error.notReady)
+            completion(NaiveHTTP2Error.notReady)
         }
     }
 
@@ -173,12 +173,12 @@ nonisolated class HTTP2Session: PoolableSession {
     // MARK: - Stream Lifecycle
 
     /// Creates and registers a new CONNECT stream; must be called on `queue`.
-    func createStream(destination: String) -> HTTP2Stream {
+    func openStream(destination: String) -> NaiveHTTP2Stream {
         let streamID = nextStreamID
         nextStreamID += 2  // Client streams are odd-numbered
-        let stream = HTTP2Stream(
+        let stream = NaiveHTTP2Stream(
             streamID: streamID,
-            session: self,
+            multiplexer: self,
             destination: destination
         )
         streams[streamID] = stream
@@ -187,7 +187,7 @@ nonisolated class HTTP2Session: PoolableSession {
     }
 
     /// Removes a stream from the active map; must be called on `queue`.
-    func removeStream(_ stream: HTTP2Stream) {
+    func removeStream(_ stream: NaiveHTTP2Stream) {
         streams.removeValue(forKey: stream.streamID)
         updatePoolSnapshot()
     }
@@ -202,20 +202,20 @@ nonisolated class HTTP2Session: PoolableSession {
         data.append(Self.connectionPreface)
 
         // SETTINGS chosen to match a common browser profile (probe resistance)
-        let settings = HTTP2Framer.settingsFrame([
+        let settings = NaiveHTTP2Framer.settingsFrame([
             (id: 0x1, value: 65536),     // HEADER_TABLE_SIZE
             (id: 0x2, value: 0),         // ENABLE_PUSH
             (id: 0x3, value: 100),       // MAX_CONCURRENT_STREAMS
-            (id: 0x4, value: UInt32(HTTP2FlowControl.naiveInitialWindowSize)),
+            (id: 0x4, value: UInt32(NaiveHTTP2FlowControl.naiveInitialWindowSize)),
             (id: 0x5, value: 16384),     // MAX_FRAME_SIZE
             (id: 0x6, value: 262144),    // MAX_HEADER_LIST_SIZE
         ])
         data.append(settings.serialized)
 
         // Expand connection receive window to 128 MB
-        let windowUpdate = HTTP2Framer.windowUpdateFrame(
+        let windowUpdate = NaiveHTTP2Framer.windowUpdateFrame(
             streamID: 0,
-            increment: HTTP2FlowControl.connectionWindowUpdateIncrement
+            increment: NaiveHTTP2FlowControl.connectionWindowUpdateIncrement
         )
         data.append(windowUpdate.serialized)
 
@@ -239,7 +239,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     /// Persistent read loop; runs from `prefaceSent` until `closed`.
     private func startReadLoop() {
-        processAvailableFrames()
+        handleInbound()
 
         guard state != .closed else { return }
 
@@ -253,8 +253,8 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    private func processAvailableFrames() {
-        while let frame = HTTP2Framer.deserialize(from: &receiveBuffer) {
+    private func handleInbound() {
+        while let frame = NaiveHTTP2Framer.deserialize(from: &receiveBuffer) {
             routeFrame(frame)
         }
 
@@ -263,14 +263,14 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    private func routeFrame(_ frame: HTTP2Frame) {
+    private func routeFrame(_ frame: NaiveHTTP2Frame) {
         switch frame.type {
         case .settings:
             handleSettings(frame)
 
         case .ping:
-            if !frame.hasFlag(HTTP2FrameFlags.ack) {
-                sendControlFrame(HTTP2Framer.pingAckFrame(opaqueData: frame.payload))
+            if !frame.hasFlag(NaiveHTTP2FrameFlags.ack) {
+                sendControlFrame(NaiveHTTP2Framer.pingAckFrame(opaqueData: frame.payload))
             }
 
         case .goaway:
@@ -291,7 +291,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
         case .rstStream:
             if let stream = streams[frame.streamID] {
-                let errorCode = HTTP2Framer.parseRstStream(payload: frame.payload) ?? 0
+                let errorCode = NaiveHTTP2Framer.parseRstStream(payload: frame.payload) ?? 0
                 stream.handleReset(errorCode: errorCode)
             }
         }
@@ -299,10 +299,10 @@ nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - Frame Handlers
 
-    private func handleSettings(_ frame: HTTP2Frame) {
-        if frame.hasFlag(HTTP2FrameFlags.ack) { return }
+    private func handleSettings(_ frame: NaiveHTTP2Frame) {
+        if frame.hasFlag(NaiveHTTP2FrameFlags.ack) { return }
 
-        let settings = HTTP2Framer.parseSettings(payload: frame.payload)
+        let settings = NaiveHTTP2Framer.parseSettings(payload: frame.payload)
         for (id, value) in settings {
             switch id {
             case 0x3: // MAX_CONCURRENT_STREAMS
@@ -318,7 +318,7 @@ nonisolated class HTTP2Session: PoolableSession {
             }
         }
 
-        sendControlFrame(HTTP2Framer.settingsAckFrame())
+        sendControlFrame(NaiveHTTP2Framer.settingsAckFrame())
 
         if state == .prefaceSent {
             state = .ready
@@ -327,23 +327,23 @@ nonisolated class HTTP2Session: PoolableSession {
         updatePoolSnapshot()
     }
 
-    private func handleGoaway(_ frame: HTTP2Frame) {
+    private func handleGoaway(_ frame: NaiveHTTP2Frame) {
         let previousState = state
         state = .goingAway
         updatePoolSnapshot()
-        if let parsed = HTTP2Framer.parseGoaway(payload: frame.payload) {
-            logger.warning("[HTTP2Session] GOAWAY: lastStreamID=\(parsed.lastStreamID), errorCode=\(parsed.errorCode)")
+        if let parsed = NaiveHTTP2Framer.parseGoaway(payload: frame.payload) {
+            logger.warning("[NaiveHTTP2Multiplexer] GOAWAY: lastStreamID=\(parsed.lastStreamID), errorCode=\(parsed.errorCode)")
             for (id, stream) in streams where id > parsed.lastStreamID {
-                stream.handleSessionError(HTTP2Error.goaway)
+                stream.handleSessionError(NaiveHTTP2Error.goaway)
             }
         }
         if previousState == .prefaceSent || previousState == .connecting {
-            completeReadyCallbacks(HTTP2Error.goaway)
+            completeReadyCallbacks(NaiveHTTP2Error.goaway)
         }
     }
 
-    private func handleWindowUpdate(_ frame: HTTP2Frame) {
-        guard let increment = HTTP2Framer.parseWindowUpdate(payload: frame.payload) else { return }
+    private func handleWindowUpdate(_ frame: NaiveHTTP2Frame) {
+        guard let increment = NaiveHTTP2Framer.parseWindowUpdate(payload: frame.payload) else { return }
         if frame.streamID == 0 {
             connectionSendWindow += Int(increment)
         } else if let stream = streams[frame.streamID] {
@@ -351,8 +351,8 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    private func handleDataFrame(_ frame: HTTP2Frame, stream: HTTP2Stream) {
-        let endStream = frame.hasFlag(HTTP2FrameFlags.endStream)
+    private func handleDataFrame(_ frame: NaiveHTTP2Frame, stream: NaiveHTTP2Stream) {
+        let endStream = frame.hasFlag(NaiveHTTP2FrameFlags.endStream)
         stream.handleData(frame.payload, endStream: endStream)
     }
 
@@ -363,21 +363,21 @@ nonisolated class HTTP2Session: PoolableSession {
         if connectionRecvConsumed >= connectionRecvWindowSize / 2 {
             let increment = UInt32(connectionRecvConsumed)
             connectionRecvConsumed = 0
-            sendControlFrame(HTTP2Framer.windowUpdateFrame(streamID: 0, increment: increment))
+            sendControlFrame(NaiveHTTP2Framer.windowUpdateFrame(streamID: 0, increment: increment))
         }
     }
 
     // MARK: - Send (called by streams)
 
     /// Sends CONNECT HEADERS for a stream.
-    func sendConnect(stream: HTTP2Stream, completion: @escaping (Error?) -> Void) {
+    func sendConnect(stream: NaiveHTTP2Stream, completion: @escaping (Error?) -> Void) {
         let extraHeaders = connectHeaders()
 
         let headerBlock = HPACKEncoder.encodeConnectRequest(
             authority: stream.destination,
             extraHeaders: extraHeaders
         )
-        let headersFrame = HTTP2Framer.headersFrame(
+        let headersFrame = NaiveHTTP2Framer.headersFrame(
             streamID: stream.streamID,
             headerBlock: headerBlock,
             endStream: false
@@ -387,14 +387,14 @@ nonisolated class HTTP2Session: PoolableSession {
     }
 
     /// Sends DATA frames for a stream, respecting connection + stream flow control.
-    func sendData(_ data: Data, on stream: HTTP2Stream, offset: Int = 0,
+    func sendData(_ data: Data, on stream: NaiveHTTP2Stream, offset: Int = 0,
                   completion: @escaping (Error?) -> Void) {
         guard offset < data.count else {
             completion(nil)
             return
         }
 
-        let maxPayload = HTTP2Framer.maxDataPayload
+        let maxPayload = NaiveHTTP2Framer.maxDataPayload
         var currentOffset = offset
         var frames = Data()
 
@@ -409,7 +409,7 @@ nonisolated class HTTP2Session: PoolableSession {
             stream.consumeSendWindow(chunkSize)
 
             let chunk = Data(data[currentOffset..<(currentOffset + chunkSize)])
-            let frame = HTTP2Framer.dataFrame(streamID: stream.streamID, payload: chunk)
+            let frame = NaiveHTTP2Framer.dataFrame(streamID: stream.streamID, payload: chunk)
             frames.append(frame.serialized)
             currentOffset += chunkSize
         }
@@ -440,10 +440,10 @@ nonisolated class HTTP2Session: PoolableSession {
     }
 
     /// Sends a control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE). Fire-and-forget.
-    func sendControlFrame(_ frame: HTTP2Frame) {
+    func sendControlFrame(_ frame: NaiveHTTP2Frame) {
         transport.send(data: frame.serialized) { error in
             if let error {
-                logger.warning("[HTTP2Session] Failed to send control frame: \(error.localizedDescription)")
+                logger.warning("[NaiveHTTP2Multiplexer] Failed to send control frame: \(error.localizedDescription)")
             }
         }
     }
@@ -459,13 +459,13 @@ nonisolated class HTTP2Session: PoolableSession {
                     return
                 }
                 guard let data, !data.isEmpty else {
-                    completion(HTTP2Error.connectionFailed("Connection closed"))
+                    completion(NaiveHTTP2Error.connectionFailed("Connection closed"))
                     return
                 }
                 self.receiveBuffer.append(data)
                 if self.receiveBuffer.count > Self.maxReceiveBufferSize {
                     self.receiveBuffer.removeAll()
-                    completion(HTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    completion(NaiveHTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
                     return
                 }
                 completion(nil)
@@ -496,13 +496,13 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    func close() {
+    func close(error: Error? = nil) {
         queue.async { [self] in
             guard state != .closed else { return }
             state = .closed
             transport.cancel()
             for (_, stream) in streams {
-                stream.handleSessionError(HTTP2Error.connectionFailed("Session closed"))
+                stream.handleSessionError(NaiveHTTP2Error.connectionFailed("Session closed"))
             }
             streams.removeAll()
             updatePoolSnapshot()

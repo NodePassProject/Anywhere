@@ -1,5 +1,5 @@
 //
-//  HTTP2Stream.swift
+//  NaiveHTTP2Stream.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/18/26.
@@ -7,11 +7,11 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HTTP2Stream")
+private let logger = AnywhereLogger(category: "NaiveHTTP2Stream")
 
-/// A single CONNECT tunnel multiplexed on an HTTP/2 session, with its own flow-control
+/// A single CONNECT tunnel multiplexed on an HTTP/2 multiplexer, with its own flow-control
 /// window; response headers are exposed so the proxy layer can run its own negotiation.
-nonisolated class HTTP2Stream: HTTPTunnel {
+nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
     // MARK: - State
 
@@ -29,7 +29,7 @@ nonisolated class HTTP2Stream: HTTPTunnel {
     let streamID: UInt32
     let destination: String
 
-    private weak var session: HTTP2Session?
+    private weak var multiplexer: NaiveHTTP2Multiplexer?
 
     private var state: StreamState = .idle
 
@@ -38,9 +38,9 @@ nonisolated class HTTP2Stream: HTTPTunnel {
 
     // Per-stream flow control (receive side)
     private var recvConsumed: Int = 0
-    private var recvWindowSize: Int = HTTP2FlowControl.naiveInitialWindowSize
+    private var recvWindowSize: Int = NaiveHTTP2FlowControl.naiveInitialWindowSize
 
-    // Receive buffering — data delivered by the session's read loop
+    // Receive buffering — data delivered by the multiplexer's read loop
     private var receiveQueue: [Data] = []
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var endStreamReceived = false
@@ -55,25 +55,25 @@ nonisolated class HTTP2Stream: HTTPTunnel {
 
     // MARK: - Init
 
-    init(streamID: UInt32, session: HTTP2Session, destination: String) {
+    init(streamID: UInt32, multiplexer: NaiveHTTP2Multiplexer, destination: String) {
         self.streamID = streamID
-        self.session = session
+        self.multiplexer = multiplexer
         self.destination = destination
-        self.sendWindow = HTTP2FlowControl.defaultInitialWindowSize
+        self.sendWindow = NaiveHTTP2FlowControl.defaultInitialWindowSize
     }
 
     // MARK: - HTTPTunnel
 
     func openTunnel(completion: @escaping (Error?) -> Void) {
-        guard let session else {
-            completion(HTTP2Error.notReady)
+        guard let multiplexer else {
+            completion(NaiveHTTP2Error.notReady)
             return
         }
 
-        session.queue.async { [self] in
-            session.ensureReady { [weak self] error in
-                guard let self, let session = self.session else { return }
-                // ensureReady completion fires on session.queue
+        multiplexer.queue.async { [self] in
+            multiplexer.ensureReady { [weak self] error in
+                guard let self, let multiplexer = self.multiplexer else { return }
+                // ensureReady completion fires on multiplexer.queue
                 if let error {
                     self.state = .closed
                     completion(error)
@@ -81,19 +81,19 @@ nonisolated class HTTP2Stream: HTTPTunnel {
                 }
 
                 // Adopt the peer's initial window size for this new stream
-                self.sendWindow = session.peerInitialWindowSize
+                self.sendWindow = multiplexer.peerInitialWindowSize
 
                 self.connectCompletion = completion
                 self.state = .connectSent
 
-                session.sendConnect(stream: self) { [weak self] error in
-                    guard let self, let session = self.session else { return }
-                    session.queue.async {
+                multiplexer.sendConnect(stream: self) { [weak self] error in
+                    guard let self, let multiplexer = self.multiplexer else { return }
+                    multiplexer.queue.async {
                         if let error {
                             self.state = .closed
                             let cb = self.connectCompletion
                             self.connectCompletion = nil
-                            session.removeStream(self)
+                            multiplexer.removeStream(self)
                             cb?(error)
                         }
                     }
@@ -103,25 +103,25 @@ nonisolated class HTTP2Stream: HTTPTunnel {
     }
 
     func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
-        guard let session else {
-            completion(HTTP2Error.notReady)
+        guard let multiplexer else {
+            completion(NaiveHTTP2Error.notReady)
             return
         }
-        session.queue.async { [self] in
+        multiplexer.queue.async { [self] in
             guard state == .open else {
-                completion(HTTP2Error.notReady)
+                completion(NaiveHTTP2Error.notReady)
                 return
             }
-            session.sendData(data, on: self, completion: completion)
+            multiplexer.sendData(data, on: self, completion: completion)
         }
     }
 
     func receiveData(completion: @escaping (Data?, Error?) -> Void) {
-        guard let session else {
-            completion(nil, HTTP2Error.notReady)
+        guard let multiplexer else {
+            completion(nil, NaiveHTTP2Error.notReady)
             return
         }
-        session.queue.async { [self] in
+        multiplexer.queue.async { [self] in
             if let error = streamError {
                 completion(nil, error)
                 return
@@ -141,7 +141,7 @@ nonisolated class HTTP2Stream: HTTPTunnel {
             }
 
             guard state == .open else {
-                completion(nil, HTTP2Error.notReady)
+                completion(nil, NaiveHTTP2Error.notReady)
                 return
             }
 
@@ -150,43 +150,43 @@ nonisolated class HTTP2Stream: HTTPTunnel {
     }
 
     func close() {
-        guard let session else { return }
-        session.queue.async { [self] in
+        guard let multiplexer else { return }
+        multiplexer.queue.async { [self] in
             guard state != .closed else { return }
             let needsRst = (state == .open || state == .connectSent)
             state = .closed
-            session.removeStream(self)
+            multiplexer.removeStream(self)
 
             // Inform the peer so it can reclaim its stream slot.
             if needsRst {
-                session.sendControlFrame(
-                    HTTP2Framer.rstStreamFrame(streamID: streamID, errorCode: 0x8 /* CANCEL */)
+                multiplexer.sendControlFrame(
+                    NaiveHTTP2Framer.rstStreamFrame(streamID: streamID, errorCode: 0x8 /* CANCEL */)
                 )
             }
 
             if let cb = connectCompletion {
                 connectCompletion = nil
-                cb(HTTP2Error.connectionFailed("Stream closed"))
+                cb(NaiveHTTP2Error.connectionFailed("Stream closed"))
             }
             if let pending = pendingReceive {
                 pendingReceive = nil
-                pending(nil, HTTP2Error.connectionFailed("Stream closed"))
+                pending(nil, NaiveHTTP2Error.connectionFailed("Stream closed"))
             }
         }
     }
 
-    // MARK: - Session Callbacks (called on session.queue)
+    // MARK: - Session Callbacks (called on multiplexer.queue)
 
-    func handleHeaders(_ frame: HTTP2Frame) {
-        guard let session, let decoded = session.hpackDecoder.decodeHeaders(from: frame.payload) else {
-            handleStreamError(HTTP2Error.protocolError("Failed to decode headers on stream \(streamID)"))
+    func handleHeaders(_ frame: NaiveHTTP2Frame) {
+        guard let multiplexer, let decoded = multiplexer.hpackDecoder.decodeHeaders(from: frame.payload) else {
+            handleStreamError(NaiveHTTP2Error.protocolError("Failed to decode headers on stream \(streamID)"))
             return
         }
         // No re-encode/forwarding here, so the never-indexed marker can be ignored.
         let headers = decoded.fields
 
         guard let statusHeader = headers.first(where: { $0.name == ":status" }) else {
-            handleStreamError(HTTP2Error.protocolError("Missing :status on stream \(streamID)"))
+            handleStreamError(NaiveHTTP2Error.protocolError("Missing :status on stream \(streamID)"))
             return
         }
 
@@ -200,9 +200,9 @@ nonisolated class HTTP2Stream: HTTPTunnel {
                 connectCompletion = nil
                 cb?(nil)
             } else if status == "407" {
-                handleStreamError(HTTP2Error.authenticationRequired)
+                handleStreamError(NaiveHTTP2Error.authenticationRequired)
             } else {
-                handleStreamError(HTTP2Error.tunnelFailed(statusCode: status))
+                handleStreamError(NaiveHTTP2Error.tunnelFailed(statusCode: status))
             }
         }
     }
@@ -220,7 +220,7 @@ nonisolated class HTTP2Stream: HTTPTunnel {
             } else if endStream {
                 pendingReceive = nil
                 state = .closed
-                session?.removeStream(self)
+                multiplexer?.removeStream(self)
                 pending(nil, nil)  // EOF
             }
             // Empty DATA without END_STREAM: keep waiting
@@ -228,17 +228,17 @@ nonisolated class HTTP2Stream: HTTPTunnel {
             receiveQueue.append(payload)
         } else if endStream && receiveQueue.isEmpty {
             state = .closed
-            session?.removeStream(self)
+            multiplexer?.removeStream(self)
         }
 
-        // END_STREAM: free the session slot now even if buffered data remains unread.
+        // END_STREAM: free the multiplexer slot now even if buffered data remains unread.
         if endStream && state != .closed {
-            session?.removeStream(self)
+            multiplexer?.removeStream(self)
         }
     }
 
     func handleReset(errorCode: UInt32) {
-        handleStreamError(HTTP2Error.streamReset(streamID))
+        handleStreamError(NaiveHTTP2Error.streamReset(streamID))
     }
 
     func handleSessionError(_ error: Error) {
@@ -249,7 +249,7 @@ nonisolated class HTTP2Stream: HTTPTunnel {
         guard state != .closed else { return }
         state = .closed
         streamError = error
-        session?.removeStream(self)
+        multiplexer?.removeStream(self)
 
         if let cb = connectCompletion {
             connectCompletion = nil
@@ -261,7 +261,7 @@ nonisolated class HTTP2Stream: HTTPTunnel {
         }
     }
 
-    // MARK: - Flow Control (called by session on session.queue)
+    // MARK: - Flow Control (called by multiplexer on multiplexer.queue)
 
     /// Opens per-stream and connection receive windows for data the consumer actually read.
     private func acknowledgeConsumedData(count: Int) {
@@ -269,11 +269,11 @@ nonisolated class HTTP2Stream: HTTPTunnel {
         if recvConsumed >= recvWindowSize / 2 {
             let increment = UInt32(recvConsumed)
             recvConsumed = 0
-            session?.sendControlFrame(
-                HTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
+            multiplexer?.sendControlFrame(
+                NaiveHTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
             )
         }
-        session?.acknowledgeReceivedData(count: count)
+        multiplexer?.acknowledgeReceivedData(count: count)
     }
 
     func consumeSendWindow(_ bytes: Int) {

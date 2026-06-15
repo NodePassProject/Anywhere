@@ -1,5 +1,5 @@
 //
-//  MuxFrame.swift
+//  VLESSVisionUDPFrame.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -10,20 +10,20 @@ import Foundation
 // MARK: - Enums & Types
 
 /// Session status values: New / Keep / End / KeepAlive.
-enum MuxSessionStatus: UInt8 {
+enum VLESSVisionUDPFrameStatus: UInt8 {
     case new       = 0x01
     case keep      = 0x02
     case end       = 0x03
     case keepAlive = 0x04
 }
 
-struct MuxOption: OptionSet {
+struct VLESSVisionUDPFrameOption: OptionSet {
     let rawValue: UInt8
-    static let data  = MuxOption(rawValue: 0x01)
-    static let error = MuxOption(rawValue: 0x02)
+    static let data  = VLESSVisionUDPFrameOption(rawValue: 0x01)
+    static let error = VLESSVisionUDPFrameOption(rawValue: 0x02)
 }
 
-enum MuxNetwork: UInt8 {
+enum VLESSVisionUDPNetwork: UInt8 {
     case tcp = 0x01
     case udp = 0x02
 }
@@ -35,16 +35,16 @@ private enum MuxAddressType: UInt8 {
     case ipv6   = 0x03
 }
 
-// MARK: - MuxFrameMetadata
+// MARK: - VLESSVisionUDPFrameMetadata
 
-struct MuxFrameMetadata {
+struct VLESSVisionUDPFrameMetadata {
     var sessionID: UInt16
-    var status: MuxSessionStatus
-    var option: MuxOption
-    var network: MuxNetwork?
+    var status: VLESSVisionUDPFrameStatus
+    var option: VLESSVisionUDPFrameOption
+    var network: VLESSVisionUDPNetwork?
     var targetHost: String?
     var targetPort: UInt16?
-    var globalID: Data?  // 8 bytes, zeros for now (XUDP #16)
+    var globalID: Data?  // 8 bytes, zeros for now (VLESSVisionUDPGlobalID #16)
 
     /// Encodes metadata into wire bytes (not including the 2-byte metadata_length prefix).
     func encode() -> Data {
@@ -67,7 +67,7 @@ struct MuxFrameMetadata {
 
             encodeAddress(host, into: &buf)
 
-            // GlobalID (8B) — omitted unless XUDP is active
+            // GlobalID (8B) — omitted unless VLESSVisionUDPGlobalID is active
             if network == .udp, let gid = globalID, gid.count == 8 {
                 buf.append(gid)
             }
@@ -77,7 +77,7 @@ struct MuxFrameMetadata {
     }
 
     /// Returns `(metadata, bytesConsumed)`, or `nil` if insufficient data.
-    static func decode(from data: Data) -> (MuxFrameMetadata, Int)? {
+    static func decode(from data: Data) -> (VLESSVisionUDPFrameMetadata, Int)? {
         guard data.count >= 4 else { return nil }  // minimum: 2B id + 1B status + 1B option
 
         let base = data.startIndex
@@ -85,13 +85,13 @@ struct MuxFrameMetadata {
         let sessionID = UInt16(data[base + offset]) << 8 | UInt16(data[base + offset + 1])
         offset += 2
 
-        guard let status = MuxSessionStatus(rawValue: data[base + offset]) else { return nil }
+        guard let status = VLESSVisionUDPFrameStatus(rawValue: data[base + offset]) else { return nil }
         offset += 1
 
-        let option = MuxOption(rawValue: data[base + offset])
+        let option = VLESSVisionUDPFrameOption(rawValue: data[base + offset])
         offset += 1
 
-        var metadata = MuxFrameMetadata(
+        var metadata = VLESSVisionUDPFrameMetadata(
             sessionID: sessionID,
             status: status,
             option: option
@@ -99,7 +99,7 @@ struct MuxFrameMetadata {
 
         if status == .new {
             guard data.count >= offset + 1 else { return nil }
-            guard let network = MuxNetwork(rawValue: data[base + offset]) else { return nil }
+            guard let network = VLESSVisionUDPNetwork(rawValue: data[base + offset]) else { return nil }
             metadata.network = network
             offset += 1
 
@@ -111,7 +111,7 @@ struct MuxFrameMetadata {
             metadata.targetHost = host
             offset += addrLen
 
-            // GlobalID for UDP (optional — only present with XUDP)
+            // GlobalID for UDP (optional — only present with VLESSVisionUDPGlobalID)
             if network == .udp && data.count >= offset + 8 {
                 metadata.globalID = data[(base + offset)..<(base + offset + 8)]
                 offset += 8
@@ -195,8 +195,8 @@ struct MuxFrameMetadata {
 
 // MARK: - Frame Encoding
 
-enum MuxFrame {
-    static func encode(metadata: MuxFrameMetadata, payload: Data?) -> Data {
+enum VLESSVisionUDPFrame {
+    static func encode(metadata: VLESSVisionUDPFrameMetadata, payload: Data?) -> Data {
         let metaBytes = metadata.encode()
         let metaLen = UInt16(metaBytes.count)
 
@@ -223,16 +223,16 @@ enum MuxFrame {
 // MARK: - Streaming Frame Parser
 
 /// Streaming parser that buffers partial reads and emits complete frames.
-nonisolated class MuxFrameParser {
+nonisolated class VLESSVisionUDPFrameParser {
     private var buffer = Data()
     private var bufferOffset = 0
 
     /// Compaction threshold — avoid O(n) shifts until dead space is significant.
     private static let compactThreshold = 4096
 
-    func feed(_ data: Data) -> [(metadata: MuxFrameMetadata, payload: Data?)] {
+    func feed(_ data: Data) -> [(metadata: VLESSVisionUDPFrameMetadata, payload: Data?)] {
         buffer.append(data)
-        var results: [(MuxFrameMetadata, Data?)] = []
+        var results: [(VLESSVisionUDPFrameMetadata, Data?)] = []
 
         while true {
             let remaining = buffer.count - bufferOffset
@@ -245,7 +245,7 @@ nonisolated class MuxFrameParser {
 
             let metaStart = bufferOffset + 2
             let metaSlice = buffer[metaStart..<(metaStart + metaLen)]
-            guard let (metadata, _) = MuxFrameMetadata.decode(from: metaSlice) else {
+            guard let (metadata, _) = VLESSVisionUDPFrameMetadata.decode(from: metaSlice) else {
                 // Corrupt frame — discard buffer
                 buffer.removeAll()
                 bufferOffset = 0

@@ -1,5 +1,5 @@
 //
-//  XUDP.swift
+//  VLESSVisionUDPGlobalID.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -8,7 +8,7 @@
 import Foundation
 import Security
 
-enum XUDP {
+enum VLESSVisionUDPGlobalID {
     private static let baseKey: [UInt8] = {
         var key = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, 32, &key)

@@ -139,7 +139,7 @@ nonisolated final class HysteriaClient {
 
     private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<HysteriaSession, Error>) -> Void) {
         lock.lock()
-        if let existing = session, !existing.poolIsClosed {
+        if let existing = session, !existing.isClosed {
             lock.unlock()
             existing.ensureReady { error in
                 if let error { completion(.failure(error)) }
@@ -221,7 +221,7 @@ nonisolated final class HysteriaClient {
     }
 
     private func openTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        // The idle-close timer can fire between `poolIsClosed` check and
+        // The idle-close timer can fire between `isClosed` check and
         // stream open; one retry with a fresh session covers that window.
         acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {

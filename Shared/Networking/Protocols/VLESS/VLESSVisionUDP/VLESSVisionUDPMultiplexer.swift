@@ -1,5 +1,5 @@
 //
-//  MuxClient.swift
+//  VLESSVisionUDPMultiplexer.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -7,9 +7,12 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MuxClient")
+private let logger = AnywhereLogger(category: "VLESSVisionUDPMultiplexer")
 
-nonisolated class MuxClient {
+nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
+
+    // MARK: - Properties
+
     let configuration: ProxyConfiguration
     let flowQueue: DispatchQueue
 
@@ -18,7 +21,7 @@ nonisolated class MuxClient {
 
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
-    private var sessions: [UInt16: MuxSession] = [:]
+    private var streams: [UInt16: VLESSVisionUDPStream] = [:]
     private var nextSessionID: UInt16 = 1
     private var connecting = false
     private var connected = false
@@ -31,7 +34,7 @@ nonisolated class MuxClient {
     private var writeQueue: [(Data, (Error?) -> Void)] = []
     private var isWriting = false
 
-    private var frameParser = MuxFrameParser()
+    private var frameParser = VLESSVisionUDPFrameParser()
 
     // 16s idle timer
     private var idleTimer: DispatchSourceTimer?
@@ -39,8 +42,7 @@ nonisolated class MuxClient {
 
     private var isXUDP = false
 
-    var sessionCount: Int { sessions.count }
-    var isFull: Bool { closed || isXUDP }
+    // MARK: - Init
 
     init(configuration: ProxyConfiguration, flowQueue: DispatchQueue) {
         self.configuration = configuration
@@ -48,143 +50,15 @@ nonisolated class MuxClient {
         flowQueue.setSpecific(key: Self.queueKey, value: true)
     }
 
-    // MARK: - Session Management
+    // MARK: - Capacity
 
-    /// Lazily connects the underlying proxy connection on first use.
-    func createSession(
-        network: MuxNetwork,
-        host: String,
-        port: UInt16,
-        globalID: Data?,
-        completion: @escaping (Result<MuxSession, Error>) -> Void
-    ) {
-        guard !closed else {
-            completion(.failure(ProxyError.connectionFailed("Mux client closed")))
-            return
-        }
+    var activeStreamCount: Int { streams.count }
+    var isClosed: Bool { closed }
+    var isFull: Bool { closed || isXUDP }
 
-        let sessionID: UInt16
-        if globalID != nil {
-            // XUDP: one flow per mux connection, always session ID 0
-            sessionID = 0
-            isXUDP = true
-        } else {
-            sessionID = nextSessionID
-            nextSessionID &+= 1
-            // Skip 0 (reserved)
-            if nextSessionID == 0 { nextSessionID = 1 }
-        }
+    // MARK: - Lifecycle
 
-        let session = MuxSession(
-            sessionID: sessionID,
-            network: network,
-            targetHost: host,
-            targetPort: port,
-            globalID: globalID,
-            client: self
-        )
-        sessions[sessionID] = session
-
-        resetIdleTimer()
-
-        let finishCreation = { [weak self] (error: Error?) in
-            guard let self else { return }
-            if let error {
-                self.sessions.removeValue(forKey: sessionID)
-                completion(.failure(error))
-                return
-            }
-
-            // For XUDP, the first UDP payload must be sent on the New frame so the
-            // server parses GlobalID from a data-bearing packet.
-            if globalID != nil {
-                completion(.success(session))
-                return
-            }
-
-            let metadata = MuxFrameMetadata(
-                sessionID: sessionID,
-                status: .new,
-                option: [],
-                network: network,
-                targetHost: host,
-                targetPort: port,
-                globalID: globalID
-            )
-
-            let frame = MuxFrame.encode(metadata: metadata, payload: nil)
-            self.writeFrame(frame) { [weak self] writeError in
-                if let writeError {
-                    self?.sessions.removeValue(forKey: sessionID)
-                    completion(.failure(writeError))
-                } else {
-                    completion(.success(session))
-                }
-            }
-        }
-
-        if connected {
-            finishCreation(nil)
-        } else {
-            connectMux { error in
-                finishCreation(error)
-            }
-        }
-    }
-
-    /// Safe to call from any thread — dispatches to flowQueue if needed.
-    func removeSession(_ sessionID: UInt16) {
-        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            sessions.removeValue(forKey: sessionID)
-            if sessions.isEmpty {
-                resetIdleTimer()
-            }
-        } else {
-            flowQueue.async { [weak self] in
-                guard let self else { return }
-                self.sessions.removeValue(forKey: sessionID)
-                if self.sessions.isEmpty {
-                    self.resetIdleTimer()
-                }
-            }
-        }
-    }
-
-    /// `error` is non-nil when the mux connection died with a transport failure;
-    /// pass `nil` for normal teardown (idle close, deliberate cancel).
-    func closeAll(error: Error? = nil) {
-        guard !closed else { return }
-        closed = true
-
-        idleTimer?.cancel()
-        idleTimer = nil
-
-        let allSessions = sessions.values
-        sessions.removeAll()
-
-        for session in allSessions {
-            session.deliverClose(error: error)
-        }
-
-        proxyConnection?.cancel()
-        proxyClient?.cancel()
-        proxyConnection = nil
-        proxyClient = nil
-
-        frameParser.reset()
-        writeQueue.removeAll()
-
-        let pendingCompletions = connectCompletions
-        connectCompletions.removeAll()
-        connecting = false
-        for cb in pendingCompletions {
-            cb(ProxyError.connectionFailed("Mux client closed"))
-        }
-    }
-
-    // MARK: - Mux Connection
-
-    private func connectMux(completion: @escaping (Error?) -> Void) {
+    private func ensureReady(completion: @escaping (Error?) -> Void) {
         if connected {
             completion(nil)
             return
@@ -202,11 +76,11 @@ nonisolated class MuxClient {
 
         connecting = true
         connectCompletions.append(completion)
-        
+
         let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
         self.proxyClient = client
 
-        client.connectMux { [weak self] (result: Result<ProxyConnection, Error>) in
+        client.connectMultiplexer { [weak self] (result: Result<ProxyConnection, Error>) in
             guard let self else { return }
 
             self.flowQueue.async { [weak self] in
@@ -220,19 +94,139 @@ nonisolated class MuxClient {
                 case .success(let connection):
                     self.proxyConnection = connection
                     self.connected = true
-                    self.startReceiveLoop(connection)
+                    self.startReadLoop(connection)
                     self.resetIdleTimer()
                     for cb in completions { cb(nil) }
 
                 case .failure(let error):
-                    self.closeAll(error: error)
+                    self.close(error: error)
                     for cb in completions { cb(error) }
                 }
             }
         }
     }
 
-    // MARK: - Write Serialization
+    private func resetIdleTimer() {
+        idleTimer?.cancel()
+        idleTimer = nil
+
+        guard !closed, streams.isEmpty else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: flowQueue)
+        timer.schedule(deadline: .now() + Self.idleTimeout)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            if self.streams.isEmpty {
+                self.close()
+            }
+        }
+        timer.resume()
+        idleTimer = timer
+    }
+
+    // MARK: - Streams
+
+    /// Lazily connects the underlying proxy connection on first use.
+    func openStream(
+        network: VLESSVisionUDPNetwork,
+        host: String,
+        port: UInt16,
+        globalID: Data?,
+        completion: @escaping (Result<VLESSVisionUDPStream, Error>) -> Void
+    ) {
+        guard !closed else {
+            completion(.failure(ProxyError.connectionFailed("Mux client closed")))
+            return
+        }
+
+        let sessionID: UInt16
+        if globalID != nil {
+            // VLESSVisionUDPGlobalID: one flow per mux connection, always stream ID 0
+            sessionID = 0
+            isXUDP = true
+        } else {
+            sessionID = nextSessionID
+            nextSessionID &+= 1
+            // Skip 0 (reserved)
+            if nextSessionID == 0 { nextSessionID = 1 }
+        }
+
+        let stream = VLESSVisionUDPStream(
+            sessionID: sessionID,
+            network: network,
+            targetHost: host,
+            targetPort: port,
+            globalID: globalID,
+            multiplexer: self
+        )
+        streams[sessionID] = stream
+
+        resetIdleTimer()
+
+        let finishCreation = { [weak self] (error: Error?) in
+            guard let self else { return }
+            if let error {
+                self.streams.removeValue(forKey: sessionID)
+                completion(.failure(error))
+                return
+            }
+
+            // For VLESSVisionUDPGlobalID, the first UDP payload must be sent on the New frame so the
+            // server parses GlobalID from a data-bearing packet.
+            if globalID != nil {
+                completion(.success(stream))
+                return
+            }
+
+            let metadata = VLESSVisionUDPFrameMetadata(
+                sessionID: sessionID,
+                status: .new,
+                option: [],
+                network: network,
+                targetHost: host,
+                targetPort: port,
+                globalID: globalID
+            )
+
+            let frame = VLESSVisionUDPFrame.encode(metadata: metadata, payload: nil)
+            self.writeFrame(frame) { [weak self] writeError in
+                if let writeError {
+                    self?.streams.removeValue(forKey: sessionID)
+                    completion(.failure(writeError))
+                } else {
+                    completion(.success(stream))
+                }
+            }
+        }
+
+        if connected {
+            finishCreation(nil)
+        } else {
+            ensureReady { error in
+                finishCreation(error)
+            }
+        }
+    }
+
+    /// Safe to call from any thread — dispatches to flowQueue if needed.
+    func removeStream(_ sessionID: UInt16) {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            streams.removeValue(forKey: sessionID)
+            if streams.isEmpty {
+                resetIdleTimer()
+            }
+        } else {
+            flowQueue.async { [weak self] in
+                guard let self else { return }
+                self.streams.removeValue(forKey: sessionID)
+                if self.streams.isEmpty {
+                    self.resetIdleTimer()
+                }
+            }
+        }
+    }
+
+    // MARK: - Send
 
     func writeFrame(_ data: Data, completion: @escaping (Error?) -> Void) {
         flowQueue.async { [weak self] in
@@ -259,7 +253,7 @@ nonisolated class MuxClient {
                 completion(error)
 
                 if let error {
-                    self.closeAll(error: error)
+                    self.close(error: error)
                 } else {
                     self.drainWriteQueue()
                 }
@@ -267,40 +261,42 @@ nonisolated class MuxClient {
         }
     }
 
-    // MARK: - Receive Loop
+    // MARK: - Read Loop
 
-    private func startReceiveLoop(_ connection: ProxyConnection) {
+    private func startReadLoop(_ connection: ProxyConnection) {
         connection.startReceiving(handler: { [weak self] (data: Data) in
             guard let self else { return }
             self.flowQueue.async { [weak self] in
-                self?.handleReceivedData(data)
+                self?.handleInbound(data)
             }
         }, errorHandler: { [weak self] (error: Error?) in
             guard let self, !self.closed else { return }
             self.flowQueue.async { [weak self] in
-                self?.closeAll(error: error)
+                self?.close(error: error)
             }
         })
     }
 
-    private func handleReceivedData(_ data: Data) {
+    // MARK: - Demux
+
+    private func handleInbound(_ data: Data) {
         let frames = frameParser.feed(data)
 
         for (metadata, payload) in frames {
             switch metadata.status {
             case .new:
-                // Server-initiated sessions — not expected for outbound mux, ignore
+                // Server-initiated streams — not expected for outbound mux, ignore
                 break
 
             case .keep:
-                if let session = sessions[metadata.sessionID], let payload, !payload.isEmpty {
-                    session.deliverData(payload)
+                if let stream = streams[metadata.sessionID], let payload, !payload.isEmpty {
+                    stream.deliverData(payload)
                 }
 
             case .end:
-                if let session = sessions[metadata.sessionID] {
-                    sessions.removeValue(forKey: metadata.sessionID)
-                    session.deliverClose()
+                if let stream = streams[metadata.sessionID] {
+                    streams.removeValue(forKey: metadata.sessionID)
+                    stream.deliverClose()
                 }
 
             case .keepAlive:
@@ -310,23 +306,37 @@ nonisolated class MuxClient {
         }
     }
 
-    // MARK: - Idle Timer
+    // MARK: - Close
 
-    private func resetIdleTimer() {
+    /// `error` is non-nil when the mux connection died with a transport failure;
+    /// pass `nil` for normal teardown (idle close, deliberate cancel).
+    func close(error: Error? = nil) {
+        guard !closed else { return }
+        closed = true
+
         idleTimer?.cancel()
         idleTimer = nil
 
-        guard !closed, sessions.isEmpty else { return }
+        let allStreams = streams.values
+        streams.removeAll()
 
-        let timer = DispatchSource.makeTimerSource(queue: flowQueue)
-        timer.schedule(deadline: .now() + Self.idleTimeout)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            if self.sessions.isEmpty {
-                self.closeAll()
-            }
+        for stream in allStreams {
+            stream.deliverClose(error: error)
         }
-        timer.resume()
-        idleTimer = timer
+
+        proxyConnection?.cancel()
+        proxyClient?.cancel()
+        proxyConnection = nil
+        proxyClient = nil
+
+        frameParser.reset()
+        writeQueue.removeAll()
+
+        let pendingCompletions = connectCompletions
+        connectCompletions.removeAll()
+        connecting = false
+        for cb in pendingCompletions {
+            cb(ProxyError.connectionFailed("Mux client closed"))
+        }
     }
 }

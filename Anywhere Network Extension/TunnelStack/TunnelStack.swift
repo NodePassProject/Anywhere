@@ -226,7 +226,7 @@ class TunnelStack {
 
     /// Mux manager for multiplexing UDP flows (created when Vision flow is
     /// active). Owned by ``udpQueue``.
-    var muxManager: MuxManager?
+    var udpMultiplexerPool: VLESSVisionUDPMultiplexerPool?
 
     // MARK: - UDP Config Snapshot
     //
@@ -401,14 +401,14 @@ class TunnelStack {
         publishUDPConfig()
         publishReflector()
 
-        // muxManager is udpQueue-owned, so build it there (a restart-time miss
+        // udpMultiplexerPool is udpQueue-owned, so build it there (a restart-time miss
         // is fine — restart resets flows).
         let useMux = configuration.usesVisionMux
         udpQueue.async { [self] in
             if useMux {
-                muxManager = MuxManager(configuration: configuration, flowQueue: udpQueue)
+                udpMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
             } else {
-                muxManager = nil
+                udpMultiplexerPool = nil
             }
         }
 
