@@ -220,9 +220,8 @@ nonisolated class RawTCPSocket: RawTransport {
     /// Latched on remote half-close; later receives return EOF immediately.
     private var receivedEOF = false
 
-    /// Reusable `recv(2)` scratch, allocated lazily on first receive.
+    /// Size of the per-receive `recv(2)` scratch buffer.
     private static let recvScratchSize = 65535
-    private var recvScratch: UnsafeMutableRawPointer?
 
     // MARK: - Lifecycle
 
@@ -657,36 +656,31 @@ nonisolated class RawTCPSocket: RawTransport {
             completion(nil, true, SocketError.notConnected)
             return
         }
-        let scratch: UnsafeMutableRawPointer
-        if let existing = recvScratch {
-            scratch = existing
-        } else {
-            scratch = UnsafeMutableRawPointer.allocate(byteCount: Self.recvScratchSize, alignment: 1)
-            recvScratch = scratch
-        }
         let fd = socketFD
-        let n = PerformanceMonitor.measure(.socketReceiveTCP) {
-            Darwin.recv(fd, scratch, Self.recvScratchSize, 0)
-        }
-        if n > 0 {
-            // Scratch is reused, so the returned Data must own its bytes (no bytesNoCopy).
-            let buf = Data(bytes: scratch, count: n)
-            pendingReceiveCompletion = nil
-            disarmReadSource()
-            completion(buf, false, nil)
-        } else if n == 0 {
-            receivedEOF = true
-            pendingReceiveCompletion = nil
-            disarmReadSource()
-            completion(nil, true, nil)
-        } else {
-            let e = errno
-            if e == EAGAIN || e == EWOULDBLOCK || e == EINTR {
-                armReadSource()
-            } else {
+        withUnsafeTemporaryAllocation(byteCount: Self.recvScratchSize, alignment: 1) { scratch in
+            let base = scratch.baseAddress!
+            let n = PerformanceMonitor.measure(.socketReceiveTCP) {
+                Darwin.recv(fd, base, Self.recvScratchSize, 0)
+            }
+            if n > 0 {
+                let buf = Data(bytes: base, count: n)
                 pendingReceiveCompletion = nil
                 disarmReadSource()
-                completion(nil, true, SocketError.posixError(.receive, errno: e))
+                completion(buf, false, nil)
+            } else if n == 0 {
+                receivedEOF = true
+                pendingReceiveCompletion = nil
+                disarmReadSource()
+                completion(nil, true, nil)
+            } else {
+                let e = errno
+                if e == EAGAIN || e == EWOULDBLOCK || e == EINTR {
+                    armReadSource()
+                } else {
+                    pendingReceiveCompletion = nil
+                    disarmReadSource()
+                    completion(nil, true, SocketError.posixError(.receive, errno: e))
+                }
             }
         }
     }
@@ -734,11 +728,6 @@ nonisolated class RawTCPSocket: RawTransport {
 
     /// Variant that fires `completion` once the fd is actually closed.
     private func tearDownSocket(completion: @escaping @Sendable () -> Void) {
-        if let scratch = recvScratch {
-            recvScratch = nil
-            scratch.deallocate()
-        }
-
         let fdToClose = socketFD
         socketFD = -1
 
