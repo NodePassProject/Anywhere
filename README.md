@@ -45,7 +45,7 @@ If this README and the code disagree, the code is correct — and the README lik
 
 ### Highlights
 
-- **Pure-Swift, zero-bridge core** — every protocol, the QUIC stack, and the packet tunnel are implemented natively. No sing-box, no Xray-core, no Go/C++ bridge.
+- **Pure-Swift, zero-bridge core** — every protocol, the QUIC stack, and the packet tunnel are implemented natively.
 - **VLESS XHTTP over HTTP/1.1, HTTP/2 & HTTP/3** — full `stream-one` / `stream-up` / `packet-up` support across all three HTTP versions (HTTP/3 over QUIC), with **up/download detach**: the download (GET) leg can ride a *separate server* with its own TLS/Reality and transport, correlated to the upload (POST) leg by a shared session ID.
 - **Post-quantum VLESS encryption** — native `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT.
 - **XTLS-RPRX-Vision** flow control with adaptive padding, plus Mux + XUDP multiplexing.
@@ -53,7 +53,7 @@ If this README and the code disagree, the code is correct — and the README lik
 
 ### Protocols & Security
 
-Every protocol, transport, and crypto layer below is implemented natively in Swift/C — no sing-box, no Xray-core bridge.
+Every protocol, transport, and crypto layer below is implemented natively in Swift/C.
 
 #### Proxy Protocols
 
@@ -79,17 +79,14 @@ Selectable on VLESS; layered under TLS or Reality.
 | **HTTP Upgrade** | Lightweight HTTP/1.1 `Upgrade` tunnel |
 | **gRPC** | `Tun` / `TunMulti` streams, multi-mode, HTTP/2 keepalive |
 | **XHTTP** | `stream-one` / `stream-up` / `packet-up` over HTTP/1.1, HTTP/2, and HTTP/3 (version chosen by TLS ALPN / Reality) · **up/download detach** — the download leg can ride a separate server with its own TLS/Reality + transport, correlated by a shared session ID |
-| **Mux + XUDP** | mux.cool multiplexing with GlobalID-based XUDP (BLAKE3 keyed hashing) |
 
-#### Security & TLS
+#### Security
 
 | Layer | Notes |
 | --- | --- |
 | **TLS** | SNI, ALPN, custom trusted certificates, min/max version, optional insecure mode |
-| **Encrypted Client Hello (ECH)** | HPKE-sealed inner ClientHello (RFC 9180 · X25519/HKDF-SHA256 · AES-128/256-GCM & ChaCha20-Poly1305) · `ECHConfigList` via base64 or opportunistic DNS discovery (RFC 9460) · accept-confirmation check with retry-config handling |
 | **Reality** | X25519 key exchange · TLS 1.3 fingerprint spoofing |
 | **VLESS Encryption** | Post-quantum `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT |
-| **Fingerprints** | Chrome · Firefox · Safari · iOS · Edge · Random |
 
 ### Architecture
 
