@@ -104,7 +104,7 @@ struct HomeView: View {
     }
 
     private var configurationCard: some View {
-        ConfigurationCard(isConnected: isConnected, showingAddSheet: $showingAddSheet)
+        ConfigurationCapsule(isConnected: isConnected, showingAddSheet: $showingAddSheet)
             .frame(maxWidth: 500)
     }
 }
@@ -176,9 +176,9 @@ private struct PowerButton: View {
     }
 }
 
-// MARK: - Configuration Card
+// MARK: - Configuration Capsule
 
-private struct ConfigurationCard: View {
+private struct ConfigurationCapsule: View {
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
@@ -189,9 +189,9 @@ private struct ConfigurationCard: View {
 
     var body: some View {
         if let configuration = viewModel.selectedConfiguration {
-            selectedCard(configuration)
+            selectedCapsule(configuration)
         } else {
-            emptyCard
+            emptyCapsule
         }
     }
     
@@ -204,7 +204,7 @@ private struct ConfigurationCard: View {
     }
 
     @ViewBuilder
-    private func selectedCard(_ configuration: ProxyConfiguration) -> some View {
+    private func selectedCapsule(_ configuration: ProxyConfiguration) -> some View {
         Menu {
             ForEach(configStore.standalonePickerItems) { item in
                 Button(item.name) { select(id: item.id) }
@@ -233,7 +233,7 @@ private struct ConfigurationCard: View {
                 Label("Add", systemImage: "plus")
             }
         } label: {
-            CardCapsule {
+            ProminentCapsule {
                 HStack {
                     Image("anywhere")
                         .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
@@ -252,11 +252,11 @@ private struct ConfigurationCard: View {
         .buttonStyle(.plain)
     }
 
-    private var emptyCard: some View {
+    private var emptyCapsule: some View {
         Button {
             showingAddSheet = true
         } label: {
-            CardCapsule {
+            ProminentCapsule {
                 HStack(spacing: 12) {
                     Image(systemName: "plus.circle.fill")
                         .font(.title2)
@@ -274,7 +274,7 @@ private struct ConfigurationCard: View {
     }
 }
 
-private struct CardCapsule<Content: View>: View {
+private struct ProminentCapsule<Content: View>: View {
     private let content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -282,11 +282,16 @@ private struct CardCapsule<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 26.0, *) {
+        if #available(iOS 27.0, *) {
             content
                 .padding(16)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive(), in: .capsule)
+        } else if #available(iOS 26.0, *) {
+            content
+                .padding(16)
+                .contentShape(Capsule())
+                .glassEffect(.clear.interactive(), in: .capsule)
         } else {
             content
                 .padding(16)
