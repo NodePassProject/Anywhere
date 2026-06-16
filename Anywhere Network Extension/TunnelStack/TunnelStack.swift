@@ -119,10 +119,7 @@ class TunnelStack {
     /// Lazily created to defer keychain access until a session needs a leaf cert.
     var mitmLeafCache: MITMLeafCertCache?
     let mitmCertificateStore = MITMCertificateStore()
-    /// Cross-session memory of HTTP/1.1-only upstreams, so the inner TLS leg
-    /// stops offering `h2` to origins that can't bridge it.
-    let mitmOriginCapabilities = MITMOriginCapabilityCache()
-    
+
     var running = false
 
     /// True during a deliberate full-stack TCP teardown so the resulting

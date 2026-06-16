@@ -9,6 +9,18 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
+/// Structured response delivery for the h2→h1 bridge. When a `MITMHTTP1Stream` (response phase) is
+/// given a sink, it delivers the rewritten response as IR — head / body / reset — instead of
+/// serializing HTTP/1.1 bytes the bridge would only re-parse. Chunked response trailers are not
+/// surfaced (dropped). lwIP-queue-confined.
+protocol MITMHTTP1ResponseIRSink: AnyObject {
+    /// `endStream` true ⇒ no body follows (the IR consumer ends the stream on the head).
+    func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool)
+    func http1ResponseBody(_ data: Data, endStream: Bool)
+    /// Malformed, oversized, or unbridgeable (101 / CONNECT-2xx) upstream response: reset the stream.
+    func http1ResponseReset()
+}
+
 /// One direction of an HTTP/1.x byte stream through the MITM: framing state
 /// machine plus chunked decoder, emitting rewritten plaintext for the opposite
 /// TLS leg. Unparseable input permanently downgrades to passthrough.
@@ -44,6 +56,11 @@ final class MITMHTTP1Stream {
     /// Fired once on 101 / CONNECT-2xx so the session can flip the opposite
     /// leg to passthrough. Response phase only.
     var onProtocolUpgrade: (() -> Void)?
+    /// Fired when a head is rejected as a request-smuggling / header-injection framing violation,
+    /// or a chunked body overruns the buffer cap. The stream stops forwarding (`.draining`) and
+    /// asks the session to close the connection — fail closed rather than relay malformed bytes or
+    /// deliver a truncated body framed as complete. Mirrors mitmproxy's `400/502 + CloseConnection`.
+    var onFatalClose: (() -> Void)?
     /// Lazy JS runtime, shared across both directions.
     private let scriptEngineProvider: MITMScriptEngine.Provider
     /// Request stream records method/URL; response stream pops them for script ctx.
@@ -126,6 +143,10 @@ final class MITMHTTP1Stream {
         case forwardingLength(remaining: Int)
         case forwardingChunked(reader: ChunkedReader)
 
+        /// Bridge (IR) only: forward a read-until-close response body as IR data until EOF — there's
+        /// no h1 framing to emit, and the consumer frames it as HTTP/2 DATA.
+        case bridgeForwardUntilClose
+
         /// Buffering body for rewrite; head withheld until body completes.
         case rewritingLength(pending: PendingHead, expected: Int, accumulator: Data)
         case rewritingChunked(pending: PendingHead, accumulator: Data, reader: ChunkedReader)
@@ -157,6 +178,11 @@ final class MITMHTTP1Stream {
     }
 
     private var mode: Mode = .awaitingHead
+
+    /// When set (the h2→h1 bridge's per-stream response stream), the response path delivers IR to
+    /// this sink instead of producing HTTP/1.1 bytes. nil ⇒ byte output (the main h1↔h1 path),
+    /// byte-for-byte unchanged. Response phase only; set once before the first `transform`.
+    weak var responseIRSink: MITMHTTP1ResponseIRSink?
 
     /// In-flight completion, retained while a script hop is outstanding.
     private var parkedCompletion: ((Data) -> Void)?
@@ -253,7 +279,7 @@ final class MITMHTTP1Stream {
     /// Re-entry while parked would stomp the stashed completion and hang the
     /// connection; fire the new completion empty and keep the stashed one.
     private func failClosedReentry(_ completion: (Data) -> Void) {
-        logger.error("[MITM] HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
+        logger.error("HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
         completion(Data())
     }
 
@@ -268,6 +294,29 @@ final class MITMHTTP1Stream {
     /// script chain; fires `completion` inline in all other modes.
     func finish(completion: @escaping (Data) -> Void) {
         guard parkedCompletion == nil else { return failClosedReentry(completion) }
+        // Bridge (IR) EOF handling, by current mode:
+        if responseIRSink != nil {
+            switch mode {
+            case .bridgeForwardUntilClose:
+                // read-until-close: EOF ends the body cleanly.
+                _ = emitBridgeBody(Data(), endStream: true)
+                mode = .draining
+                completion(Data())
+                return
+            case .forwardingLength, .forwardingChunked, .rewritingLength, .rewritingChunked:
+                // EOF arrived mid-body (a truncated upstream response) → reset the bridged stream
+                // rather than leave the client waiting for a body that won't finish.
+                responseIRSink?.http1ResponseReset()
+                mode = .draining
+                completion(Data())
+                return
+            case .rewritingUntilClose:
+                break // fall through: run the buffered script chain at EOF; the resume delivers IR.
+            default:
+                completion(Data())
+                return
+            }
+        }
         guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
             completion(Data())
             return
@@ -303,7 +352,17 @@ final class MITMHTTP1Stream {
     private func drive(into output: inout Data) -> Bool {
         switch mode {
         case .passthrough:
+            // Bridge: a passthrough downgrade (malformed framing, upgrade, non-HTTP, oversize head)
+            // can't map onto one HTTP/2 stream — reset it instead of leaking raw bytes the IR
+            // consumer can't frame. The main path forwards verbatim.
+            if bridgeResetIfNeeded() { return false }
             output.append(rxBuffer.prefix(rxBuffer.count))
+            rxBuffer.removeAll(keepingCapacity: false)
+            return false
+
+        case .bridgeForwardUntilClose:
+            guard !rxBuffer.isEmpty else { return false }
+            _ = emitBridgeBody(Data(rxBuffer.prefix(rxBuffer.count)), endStream: false)
             rxBuffer.removeAll(keepingCapacity: false)
             return false
 
@@ -359,7 +418,7 @@ final class MITMHTTP1Stream {
         let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
         guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
             if rxBuffer.count > Self.maxHeadBytes {
-                logger.warning("[MITM] HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; downgrading to passthrough")
+                logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; downgrading to passthrough")
                 output.append(rxBuffer.prefix(rxBuffer.count))
                 rxBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
@@ -374,11 +433,23 @@ final class MITMHTTP1Stream {
         let headData = rxBuffer.subdata(in: 0..<headEnd)
         rxBuffer.removeFirst(headEnd)
 
-        guard let parsed = parseHead(headData) else {
-            // Not HTTP/1.x: stop rewriting, forward verbatim.
+        let parsed: ParsedHead
+        switch parseHead(headData) {
+        case .ok(let p):
+            parsed = p
+        case .forward:
+            // Not HTTP/1.x, or a tolerable deviation: stop rewriting, forward verbatim.
             mode = .passthrough
             output.append(headData)
             return true
+        case .smuggling:
+            // A request-smuggling / header-injection framing violation (RFC 9112 §6). Fail closed:
+            // do not relay the offending bytes (mitmproxy answers 400 + CloseConnection). The session
+            // closes the connection; `.draining` drops anything already buffered behind this head.
+            logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
+            mode = .draining
+            onFatalClose?()
+            return false
         }
 
         let rewrittenStartLine: String
@@ -418,7 +489,16 @@ final class MITMHTTP1Stream {
 
         // Authority rewrite first so a headerReplace on Host can still override it.
         let withAuthority = applyAuthorityRewrite(parsed.headers)
-        let rewrittenHeaders = applyHeaderRules(withAuthority, requestURL: gateURL)
+        var rewrittenHeaders = applyHeaderRules(withAuthority, requestURL: gateURL)
+        // Clamp the request's Accept-Encoding to codings we can decode (mitmproxy `constrain_encoding`)
+        // so a buffered body rule isn't silently defeated by an undecodable Content-Encoding (e.g. zstd).
+        if phase == .httpRequest {
+            rewrittenHeaders = rewrittenHeaders.map { entry in
+                entry.name.equalsIgnoringASCIICase("accept-encoding")
+                    ? (name: entry.name, value: MITMBodyCodec.constrainedAcceptEncoding(entry.value))
+                    : entry
+            }
+        }
 
         let framing = bodyFraming(
             startLine: rewrittenStartLine,
@@ -473,6 +553,18 @@ final class MITMHTTP1Stream {
             } else {
                 finalHeaders = rewrittenHeaders
             }
+            if responseIRSink != nil {
+                if case .switchingProtocols = framing {
+                    // 101 / CONNECT-2xx can't bridge onto a single HTTP/2 stream — reset (the client
+                    // retries over HTTP/1.1, where the tunnel path applies).
+                    _ = bridgeResetIfNeeded()
+                    return false
+                }
+                // read-until-close: deliver the head, then stream the body as IR until EOF.
+                emitResponseHead(startLine: rewrittenStartLine, headers: finalHeaders, bodyFollows: true, into: &output)
+                mode = .bridgeForwardUntilClose
+                return true
+            }
             output.append(serializeHead(startLine: rewrittenStartLine, headers: finalHeaders))
             // Best-effort: synth bytes can't be cleanly framed once passthrough.
             flushSynthAfterResponse(into: &output)
@@ -519,7 +611,14 @@ final class MITMHTTP1Stream {
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
             }
-            output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+            // The h2→h1 bridge can't carry an interim 1xx as its own h2 HEADERS without ending the
+            // stream; swallow it — matching the h2 upstream leg and mitmproxy — and await the final
+            // response (interims peek the request-log record, so it stays queued for that pop).
+            if responseIRSink != nil, isInterimResponseStartLine(rewrittenStartLine) {
+                mode = .awaitingHead
+                return true
+            }
+            emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: false, into: &output)
             // Head-only response: this is the synth-after boundary.
             flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
@@ -562,7 +661,7 @@ final class MITMHTTP1Stream {
     ) -> Bool {
         // Stream scripts can't modify a length-prefixed body; warn and fall through.
         if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
-            logger.warning("[MITM] HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
+            logger.warning("HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
         }
 
         // Opt out of buffering up front when length exceeds the cap — keeps
@@ -585,12 +684,12 @@ final class MITMHTTP1Stream {
             return true
         }
         if buffersBody, length > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("[MITM] HTTP/1 \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
+            logger.warning("HTTP/1 \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
         }
         if phase == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
         }
-        output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+        emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
         mode = .forwardingLength(remaining: length)
         return true
     }
@@ -607,8 +706,16 @@ final class MITMHTTP1Stream {
         // Streaming script wins over buffered script; emit head immediately
         // (stream scripts can't mutate head fields).
         if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
+            if responseIRSink != nil {
+                // The bridge can't run a streaming response script across the h2→h1 boundary
+                // (mirrors the request side); forward the body unscripted as IR rather than stall.
+                logger.warning("HTTP/1 \(host): response stream-script unsupported on the bridge; forwarding unscripted")
+                emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
+                mode = .forwardingChunked(reader: ChunkedReader())
+                return true
+            }
             if buffersBody {
-                logger.warning("[MITM] HTTP/1 \(host): Stream Script wins over buffered body rule")
+                logger.warning("HTTP/1 \(host): Stream Script wins over buffered body rule")
             }
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
@@ -643,7 +750,7 @@ final class MITMHTTP1Stream {
         if phase == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
         }
-        output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+        emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
         mode = .forwardingChunked(reader: ChunkedReader())
         return true
     }
@@ -668,10 +775,12 @@ final class MITMHTTP1Stream {
     private func forwardLength(remaining: Int, into output: inout Data) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
         let take = min(remaining, rxBuffer.count)
-        let slice = rxBuffer.prefix(take)
-        output.append(slice)
+        let slice = Data(rxBuffer.prefix(take))
         rxBuffer.removeFirst(take)
         let left = remaining - take
+        if !emitBridgeBody(slice, endStream: left == 0) {
+            output.append(slice)
+        }
         if left == 0 {
             flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
@@ -683,18 +792,29 @@ final class MITMHTTP1Stream {
 
     private func forwardChunked(reader: inout ChunkedReader, into output: inout Data) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
-        let result = reader.consumeForward(&rxBuffer, into: &output)
+        let result: ChunkedReader.ForwardResult
+        if let sink = responseIRSink {
+            // Bridge: deliver decoded chunk payloads as IR — no h1 re-framing.
+            result = reader.consumeForwardIR(&rxBuffer) { sink.http1ResponseBody($0, endStream: false) }
+        } else {
+            result = reader.consumeForward(&rxBuffer, into: &output)
+        }
         switch result {
         case .needMore:
             mode = .forwardingChunked(reader: reader)
             return false
         case .complete:
+            if emitBridgeBody(Data(), endStream: true) {
+                mode = .awaitingHead
+                return true
+            }
             flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .malformed:
-            // Head went out as chunked: synthesize the terminator before downgrading,
-            // or the receiver hangs waiting for `0\r\n\r\n`.
+            // Chunked framing broke mid-body. Bridge: reset the stream. Main path: synthesize the
+            // terminator (or the receiver hangs waiting for `0\r\n\r\n`) and downgrade to passthrough.
+            if bridgeResetIfNeeded() { return false }
             output.append(contentsOf: "0\r\n\r\n".utf8)
             rxBuffer.removeAll(keepingCapacity: false)
             flushSynthAfterResponse(into: &output)
@@ -741,18 +861,18 @@ final class MITMHTTP1Stream {
         let result = reader.consumeBuffered(&rxBuffer, into: &accumulator)
         switch result {
         case .needMore:
-            // No up-front length; on cap overflow apply rules to the partial
-            // buffer and drain the rest — lossy, but beats skipping rewrite.
+            // No up-front length. On cap overflow we can neither buffer the whole body nor cleanly
+            // stream the remainder un-rewritten (the head is withheld and decode-while-buffering has
+            // already consumed the original chunk framing). Emitting the partial buffer with an
+            // *exact* Content-Length would frame a silently-truncated body as complete — which a
+            // client trusts (corrupt JSON / file). Fail honestly instead: answer a 502 on the
+            // response phase (output is client-bound there; mirrors mitmproxy's RESPONSE_TOO_LARGE)
+            // and close, never presenting a truncated body as whole.
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                logger.warning("[MITM] HTTP1 \(host): Chunked body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
-                let parked = applyScriptsAndEmit(
-                    pending: pending,
-                    rawBody: accumulator,
-                    originalSizes: [accumulator.count],
-                    resumeMode: .discardingChunked(reader: reader, afterSynth: false),
-                    into: &output
-                )
-                return !parked
+                logger.warning("HTTP/1 \(host): chunked body exceeded \(MITMBodyCodec.maxBufferedBodyBytes) B buffer cap; failing closed rather than truncating to a fake-complete length")
+                mode = .draining
+                onFatalClose?()
+                return false
             }
             mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
             return false
@@ -766,6 +886,9 @@ final class MITMHTTP1Stream {
             )
             return !parked
         case .malformed:
+            // Bridge: no head emitted yet (buffered rewrite), so reset the client stream rather
+            // than strand it. Main path keeps its passthrough downgrade.
+            if bridgeResetIfNeeded() { return false }
             flushSynthAfterResponse(into: &output)
             mode = .passthrough
             return true
@@ -783,7 +906,8 @@ final class MITMHTTP1Stream {
         accumulator.append(rxBuffer.prefix(rxBuffer.count))
         rxBuffer.removeAll(keepingCapacity: false)
         if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("[MITM] HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
+            logger.warning("HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
+            if bridgeResetIfNeeded() { return false }
             output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
             output.append(accumulator)
             flushSynthAfterResponse(into: &output)
@@ -807,7 +931,7 @@ final class MITMHTTP1Stream {
                 guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
                         // Unterminated size line: malformed, or the buffer grows unbounded.
-                        logger.warning("[MITM] HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
+                        logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
                         output.append(contentsOf: "0\r\n\r\n".utf8)
                         rxBuffer.removeAll(keepingCapacity: false)
                         flushSynthAfterResponse(into: &output)
@@ -863,7 +987,7 @@ final class MITMHTTP1Stream {
                 // A declared chunk size can be Int.max; on overflow flush the held
                 // chunk, bypass the script, and emit the remainder verbatim.
                 if left != 0, accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                    logger.warning("[MITM] HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
+                    logger.warning("HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
                     if let held = streaming.pendingChunk {
                         streaming.pendingChunk = nil
                         if emitOrParkStreamingFrame(
@@ -927,7 +1051,7 @@ final class MITMHTTP1Stream {
                 // RFC 9112 §7.1.2: forward trailer lines verbatim until the empty-line terminator.
                 guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
-                        logger.warning("[MITM] HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
+                        logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
                         // "0\r\n" was already emitted; close the trailer section.
                         output.append(contentsOf: "\r\n".utf8)
                         rxBuffer.removeAll(keepingCapacity: false)
@@ -1119,6 +1243,14 @@ final class MITMHTTP1Stream {
         let body: Data
         if pending.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(rawBody, plan: pending.codec, host: host) else {
+                if responseIRSink != nil {
+                    // Couldn't decompress to run the rule — deliver the head with its Content-Encoding
+                    // intact plus the original (still-encoded) body; the client decodes it (rule skipped).
+                    emitResponseHead(startLine: pending.startLine, headers: pending.headers, bodyFollows: !rawBody.isEmpty, into: &output)
+                    if !rawBody.isEmpty { _ = emitBridgeBody(rawBody, endStream: true) }
+                    mode = resumeMode
+                    return false
+                }
                 if phase == .httpRequest {
                     logRequest(startLine: pending.startLine)
                 }
@@ -1176,11 +1308,22 @@ final class MITMHTTP1Stream {
             if phase == .httpRequest {
                 logRequest(startLine: finalStartLine)
             }
-            resumed.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-            if !result.body.isEmpty {
-                resumed.append(result.body)
+            if responseIRSink != nil {
+                emitResponseHead(startLine: finalStartLine, headers: finalHeaders, bodyFollows: !result.body.isEmpty, into: &resumed)
+                if !result.body.isEmpty { _ = emitBridgeBody(result.body, endStream: true) }
+            } else {
+                resumed.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
+                if !result.body.isEmpty {
+                    resumed.append(result.body)
+                }
             }
         case .synthesizedResponse(let response):
+            if responseIRSink != nil {
+                // Response-phase Anywhere.respond shouldn't occur on the bridge; reset, don't mis-frame.
+                _ = bridgeResetIfNeeded()
+                finishDrivePass(resumed)
+                return
+            }
             queueSynthesizedResponse(response)
         }
         flushSynthAfterResponse(into: &resumed)
@@ -1210,6 +1353,11 @@ final class MITMHTTP1Stream {
                 into: &resumed
             )
         case .synthesizedResponse(let response):
+            if responseIRSink != nil {
+                _ = bridgeResetIfNeeded()
+                finishDrivePass(resumed)
+                return
+            }
             queueSynthesizedResponse(response)
         }
         flushSynthAfterResponse(into: &resumed)
@@ -1251,10 +1399,16 @@ final class MITMHTTP1Stream {
         if phase == .httpRequest {
             logRequest(startLine: finalStartLine)
         }
-        output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-        // RFC 9110 §15.2: HEAD responses must not carry a body.
-        if !result.body.isEmpty, !isHeadResponse {
-            output.append(result.body)
+        let hasBody = !result.body.isEmpty && !isHeadResponse
+        if responseIRSink != nil {
+            emitResponseHead(startLine: finalStartLine, headers: finalHeaders, bodyFollows: hasBody, into: &output)
+            if hasBody { _ = emitBridgeBody(result.body, endStream: true) }
+        } else {
+            output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
+            // RFC 9110 §15.2: HEAD responses must not carry a body.
+            if hasBody {
+                output.append(result.body)
+            }
         }
     }
 
@@ -1335,34 +1489,63 @@ final class MITMHTTP1Stream {
         let headers: [Header]
     }
 
-    private func parseHead(_ data: Data) -> ParsedHead? {
-        guard let raw = String(data: data, encoding: .ascii) else { return nil }
+    /// Outcome of `parseHead`, distinguishing the two reasons it can decline a head so the caller
+    /// can act differently: a non-HTTP / tolerable head is forwarded verbatim (`.forward`), while an
+    /// HTTP head carrying a request-smuggling / injection framing violation fails closed
+    /// (`.smuggling`) instead of being relayed.
+    private enum ParsedHeadResult {
+        case ok(ParsedHead)
+        case forward
+        case smuggling
+    }
+
+    private func parseHead(_ data: Data) -> ParsedHeadResult {
+        guard let raw = String(data: data, encoding: .ascii) else { return .forward }
         let lines = raw.components(separatedBy: "\r\n")
-        guard let startLine = lines.first, !startLine.isEmpty else { return nil }
-        guard isHTTPStartLine(startLine) else { return nil }
+        guard let startLine = lines.first, !startLine.isEmpty else { return .forward }
+        guard isHTTPStartLine(startLine) else { return .forward }
         // A lone CR/LF survives the exact-CRLF split and could smuggle a header
         // on re-emission; NUL is forbidden too (RFC 9112 §2.2).
-        if Self.containsControlChars(startLine) { return nil }
+        if Self.containsControlChars(startLine) { return .smuggling }
+        // RFC 9112 §3: a request-line is exactly `method SP request-target SP HTTP-version`. The
+        // incoming target is otherwise re-emitted verbatim, so validate it here — an embedded
+        // SP/TAB/DEL/CTL is a target-confusion / request-smuggling primitive, and would also desync
+        // the URL gate (which splits on SP). Responses skip this: the reason phrase may contain SP.
+        if phase == .httpRequest {
+            let parts = startLine.split(separator: " ", omittingEmptySubsequences: false)
+            guard parts.count == 3, Self.isValidRequestTarget(String(parts[1])) else {
+                return .smuggling
+            }
+        }
+        // RFC 9112 §5.2 / RFC 7230 §3.2.4: obs-fold is deprecated. Rather than forward a folded head
+        // verbatim — which would let a field value split across a fold skip the CL/TE smuggling
+        // checks below — unfold it (append each continuation to the prior field value with a single
+        // SP) and validate the unfolded result.
+        var headerLines: [String] = []
+        for line in lines.dropFirst() {
+            if line.isEmpty { continue }
+            if let first = line.utf8.first, first == 0x20 || first == 0x09 {
+                guard !headerLines.isEmpty else { return .smuggling } // continuation with no field
+                let continuation = line.drop { $0 == " " || $0 == "\t" }
+                headerLines[headerLines.count - 1] += " " + String(continuation)
+                continue
+            }
+            headerLines.append(line)
+        }
         var headers: [Header] = []
         var contentLengthValues: [String] = []
         var transferEncodingValues: [String] = []
-        var hasTEChunked = false
-        for line in lines.dropFirst() {
-            if line.isEmpty { continue }
-            // RFC 9112 §5.2: reject obs-fold (a folding smuggling vector).
-            if let first = line.utf8.first, first == 0x20 || first == 0x09 {
-                return nil
-            }
-            // RFC 9112 §5.1: no colon is a syntax error; a lax peer could treat
-            // the dropped line as a real framing header.
-            guard let colon = line.firstIndex(of: ":") else { return nil }
+        for line in headerLines {
+            // RFC 9112 §5.1: no colon is a syntax error; forward verbatim (it isn't itself a
+            // CL/TE framing manipulation) and let the upstream reject it.
+            guard let colon = line.firstIndex(of: ":") else { return .forward }
             let name = String(line[..<colon])
             let value = String(line[line.index(after: colon)...])
                 .trimmingCharacters(in: CharacterSet.whitespaces)
             // RFC 9110 §5.6.2: SP/CTL in a field-name is the classic obfuscated-TE smuggle.
-            guard isValidHTTPHeaderName(name) else { return nil }
+            guard isValidHTTPHeaderName(name) else { return .smuggling }
             // CR/LF/NUL in a field-value would split the line on re-emission.
-            if Self.containsControlChars(value) { return nil }
+            if Self.containsControlChars(value) { return .smuggling }
             if name.equalsIgnoringASCIICase("content-length") {
                 contentLengthValues.append(
                     value.trimmingCharacters(in: CharacterSet.whitespaces)
@@ -1375,25 +1558,26 @@ final class MITMHTTP1Stream {
         // Reject any Content-Length that `bodyFraming` wouldn't honor — a
         // forward/frame divergence is a request-smuggling vector.
         if contentLengthValues.contains(where: { !Self.isCleanContentLength($0) }) {
-            return nil
+            return .smuggling
         }
-        // RFC 9112 §6.1: TE must have `chunked` as the final coding.
-        // Multiple TE field lines are a known smuggling vector; reject.
+        // RFC 9112 §6.1: a request's Transfer-Encoding must end in `chunked` — a non-chunked final
+        // coding is unframable and a smuggling vector. A *response* may carry a non-chunked
+        // transfer-coding (e.g. `gzip`), framed by connection close (RFC 9112 §6.3); `bodyFraming`
+        // resolves that to `.readUntilClose`. Multiple TE field lines are always a smuggling vector.
         if !transferEncodingValues.isEmpty {
-            if transferEncodingValues.count > 1 { return nil }
-            guard Self.transferEncodingIsChunked(transferEncodingValues[0]) else {
-                return nil
+            if transferEncodingValues.count > 1 { return .smuggling }
+            if !Self.transferEncodingIsChunked(transferEncodingValues[0]), phase == .httpRequest {
+                return .smuggling
             }
-            hasTEChunked = true
         }
         // RFC 9112 §6.3.5: differing Content-Length values are a primary smuggling vector.
         let uniqueLengths = Set(contentLengthValues)
         if uniqueLengths.count > 1 {
-            return nil
+            return .smuggling
         }
-        // RFC 9112 §6.1: TE: chunked + Content-Length together is an error;
-        // strip Content-Length to prevent framing-source ambiguity.
-        if hasTEChunked && !contentLengthValues.isEmpty {
+        // RFC 9112 §6.3: Transfer-Encoding overrides Content-Length. When both are present, strip
+        // Content-Length so the two framing sources can't disagree (the classic TE+CL smuggle).
+        if !transferEncodingValues.isEmpty && !contentLengthValues.isEmpty {
             headers = headers.filter {
                 !$0.name.equalsIgnoringASCIICase("content-length")
             }
@@ -1405,7 +1589,7 @@ final class MITMHTTP1Stream {
             filtered.append((name: "Content-Length", value: contentLengthValues[0]))
             headers = filtered
         }
-        return ParsedHead(startLine: startLine, headers: headers)
+        return .ok(ParsedHead(startLine: startLine, headers: headers))
     }
 
     /// Pure non-negative integer Content-Length; rejects `+5`, `5 5`, overflow
@@ -1456,12 +1640,40 @@ final class MITMHTTP1Stream {
         return (100..<200).contains(status) && status != 101
     }
 
+    /// Emits the (rewritten) response head: HTTP/1.1 bytes on the main path, or IR to the bridge
+    /// sink. `bodyFollows` sets the IR END_STREAM flag (no body ⇒ the stream ends on the head).
+    private func emitResponseHead(startLine: String, headers: [Header], bodyFollows: Bool, into output: inout Data) {
+        if let sink = responseIRSink {
+            sink.http1ResponseHead(status: responseStatusCode(from: startLine) ?? 0, headers: headers, endStream: !bodyFollows)
+        } else {
+            output.append(serializeHead(startLine: startLine, headers: headers))
+        }
+    }
+
+    /// IR-mode body emission for the bridge. Returns true when handled via IR (the caller must then
+    /// NOT append framed bytes); false on the main path, where the caller frames bytes as usual.
+    private func emitBridgeBody(_ data: Data, endStream: Bool) -> Bool {
+        guard let sink = responseIRSink else { return false }
+        sink.http1ResponseBody(data, endStream: endStream)
+        return true
+    }
+
+    /// IR-mode reset for the bridge: surfaces a malformed / unbridgeable response and drains. Returns
+    /// true when handled via IR; the main (byte) path keeps its passthrough/terminator behavior.
+    private func bridgeResetIfNeeded() -> Bool {
+        guard let sink = responseIRSink else { return false }
+        sink.http1ResponseReset()
+        mode = .draining
+        rxBuffer.removeAll(keepingCapacity: false)
+        return true
+    }
+
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
         // Defense-in-depth: enforce the no-CR/LF/NUL invariant at the serialization boundary.
         let safeHeaders = headers.filter { entry in
             guard !Self.containsControlChars(entry.name),
                   !Self.containsControlChars(entry.value) else {
-                logger.warning("[MITM] HTTP/1 \(host): dropping header with CR/LF/NUL from serialized head: \(entry.name)")
+                logger.warning("HTTP/1 \(host): dropping header with CR/LF/NUL from serialized head: \(entry.name)")
                 return false
             }
             return true
@@ -1556,8 +1768,8 @@ final class MITMHTTP1Stream {
                     return .switchingProtocols
                 }
                 if status == 101 { return .switchingProtocols }
-                if status == 204 || status == 304 { return .none }
-                if status >= 100 && status < 200 { return .none }
+                // RFC 9110 §15: 1xx (except 101), 204, 205, 304 carry no body regardless of CL/TE.
+                if isNoBodyStatus(status) { return .none }
             }
         }
         // RFC 9112 §6.3: TE takes precedence over Content-Length.
@@ -1592,7 +1804,7 @@ final class MITMHTTP1Stream {
         let contentType = firstHeaderValue(headers, name: "content-type")
         guard phase == .httpResponse,
               MITMScriptTransform.isStreamingMediaType(contentType) else { return }
-        logger.warning("[MITM] \(host): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
+        logger.warning("\(host): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
     }
 
     /// All values for `name` joined by `", "` (RFC 9110 §5.3) — first-value-only
@@ -1649,7 +1861,7 @@ final class MITMHTTP1Stream {
             case .transparent(let replacement):
                 // Re-validate at use time as a backstop (validated at load time too).
                 guard Self.isValidRequestTarget(replacement.requestTarget) else {
-                    logger.warning("[MITM] HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
+                    logger.warning("HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
                     continue
                 }
                 effectiveAuthority = replacement.authority
@@ -1942,6 +2154,56 @@ private final class ChunkedReader {
                 if line.isEmpty {
                     return .complete
                 }
+            }
+        }
+        return .needMore
+    }
+
+    /// Like `consumeForward`, but delivers each decoded chunk payload to `deliver` instead of
+    /// re-framing it as HTTP/1.1 (the h2→h1 bridge frames payloads as HTTP/2 DATA). Trailer lines
+    /// are dropped. `state` / `scanCursor` are shared, so a reader is used in exactly one mode for
+    /// its lifetime.
+    func consumeForwardIR(_ buffer: inout MITMByteBuffer, deliver: (Data) -> Void) -> ForwardResult {
+        while !buffer.isEmpty {
+            switch state {
+            case .sizeLine:
+                guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
+                    if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
+                    scanCursor = max(0, buffer.count - 1)
+                    return .needMore
+                }
+                let line = buffer.subdata(in: 0..<lineEnd)
+                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
+                buffer.removeFirst(lineEnd + 2)
+                scanCursor = 0
+                state = size == 0 ? .trailerOrEnd : .chunkData(remaining: size, originalSize: size)
+            case .chunkData(let remaining, let originalSize):
+                let take = min(remaining, buffer.count)
+                if take > 0 { deliver(Data(buffer.prefix(take))) }
+                buffer.removeFirst(take)
+                let left = remaining - take
+                if left == 0 {
+                    state = .dataCRLF(originalSize: originalSize)
+                } else {
+                    state = .chunkData(remaining: left, originalSize: originalSize)
+                    return .needMore
+                }
+            case .dataCRLF:
+                guard buffer.count >= 2 else { return .needMore }
+                guard buffer[0] == 0x0D, buffer[1] == 0x0A else { return .malformed }
+                buffer.removeFirst(2)
+                state = .sizeLine
+            case .trailerOrEnd:
+                guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
+                    if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
+                    scanCursor = max(0, buffer.count - 1)
+                    return .needMore
+                }
+                let line = buffer.subdata(in: 0..<lineEnd)
+                buffer.removeFirst(lineEnd + 2)
+                scanCursor = 0
+                if line.isEmpty { return .complete }
+                // else: a trailer line — dropped.
             }
         }
         return .needMore

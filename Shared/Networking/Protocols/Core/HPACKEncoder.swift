@@ -639,3 +639,78 @@ enum HPACKHuffman {
         (0xfffffffc, 30),  // 256 = EOS
     ]
 }
+
+// MARK: - HTTP/2 frame wire format (shared by the MITM bridge and the CONNECT-tunnel multiplexer)
+
+/// Shared HTTP/2 frame wire-format primitives (RFC 9113 §4.1), used by both hand-rolled HTTP/2
+/// implementations in the codebase — the CONNECT-tunnel multiplexer (`NaiveHTTP2Framer`) and the
+/// MITM bridge (`MITMHTTP2FrameCodec`). It centralizes the byte-level frame header, the big-endian
+/// 4-byte field layout, and the stateless payload parsers so a wire-format fix lands once instead
+/// of drifting between the two. The two stacks intentionally keep their own frame structs, decode
+/// loops (they read from different buffer types), and state machines (relay vs. request/response
+/// rewrite) — only the byte-format layer is shared here.
+enum HTTP2FrameWire {
+
+    /// Frame header length (RFC 9113 §4.1): 24-bit length + 8-bit type + 8-bit flags + 31-bit stream id.
+    static let headerSize = 9
+
+    /// Appends the 9-byte frame header. The reserved high bit of the stream id is cleared.
+    static func appendHeader(
+        type: UInt8,
+        flags: UInt8,
+        streamID: UInt32,
+        payloadLength: Int,
+        into out: inout Data
+    ) {
+        out.append(UInt8((payloadLength >> 16) & 0xFF))
+        out.append(UInt8((payloadLength >> 8) & 0xFF))
+        out.append(UInt8(payloadLength & 0xFF))
+        out.append(type)
+        out.append(flags)
+        let sid = streamID & 0x7FFF_FFFF
+        out.append(UInt8((sid >> 24) & 0xFF))
+        out.append(UInt8((sid >> 16) & 0xFF))
+        out.append(UInt8((sid >> 8) & 0xFF))
+        out.append(UInt8(sid & 0xFF))
+    }
+
+    /// Appends a 32-bit big-endian value — the 4-byte body of WINDOW_UPDATE / RST_STREAM and the
+    /// fields of GOAWAY. The caller masks the reserved bit where the field is a stream id.
+    static func appendUInt32(_ value: UInt32, into out: inout Data) {
+        out.append(UInt8((value >> 24) & 0xFF))
+        out.append(UInt8((value >> 16) & 0xFF))
+        out.append(UInt8((value >> 8) & 0xFF))
+        out.append(UInt8(value & 0xFF))
+    }
+
+    /// Reads a 32-bit big-endian value at `payload` start + `offset`; nil if fewer than 4 bytes remain.
+    static func readUInt32(_ payload: Data, offset: Int = 0) -> UInt32? {
+        let s = payload.startIndex + offset
+        guard s >= payload.startIndex, s + 4 <= payload.endIndex else { return nil }
+        return UInt32(payload[s]) << 24 | UInt32(payload[s + 1]) << 16
+             | UInt32(payload[s + 2]) << 8 | UInt32(payload[s + 3])
+    }
+
+    /// Parses a SETTINGS payload (RFC 9113 §6.5) into (identifier, value) pairs, ignoring a trailing
+    /// partial entry (a length not a multiple of 6).
+    static func parseSettings(_ payload: Data) -> [(id: UInt16, value: UInt32)] {
+        var result: [(id: UInt16, value: UInt32)] = []
+        var offset = payload.startIndex
+        while offset + 6 <= payload.endIndex {
+            let id = UInt16(payload[offset]) << 8 | UInt16(payload[offset + 1])
+            let value = UInt32(payload[offset + 2]) << 24 | UInt32(payload[offset + 3]) << 16
+                      | UInt32(payload[offset + 4]) << 8 | UInt32(payload[offset + 5])
+            result.append((id: id, value: value))
+            offset += 6
+        }
+        return result
+    }
+
+    /// Parses a GOAWAY payload (RFC 9113 §6.8): last-stream-id (reserved bit cleared) + error code.
+    /// Trailing debug data is ignored.
+    static func parseGoaway(_ payload: Data) -> (lastStreamID: UInt32, errorCode: UInt32)? {
+        guard let last = readUInt32(payload, offset: 0),
+              let err = readUInt32(payload, offset: 4) else { return nil }
+        return (last & 0x7FFF_FFFF, err)
+    }
+}

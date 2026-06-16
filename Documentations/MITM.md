@@ -42,7 +42,9 @@ configured rule set. Anywhere then:
    destination host.
 3. **Defers** opening the **outer** leg until the destination is known, then
    dials it (the rewritten host when set, otherwise the original) and runs its
-   own handshake there, following the inner ALPN.
+   own TLS handshake there. An HTTP/1.1 client is shuttled to an HTTP/1.1
+   upstream; an HTTP/2 client is **bridged** to whichever protocol the upstream
+   speaks — HTTP/2 directly, or HTTP/1.1 with on-the-fly translation.
 4. Decrypts each direction, runs the matching rules, and re-encrypts to the
    opposite leg.
 
@@ -221,15 +223,22 @@ Because a transparent rewrite can change the dial target, the upstream dial is
 client), the first request is read and rewritten, and only then is the upstream
 dialed — to the rewritten host when one is set, otherwise the original. A `302` /
 reject sub-mode answers on the inner leg and never dials. (Consequence: the
-inner ALPN is client-driven; if the client negotiates `h2` but the upstream
-can't, the connection is torn down once and the origin is remembered as
-HTTP/1.1-only, so the retry — and later connections to that host — offer the
-client only `http/1.1` and succeed. The connection's upstream is fixed by the
-first request — for both
-HTTP/1.1 and HTTP/2 — so a later request on the same connection whose transparent
-rewrite resolves a *different* host/port can't be reached on the already-dialed
-leg; rather than misroute it, the connection is torn down and the client retries
-it on a fresh connection.)
+inner ALPN is client-driven, and the upstream protocol is negotiated separately on
+the first dial. If the client negotiates `h2` but the upstream speaks only
+HTTP/1.1, Anywhere **bridges** the two — translating the client's HTTP/2 to the
+HTTP/1.1 upstream (one short-lived upstream connection per request stream) and the
+responses back — so no downgrade or client retry is needed. For an HTTP/1.1
+connection the single upstream leg is fixed by the first request, so a later
+request whose transparent rewrite resolves a *different* host/port can't be reached
+on the already-dialed leg; rather than misroute it, the connection is torn down and
+the client retries it on a fresh connection. A bridged HTTP/2 client commits its
+upstream on the first request too: an HTTP/1.1 upstream is dialed per stream and so
+generally follows each stream's own resolved host (a request held back for a body
+rewrite resolves its target as it is finally emitted, so a concurrent stream's
+rewrite to a different host can win), while an HTTP/2 upstream multiplexes every
+stream over the one committed connection, so a later stream whose rewrite resolves a
+*different* host is sent to that committed upstream rather than re-routed. Either way,
+avoid splitting one origin's traffic across several transparent target hosts.)
 
 Examples — transparently send one host's traffic to another, redirect with a
 `302`, and block an ad path with a tiny GIF:
@@ -288,9 +297,13 @@ the literal text `"price":` is written as the field `"""price"":"`.
 Like `script`, `body-replace` is a **buffered body transform**: the rewriter
 accumulates the body (auto-decoding `gzip` / `deflate` / `br`, up to the same
 **4 MiB** cap), edits it, and re-emits with a corrected `Content-Length`. The
-contract is **total** — a body that isn't valid UTF-8, or a `search` that
-matches nothing, leaves the body **unchanged**. Unlike `script`, **every**
-matching `body-replace` rule fires, in rule order, so replacements compose.
+body is decoded as UTF-8, falling back to ISO-8859-1 (latin-1) for single-byte
+charsets (Windows-125x / ISO-8859-x); multi-byte charsets (UTF-16, GBK, …) are
+not decoded and pass through unchanged. The contract is **total** — a body
+decodable as neither, a `search` that matches nothing, or a `replacement` that
+can't be represented in the body's charset leaves the body **unchanged**. Unlike
+`script`, **every** matching `body-replace` rule fires, in rule order, so
+replacements compose.
 
 When several body transforms match the same message they run in a fixed order:
 `body-json` edits first, then `body-replace`, then a `script` (so the script
@@ -327,7 +340,8 @@ contract is **total** — a body that isn't JSON, a path that doesn't resolve, o
 a non-serializable result leaves the body **unchanged** (byte-for-byte; a rule
 that matches but changes nothing never reshapes the body). A *successful* edit,
 though, re-serializes the whole document, so a JSON integer beyond 2^53 anywhere
-in it can lose precision. Unlike `script`,
+in it can lose precision, and object members are re-serialized in an unspecified
+order (source key order is not preserved). Unlike `script`,
 **every** matching `body-json` rule fires, in rule order, so edits compose; when
 a `script` rule also matches the same message, the JSON edits run **first** and
 the script sees the already-edited body (after any `body-replace` edits).
@@ -428,6 +442,12 @@ The trade-off is a narrower contract:
 - **No HTTP/1 `Content-Length` bodies** — the byte count is already committed
   and can't change mid-stream, so length-prefixed HTTP/1 bodies are skipped
   (chunked is required). HTTP/2 has no such restriction.
+- **Not applied on the HTTP/2→HTTP/1.1 bridge.** When an HTTP/2 client is bridged
+  to an HTTP/1.1 upstream, a matching `stream-script` is **skipped** — the body is
+  forwarded unscripted (with a logged warning) — in both request and response
+  directions, since the bridge translates between framings rather than running a
+  per-frame script across them. Buffered `script` / `body-replace` / `body-json`
+  rules still apply on the bridge.
 
 Per-frame context adds:
 
@@ -560,7 +580,8 @@ is the body; returns a fresh `Uint8Array` of re-serialized compact JSON). The
 contract is **total** — a body that isn't JSON, a path that doesn't resolve, a
 type mismatch, or a non-serializable value all yield the body **unchanged**
 (byte-for-byte) rather than throwing. A *successful* edit re-serializes the whole
-document, so a JSON integer beyond 2^53 anywhere in it can lose precision.
+document, so a JSON integer beyond 2^53 anywhere in it can lose precision and its
+object members are re-serialized in an unspecified order (key order is not preserved).
 
 - `add(body, path, value)` — upsert at a JSONPath.
 - `replace(body, path, value)` — modify only if the member/index already exists.
@@ -919,17 +940,26 @@ function process(ctx) {
   fresh `Content-Length`. `stream-script` rules see raw, still-compressed frames.
   A rare concatenated multi-member `gzip` body is left compressed and forwarded
   unrewritten rather than risk corrupting it.
+- **Accept-Encoding.** On an intercepted request, Anywhere clamps the client's
+  `Accept-Encoding` to the codings it can decode — `gzip`, `deflate`, `br`,
+  `identity` — dropping any others (notably `zstd`) so an origin can't select an
+  encoding a body rule couldn't reverse. A body that still arrives in an
+  unsupported `Content-Encoding` is forwarded unrewritten.
 - **HEAD responses.** A response to `HEAD` never carries a body; its framing
   headers are preserved and a script that writes `ctx.body` has that write
   dropped on the wire.
 - **Interim 1xx responses.** `100 Continue`, `103 Early Hints`, etc. are not the
   final response; scripts run only on the final response.
-- **Protocol upgrades & tunnels.** A `101 Switching Protocols` response, or a
-  `2xx` to a `CONNECT`, turns the connection into an opaque tunnel: both
-  directions drop to verbatim passthrough and no rule or script sees the
-  tunneled bytes (e.g. WebSocket frames). HTTP/2 `CONNECT` — including the
-  RFC 8441 extended form for WebSocket-over-h2 — is likewise relayed
-  frame-for-frame.
+- **Protocol upgrades & tunnels.** On an **HTTP/1.1** connection a `101 Switching
+  Protocols` response, or a `2xx` to a `CONNECT`, turns the connection into an
+  opaque tunnel: both directions drop to verbatim passthrough and no rule or
+  script sees the tunneled bytes (e.g. WebSocket frames). An **HTTP/2** `CONNECT`
+  (including the RFC 8441 extended form for WebSocket-over-h2) can't cross the
+  bridge — it terminates and re-originates HTTP/2 rather than relaying frames, and
+  a tunnel has no request/response to translate. The stream is refused with
+  `HTTP_1_1_REQUIRED`, the standard signal for the client to retry that request
+  over HTTP/1.1 (a fresh connection negotiating `http/1.1`), where the tunnel
+  path above applies.
 - **Pipelining order.** A request-phase `Anywhere.respond` on a pipelined
   connection is held until the in-flight response ahead of it finishes, so the
   client's request/response ordering is preserved.

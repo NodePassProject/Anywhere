@@ -18,12 +18,14 @@ final class MITMHTTP2Rewriter {
     private let requestRules: [CompiledMITMRule]
     private let responseRules: [CompiledMITMRule]
     private let cachedRuleSetID: UUID?
-    /// When set, every request's `:authority` is rewritten to this value. Sticky by
-    /// design: the connection's single upstream leg is committed once a rewrite changes the host.
+    /// When set, every subsequent request's `:authority` is rewritten to this value.
+    /// Each transparent rewrite updates it (last write wins). Single-upstream commitment
+    /// is enforced by the session, not here: the h1 inner leg tears down on a per-request
+    /// host change, and the h2 bridge commits to the first request's upstream.
     private var effectiveAuthority: String?
 
-    /// Upstream to dial when a transparent rewrite resolves a replacement host;
-    /// nil falls back to the original destination.
+    /// Upstream to dial when a transparent rewrite resolves a replacement host; nil falls
+    /// back to the original destination. Reflects the latest transparent rewrite only.
     private(set) var resolvedUpstream: (host: String, port: UInt16?)?
     /// Lazy JS runtime, shared session-wide; touched only when a script rule fires.
     let scriptEngineProvider: MITMScriptEngine.Provider

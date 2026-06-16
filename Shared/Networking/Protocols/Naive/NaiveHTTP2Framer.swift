@@ -69,20 +69,9 @@ struct NaiveHTTP2Frame {
 
     /// Serializes this frame to wire format (RFC 7540 §4.1): 9-byte header + payload.
     var serialized: Data {
-        let length = UInt32(payload.count)
         var data = Data(capacity: NaiveHTTP2Framer.headerSize + payload.count)
-        // 24-bit length (big-endian)
-        data.append(UInt8((length >> 16) & 0xFF))
-        data.append(UInt8((length >> 8) & 0xFF))
-        data.append(UInt8(length & 0xFF))
-        data.append(type.rawValue)
-        data.append(flags)
-        // 31-bit stream ID (big-endian, reserved bit 0)
-        let sid = streamID & 0x7FFFFFFF
-        data.append(UInt8((sid >> 24) & 0xFF))
-        data.append(UInt8((sid >> 16) & 0xFF))
-        data.append(UInt8((sid >> 8) & 0xFF))
-        data.append(UInt8(sid & 0xFF))
+        HTTP2FrameWire.appendHeader(type: type.rawValue, flags: flags, streamID: streamID,
+                                    payloadLength: payload.count, into: &data)
         data.append(payload)
         return data
     }
@@ -91,7 +80,7 @@ struct NaiveHTTP2Frame {
 // MARK: - Framer
 
 enum NaiveHTTP2Framer {
-    static let headerSize = 9
+    static let headerSize = HTTP2FrameWire.headerSize
     static let maxDataPayload = 16_384  // HTTP/2 default SETTINGS_MAX_FRAME_SIZE
 
     // MARK: Deserialize
@@ -146,11 +135,7 @@ enum NaiveHTTP2Framer {
 
     static func windowUpdateFrame(streamID: UInt32, increment: UInt32) -> NaiveHTTP2Frame {
         var payload = Data(capacity: 4)
-        let inc = increment & 0x7FFFFFFF
-        payload.append(UInt8((inc >> 24) & 0xFF))
-        payload.append(UInt8((inc >> 16) & 0xFF))
-        payload.append(UInt8((inc >> 8) & 0xFF))
-        payload.append(UInt8(inc & 0xFF))
+        HTTP2FrameWire.appendUInt32(increment & 0x7FFFFFFF, into: &payload)
         return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.windowUpdate, flags: 0, streamID: streamID, payload: payload)
     }
 
@@ -169,10 +154,7 @@ enum NaiveHTTP2Framer {
 
     static func rstStreamFrame(streamID: UInt32, errorCode: UInt32) -> NaiveHTTP2Frame {
         var payload = Data(capacity: 4)
-        payload.append(UInt8((errorCode >> 24) & 0xFF))
-        payload.append(UInt8((errorCode >> 16) & 0xFF))
-        payload.append(UInt8((errorCode >> 8) & 0xFF))
-        payload.append(UInt8(errorCode & 0xFF))
+        HTTP2FrameWire.appendUInt32(errorCode, into: &payload)
         return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.rstStream, flags: 0, streamID: streamID, payload: payload)
     }
 
@@ -184,39 +166,18 @@ enum NaiveHTTP2Framer {
     // MARK: - Payload Parsers
 
     static func parseSettings(payload: Data) -> [(id: UInt16, value: UInt32)] {
-        var result: [(id: UInt16, value: UInt32)] = []
-        var offset = payload.startIndex
-        while offset + 6 <= payload.endIndex {
-            let id = UInt16(payload[offset]) << 8 | UInt16(payload[offset+1])
-            let value = UInt32(payload[offset+2]) << 24 | UInt32(payload[offset+3]) << 16
-                      | UInt32(payload[offset+4]) << 8 | UInt32(payload[offset+5])
-            result.append((id: id, value: value))
-            offset += 6
-        }
-        return result
+        HTTP2FrameWire.parseSettings(payload)
     }
 
     static func parseWindowUpdate(payload: Data) -> UInt32? {
-        guard payload.count >= 4 else { return nil }
-        let s = payload.startIndex
-        return (UInt32(payload[s]) << 24 | UInt32(payload[s+1]) << 16
-              | UInt32(payload[s+2]) << 8 | UInt32(payload[s+3])) & 0x7FFFFFFF
+        HTTP2FrameWire.readUInt32(payload).map { $0 & 0x7FFFFFFF }
     }
 
     static func parseGoaway(payload: Data) -> (lastStreamID: UInt32, errorCode: UInt32)? {
-        guard payload.count >= 8 else { return nil }
-        let s = payload.startIndex
-        let lastStreamID = (UInt32(payload[s]) << 24 | UInt32(payload[s+1]) << 16
-                          | UInt32(payload[s+2]) << 8 | UInt32(payload[s+3])) & 0x7FFFFFFF
-        let errorCode = UInt32(payload[s+4]) << 24 | UInt32(payload[s+5]) << 16
-                      | UInt32(payload[s+6]) << 8 | UInt32(payload[s+7])
-        return (lastStreamID, errorCode)
+        HTTP2FrameWire.parseGoaway(payload)
     }
 
     static func parseRstStream(payload: Data) -> UInt32? {
-        guard payload.count >= 4 else { return nil }
-        let s = payload.startIndex
-        return UInt32(payload[s]) << 24 | UInt32(payload[s+1]) << 16
-             | UInt32(payload[s+2]) << 8 | UInt32(payload[s+3])
+        HTTP2FrameWire.readUInt32(payload)
     }
 }

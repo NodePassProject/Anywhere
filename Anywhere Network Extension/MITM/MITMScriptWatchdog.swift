@@ -71,6 +71,6 @@ enum MITMScriptWatchdog {
         let seconds = elapsedNanos / 1_000_000_000
         let shown = label.count > 200 ? String(label.prefix(200)) + "…" : label
         // JSC cannot preempt the runaway; crash so the OS relaunches the extension clean.
-        fatalError("[MITM] A JavaScript script span ran \(seconds)s without returning — a user `process(ctx)` is looping or recursing without bound and has wedged the MITM script queue (JSC execution is uninterruptible). Crashing the Network Extension so the system relaunches it clean. Offending script: \(shown)")
+        fatalError("A JavaScript script span ran \(seconds)s without returning — a user `process(ctx)` is looping or recursing without bound and has wedged the MITM script queue (JSC execution is uninterruptible). Crashing the Network Extension so the system relaunches it clean. Offending script: \(shown)")
     }
 }

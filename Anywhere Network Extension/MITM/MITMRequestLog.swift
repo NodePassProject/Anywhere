@@ -68,7 +68,7 @@ final class MITMRequestLog {
         let idx = http1Queue.count - 1
         let projected = http1Queue[idx].synthAfter.count + bytes.count
         if projected > Self.maxSynthAfterBytes {
-            logger.warning("[MITM] synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
+            logger.warning("synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
             return
         }
         http1Queue[idx].synthAfter.append(bytes)

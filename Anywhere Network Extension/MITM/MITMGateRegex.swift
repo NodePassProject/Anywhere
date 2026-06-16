@@ -93,7 +93,7 @@ final class MITMGateRegex: @unchecked Sendable {
         guard let schemeRange = pattern.range(of: "://") else { return }
         let authority = pattern[schemeRange.upperBound...].prefix { $0 != "/" }
         if authority.contains(where: { $0.isASCII && $0.isUppercase }) {
-            logger.warning("[MITM] gate pattern \"\(pattern)\" has an uppercase letter in its host region; the URL host is matched lowercased, so this rule will never fire — write the host in lowercase")
+            logger.warning("gate pattern \"\(pattern)\" has an uppercase letter in its host region; the URL host is matched lowercased, so this rule will never fire — write the host in lowercase")
         }
     }
 
@@ -158,7 +158,7 @@ final class MITMGateRegex: @unchecked Sendable {
         MITMWatchdogMonitor.queue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
             guard done.wait(timeout: .now()) != .success else { return }
             let shown = pattern.count > 200 ? String(pattern.prefix(200)) + "…" : pattern
-            fatalError("[MITM] URL-gate regex did not return \(hardCapSeconds)s after blowing its \(matchDeadlineMillis)ms budget — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed. Crashing the Network Extension so the system relaunches it clean. Offending pattern: \(shown)")
+            fatalError("URL-gate regex did not return \(hardCapSeconds)s after blowing its \(matchDeadlineMillis)ms budget — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed. Crashing the Network Extension so the system relaunches it clean. Offending pattern: \(shown)")
         }
     }
 
@@ -190,9 +190,9 @@ final class MITMGateRegex: @unchecked Sendable {
             quarantined = true
             cache.removeAll(keepingCapacity: false)
             cacheOrder.removeAll(keepingCapacity: false)
-            logger.warning("[MITM] URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each) — likely catastrophic backtracking. The rule is disabled (fail-closed) until the rule set is reloaded. Pattern: \(pattern)")
+            logger.warning("URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each) — likely catastrophic backtracking. The rule is disabled (fail-closed) until the rule set is reloaded. Pattern: \(pattern)")
         } else {
-            logger.warning("[MITM] URL-gate match exceeded its \(Self.matchDeadlineMillis)ms budget (strike \(timeoutStrikes)/\(Self.strikeLimit)); failing this match closed. Pattern: \(pattern)")
+            logger.warning("URL-gate match exceeded its \(Self.matchDeadlineMillis)ms budget (strike \(timeoutStrikes)/\(Self.strikeLimit)); failing this match closed. Pattern: \(pattern)")
         }
     }
 

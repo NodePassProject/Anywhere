@@ -69,6 +69,26 @@ enum MITMBodyCodec {
         return Plan(codecs: codecs, supported: supported)
     }
 
+    /// Content-codings we can decode for a buffered transform — the set a request's
+    /// `Accept-Encoding` is clamped to so an origin never selects an encoding we can't reverse.
+    static let decodableContentCodings: Set<String> = ["gzip", "x-gzip", "deflate", "br", "identity"]
+
+    /// Clamps an `Accept-Encoding` value to ``decodableContentCodings`` (mitmproxy's
+    /// `constrain_encoding`): drops any coding — notably `zstd` and `*` — we couldn't decode, so a
+    /// buffered body rule is never silently defeated by an undecodable `Content-Encoding`. An empty
+    /// result falls back to `identity`. Per-coding `;q=` weights are preserved on kept codings.
+    static func constrainedAcceptEncoding(_ value: String) -> String {
+        let kept = value
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { token in
+                guard let coding = token.split(separator: ";").first?
+                    .trimmingCharacters(in: .whitespaces).lowercased() else { return false }
+                return decodableContentCodings.contains(coding)
+            }
+        return kept.isEmpty ? "identity" : kept.joined(separator: ", ")
+    }
+
     /// Decompresses in reverse-of-apply order; nil if any codec fails or the plan is unsupported.
     static func decompress(_ data: Data, plan: Plan, host: String) -> Data? {
         guard plan.supported else { return nil }
@@ -80,19 +100,19 @@ enum MITMBodyCodec {
             case .gzip:
                 let (decoded, failure) = gunzip(current)
                 guard let next = decoded else {
-                    logger.warning("[MITM] \(host): gzip decode failed — \(failure?.description ?? "unknown") (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("\(host): gzip decode failed — \(failure?.description ?? "unknown") (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
                     return nil
                 }
                 current = next
             case .deflate:
                 guard let next = inflateDeflate(current) else {
-                    logger.warning("[MITM] \(host): deflate decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("\(host): deflate decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
                     return nil
                 }
                 current = next
             case .brotli:
                 guard let next = streamDecode(current, algorithm: COMPRESSION_BROTLI) else {
-                    logger.warning("[MITM] \(host): brotli decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
+                    logger.warning("\(host): brotli decode failed (input \(current.count) B, head=[\(Self.headFingerprint(current))])")
                     return nil
                 }
                 current = next
@@ -113,7 +133,7 @@ enum MITMBodyCodec {
     static func decode(_ data: Data, codec: Codec) -> Data? {
         switch codec {
         case .identity: return data
-        case .gzip:     return gunzip(data).decoded
+        case .gzip:     return gunzip(data, allowMultiMember: true).decoded
         case .deflate:  return inflateDeflate(data)
         case .brotli:   return streamDecode(data, algorithm: COMPRESSION_BROTLI)
         }
@@ -185,7 +205,10 @@ enum MITMBodyCodec {
     /// Decodes a gzip body per RFC 1952. The Compression framework's raw-deflate
     /// decoder swallows the whole input while emitting just member 1, so the loop
     /// never advances past it; the trailer check catches the multi-member case.
-    private static func gunzip(_ data: Data) -> (decoded: Data?, failure: GzipFailure?) {
+    /// When `allowMultiMember` is true (the single-codec JS `Anywhere.codec.gzip` bridge) every
+    /// concatenated member is returned. The default fails closed on a multi-member trailer mismatch
+    /// so the buffered transform forwards such a body verbatim rather than risk corrupting it.
+    private static func gunzip(_ data: Data, allowMultiMember: Bool = false) -> (decoded: Data?, failure: GzipFailure?) {
         var combined = Data()
         var cursor = data.startIndex
         let end = data.endIndex
@@ -193,7 +216,7 @@ enum MITMBodyCodec {
             // Budget each member against the running total so peak memory stays near the cap.
             switch gunzipOneMember(data, from: cursor, producedSoFar: combined.count) {
             case .capExceeded:
-                logger.warning("[MITM] gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
+                logger.warning("gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                 return (nil, .capExceeded)
             case .failure(let reason):
                 // First-member failure is fatal; trailing junk after a decoded prefix is recoverable.
@@ -203,6 +226,9 @@ enum MITMBodyCodec {
                 cursor = data.index(cursor, offsetBy: consumed)
             }
         }
+        // The single-codec bridge wants every member's plaintext; only the buffered transform
+        // fails closed on a multi-member body (forwarding it verbatim instead of rewriting).
+        if allowMultiMember { return (combined, nil) }
         // Multi-member detection via the whole-body trailer pair (RFC 1952 §2.3.1):
         // a member-1-only decode of a multi-member body fails the ISIZE/CRC-32 check.
         // On mismatch fail closed — forward verbatim so the client decodes all members.
@@ -372,7 +398,7 @@ enum MITMBodyCodec {
                     if written > 0 {
                         // budgetUsed bounds *cumulative* multi-member output.
                         if budgetUsed + output.count + written > maxBufferedBodyBytes {
-                            logger.warning("[MITM] decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting")
+                            logger.warning("decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                             return .capExceeded(producedOutput: output.count)
                         }
                         output.append(buffer, count: written)

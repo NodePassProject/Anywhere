@@ -10,7 +10,7 @@ import Foundation
 private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
 /// Native regex find-and-replace over a text body. Replacements are literal — no `$1`
-/// capture expansion; a non-UTF-8 body is returned unchanged.
+/// capture expansion; a body decodable as neither UTF-8 nor latin-1 is returned unchanged.
 enum MITMBodyReplace {
 
     /// Pre-compiled so the per-message hot path skips pattern parsing.
@@ -25,10 +25,27 @@ enum MITMBodyReplace {
         return CompiledOp(search: regex, replacement: replacement)
     }
 
-    /// Applies every compiled edit in order; fail-closed on a non-UTF-8 body or a blown time budget.
+    /// Applies every compiled edit in order; fail-closed on an undecodable body or a blown budget.
+    ///
+    /// Decodes as UTF-8 first; on failure falls back to ISO-8859-1 (latin-1), which round-trips any
+    /// byte sequence losslessly, so single-byte-charset bodies (Windows-125x / ISO-8859-x) are
+    /// edited in place instead of silently passing through (mitmproxy's latin-1 fallback). The body
+    /// is re-encoded in the same charset; if the replacement introduced characters that charset
+    /// can't represent, the edit is abandoned and the original body is returned unchanged.
+    /// Multi-byte charsets (UTF-16, GBK, …) are still not covered — those bodies pass through.
     static func applyAll(_ ops: [CompiledOp], to body: Data) -> Data {
         guard !ops.isEmpty else { return body }
-        guard let text = String(data: body, encoding: .utf8) else { return body }
+        let encoding: String.Encoding
+        let text: String
+        if let utf8 = String(data: body, encoding: .utf8) {
+            encoding = .utf8
+            text = utf8
+        } else if let latin1 = String(data: body, encoding: .isoLatin1) {
+            encoding = .isoLatin1
+            text = latin1
+        } else {
+            return body
+        }
         var current = text
         for op in ops {
             guard let replaced = boundedReplace(current, op: op) else {
@@ -37,7 +54,9 @@ enum MITMBodyReplace {
             }
             current = replaced
         }
-        return Data(current.utf8)
+        // Re-encode in the source charset; a replacement that isn't representable there fails closed.
+        guard let out = current.data(using: encoding) else { return body }
+        return out
     }
 
     /// Soft budget per substitution; Swift Regex has no execution limit, so a runaway
@@ -79,7 +98,7 @@ enum MITMBodyReplace {
         }
         // The semaphore establishes happens-before for the unsynchronized box.
         guard done.wait(timeout: .now() + substitutionTimeLimit) == .success else {
-            logger.warning("[MITM] bodyReplace: regex substitution exceeded its time budget over a \(text.utf8.count) B body; leaving the body unchanged (possible catastrophic backtracking in the pattern)")
+            logger.warning("bodyReplace: regex substitution exceeded its time budget over a \(text.utf8.count) B body; leaving the body unchanged (possible catastrophic backtracking in the pattern)")
             // The worker is still spinning with the in-flight flag stuck; arm the hard-cap crash.
             Self.scheduleHardCapCheck(done, byteCount: text.utf8.count)
             return nil
@@ -92,7 +111,7 @@ enum MITMBodyReplace {
     private static func scheduleHardCapCheck(_ done: DispatchSemaphore, byteCount: Int) {
         MITMWatchdogMonitor.queue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
             guard done.wait(timeout: .now()) != .success else { return }
-            fatalError("[MITM] bodyReplace regex substitution did not return \(hardCapSeconds)s after blowing its soft budget over a \(byteCount) B body — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed, leaving bodyReplace disabled process-wide. Crashing the Network Extension so the system relaunches it clean.")
+            fatalError("bodyReplace regex substitution did not return \(hardCapSeconds)s after blowing its soft budget over a \(byteCount) B body — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed, leaving bodyReplace disabled process-wide. Crashing the Network Extension so the system relaunches it clean.")
         }
     }
 

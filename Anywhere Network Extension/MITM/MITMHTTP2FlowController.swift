@@ -9,8 +9,8 @@ import Foundation
 
 /// Tracks the peer receive windows the MITM must respect when it emits DATA the
 /// real sender didn't produce (synth and buffered-rewrite bodies), pacing instead
-/// of overflowing into a FLOW_CONTROL_ERROR. Only connection-level windows and
-/// cross-leg debt live here; per-stream windows live on the connection.
+/// of overflowing into a FLOW_CONTROL_ERROR. Only connection-level windows live
+/// here; per-stream windows live on the connection.
 ///
 /// Shared by a session's two h2 legs on the serial lwIP queue — no internal
 /// synchronization. Windows are signed (RFC 9113 §6.9.2 allows going negative);
@@ -34,16 +34,6 @@ final class MITMHTTP2FlowController {
     /// Upstream mirror of ``clientInitialStreamWindow`` for server-bound request bodies.
     private(set) var serverInitialStreamWindow: Int = 65_535
 
-    /// Bytes the MITM injected toward the client that the upstream did not send;
-    /// relaying the client's WINDOW_UPDATEs verbatim would over-grant the upstream's
-    /// send window, so this is withheld first.
-    private(set) var synthConnectionDebt: Int = 0
-
-    /// Request-direction mirror: bytes credited directly to the client while
-    /// buffering a request, withheld from the upstream's later credits so the
-    /// client isn't credited twice.
-    private(set) var clientRequestConnectionDebt: Int = 0
-
     /// Debits the connection window; may go negative, gating synth emission.
     func debitConnection(_ n: Int) {
         connectionWindow -= n
@@ -62,32 +52,6 @@ final class MITMHTTP2FlowController {
     /// Credits the upstream connection window by a server stream-0 WINDOW_UPDATE, clamped to ``maxWindow``.
     func creditServerConnection(_ increment: Int) {
         serverConnectionWindow = min(Self.maxWindow, serverConnectionWindow &+ increment)
-    }
-
-    /// Records synth debt (post-establishment only — a pre-establishment one-shot
-    /// never dials, so nothing to over-grant).
-    func addSynthDebt(_ n: Int) {
-        synthConnectionDebt += n
-    }
-
-    func addClientRequestDebt(_ n: Int) {
-        clientRequestConnectionDebt += n
-    }
-
-    /// Withholds the debt portion from an upstream→client WINDOW_UPDATE; `0` means
-    /// drop the frame (a zero-increment WINDOW_UPDATE is a PROTOCOL_ERROR, RFC 9113 §6.9.1).
-    func withholdClientRequestDebt(from increment: Int) -> Int {
-        let withheld = min(increment, clientRequestConnectionDebt)
-        clientRequestConnectionDebt -= withheld
-        return increment - withheld
-    }
-
-    /// Withholds the synth-debt portion from a client→upstream WINDOW_UPDATE;
-    /// `0` means drop the frame.
-    func withholdSynthDebt(from increment: Int) -> Int {
-        let withheld = min(increment, synthConnectionDebt)
-        synthConnectionDebt -= withheld
-        return increment - withheld
     }
 
     /// Records a new client SETTINGS_INITIAL_WINDOW_SIZE and returns the (possibly
