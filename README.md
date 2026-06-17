@@ -114,6 +114,16 @@ anywhere://add-proxy?link=<link>
 
 > **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
 
+### Import Rule Sets
+
+```
+anywhere://add-rule-set?link=<arrs-or-amrs-url>&link=<arrs-or-amrs-url>
+```
+
+Import one or more routing (`.arrs`) and MITM (`.amrs`) rule sets from remote links. Pass one `link` query item per rule set; routing and MITM links may be mixed freely.
+
+> **Note:** Unlike `add-proxy`, each `link` is a standard URL query item, so multiple links are supported. Percent-encode a link only if it carries its own reserved characters (`&`, `=`, `#`).
+
 ### Proxy URI Schemes
 
 Tapping any of the following links on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import:

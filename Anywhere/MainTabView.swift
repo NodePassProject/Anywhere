@@ -16,6 +16,8 @@ struct MainTabView: View {
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var pendingDeepLinkURL: String?
+    @State private var showingImportRuleSetsSheet = false
+    @State private var pendingRuleSetLinks: [URL] = []
     
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
@@ -34,6 +36,14 @@ struct MainTabView: View {
                     showingDeepLinkAddSheet = true
                 }
             }
+            .onChange(of: deepLinkManager.ruleSetLinks) { _, newValue in
+                if let links = newValue, !links.isEmpty {
+                    selectedTab = .settings
+                    pendingRuleSetLinks = links
+                    deepLinkManager.ruleSetLinks = nil
+                    showingImportRuleSetsSheet = true
+                }
+            }
             .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                     AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
@@ -44,6 +54,9 @@ struct MainTabView: View {
                     configStore.add(configuration)
                     viewModel.selectIfNone(configuration)
                 }
+            }
+            .sheet(isPresented: $showingImportRuleSetsSheet, onDismiss: { pendingRuleSetLinks = [] }) {
+                ImportRuleSetsView(links: pendingRuleSetLinks)
             }
             .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
                 Button(String(localized: "OK")) {}
