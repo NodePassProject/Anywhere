@@ -69,6 +69,10 @@ protocol MITMResponseSink: AnyObject {
     /// `neverIndexed` carries the lowercased names the upstream marked never-indexed (RFC 7541
     /// §6.2.3), which the sink must re-emit never-indexed toward the client (§7.1.3).
     func deliverResponseHead(streamID: UInt32, status: Int, headers: [(name: String, value: String)], endStream: Bool, neverIndexed: Set<String>)
+    /// An interim 1xx informational response (e.g. 103 Early Hints). It precedes the final response
+    /// on the same stream and carries no body or END_STREAM (RFC 9113 §8.1); the sink emits it as a
+    /// HEADERS block and keeps the stream open for the final response that follows.
+    func deliverResponseInterim(streamID: UInt32, status: Int, headers: [(name: String, value: String)])
     func deliverResponseData(streamID: UInt32, _ data: Data, endStream: Bool)
     /// Terminal trailer fields (e.g. gRPC `grpc-status`). The sink emits them as a trailing
     /// HEADERS block with END_STREAM, after the response body has drained to the client.
@@ -97,10 +101,12 @@ extension MITMResponseSink {
 /// and normalizes field-name case for the target protocol.
 enum MITMBridgeHeaders {
 
-    /// Connection-specific / hop-by-hop fields, illegal in HTTP/2 (RFC 9113 §8.2.2)
-    /// and meaningless once the bridge owns framing. Lowercased for matching.
+    /// Connection-specific / hop-by-hop fields, illegal in HTTP/2 (RFC 9113 §8.2.2) or meaningless
+    /// once the bridge owns framing — including the classic hop-by-hop set (RFC 9110 §7.6.1):
+    /// proxy-auth and Trailer must not be forwarded across this leg. Lowercased for matching.
     static let hopByHop: Set<String> = [
         "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade",
+        "proxy-authenticate", "proxy-authorization", "trailer",
     ]
 
     /// RFC 9113 §8.3: validates a decoded h2 header block's pseudo-header section — every

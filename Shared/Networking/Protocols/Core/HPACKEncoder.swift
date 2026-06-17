@@ -12,35 +12,33 @@ import Foundation
 /// so a peer cannot grow it unbounded.
 nonisolated class HPACKDecoder {
 
-    /// Default SETTINGS_HEADER_TABLE_SIZE (RFC 9113 §6.5.2).
+    /// SETTINGS_HEADER_TABLE_SIZE we advertise (RFC 9113 §6.5.2). We send no custom value in our
+    /// preface, so the peer's encoder assumes this default — and a decoder's table cap is governed
+    /// by what *we* advertise, so it is fixed here. (A peer's own SETTINGS_HEADER_TABLE_SIZE bounds
+    /// *our* encoder, which is static-table-only and so already respects any limit; it does not
+    /// touch this decoder, which is why no setter wires it in.)
     private static let defaultMaxTableSize = 4096
 
-    /// Clamp on the peer's SETTINGS_HEADER_TABLE_SIZE; 64 KiB covers mainstream
-    /// peers while denying a hostile peer a multi-GiB allocation primitive.
-    private static let maxAllowedTableSize = 65536
+    /// Cap on the cumulative *decoded* header-list size (RFC 9113 §6.5.2 metric: Σ name+value+32).
+    /// HPACK expands a tiny indexed block into a large list — a 1-byte reference to a ~64 KiB
+    /// dynamic-table entry, repeated — and re-encoding materializes every entry, so an uncapped list
+    /// is a memory-amplification DoS even though the compressed block is bounded. h2 enforces this
+    /// via SETTINGS_MAX_HEADER_LIST_SIZE; mirror it here and advertise the same value in the preface.
+    static let maxDecodedHeaderListSize = 256 * 1024
 
     private var dynamicTable: [(name: String, value: String)] = []
 
     /// Running dynamic-table size in octets (RFC 7541 §4.1).
     private var currentSize = 0
 
-    /// Limit from SETTINGS_HEADER_TABLE_SIZE; a §6.3 update above it is a decoding error (§4.2).
-    private var protocolMaxSize = HPACKDecoder.defaultMaxTableSize
+    /// The advertised limit (the default — we send no custom SETTINGS_HEADER_TABLE_SIZE); a peer
+    /// §6.3 dynamic-table-size update above it is a decoding error (§4.2). Fixed: our advertised
+    /// value never changes.
+    private let protocolMaxSize = HPACKDecoder.defaultMaxTableSize
 
-    /// Effective eviction cap: equals protocolMaxSize unless the encoder lowers it
-    /// via a §6.3 update, so it never drops below the encoder's live table.
+    /// Effective eviction cap: starts at protocolMaxSize and only drops when the peer lowers it
+    /// in-band via a §6.3 update (it never rises above what we advertise).
     private var maxSize = HPACKDecoder.defaultMaxTableSize
-
-    /// Applies the peer's SETTINGS_HEADER_TABLE_SIZE, clamped to maxAllowedTableSize.
-    /// Only raises the cap — reductions arrive in-band as the encoder's §6.3 update.
-    /// Call on the same serial queue as decodeHeaders.
-    func setPeerHeaderTableSize(_ size: Int) {
-        let clamped = max(0, min(size, HPACKDecoder.maxAllowedTableSize))
-        protocolMaxSize = clamped
-        if clamped > maxSize {
-            maxSize = clamped
-        }
-    }
 
     /// Decodes an HPACK header block, updating the persistent dynamic table. Also
     /// returns the lowercased names received §6.2.3 never-indexed, which an
@@ -49,6 +47,13 @@ nonisolated class HPACKDecoder {
         var headers: [(name: String, value: String)] = []
         var neverIndexed: Set<String> = []
         var offset = data.startIndex
+        // Running decoded-list size (RFC 9113 §6.5.2). Bail past the cap so an HPACK-expanded
+        // block can't blow up into a multi-GiB list on append/re-encode.
+        var listSize = 0
+        func account(_ name: String, _ value: String) -> Bool {
+            listSize += Self.wireOctetCount(name) + Self.wireOctetCount(value) + 32
+            return listSize <= Self.maxDecodedHeaderListSize
+        }
 
         while offset < data.endIndex {
             let byte = data[offset]
@@ -60,12 +65,14 @@ nonisolated class HPACKDecoder {
                     return nil
                 }
                 headers.append(entry)
+                guard account(entry.name, entry.value) else { return nil }
 
             } else if byte & 0xC0 == 0x40 {
                 // §6.2.1 Literal with Incremental Indexing (01xxxxxx)
                 guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 6,
                                                                      dynamicTable: dynamicTable) else { return nil }
                 headers.append((name, value))
+                guard account(name, value) else { return nil }
                 insertWithEviction(name: name, value: value)
 
             } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
@@ -75,6 +82,7 @@ nonisolated class HPACKDecoder {
                 guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 4,
                                                                      dynamicTable: dynamicTable) else { return nil }
                 headers.append((name, value))
+                guard account(name, value) else { return nil }
                 if isNeverIndexed { neverIndexed.insert(name.lowercased()) }
 
             } else if byte & 0xE0 == 0x20 {
@@ -97,7 +105,19 @@ nonisolated class HPACKDecoder {
 
     /// Size of a dynamic-table entry in octets (RFC 7541 §4.1).
     private func entrySize(name: String, value: String) -> Int {
-        name.utf8.count + value.utf8.count + 32
+        Self.wireOctetCount(name) + Self.wireOctetCount(value) + 32
+    }
+
+    /// On-the-wire octet length of a header string (ISO-8859-1, the byte encoding HPACK uses), so the
+    /// dynamic-table size we track matches what the peer's encoder computed (RFC 7541 §4.1). Counting
+    /// `utf8` octets would over-count a latin-1-decoded value (a 0x80–0xFF octet becomes a 2-byte UTF-8
+    /// scalar) and drift the eviction boundary, desyncing the table against the peer.
+    static func wireOctetCount(_ s: String) -> Int {
+        var n = 0
+        for scalar in s.unicodeScalars {
+            n += scalar.value <= 0xFF ? 1 : String(scalar).utf8.count
+        }
+        return n
     }
 
     /// Inserts at the head after evicting from the oldest end to stay within maxSize (RFC 7541 §4.4).
@@ -278,7 +298,15 @@ enum HPACKEncoder {
 
     /// Encodes a string in raw (non-Huffman) format.
     static func encodeString(_ string: String, into data: inout Data) {
-        let bytes = [UInt8](string.utf8)
+        // HPACK string literals are byte sequences (RFC 7541 §5.2). Emit ISO-8859-1 so an octet that
+        // was decoded as latin-1 round-trips to the same byte; fall back to UTF-8 only for a rewritten
+        // value carrying scalars > 0xFF, which latin-1 can't represent.
+        let bytes: [UInt8]
+        if let latin1 = string.data(using: .isoLatin1) {
+            bytes = [UInt8](latin1)
+        } else {
+            bytes = [UInt8](string.utf8)
+        }
         // H=0 (raw), length
         var lengthData = Data()
         encodeInteger(bytes.count, prefixBits: 7, into: &lengthData)
@@ -298,11 +326,15 @@ enum HPACKEncoder {
         let stringData = data[offset..<(offset + length)]
         offset += length
 
+        // Decode as ISO-8859-1, not UTF-8: an HPACK string is a byte sequence (RFC 7541 §5.2), and
+        // latin-1 maps every octet 1:1 so a legal non-UTF-8 field value round-trips instead of failing
+        // the decode — a nil here aborts the whole block and (for the persistent decoder) desyncs the
+        // dynamic table, forcing a connection teardown on otherwise-valid headers.
         if huffman {
             guard let decoded = HPACKHuffman.decode(stringData) else { return nil }
-            return String(bytes: decoded, encoding: .utf8)
+            return String(bytes: decoded, encoding: .isoLatin1)
         } else {
-            return String(bytes: stringData, encoding: .utf8)
+            return String(bytes: stringData, encoding: .isoLatin1)
         }
     }
 

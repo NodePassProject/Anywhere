@@ -130,7 +130,16 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Releases every per-stream record for a finished or reset client stream — including
     /// the upstream stream-ID mapping, which would otherwise accumulate for the life of
     /// this (long-lived, multiplexed) connection.
-    private func releaseStream(clientID: UInt32) {
+    private func releaseStream(clientID: UInt32, resetOrigin: Bool = false) {
+        // When we abandon a stream the origin still considers open — the response never reached
+        // END_STREAM, or our request body never finished — the caller passes `resetOrigin` so we RST
+        // it. Otherwise the origin's stream and one of its MAX_CONCURRENT_STREAMS slots leak for the
+        // life of this long-lived multiplexed connection. Clean completions and origin-initiated
+        // closes (RST/GOAWAY, or a site that already sent its own RST) pass false so we don't
+        // re-RST a stream that is already closing.
+        if resetOrigin, let sid = ourStreamID[clientID] {
+            onUpstreamBytes?(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.cancel))
+        }
         responseStreams.removeValue(forKey: clientID)
         drainCoupledStreams.remove(clientID)
         pendingRequestBodies.removeValue(forKey: clientID)
@@ -202,6 +211,13 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// streams and the buffer-overflow→passthrough fallback stay eager-credited and are absent here.
     private var drainCoupledStreams: Set<UInt32> = []
 
+    /// Receive-window credit (toward the origin) accumulated during one pass and flushed once at
+    /// `finishPass` (and at the end of the out-of-pass `creditDrainedResponse`), so a burst of DATA
+    /// frames yields one WINDOW_UPDATE per stream plus one for the connection instead of a pair per
+    /// frame. Flushing every pass keeps the window from stalling. Keyed by upstream (wire) stream id.
+    private var batchedConnCredit = 0
+    private var batchedStreamCredit: [UInt32: Int] = [:]
+
     private static let maxBufferedRewriteGrowthBytes = 65_535
     private static let maxStreamingRewriteGrowthBytes = 65_535
 
@@ -240,6 +256,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         queueOrder.removeAll()
         ourStreamID.removeAll()
         theirStreamID.removeAll()
+        batchedConnCredit = 0
+        batchedStreamCredit.removeAll()
         pending = nil
     }
 
@@ -250,16 +268,24 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         guard !prefaceSent else { return }
         prefaceSent = true
         var d = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
-        Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 12, into: &d)
+        Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 18, into: &d)
         d.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]) // SETTINGS_ENABLE_PUSH = 0
         let w = UInt32(Self.receiveWindow)
         d.append(contentsOf: [0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE (per-stream)
                               UInt8((w >> 24) & 0xFF), UInt8((w >> 16) & 0xFF),
                               UInt8((w >> 8) & 0xFF), UInt8(w & 0xFF)])
+        // Bound the decoded response-header list so a conformant origin self-limits (we also enforce
+        // it in the HPACK decoder — RFC 9113 §6.5.2).
+        let maxHeaderList = UInt32(HPACKDecoder.maxDecodedHeaderListSize)
+        d.append(contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
+                              UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
+                              UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)])
         onUpstreamBytes?(d)
         // INITIAL_WINDOW_SIZE doesn't move the connection window (RFC 9113 §6.9.2); raise it
-        // explicitly so the connection isn't the ~64 KiB bottleneck either.
-        creditConnectionWindow(Self.receiveWindow - 65_535)
+        // explicitly so the connection isn't the ~64 KiB bottleneck either. Direct emit (not the
+        // batched path): this enlargement must reach the origin before any DATA pass, or the origin
+        // throttles the first response to the 64 KiB default.
+        onUpstreamBytes?(Codec.windowUpdate(streamID: 0, increment: Self.receiveWindow - 65_535))
     }
 
     // MARK: - MITMUpstreamLeg (request IR → upstream h2)
@@ -415,9 +441,13 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         ))
     }
 
-    private func flushRequestBody(_ clientID: UInt32) {
-        guard var entry = pendingRequestBodies[clientID], let sid = ourStreamID[clientID] else { return }
-        let available = max(0, min(flowController.serverConnectionWindow, entry.streamWindow, entry.remaining.count))
+    /// Sends as much of a pending request body as the connection and stream windows allow, up to `cap`
+    /// bytes (the round-robin distributor passes a single max-frame cap; direct callers leave it
+    /// unbounded). Returns whether it made progress so the distributor knows to keep cycling.
+    @discardableResult
+    private func flushRequestBody(_ clientID: UInt32, cap: Int = .max) -> Bool {
+        guard var entry = pendingRequestBodies[clientID], let sid = ourStreamID[clientID] else { return false }
+        let available = max(0, min(flowController.serverConnectionWindow, entry.streamWindow, entry.remaining.count, cap))
         if available > 0 {
             let chunk = entry.remaining.prefix(available)
             entry.remaining.removeFirst(available)
@@ -431,7 +461,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
                 if let trailers = entry.pendingTrailers { emitRequestTrailers(sid: sid, trailers) }
                 pendingRequestBodies.removeValue(forKey: clientID)
                 openRequestStreams.remove(clientID)
-                return
+                return true
             }
         } else if entry.remaining.isEmpty, entry.endStream {
             if let trailers = entry.pendingTrailers {
@@ -441,10 +471,31 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             }
             pendingRequestBodies.removeValue(forKey: clientID)
             openRequestStreams.remove(clientID)
-            return
+            return true
         }
         // Otherwise the upstream's flow-control window is exhausted; resume on its next WINDOW_UPDATE.
         pendingRequestBodies[clientID] = entry
+        return available > 0
+    }
+
+    /// Distributes the available upstream connection window across pending request bodies by an equal
+    /// share each, so a large upload on one stream can't drain it all first and starve its siblings
+    /// (mitmproxy distributes evenly). One `flushRequestBody` per stream — same cost as draining them
+    /// in turn — but each is capped to its fair slice; window a stream can't use flows to those after.
+    private func distributeServerConnectionWindow() {
+        // Only streams with unsent body contend for the connection window. Counting idle streams would
+        // shrink each share and leave window unused until the next WINDOW_UPDATE — a stall — so a sole
+        // sender must see the full window.
+        let ready = pendingRequestBodies.keys.filter { !(pendingRequestBodies[$0]?.remaining.isEmpty ?? true) }.sorted()
+        var remaining = ready.count
+        for id in ready {
+            guard flowController.serverConnectionWindow > 0 else { break }
+            // Floor at one frame so a stream is never starved to a sub-frame slice; flushRequestBody
+            // re-clamps to the true remaining window, so the floor can't overspend it.
+            let share = max(Codec.maxFramePayloadSize, flowController.serverConnectionWindow / max(1, remaining))
+            flushRequestBody(id, cap: share)
+            remaining -= 1
+        }
     }
 
     // MARK: - Upstream h2 → response IR
@@ -475,8 +526,26 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
 
     private func finishPass(parked: Bool) {
+        // Flush every pass (parked or not) so coalesced receive-window credit reaches the origin
+        // before it can stall on a depleted window, and never lingers across a script hop.
+        flushBatchedCredits()
         if parked { return }
         let c = parkedCompletion; parkedCompletion = nil; c?()
+    }
+
+    /// Emits the WINDOW_UPDATEs accumulated this pass — one per credited stream plus one for the
+    /// connection — then clears the batch. A stream-level update for a since-released stream is
+    /// harmless (the origin ignores WINDOW_UPDATE on a closed stream, RFC 9113 §5.1).
+    private func flushBatchedCredits() {
+        if batchedConnCredit > 0 {
+            onUpstreamBytes?(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
+            batchedConnCredit = 0
+        }
+        guard !batchedStreamCredit.isEmpty else { return }
+        for (sid, n) in batchedStreamCredit where n > 0 {
+            onUpstreamBytes?(Codec.windowUpdate(streamID: sid, increment: n))
+        }
+        batchedStreamCredit.removeAll(keepingCapacity: true)
     }
 
     private func resumeAfterScript() {
@@ -545,7 +614,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let delta = flowController.updateServerInitialStreamWindow(newValue)
         guard delta != 0 else { return }
         for id in pendingRequestBodies.keys { pendingRequestBodies[id]?.streamWindow += delta }
-        if delta > 0 { for id in pendingRequestBodies.keys.sorted() { flushRequestBody(id) } }
+        if delta > 0 { distributeServerConnectionWindow() }
     }
 
     private func handleWindowUpdate(_ frame: Codec.RawFrame) {
@@ -556,10 +625,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         guard let inc = Codec.windowUpdateIncrement(frame.payload), inc > 0 else { return }
         if frame.streamID == 0 {
             flowController.creditServerConnection(inc)
-            for id in pendingRequestBodies.keys.sorted() {
-                if flowController.serverConnectionWindow <= 0 { break }
-                flushRequestBody(id)
-            }
+            distributeServerConnectionWindow()
         } else if let clientID = theirStreamID[frame.streamID], pendingRequestBodies[clientID] != nil {
             let current = pendingRequestBodies[clientID]?.streamWindow ?? 0
             pendingRequestBodies[clientID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + inc)
@@ -659,10 +725,28 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             return false
         }
 
+        // RFC 9113 §8.2.1/§8.1.1: a response field with CR/LF/NUL or a non-tchar name is malformed.
+        // Treat it as a stream error (not a connection teardown — the HPACK table absorbed the block,
+        // so the connection stays in sync) and never re-encode the laundered bytes to the client.
+        guard http2HeaderOctetsValid(decoded) else {
+            logger.warning("h2-upstream \(host) stream \(clientID): response header with CR/LF/NUL or invalid field-name; resetting stream")
+            sink?.deliverResponseReset(streamID: clientID)
+            releaseStream(clientID: clientID, resetOrigin: true)
+            return false
+        }
+
         // A HEADERS on an already-open response stream is a trailer (carries END_STREAM). Relay
         // its fields as the terminal frame once the body finalizes — gRPC puts grpc-status here,
         // so dropping it breaks the call.
         if responseStreams[clientID] != nil {
+            // A trailer HEADERS MUST set END_STREAM (RFC 9113 §8.1); a non-final second HEADERS would
+            // otherwise truncate the response. Reset the stream rather than mis-finalize it.
+            guard endStream else {
+                logger.warning("h2-upstream \(host) stream \(clientID): response trailer without END_STREAM; resetting stream")
+                sink?.deliverResponseReset(streamID: clientID)
+                releaseStream(clientID: clientID, resetOrigin: true)
+                return false
+            }
             let trailerFields = decoded.filter { !$0.name.hasPrefix(":") }
             return finishResponseStream(streamID: clientID, endStream: true, trailers: trailerFields)
         }
@@ -673,17 +757,23 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             return false
         }
 
-        // Interim 1xx (not 101): not the final response, so swallow it on the h2 side and
-        // keep the request-log record for the response that follows.
+        // Interim 1xx (not 101): not the final response, so keep the request-log record for the
+        // response that follows. Forward it to the client as its own interim HEADERS — e.g. 103
+        // Early Hints, whose preload links are useful before the final response (RFC 9113 §8.1 /
+        // RFC 8297). Response header rules target the final response, so the interim's regular
+        // fields are relayed as-is.
         let isInterim = (100..<200).contains(status) && status != 101
         let originatingRequest = isInterim
             ? rewriter.requestLog.peekHTTP2(streamID: clientID)
             : rewriter.requestLog.popHTTP2(streamID: clientID)
-        if isInterim { return false }
+        if isInterim {
+            sink?.deliverResponseInterim(streamID: clientID, status: status, headers: decoded.filter { !$0.name.hasPrefix(":") })
+            return false
+        }
         if status == 101 {
             // 101 has no place in h2 (it uses extended CONNECT); reset and drop the stream.
             sink?.deliverResponseReset(streamID: clientID)
-            releaseStream(clientID: clientID)
+            releaseStream(clientID: clientID, resetOrigin: true)
             return false
         }
 
@@ -695,7 +785,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let isHead = originatingRequest?.method?.uppercased() == "HEAD"
         if endStream || isHead || status == 204 || status == 304 {
             sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: true, neverIndexed: neverIndexed)
-            releaseStream(clientID: clientID)
+            // We tell the client the response is over, but the origin only really ended it if it set
+            // END_STREAM; a HEAD/204/304 whose origin omitted it (or a request body still in flight)
+            // leaves the origin stream open — RST it so it isn't leaked.
+            releaseStream(clientID: clientID, resetOrigin: !endStream || openRequestStreams.contains(clientID))
             return false
         }
 
@@ -754,7 +847,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
                 creditStreamWindow(sid, onWireLength) // overflow→passthrough fallback stays eager
             }
             sink?.deliverResponseData(streamID: clientID, body, endStream: endStream)
-            if endStream { releaseStream(clientID: clientID) }
+            // Response done; if the client never finished uploading, the origin's request half is
+            // still open — RST so the stream isn't leaked on this multiplexed connection.
+            if endStream { releaseStream(clientID: clientID, resetOrigin: openRequestStreams.contains(clientID)) }
             return false
 
         case .buffering(var buf):
@@ -792,13 +887,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// every received byte exactly once keeps the connection window from leaking shut.
     private func creditConnectionWindow(_ n: Int) {
         guard n > 0 else { return }
-        onUpstreamBytes?(Codec.windowUpdate(streamID: 0, increment: n))
+        // Accumulate; flushed at `finishPass` (or the end of `creditDrainedResponse` off-pass).
+        batchedConnCredit += n
     }
 
     /// Credits one stream's receive window on the wire.
     private func creditStreamWindow(_ upstreamStreamID: UInt32, _ n: Int) {
         guard n > 0 else { return }
-        onUpstreamBytes?(Codec.windowUpdate(streamID: upstreamStreamID, increment: n))
+        batchedStreamCredit[upstreamStreamID, default: 0] += n
     }
 
     /// Eager credit of both windows — used where the leg consumes the bytes itself (buffered/
@@ -814,6 +910,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     func creditDrainedResponse(clientID: UInt32, _ n: Int) {
         guard !torn, n > 0, drainCoupledStreams.contains(clientID), let sid = ourStreamID[clientID] else { return }
         creditStreamWindow(sid, n)
+        // This runs off the response pump (driven by the client leg draining), so flush now rather
+        // than waiting for a `finishPass` that may not come until the next inbound DATA.
+        flushBatchedCredits()
     }
 
     /// Finalizes a response stream when END_STREAM arrives (on DATA or a trailer HEADERS).
@@ -822,7 +921,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     private func finishResponseStream(streamID: UInt32, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
         switch responseStreams[streamID] {
         case .passthrough:
-            releaseStream(clientID: streamID)
+            releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
             if trailers.isEmpty {
                 sink?.deliverResponseData(streamID: streamID, Data(), endStream: true)
             } else {
@@ -867,10 +966,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         if endStream, !trailers.isEmpty {
             if !body.isEmpty { sink?.deliverResponseData(streamID: streamID, body, endStream: false) }
             sink?.deliverResponseTrailers(streamID: streamID, trailers)
-            releaseStream(clientID: streamID)
+            releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
         } else {
             sink?.deliverResponseData(streamID: streamID, body, endStream: endStream)
-            if endStream { releaseStream(clientID: streamID) }
+            if endStream { releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID)) }
         }
     }
 
@@ -880,7 +979,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         guard case .buffering(let buf)? = responseStreams[streamID] else { return false }
         // The body is complete (END_STREAM seen), so the stream is done once the script
         // delivers; release it now — the async completion delivers by client ID, not the maps.
-        releaseStream(clientID: streamID)
+        releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
         let plaintext: Data
         if buf.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(buf.data, plan: buf.codec, host: host) else {

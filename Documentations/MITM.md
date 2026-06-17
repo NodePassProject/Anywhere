@@ -230,8 +230,10 @@ HTTP/1.1 upstream (one short-lived upstream connection per request stream) and t
 responses back — so no downgrade or client retry is needed. For an HTTP/1.1
 connection the single upstream leg is fixed by the first request, so a later
 request whose transparent rewrite resolves a *different* host/port can't be reached
-on the already-dialed leg; rather than misroute it, the connection is torn down and
-the client retries it on a fresh connection. A bridged HTTP/2 client commits its
+on the already-dialed leg. If that leg is idle (no response in flight), Anywhere
+reconnects it to the new target transparently, so the client sees no drop; if a
+response is still in flight, the connection is torn down instead and the client
+retries it on a fresh connection. A bridged HTTP/2 client commits its
 upstream on the first request too: an HTTP/1.1 upstream is dialed per stream and so
 generally follows each stream's own resolved host (a request held back for a body
 rewrite resolves its target as it is finally emitted, so a concurrent stream's
@@ -764,7 +766,7 @@ If you need composed behavior, consolidate the logic into a single
 | `Anywhere.http` concurrent requests (all scripts) | 32 | Promise rejects |
 | `Anywhere.http` in-flight body bytes (all scripts) | 16 MiB | Promise rejects |
 | `Anywhere.http` response body      | 4 MiB        | Promise rejects |
-| HTTP/1 request/response head       | 64 KiB       | stream downgrades to passthrough |
+| HTTP/1 request/response head       | 64 KiB       | fails closed — connection closed (request) / 502 (response) |
 | Typed-array memory (all scripts)   | 16 MiB / 32 MiB | soft → GC hint; hard → empty `Uint8Array` returned |
 | Idle suspended `async` script      | ~60 s no progress | reverted to original, released |
 | Runaway synchronous JS span        | ~30 s        | extension crashes & relaunches clean |

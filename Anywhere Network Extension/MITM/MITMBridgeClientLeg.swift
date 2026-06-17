@@ -65,6 +65,14 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     /// one (closed or exhausted window) trips it instead of buffering an unbounded response.
     private static let maxClientBufferedBytes = 8 * 1024 * 1024
 
+    /// Receive window advertised to the client — per-stream via SETTINGS_INITIAL_WINDOW_SIZE and the
+    /// connection via an initial WINDOW_UPDATE. The 64 KiB default throttles a single client→server
+    /// upload to ~64 KiB/RTT (mitmproxy raises both directions for the same reason; the h2 upstream
+    /// leg already does this for the response direction). 4 MiB fills a high bandwidth·delay path
+    /// while staying within the upstream-bound backlog caps (`maxUpstreamBufferedBytes` /
+    /// `MITMSession.maxBridgeUpstreamBufferedBytes`), which bound buffering against a slow origin.
+    private static let receiveWindow = 4 * 1024 * 1024
+
     // MARK: Connection state
 
     private var prefaceRemaining = Codec.clientPrefaceLength
@@ -131,6 +139,14 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     /// window when the PaceState is created so the credit isn't lost (RFC 9113 §6.9.2).
     private var pendingStreamCredit: [UInt32: Int] = [:]
 
+    /// Receive-window credit (for client uploads) accumulated during one pump pass and flushed once
+    /// at `finishPass`, so a TCP segment carrying many DATA frames yields one WINDOW_UPDATE per stream
+    /// plus one for the connection instead of a pair per frame. Flushing every pass keeps it safe: the
+    /// client can't put more than a window's worth in flight before we credit, so the window never
+    /// stalls. Keyed by client stream id; the connection total is separate.
+    private var batchedConnCredit = 0
+    private var batchedStreamCredit: [UInt32: Int] = [:]
+
 
     init(
         host: String,
@@ -152,6 +168,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         streamMethods.removeAll()
         paceStates.removeAll()
         pendingStreamCredit.removeAll()
+        batchedConnCredit = 0
+        batchedStreamCredit.removeAll()
         pending = nil
     }
 
@@ -204,13 +222,28 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         // Advertise ENABLE_PUSH=0 (we never push; RFC 9113 §6.5.2) and MAX_CONCURRENT_STREAMS so a
         // conformant client self-throttles instead of opening streams we'd only answer with
         // REFUSED_STREAM.
-        Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 12, into: &preface)
+        Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 24, into: &preface)
         preface.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]) // SETTINGS_ENABLE_PUSH = 0
         let maxStreams = UInt32(Self.advertisedMaxConcurrentStreams)
         preface.append(contentsOf: [0x00, 0x03, // SETTINGS_MAX_CONCURRENT_STREAMS
                                     UInt8((maxStreams >> 24) & 0xFF), UInt8((maxStreams >> 16) & 0xFF),
                                     UInt8((maxStreams >> 8) & 0xFF), UInt8(maxStreams & 0xFF)])
+        // Enlarge our per-stream receive window so client→server uploads aren't throttled to
+        // ~64 KiB/RTT (mirrors the h2 upstream leg's response-direction window).
+        let w = UInt32(Self.receiveWindow)
+        preface.append(contentsOf: [0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE (per-stream)
+                                    UInt8((w >> 24) & 0xFF), UInt8((w >> 16) & 0xFF),
+                                    UInt8((w >> 8) & 0xFF), UInt8(w & 0xFF)])
+        // Bound the decoded request-header list so a conformant client self-limits (we also enforce
+        // it in the HPACK decoder — RFC 9113 §6.5.2).
+        let maxHeaderList = UInt32(HPACKDecoder.maxDecodedHeaderListSize)
+        preface.append(contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
+                                    UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
+                                    UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)])
         delegate?.clientLegWriteToClient(preface)
+        // INITIAL_WINDOW_SIZE doesn't move the connection window (RFC 9113 §6.9.2); raise it
+        // explicitly so the connection isn't the ~64 KiB upload bottleneck either.
+        delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: Self.receiveWindow - 65_535))
     }
 
     private func pump() -> Bool {
@@ -229,10 +262,28 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func finishPass(parked: Bool) {
+        // Flush every pass (parked or not) so coalesced receive-window credit is emitted before the
+        // client can stall on a depleted window, and never lingers across a script hop.
+        flushBatchedCredits()
         if parked { return }
         let completion = parkedCompletion
         parkedCompletion = nil
         completion?()
+    }
+
+    /// Emits the WINDOW_UPDATEs accumulated this pass — one per credited stream plus one for the
+    /// connection — then clears the batch. Sending a stream-level update for a since-closed stream is
+    /// harmless (the client ignores WINDOW_UPDATE on a closed stream, RFC 9113 §5.1).
+    private func flushBatchedCredits() {
+        if batchedConnCredit > 0 {
+            delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
+            batchedConnCredit = 0
+        }
+        guard !batchedStreamCredit.isEmpty else { return }
+        for (sid, n) in batchedStreamCredit where n > 0 {
+            delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: sid, increment: n))
+        }
+        batchedStreamCredit.removeAll(keepingCapacity: true)
     }
 
     private func fail(_ message: String, code: UInt32 = Codec.ErrorCode.protocolError) {
@@ -304,7 +355,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let delta = flowController.updateInitialStreamWindow(newValue)
         guard delta != 0 else { return }
         for id in paceStates.keys { paceStates[id]?.streamWindow += delta }
-        if delta > 0 { for id in paceStates.keys.sorted() { flushResponse(id) } }
+        if delta > 0 { distributeClientConnectionWindow() }
     }
 
     private func handleWindowUpdate(_ frame: Codec.RawFrame) {
@@ -314,10 +365,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         guard let inc = Codec.windowUpdateIncrement(frame.payload), inc > 0 else { return }
         if frame.streamID == 0 {
             flowController.creditConnection(inc)
-            for id in paceStates.keys.sorted() {
-                if flowController.connectionWindow <= 0 { break }
-                flushResponse(id)
-            }
+            distributeClientConnectionWindow()
         } else if paceStates[frame.streamID] != nil {
             let current = paceStates[frame.streamID]?.streamWindow ?? 0
             paceStates[frame.streamID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + inc)
@@ -399,6 +447,16 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
 
+        // RFC 9113 §8.2.1: a field with CR/LF/NUL or a non-tchar name is malformed and a request-
+        // splitting vector once re-serialized to HTTP/1.1; reject it rather than launder it (HPACK
+        // decode only checks UTF-8). The table already absorbed the block, so reset just this stream.
+        guard http2HeaderOctetsValid(decoded) else {
+            logger.warning("bridge \(host) stream \(streamID): header with CR/LF/NUL or invalid field-name; RST")
+            rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
+                        abortUpstream: requestStreams[streamID] != nil)
+            return false
+        }
+
         // A HEADERS block with no :method is either a request trailer (on an open stream) or a
         // malformed request missing its required pseudo-header (on a stream not yet open).
         if firstHeaderValue(decoded, name: ":method") == nil {
@@ -409,7 +467,15 @@ final class MITMBridgeClientLeg: MITMResponseSink {
                 rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: false)
                 return false
             }
-            // Trailer section (RFC 9113 §8.1): forward the filtered trailer fields, then end the body.
+            // Trailer section (RFC 9113 §8.1): a trailer HEADERS MUST set END_STREAM. A non-final
+            // second HEADERS would otherwise be treated as a clean end-of-body and truncate the
+            // request (dropping body bytes a following DATA would carry) — reject it instead.
+            guard endStream else {
+                logger.warning("bridge \(host) stream \(streamID): trailer HEADERS without END_STREAM; RST")
+                rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
+                return false
+            }
+            // Forward the filtered trailer fields, then end the body.
             let trailers = MITMBridgeHeaders.upstreamRequestHeaders(decoded: decoded)
             return endRequestBody(streamID, trailers: trailers)
         }
@@ -444,8 +510,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let gateURL = MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(host)\($0)" } ?? requestURL
 
         // Expect: 100-continue — answer with an interim 100 ourselves and strip Expect before
-        // forwarding (mirrors the h1 inner leg and mitmproxy). Both upstream legs swallow the
-        // origin's interim 1xx, so without this an h2 client withholding its body would stall.
+        // forwarding (mirrors the h1 inner leg and mitmproxy). Stripping Expect upstream means the
+        // origin never sees it and never sends its own 100, so without our synthesized one an h2
+        // client withholding its body would stall.
         if !endStream, Self.expectsContinue(rewritten) {
             sendInterimContinue(streamID)
             rewritten = rewritten.filter { !$0.name.equalsIgnoringASCIICase("expect") }
@@ -604,13 +671,18 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             return false
 
         case nil:
-            // DATA on a stream we already finished (the client keeps uploading after a synth /
-            // early response closed it) or never opened. Its stream window is gone, but the bytes
-            // still count against the connection receive window — credit it back or the window
-            // leaks and eventually stalls every upload on the connection (RFC 9113 §6.9.1).
-            if onWireLength > 0 {
-                delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: onWireLength))
+            // DATA on a stream above the highest we've opened is DATA on an *idle* stream — a
+            // connection error (RFC 9113 §5.1), not a late frame; fail rather than silently absorb it.
+            if id > highestStreamID {
+                fail("DATA on idle stream \(id)")
+                return false
             }
+            // Otherwise it's a stream we already finished (the client keeps uploading after a synth /
+            // early response closed it). Its stream window is gone, but the bytes still count against
+            // the connection receive window — credit it back or the window leaks and eventually
+            // stalls every upload on the connection (RFC 9113 §6.9.1). Coalesced like the rest;
+            // flushed at `finishPass`.
+            if onWireLength > 0 { batchedConnCredit += onWireLength }
             return false
         }
     }
@@ -657,8 +729,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     private func creditClientUpload(streamID: UInt32, length: Int) {
         guard length > 0 else { return }
-        delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: streamID, increment: length))
-        delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: length))
+        // Accumulate; `finishPass` emits the coalesced WINDOW_UPDATEs at the end of the pass.
+        batchedStreamCredit[streamID, default: 0] += length
+        batchedConnCredit += length
     }
 
     // MARK: Buffered request script application
@@ -774,8 +847,17 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: - MITMResponseSink (upstream → client)
 
+    /// A response stream is live from its request HEADERS (`streamMethods` set) until it finishes or is
+    /// reset (both maps cleared by `finishClientStream` / `rstToClient` / `handleClientRST`). The sink
+    /// entry points guard on this so an upstream response event that loses the race with a client
+    /// RST_STREAM is dropped, not re-materialized onto a closed stream via `makePaceState` — which
+    /// would write frames the client answers with STREAM_CLOSED, a connection error.
+    private func isLiveResponseStream(_ streamID: UInt32) -> Bool {
+        streamMethods[streamID] != nil || paceStates[streamID] != nil
+    }
+
     func deliverResponseHead(streamID: UInt32, status: Int, headers: [(name: String, value: String)], endStream: Bool, neverIndexed: Set<String>) {
-        guard !torn else { return }
+        guard !torn, isLiveResponseStream(streamID) else { return }
         var block: [(name: String, value: String)] = [(name: ":status", value: String(status))]
         block.append(contentsOf: MITMBridgeHeaders.responseHeadersToH2(headers))
         delegate?.clientLegWriteToClient(Codec.emitHeaders(
@@ -790,13 +872,26 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
     }
 
+    func deliverResponseInterim(streamID: UInt32, status: Int, headers: [(name: String, value: String)]) {
+        guard !torn, isLiveResponseStream(streamID) else { return }
+        var block: [(name: String, value: String)] = [(name: ":status", value: String(status))]
+        block.append(contentsOf: MITMBridgeHeaders.responseHeadersToH2(headers))
+        delegate?.clientLegWriteToClient(Codec.emitHeaders(
+            streamID: streamID,
+            block: HPACKEncoder.encodeHeaderBlock(block),
+            endStream: false
+        ))
+        // No PaceState and no finalize: a 1xx precedes the final response on the same stream
+        // (RFC 9113 §8.1), so the stream stays open for the real head that follows.
+    }
+
     func deliverResponseData(streamID: UInt32, _ data: Data, endStream: Bool) {
-        guard !torn else { return }
+        guard !torn, isLiveResponseStream(streamID) else { return }
         appendClientBody(streamID: streamID, data: data, endStream: endStream)
     }
 
     func deliverResponseTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
-        guard !torn else { return }
+        guard !torn, isLiveResponseStream(streamID) else { return }
         var st = paceStates[streamID] ?? makePaceState(streamID)
         st.sawEnd = true
         let normalized = MITMBridgeHeaders.responseHeadersToH2(trailers)
@@ -807,7 +902,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     func deliverResponseReset(streamID: UInt32, errorCode: UInt32) {
-        guard !torn else { return }
+        // If the stream is already gone (client RST raced this upstream reset), there's nothing left
+        // to reset toward the client — dropping it avoids an RST_STREAM on a closed stream.
+        guard !torn, isLiveResponseStream(streamID) else { return }
         rstToClient(streamID, errorCode: errorCode, abortUpstream: false)
     }
 
@@ -835,9 +932,14 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
     }
 
-    private func flushResponse(_ streamID: UInt32) {
-        guard var st = paceStates[streamID] else { return }
-        let available = max(0, min(flowController.connectionWindow, st.streamWindow, st.pending.count))
+    /// Sends as much of a response stream's buffered body as the connection and stream windows allow,
+    /// up to `cap` bytes (the round-robin distributor passes a single max-frame cap; direct callers
+    /// leave it unbounded). Returns whether it made progress, so the distributor knows to keep cycling.
+    @discardableResult
+    private func flushResponse(_ streamID: UInt32, cap: Int = .max) -> Bool {
+        guard var st = paceStates[streamID] else { return false }
+        var progressed = false
+        let available = max(0, min(flowController.connectionWindow, st.streamWindow, st.pending.count, cap))
         if available > 0 {
             let chunk = st.pending.prefix(available)
             // A pending trailer is the terminal frame, so body DATA must not carry END_STREAM.
@@ -851,6 +953,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             // Backpressure: these bytes have left for the client, so it's safe to credit the
             // upstream's receive window (no-op unless an h2 upstream marked this stream drain-coupled).
             onResponseDrainedToClient?(streamID, available)
+            progressed = true
         }
         // Body fully drained and the stream ended: emit the terminal frame. A trailer HEADERS
         // block isn't flow-controlled, so it follows the last body DATA directly.
@@ -863,12 +966,34 @@ final class MITMBridgeClientLeg: MITMResponseSink {
                 delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: Data(), endStream: true))
             }
             st.finished = true
+            progressed = true
         }
         // Otherwise the client's flow-control window is exhausted; resume on its next WINDOW_UPDATE.
         paceStates[streamID] = st
         if st.finished {
             paceStates.removeValue(forKey: streamID)
             finishClientStream(streamID, notifyUpstream: true)
+        }
+        return progressed
+    }
+
+    /// Distributes the available client connection window across response streams by an equal share
+    /// each, so a large download on one stream can't drain it all first and starve its siblings
+    /// (mitmproxy distributes evenly). One `flushResponse` per stream — same cost as draining them in
+    /// turn — but each is capped to its fair slice; window a stream can't use flows to those after it.
+    private func distributeClientConnectionWindow() {
+        // Only streams with buffered body contend for the connection window. Counting idle streams
+        // would shrink each share and leave window unused until the next WINDOW_UPDATE — a stall — so
+        // a sole sender must see the full window.
+        let ready = paceStates.keys.filter { (paceStates[$0]?.pending.count ?? 0) > 0 }.sorted()
+        var remaining = ready.count
+        for id in ready {
+            guard flowController.connectionWindow > 0 else { break }
+            // Floor at one frame so a stream is never starved to a sub-frame slice; flushResponse
+            // re-clamps to the true remaining window, so the floor can't overspend it.
+            let share = max(Codec.maxFramePayloadSize, flowController.connectionWindow / max(1, remaining))
+            flushResponse(id, cap: share)
+            remaining -= 1
         }
     }
 

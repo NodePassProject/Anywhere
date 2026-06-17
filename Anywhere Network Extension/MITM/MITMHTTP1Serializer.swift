@@ -61,12 +61,14 @@ enum MITMHTTP1Serializer {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
-        out.append(contentsOf: startLine.utf8)
+        // ISO-8859-1 bytes so a header octet the client sent (HPACK-decoded as latin-1) round-trips
+        // to the upstream unchanged rather than being re-encoded as multi-byte UTF-8.
+        out.appendHeaderFieldBytes(startLine)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in safe {
-            out.append(contentsOf: name.utf8)
+            out.appendHeaderFieldBytes(name)
             out.append(0x3A); out.append(0x20)
-            out.append(contentsOf: value.utf8)
+            out.appendHeaderFieldBytes(value)
             out.append(0x0D); out.append(0x0A)
         }
         out.append(0x0D); out.append(0x0A)

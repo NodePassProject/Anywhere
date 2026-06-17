@@ -217,6 +217,11 @@ class TCPConnection {
         // MITM: client bytes feed the inner TLS leg; the upload pipeline stays untouched.
         if let mitmSession {
             let chunk = Data(bytes: bytePtr, count: count)
+            // Count client→inner-leg bytes as uplink activity. A long upload with no server response
+            // yet (a large POST/PUT, or a slow upstream) produces no downlink to refresh the idle
+            // timer, so without this it looks idle and is torn down mid-stream — the non-MITM upload
+            // path refreshes the timer on every accepted chunk for the same reason.
+            activityTimer?.update()
             // Ack to lwIP up-front; MITMSession owns inner-leg flow control.
             acknowledgeReceivedBytes(count)
             mitmSession.feedClientBytes(chunk)

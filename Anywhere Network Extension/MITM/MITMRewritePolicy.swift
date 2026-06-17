@@ -284,11 +284,19 @@ final class MITMRewritePolicy {
     // Rule sets are untrusted; serializers emit header bytes verbatim, so CR/LF
     // in a value enables response-splitting. Validated once at compile time.
 
-    /// Framing headers (RFC 9112 §6) are blocked for add/replace — divergent framing
-    /// is the request-smuggling primitive; delete only makes framing more conservative.
+    /// Framing (RFC 9112 §6) and connection-management headers are blocked for add/replace: divergent
+    /// framing is the request-smuggling primitive, and an injected Connection/Upgrade/Keep-Alive/TE
+    /// token desyncs keep-alive or smuggles a connection directive (and on the h1 leg, which doesn't
+    /// strip hop-by-hop, would reach the upstream). Delete only makes framing more conservative, so
+    /// it stays allowed.
     private static func isFramingHeader(_ name: String) -> Bool {
-        let lower = name.lowercased()
-        return lower == "content-length" || lower == "transfer-encoding"
+        switch name.lowercased() {
+        case "content-length", "transfer-encoding",
+             "connection", "keep-alive", "proxy-connection", "upgrade", "te", "trailer":
+            return true
+        default:
+            return false
+        }
     }
 
     /// SP/HTAB/CR/LF/NUL/DEL would break HTTP/1's start line or be rejected by HTTP/2 receivers.

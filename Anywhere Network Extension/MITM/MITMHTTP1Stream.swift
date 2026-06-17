@@ -16,6 +16,9 @@ private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 protocol MITMHTTP1ResponseIRSink: AnyObject {
     /// `endStream` true ⇒ no body follows (the IR consumer ends the stream on the head).
     func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool)
+    /// An interim 1xx informational response (e.g. 103 Early Hints) ahead of the final response:
+    /// forwarded to the client without a body and without ending the stream (RFC 9113 §8.1).
+    func http1ResponseInterim(status: Int, headers: [(name: String, value: String)])
     func http1ResponseBody(_ data: Data, endStream: Bool)
     /// Malformed, oversized, or unbridgeable (101 / CONNECT-2xx) upstream response: reset the stream.
     func http1ResponseReset()
@@ -207,6 +210,18 @@ final class MITMHTTP1Stream {
 
     /// Synth bytes held until the current response finishes streaming. Response phase only.
     private var pendingSynthAfterCurrentResponse = Data()
+
+    /// True when the stream is between messages — awaiting a head, with nothing buffered, parked, or
+    /// pending. The session checks this on the *response* stream to know an h1 upstream leg is fully
+    /// idle (no response in flight) and so can be safely closed to reconnect to a different
+    /// transparent-rewrite target. Conservative by construction: any in-progress state reads false.
+    var isBetweenMessages: Bool {
+        guard case .awaitingHead = mode else { return false }
+        return rxBuffer.isEmpty
+            && parkedCompletion == nil
+            && !forcePassthroughPending
+            && pendingSynthAfterCurrentResponse.isEmpty
+    }
 
     // MARK: - Public API
 
@@ -418,12 +433,18 @@ final class MITMHTTP1Stream {
         let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
         guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
             if rxBuffer.count > Self.maxHeadBytes {
-                logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; downgrading to passthrough")
-                output.append(rxBuffer.prefix(rxBuffer.count))
+                // An over-cap head with no CRLF CRLF (giant headers, or bare-LF framing we never
+                // terminate) used to downgrade to verbatim passthrough — relaying bytes that skip
+                // every parseHead smuggling check, a trivially-triggered inspection bypass. Fail
+                // closed instead, like the `.smuggling` path: never relay an unparseable head
+                // (mitmproxy answers 400/502 + close). onFatalClose closes the connection on the
+                // request leg, or answers the client 502 on the response leg.
+                logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; closing the connection without forwarding")
                 rxBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
-                mode = .passthrough
-                return true
+                mode = .draining
+                onFatalClose?()
+                return false
             }
             headScanned = rxBuffer.count
             return false
@@ -611,10 +632,14 @@ final class MITMHTTP1Stream {
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
             }
-            // The h2→h1 bridge can't carry an interim 1xx as its own h2 HEADERS without ending the
-            // stream; swallow it — matching the h2 upstream leg and mitmproxy — and await the final
-            // response (interims peek the request-log record, so it stays queued for that pop).
-            if responseIRSink != nil, isInterimResponseStartLine(rewrittenStartLine) {
+            // Interim 1xx (e.g. 103 Early Hints): forward it to the client leg as its own interim
+            // head — no body, doesn't end the stream (RFC 9113 §8.1) — then await the final response
+            // (the request-log record was peeked, so it stays queued for that pop).
+            if let sink = responseIRSink, isInterimResponseStartLine(rewrittenStartLine) {
+                sink.http1ResponseInterim(
+                    status: responseStatusCode(from: rewrittenStartLine) ?? 0,
+                    headers: rewrittenHeaders
+                )
                 mode = .awaitingHead
                 return true
             }
@@ -1184,7 +1209,9 @@ final class MITMHTTP1Stream {
 
     /// Parses the hex chunk-size, ignoring any extensions after `;`.
     fileprivate static func parseHexSize(_ data: Data) -> Int? {
-        guard let raw = String(data: data, encoding: .ascii) else { return nil }
+        // latin-1 never fails (a non-ASCII byte in a chunk extension shouldn't kill an otherwise-valid
+        // body); the hex chunk-size itself is still validated as ASCII hex digits below.
+        guard let raw = String(data: data, encoding: .isoLatin1) else { return nil }
         let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
         let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
         // RFC 9112 §7.1: unsigned hex only. `Int(_:radix:)` accepts `-`/`+`,
@@ -1416,7 +1443,10 @@ final class MITMHTTP1Stream {
     private func isNoBodyStatus(_ status: Int?) -> Bool {
         guard let status else { return false }
         switch status {
-        case 204, 205, 304:
+        case 204, 304:
+            // RFC 9112 §6.3's framing no-body set is 1xx/204/304 (plus HEAD and CONNECT-2xx). 205 is
+            // *not* in it — though it carries no content (RFC 9110 §15.3.6), `bodyFraming` honors an
+            // explicit Content-Length/Transfer-Encoding on a 205 and only then defaults it to empty.
             return true
         default:
             return (100..<200).contains(status) && status != 101
@@ -1500,7 +1530,12 @@ final class MITMHTTP1Stream {
     }
 
     private func parseHead(_ data: Data) -> ParsedHeadResult {
-        guard let raw = String(data: data, encoding: .ascii) else { return .forward }
+        // ISO-8859-1, not ASCII: HTTP/1 header octets are a byte string (RFC 9110 §5.5 obs-text), and
+        // latin-1 maps every byte 1:1 so it never fails. An ASCII decode returned nil on any byte > 0x7F
+        // (common in real Set-Cookie / Content-Disposition / Server fields), which dropped the whole
+        // connection to verbatim passthrough and silently disabled all rewriting. `serializeHead`
+        // re-emits these via `appendHeaderFieldBytes`, so the original octets round-trip exactly.
+        guard let raw = String(data: data, encoding: .isoLatin1) else { return .forward }
         let lines = raw.components(separatedBy: "\r\n")
         guard let startLine = lines.first, !startLine.isEmpty else { return .forward }
         guard isHTTPStartLine(startLine) else { return .forward }
@@ -1566,6 +1601,10 @@ final class MITMHTTP1Stream {
         // resolves that to `.readUntilClose`. Multiple TE field lines are always a smuggling vector.
         if !transferEncodingValues.isEmpty {
             if transferEncodingValues.count > 1 { return .smuggling }
+            // RFC 9112 §6.1 / RFC 9110: Transfer-Encoding is an HTTP/1.1-only feature. A TE on an
+            // HTTP/1.0 message is a smuggling vector — HTTP/1.0 hops ignore TE and frame by close, so
+            // two hops disagree on the body boundary (mitmproxy rejects this in validate.py).
+            guard startLineIsHTTP11(startLine) else { return .smuggling }
             if !Self.transferEncodingIsChunked(transferEncodingValues[0]), phase == .httpRequest {
                 return .smuggling
             }
@@ -1598,6 +1637,12 @@ final class MITMHTTP1Stream {
         guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
         guard let length = Int(trimmed), length >= 0 else { return false }
         return true
+    }
+
+    /// True when the start line declares HTTP/1.1 — a request line ends with the version, a status
+    /// line begins with it. Transfer-Encoding is valid only for HTTP/1.1 (RFC 9112 §6.1).
+    private func startLineIsHTTP11(_ startLine: String) -> Bool {
+        phase == .httpRequest ? startLine.hasSuffix(" HTTP/1.1") : startLine.hasPrefix("HTTP/1.1")
     }
 
     /// True when `chunked` is the final Transfer-Encoding coding (RFC 9112 §6.1).
@@ -1684,12 +1729,14 @@ final class MITMHTTP1Stream {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
-        out.append(contentsOf: startLine.utf8)
+        // Emit as ISO-8859-1 bytes so a header octet parsed as latin-1 round-trips exactly (a plain
+        // `.utf8` would re-encode a 0x80–0xFF octet as a 2-byte sequence, corrupting it).
+        out.appendHeaderFieldBytes(startLine)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in safeHeaders {
-            out.append(contentsOf: name.utf8)
+            out.appendHeaderFieldBytes(name)
             out.append(0x3A); out.append(0x20) // ':'  ' '
-            out.append(contentsOf: value.utf8)
+            out.appendHeaderFieldBytes(value)
             out.append(0x0D); out.append(0x0A)
         }
         out.append(0x0D); out.append(0x0A)
@@ -1753,6 +1800,7 @@ final class MITMHTTP1Stream {
         headers: [Header],
         originatingMethod: String? = nil
     ) -> Framing {
+        var responseStatus: Int?
         if phase == .httpResponse {
             // RFC 9110 §15.2: HEAD responses never carry a body regardless of Content-Length.
             if let method = originatingMethod,
@@ -1761,6 +1809,7 @@ final class MITMHTTP1Stream {
             }
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let status = parseHTTPStatusCode(parts[1]) {
+                responseStatus = status
                 // RFC 9110 §9.3.6: 2xx to CONNECT makes the connection an opaque
                 // tunnel; treat like 101.
                 if (200..<300).contains(status),
@@ -1768,7 +1817,7 @@ final class MITMHTTP1Stream {
                     return .switchingProtocols
                 }
                 if status == 101 { return .switchingProtocols }
-                // RFC 9110 §15: 1xx (except 101), 204, 205, 304 carry no body regardless of CL/TE.
+                // RFC 9110 §15: 1xx (except 101), 204, 304 carry no body regardless of CL/TE.
                 if isNoBodyStatus(status) { return .none }
             }
         }
@@ -1796,6 +1845,10 @@ final class MITMHTTP1Stream {
                 return length == 0 ? .none : .contentLength(length)
             }
         }
+        // 205 Reset Content carries no content (RFC 9110 §15.3.6); with no explicit CL/TE above, frame
+        // it as empty rather than read-until-close — the latter would hang a keep-alive connection
+        // waiting for an EOF that never comes.
+        if responseStatus == 205 { return .none }
         return phase == .httpRequest ? .none : .readUntilClose
     }
 
@@ -1845,6 +1898,14 @@ final class MITMHTTP1Stream {
             if case .rewrite = $0.operation { return true }
             return false
         }) else { return .rewritten(startLine) }
+
+        // Each request re-resolves its own upstream. Clear any target a *previous* request on this
+        // keep-alive leg set, so a later request that matches no transparent rewrite resolves to the
+        // original origin (and the session tears the leg down if that differs from the dialed host)
+        // rather than inheriting the prior request's target and `Host`. Without this, request #2 on a
+        // connection whose request #1 rewrote A→B is misrouted to B.
+        effectiveAuthority = nil
+        resolvedUpstream = nil
 
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3 else { return .rewritten(startLine) }

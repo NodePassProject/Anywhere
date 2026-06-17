@@ -153,6 +153,10 @@ final class MITMSession {
     /// True while the dial is in flight; further upstream-bound bytes buffer instead of redialing.
     private var dialing = false
 
+    /// True when the inbound pump paused under backpressure (the pre-dial buffer reached the
+    /// high-water mark). `finishDialAndShuttle` resumes it once the outer leg exists and drains.
+    private var inboundReadPaused = false
+
     /// Upstream the dial committed to; a later request resolving a different one is torn down rather than misrouted.
     private var dialedHost: String?
     private var dialedPort: UInt16?
@@ -163,8 +167,15 @@ final class MITMSession {
     /// Client bytes buffered until the inner TLSServer exists.
     private var pendingClientBytes: Data
 
-    /// Pre-handshake buffer cap; 256 KiB tolerates large ClientHellos while bounding memory against a hostile local app.
+    /// Pre-handshake buffer cap; 256 KiB tolerates large ClientHellos while bounding memory against a
+    /// hostile local app. Also the pre-dial inbound high-water mark: once the upstream-bound buffer
+    /// reaches it while the dial is in flight, the inner read pauses (backpressure) rather than buffering on.
     private static let maxPendingClientBytes: Int = 256 * 1024
+
+    /// Hard backstop on the pre-dial upstream buffer. Backpressure keeps it near `maxPendingClientBytes`
+    /// in practice; a single buffered-body rewrite can legitimately deliver up to the 4 MiB body cap in
+    /// one chunk, so the backstop sits above that. Tearing down here means a genuinely pathological case.
+    private static let maxPendingUpstreamBytes: Int = 8 * 1024 * 1024
 
     private var tlsServer: TLSServer?
     private var tlsClient: TLSClient?
@@ -255,6 +266,9 @@ final class MITMSession {
         }
         func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool) {
             client?.deliverResponseHead(streamID: streamID, status: status, headers: headers, endStream: endStream)
+        }
+        func http1ResponseInterim(status: Int, headers: [(name: String, value: String)]) {
+            client?.deliverResponseInterim(streamID: streamID, status: status, headers: headers)
         }
         func http1ResponseBody(_ data: Data, endStream: Bool) {
             client?.deliverResponseData(streamID: streamID, data, endStream: endStream)
@@ -531,6 +545,9 @@ final class MITMSession {
                     return
                 }
                 guard !self.torn, let inner = self.innerRecord else {
+                    // Handshake won the timeout race but the session was already torn down; cancel the
+                    // freshly-minted record too (mirrors the disarm branch above), not just the socket.
+                    if case .success(let record) = result { record.cancel() }
                     connection.cancel()
                     return
                 }
@@ -573,6 +590,13 @@ final class MITMSession {
             }
         }
         startOutboundPump(inner: inner, outer: outer)
+        // If the inbound pump paused under backpressure while the dial was in flight, resume it now:
+        // the outer leg exists and the buffer is flushed, so subsequent client bytes shuttle straight
+        // through. (If it never paused, it's still running — don't double-start it.)
+        if inboundReadPaused {
+            inboundReadPaused = false
+            startInboundPump(inner: inner)
+        }
     }
 
     /// sendChunked chunk size; 64 KiB = 4× the TLS plaintext record cap, bounding in-flight bytes per leg.
@@ -689,11 +713,17 @@ final class MITMSession {
                         return
                     }
                     if let outer = self.outerRecord {
-                        // One outer leg can't carry two authorities; a request resolving
-                        // a different upstream is torn down rather than misrouted.
+                        // One outer leg carries one authority. When a later request resolves a
+                        // different upstream, reconnect the leg if it's fully idle (no response in
+                        // flight, no earlier request still owed one) so the client doesn't see a
+                        // drop; otherwise tear down rather than risk truncating an in-flight response.
                         guard self.resolvedUpstreamMatchesDialed() else {
-                            logger.warning("\(self.dstHost): request resolved an upstream different from the dialed one; tearing down so the client retries")
-                            self.cancel(error: nil)
+                            if self.canReconnectOuterLeg() {
+                                self.reconnectOuterLeg(with: transformed, inner: inner)
+                            } else {
+                                logger.warning("\(self.dstHost): request resolved a different upstream while the leg was busy; tearing down so the client retries")
+                                self.cancel(error: nil)
+                            }
                             return
                         }
                         self.sendChunked(transformed, via: outer) { [weak self] sendError in
@@ -715,19 +745,21 @@ final class MITMSession {
 
     /// Buffers upstream-bound bytes and kicks off the deferred dial; mid-dial calls only buffer.
     private func bufferUpstreamAndDial(_ transformed: Data, inner: TLSRecordConnection) {
-        if pendingUpstreamBytes.count + transformed.count > Self.maxPendingClientBytes {
-            logger.warning("\(dstHost): pre-dial upstream buffer would exceed \(Self.maxPendingClientBytes) B; tearing down session")
+        pendingUpstreamBytes.append(transformed)
+        // Backstop only — `resumeOrPauseInboundPreDial` applies backpressure at the high-water mark, so
+        // this trips only on a pathological single oversized rewrite, not on a large streamed upload.
+        if pendingUpstreamBytes.count > Self.maxPendingUpstreamBytes {
+            logger.warning("\(dstHost): pre-dial upstream buffer exceeded \(Self.maxPendingUpstreamBytes) B; tearing down session")
             cancel(error: nil)
             return
         }
-        pendingUpstreamBytes.append(transformed)
         if dialing {
             guard resolvedUpstreamMatchesDialed() else {
                 logger.warning("\(dstHost): pipelined request resolved an upstream different from the dialed one; tearing down so the client retries")
                 cancel(error: nil)
                 return
             }
-            startInboundPump(inner: inner)
+            resumeOrPauseInboundPreDial(inner: inner)
             return
         }
         dialing = true
@@ -756,7 +788,21 @@ final class MITMSession {
                 self.failInnerLegWith502("upstream connect failed: \(error)")
             }
         }
-        startInboundPump(inner: inner)
+        resumeOrPauseInboundPreDial(inner: inner)
+    }
+
+    /// While the deferred dial is in flight, keep reading client bytes until the upstream-bound
+    /// buffer reaches the high-water mark, then pause — filling the client's TCP window so a fast
+    /// local uploader is throttled instead of buffering an unbounded first-request body. The old
+    /// fixed 256 KiB cap tore such uploads down; this backpressures them instead.
+    /// `finishDialAndShuttle` resumes the pump once the outer leg exists and the buffer is flushed.
+    /// lwipQueue only.
+    private func resumeOrPauseInboundPreDial(inner: TLSRecordConnection) {
+        if pendingUpstreamBytes.count >= Self.maxPendingClientBytes {
+            inboundReadPaused = true
+        } else {
+            startInboundPump(inner: inner)
+        }
     }
 
     /// False when the current request resolves a different upstream than dialed; always true pre-dial.
@@ -765,6 +811,56 @@ final class MITMSession {
         let resolved = inbound.resolvedUpstream
         return (resolved?.host ?? dstHost) == dialedHost
             && (resolved?.port ?? dstPort) == dialedPort
+    }
+
+    /// Whether the current outer (h1 upstream) leg can be safely closed and re-dialed for a request
+    /// that resolved a different upstream host. Safe **only** when the leg is fully idle: the response
+    /// stream is between messages (no response head or body in flight) and the request just routed is
+    /// the *only* one outstanding (`http1InFlightCount == 1` — it was logged as it was emitted; a
+    /// higher count means an earlier request is still owed a response). Anything else returns false so
+    /// the caller falls back to tearing down — closing a busy leg could truncate an in-flight
+    /// response. Pure and side-effect-free so the decision can be unit-tested in isolation.
+    static func canSwapOuterLeg(responseBetweenMessages: Bool, http1InFlightCount: Int) -> Bool {
+        responseBetweenMessages && http1InFlightCount == 1
+    }
+
+    /// Live evaluation of ``canSwapOuterLeg`` against this session's response stream and request log.
+    private func canReconnectOuterLeg() -> Bool {
+        Self.canSwapOuterLeg(
+            responseBetweenMessages: responseStream.isBetweenMessages,
+            http1InFlightCount: requestLog.http1InFlightCount
+        )
+    }
+
+    /// Closes the current (confirmed-idle) outer h1 leg and dials a fresh one for the request that
+    /// resolved a different upstream host, keeping the inner (client) leg up so the client sees no
+    /// connection drop or retry — mitmproxy's lazy-mode connection reuse for a changed destination.
+    /// Precondition: ``canReconnectOuterLeg`` returned true. lwipQueue only.
+    private func reconnectOuterLeg(with transformed: Data, inner: TLSRecordConnection) {
+        logger.info("\(dstHost): later request resolved a new upstream; reconnecting the idle outer leg instead of tearing down")
+        // Detach the old leg *before* cancelling it: the old outbound pump's `outerRecord === outer`
+        // guard then sees a non-matching (nil) record and makes its EOF a no-op, so cancelling here
+        // can't recurse into a full session teardown.
+        let oldOuter = outerRecord
+        outerRecord = nil
+        if let oldOuter {
+            legSenders.removeValue(forKey: ObjectIdentifier(oldOuter))
+            oldOuter.cancel()
+        }
+        tlsClient?.cancel()
+        tlsClient = nil
+        outerConnection?.cancel()
+        outerConnection = nil
+        proxyClient?.cancel()
+        proxyClient = nil
+        // Reset the dial state so `bufferUpstreamAndDial` dials afresh; the request's own
+        // `resolvedUpstream` (already reflected on the request stream) picks the new target.
+        dialing = false
+        dialedHost = nil
+        dialedPort = nil
+        pendingUpstreamBytes = Data()
+        inboundReadPaused = false
+        bufferUpstreamAndDial(transformed, inner: inner)
     }
 
     /// Error marking a deferred upstream handshake that overran `TunnelConstants.handshakeTimeout`.
@@ -831,6 +927,10 @@ final class MITMSession {
         outer.receive { [weak self] data, error in
             guard let self else { return }
             self.lwipQueue.async {
+                // If this leg has been swapped out (a host-change reconnect replaced `outerRecord`)
+                // or the session is gone, it's no longer ours to drive: ignore its callbacks so its
+                // imminent EOF can't tear down the session or the freshly-dialed replacement leg.
+                guard self.outerRecord === outer else { return }
                 if let error {
                     self.cancel(error: error)
                     return
@@ -1081,7 +1181,11 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                     connection.cancel()
                     return
                 }
-                guard !self.torn else { connection.cancel(); return }
+                guard !self.torn else {
+                    if case .success(let record) = result { record.cancel() }
+                    connection.cancel()
+                    return
+                }
                 switch result {
                 case .success(let record):
                     self.sharedUpstreamRecord = record
@@ -1342,6 +1446,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                     return
                 }
                 guard !self.torn, let bs = self.bridgeStreams[streamID] else {
+                    if case .success(let record) = result { record.cancel() }
                     connection.cancel()
                     return
                 }

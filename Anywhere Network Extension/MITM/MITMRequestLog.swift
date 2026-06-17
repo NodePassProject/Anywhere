@@ -58,6 +58,13 @@ final class MITMRequestLog {
         http1Queue.isEmpty
     }
 
+    /// Number of HTTP/1 requests recorded (emitted upstream) but not yet matched to a response head.
+    /// The session reads this to decide whether an h1 upstream leg has outstanding responses before
+    /// closing it to reconnect to a different transparent-rewrite target.
+    var http1InFlightCount: Int {
+        http1Queue.count
+    }
+
     /// Cap on per-record synthAfter so pipelined `Anywhere.respond` bursts can't
     /// exhaust memory; excess bytes are dropped with a warning.
     private static let maxSynthAfterBytes: Int = 1 * 1024 * 1024

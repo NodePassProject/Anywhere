@@ -50,6 +50,19 @@ func isValidHTTPHeaderValue(_ value: String) -> Bool {
     return true
 }
 
+/// Rejects a decoded HTTP/2 header list carrying CR/LF/NUL in any field-value, or a non-`tchar`
+/// regular field-name — the splitting vector mitmproxy guards via `validate_headers` (RFC 9113
+/// §8.2.1). HPACK decoding only validates UTF-8, so control bytes otherwise slip through and get
+/// laundered to the peer (or downcast to HTTP/1.1). Pseudo-header names (`:`-prefixed) are validated
+/// structurally by the pseudo-header checker, so only their values are screened here.
+func http2HeaderOctetsValid(_ headers: [(name: String, value: String)]) -> Bool {
+    for (name, value) in headers {
+        if !isValidHTTPHeaderValue(value) { return false }
+        if !name.hasPrefix(":"), !isValidHTTPHeaderName(name) { return false }
+    }
+    return true
+}
+
 /// First value for `name` (ASCII case-insensitive), or nil.
 func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
     for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
@@ -111,5 +124,21 @@ extension String {
             startIdx = hay.index(after: startIdx)
         }
         return false
+    }
+}
+
+extension Data {
+
+    /// Appends a header field-name or field-value as its on-the-wire bytes. HTTP/1 header octets and
+    /// HPACK string literals are byte strings (RFC 9110 §5.5 obs-text; RFC 7541 §5.2), so a value
+    /// parsed as ISO-8859-1 round-trips to the exact same octets when re-emitted the same way. Falls
+    /// back to UTF-8 only for a rule-/script-injected value carrying scalars > 0xFF, which latin-1
+    /// can't represent — preserving the prior behavior for those.
+    mutating func appendHeaderFieldBytes(_ field: String) {
+        if let latin1 = field.data(using: .isoLatin1) {
+            append(latin1)
+        } else {
+            append(contentsOf: field.utf8)
+        }
     }
 }
