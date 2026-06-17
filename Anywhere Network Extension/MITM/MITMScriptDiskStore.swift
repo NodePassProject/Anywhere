@@ -139,7 +139,7 @@ final class MITMScriptDiskStore {
         guard !loaded.contains(scope) else { return }
         loaded.insert(scope)
         guard let url = fileURL(scope),
-              let data = try? Data(contentsOf: url),
+              let data = coordinatedRead(url),
               let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
               let dict = object as? [String: Data]
         else {
@@ -149,26 +149,53 @@ final class MITMScriptDiskStore {
         cache[scope] = dict
     }
 
+    /// Reads `url` under an `NSFileCoordinator` read so a concurrent writer in another App Group
+    /// process (e.g. the main app) can't be observed mid-write. (Cache coherence across processes
+    /// would additionally need an `NSFilePresenter`; today only the serialized NE writes this store.)
+    private func coordinatedRead(_ url: URL) -> Data? {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordError: NSError?
+        var result: Data?
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordError) { coordinatedURL in
+            result = try? Data(contentsOf: coordinatedURL)
+        }
+        return result
+    }
+
     private func writeUnlocked(scope: UUID, data: Data) -> Bool {
         guard let directory, let url = fileURL(scope) else { return false }
         let fileManager = FileManager.default
         if !fileManager.fileExists(atPath: directory.path) {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        do {
-            // FirstUserAuthentication matches the CA-key accessibility: the background NE can
-            // read/write after the first unlock even while the device is later locked.
-            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            return true
-        } catch {
+        // Coordinate the write across App Group processes so concurrent writers can't clobber each
+        // other's whole-bucket plist (last-writer-wins corruption). FirstUserAuthentication matches
+        // the CA-key accessibility: the background NE can read/write after the first unlock even
+        // while the device is later locked.
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordError: NSError?
+        var writeError: Error?
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordError) { coordinatedURL in
+            do {
+                try data.write(to: coordinatedURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            } catch {
+                writeError = error
+            }
+        }
+        if let error = coordError ?? writeError {
             logger.error("[MITM][JS] Anywhere.store(onDisk): write failed for \(scope): \(error)")
             return false
         }
+        return true
     }
 
     private func removeFileUnlocked(_ scope: UUID) {
         if let url = fileURL(scope) {
-            try? FileManager.default.removeItem(at: url)
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var coordError: NSError?
+            coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordError) { coordinatedURL in
+                try? FileManager.default.removeItem(at: coordinatedURL)
+            }
         }
         totalBytes -= fileSizes[scope] ?? 0
         fileSizes.removeValue(forKey: scope)

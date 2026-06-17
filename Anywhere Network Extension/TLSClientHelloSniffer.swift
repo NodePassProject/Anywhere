@@ -56,20 +56,45 @@ struct TLSClientHelloSniffer {
     // MARK: - Parsing
 
     /// TLS record layer: [content_type:1][legacy_version:2][length:2][fragment]
+    ///
+    /// A client may split the ClientHello across several TLS records (RFC 8446 §5.1) — common with
+    /// TLS-fragmenting / anti-censorship clients. Reassemble the handshake message across consecutive
+    /// handshake records before parsing, rather than giving up after the first record (which would
+    /// drop SNI-based routing for those clients). The total is bounded by `bufferLimit`.
     private func parse(_ buf: Data) -> State {
         guard buf.count >= 5 else { return .needMore }
-
         let base = buf.startIndex
         guard buf[base] == 0x16 else { return .unavailable }
 
-        // RFC 8446 §5.1: record fragment length ≤ 2^14.
-        let fragLen = (Int(buf[base + 3]) << 8) | Int(buf[base + 4])
-        guard fragLen > 0, fragLen <= 16_384 else { return .unavailable }
-
-        let recordEnd = base + 5 + fragLen
-        guard buf.count >= recordEnd else { return .needMore }
-
-        return parseHandshake(buf[(base + 5)..<recordEnd])
+        var fragment = Data()
+        var offset = 0                  // bytes scanned from base
+        var messageLength: Int?         // 4 + bodyLen, once the handshake header is in hand
+        let total = buf.count
+        while true {
+            guard total - offset >= 5 else { return .needMore }
+            let h = buf.index(base, offsetBy: offset)
+            guard buf[h] == 0x16 else { return .unavailable } // non-handshake record mid-message
+            // RFC 8446 §5.1: record fragment length ≤ 2^14.
+            let fragLen = (Int(buf[buf.index(h, offsetBy: 3)]) << 8) | Int(buf[buf.index(h, offsetBy: 4)])
+            guard fragLen > 0, fragLen <= 16_384 else { return .unavailable }
+            let recordTotal = 5 + fragLen
+            guard total - offset >= recordTotal else { return .needMore }
+            let fStart = buf.index(h, offsetBy: 5)
+            let fEnd = buf.index(fStart, offsetBy: fragLen)
+            fragment.append(buf[fStart..<fEnd])
+            offset += recordTotal
+            if messageLength == nil, fragment.count >= 4 {
+                let b = fragment.startIndex
+                guard fragment[b] == 0x01 else { return .unavailable } // ClientHello
+                let bodyLen = (Int(fragment[fragment.index(b, offsetBy: 1)]) << 16)
+                            | (Int(fragment[fragment.index(b, offsetBy: 2)]) << 8)
+                            | Int(fragment[fragment.index(b, offsetBy: 3)])
+                messageLength = 4 + bodyLen
+            }
+            if let ml = messageLength, fragment.count >= ml {
+                return parseHandshake(fragment.prefix(ml))
+            }
+        }
     }
 
     /// Handshake layer: [msg_type:1][length:3][body]

@@ -63,7 +63,14 @@ final class MITMHTTP1Stream {
     /// or a chunked body overruns the buffer cap. The stream stops forwarding (`.draining`) and
     /// asks the session to close the connection — fail closed rather than relay malformed bytes or
     /// deliver a truncated body framed as complete. Mirrors mitmproxy's `400/502 + CloseConnection`.
+    /// Used only *before* a head is committed to the wire, so the response leg can still answer 502.
     var onFatalClose: (() -> Void)?
+    /// Fired when chunked framing breaks *mid-body*, after the head is already on the wire. The
+    /// session must tear down both legs (a plain TCP close) — it cannot answer a 502, and
+    /// synthesizing a `0\r\n\r\n` terminator + passthrough would frame a truncated body as complete
+    /// and then desync the peer onto the next message. Mirrors mitmproxy's `CloseConnection` on a
+    /// body `ProtocolError`.
+    var onHardClose: (() -> Void)?
     /// Lazy JS runtime, shared across both directions.
     private let scriptEngineProvider: MITMScriptEngine.Provider
     /// Request stream records method/URL; response stream pops them for script ctx.
@@ -837,13 +844,15 @@ final class MITMHTTP1Stream {
             mode = .awaitingHead
             return true
         case .malformed:
-            // Chunked framing broke mid-body. Bridge: reset the stream. Main path: synthesize the
-            // terminator (or the receiver hangs waiting for `0\r\n\r\n`) and downgrade to passthrough.
+            // Chunked framing broke mid-body. Bridge: reset the stream. Main path: the head is
+            // already on the wire, so we can't answer an error — synthesizing a `0\r\n\r\n`
+            // terminator + passthrough would frame a truncated body as complete and then desync the
+            // peer onto the next message. Fail closed (close both legs), matching mitmproxy.
             if bridgeResetIfNeeded() { return false }
-            output.append(contentsOf: "0\r\n\r\n".utf8)
+            logger.warning("HTTP/1 \(host): chunked framing broke mid-body; closing the connection rather than truncating + desyncing")
             rxBuffer.removeAll(keepingCapacity: false)
-            flushSynthAfterResponse(into: &output)
-            mode = .passthrough
+            mode = .draining
+            onHardClose?()
             return true
         }
     }
@@ -912,10 +921,13 @@ final class MITMHTTP1Stream {
             return !parked
         case .malformed:
             // Bridge: no head emitted yet (buffered rewrite), so reset the client stream rather
-            // than strand it. Main path keeps its passthrough downgrade.
+            // than strand it. Main path: the head is still withheld (we were buffering to rewrite),
+            // so fail closed — answer 502 / close — instead of going passthrough, which would emit
+            // raw body bytes with no response head and desync the peer.
             if bridgeResetIfNeeded() { return false }
-            flushSynthAfterResponse(into: &output)
-            mode = .passthrough
+            logger.warning("HTTP/1 \(host): chunked framing broke while buffering for a rewrite; failing closed")
+            mode = .draining
+            onFatalClose?()
             return true
         }
     }
@@ -955,12 +967,13 @@ final class MITMHTTP1Stream {
             case .sizeLine:
                 guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
-                        // Unterminated size line: malformed, or the buffer grows unbounded.
-                        logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
-                        output.append(contentsOf: "0\r\n\r\n".utf8)
+                        // Unterminated size line: malformed, or the buffer grows unbounded. The head
+                        // is already on the wire, so fail closed (close both legs) rather than
+                        // synthesize a terminator that frames the body as complete and desyncs.
+                        logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
                         rxBuffer.removeAll(keepingCapacity: false)
-                        flushSynthAfterResponse(into: &output)
-                        mode = .passthrough
+                        mode = .draining
+                        onHardClose?()
                         return true
                     }
                     streaming.lineScanCursor = max(0, rxBuffer.count - 1)
@@ -971,12 +984,13 @@ final class MITMHTTP1Stream {
                 rxBuffer.removeFirst(lineEnd + 2)
                 streaming.lineScanCursor = 0
                 guard let size = Self.parseHexSize(line) else {
-                    // Head went out as chunked: synthesize the terminator and
-                    // discard the rest rather than feed garbage as the next head.
-                    output.append(contentsOf: "0\r\n\r\n".utf8)
+                    // Malformed chunk-size line: the head already went out as chunked, so fail closed
+                    // (close both legs) rather than synthesize a terminator that frames a truncated
+                    // body as complete and then feeds garbage as the next response.
+                    logger.warning("HTTP/1 \(host): malformed chunk-size line; closing the connection")
                     rxBuffer.removeAll(keepingCapacity: false)
-                    flushSynthAfterResponse(into: &output)
-                    mode = .passthrough
+                    mode = .draining
+                    onHardClose?()
                     return true
                 }
                 if size == 0 {
@@ -1063,11 +1077,12 @@ final class MITMHTTP1Stream {
                 guard rxBuffer[0] == 0x0D,
                       rxBuffer[1] == 0x0A
                 else {
-                    // Same as malformed size-line: synthesize terminator and drop garbage.
-                    output.append(contentsOf: "0\r\n\r\n".utf8)
+                    // Missing inter-chunk CRLF: framing is broken and the head is on the wire.
+                    // Fail closed (close both legs) rather than truncate-and-desync.
+                    logger.warning("HTTP/1 \(host): missing CRLF after chunk data; closing the connection")
                     rxBuffer.removeAll(keepingCapacity: false)
-                    flushSynthAfterResponse(into: &output)
-                    mode = .passthrough
+                    mode = .draining
+                    onHardClose?()
                     return true
                 }
                 rxBuffer.removeFirst(2)
@@ -1076,12 +1091,14 @@ final class MITMHTTP1Stream {
                 // RFC 9112 §7.1.2: forward trailer lines verbatim until the empty-line terminator.
                 guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
-                        logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
-                        // "0\r\n" was already emitted; close the trailer section.
-                        output.append(contentsOf: "\r\n".utf8)
+                        // Oversized/garbage trailer with the final CRLF still unseen: the upstream
+                        // framing is broken. We already emitted `0\r\n` but not the closing `\r\n`,
+                        // so the peer sees an unterminated body — close both legs (the honest signal)
+                        // rather than paper over it and desync onto trailer garbage.
+                        logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
                         rxBuffer.removeAll(keepingCapacity: false)
-                        flushSynthAfterResponse(into: &output)
-                        mode = .passthrough
+                        mode = .draining
+                        onHardClose?()
                         return true
                     }
                     streaming.lineScanCursor = max(0, rxBuffer.count - 1)
@@ -1605,6 +1622,17 @@ final class MITMHTTP1Stream {
             // HTTP/1.0 message is a smuggling vector — HTTP/1.0 hops ignore TE and frame by close, so
             // two hops disagree on the body boundary (mitmproxy rejects this in validate.py).
             guard startLineIsHTTP11(startLine) else { return .smuggling }
+            // RFC 9112 §6.1: `chunked` must be applied at most once and only as the final coding.
+            // `chunked, chunked` (or chunked in a non-final position) means two hops can disagree on
+            // the body length — reject it on both phases, matching mitmproxy's TE allow-list.
+            let teTokens = transferEncodingValues[0]
+                .split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: CharacterSet.whitespaces) }
+            let chunkedCount = teTokens.filter { $0.equalsIgnoringASCIICase("chunked") }.count
+            if chunkedCount > 1 { return .smuggling }
+            if chunkedCount == 1, teTokens.last?.equalsIgnoringASCIICase("chunked") != true {
+                return .smuggling
+            }
             if !Self.transferEncodingIsChunked(transferEncodingValues[0]), phase == .httpRequest {
                 return .smuggling
             }
@@ -1754,6 +1782,7 @@ final class MITMHTTP1Stream {
         let body = response.truncatedBody(cap: Self.maxSynthesizedResponseBodyBytes) { size in
             logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond body \(size) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
         }
+        headers = response.withDateStamp(headers, lowercaseName: false)
         headers.append((name: "Content-Length", value: String(body.count)))
         var bytes = serializeHead(startLine: startLine, headers: headers)
         if !body.isEmpty {

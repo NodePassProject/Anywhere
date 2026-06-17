@@ -390,6 +390,14 @@ final class MITMSession {
         responseStream.onFatalClose = { [weak self] in
             self?.lwipQueue.async { self?.failInnerLegWith502("rejected a malformed or oversized upstream response") }
         }
+        // Mid-body chunked framing breakage (head already on the wire): tear down both legs. A 502
+        // can't be written over an in-flight response, and a synthesized terminator would frame a
+        // truncated body as complete and desync the peer onto the next message.
+        let hardClose: () -> Void = { [weak self] in
+            self?.lwipQueue.async { self?.cancel(error: nil) }
+        }
+        requestStream.onHardClose = hardClose
+        responseStream.onHardClose = hardClose
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
         // Unparseable ClientHello fails closed to TLS 1.2; any 1.3-capable client also speaks 1.2.
@@ -528,7 +536,7 @@ final class MITMSession {
             serverName: host,
             alpn: [innerALPN],
             minVersion: .tls12,
-            maxVersion: clientSupportsTLS13 ? .tls13 : .tls12,
+            maxVersion: .tls13, // upstream TLS leg is independent of the client leg — don't cap it to the client's version
             fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
@@ -563,10 +571,28 @@ final class MITMSession {
                     self.outerRecord = record
                     self.finishDialAndShuttle(inner: inner, outer: record)
                 case .failure(let error):
-                    self.failInnerLegWith502("upstream connect failed: \(error)")
+                    // A *certificate-validation* failure is a security signal, not a gateway hiccup:
+                    // answering a clean 502 over the trusted inner leg would render as a padlocked
+                    // "502" page and mask that the real origin's cert is invalid/expired/self-signed.
+                    // Tear the connection down instead so the client surfaces a connection failure.
+                    // (Surfacing the actual TLS error to the client would require eager-mode TLS,
+                    // establishing+verifying upstream before the inner handshake — out of scope here.)
+                    if Self.isCertVerifyFailure(error) {
+                        logger.warning("[MITM] \(self.dstHost): upstream certificate validation failed (\(error)); closing rather than masking as a 502")
+                        self.cancel(error: nil)
+                    } else {
+                        self.failInnerLegWith502("upstream connect failed: \(error)")
+                    }
                 }
             }
         }
+    }
+
+    /// True for an upstream TLS certificate-validation failure (vs a transport/timeout failure),
+    /// so the deferred-dial paths can reset instead of answering a trusted-looking 502.
+    private static func isCertVerifyFailure(_ error: Error) -> Bool {
+        if case TLSError.certificateValidationFailed = error { return true }
+        return false
     }
 
     // MARK: - ClientHello parsing
@@ -1114,7 +1140,14 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     private func startFirstUpstreamDial() {
         guard !firstUpstreamDialStarted else { return }
         firstUpstreamDialStarted = true
-        let resolved = h2Rewriter.resolvedUpstream
+        // Dial target from the first pending request's head (captured at its own rewrite time),
+        // not the rewriter's shared last-write-wins field — keeps the probe consistent with that
+        // request's `:authority` even if a later stream rewrote to a different host meanwhile.
+        let firstHead = pendingRequestEvents.lazy.compactMap { event -> MITMRequestHead? in
+            if case .head(let head, _, _) = event { return head }
+            return nil
+        }.first
+        let resolved = firstHead?.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
         dialer(host, port) { [weak self] result in
@@ -1165,7 +1198,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             serverName: host,
             alpn: ["h2", "http/1.1"],
             minVersion: .tls12,
-            maxVersion: clientSupportsTLS13 ? .tls13 : .tls12,
+            maxVersion: .tls13, // upstream TLS leg is independent of the client leg — don't cap it to the client's version
             fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
@@ -1195,7 +1228,16 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                         self.bindH1Upstream()
                     }
                 case .failure(let error):
-                    self.failPendingBridgeRequests(error: error)
+                    // A cert-validation failure is a security signal, not a gateway hiccup: a 502 over
+                    // the trusted inner leg renders as a padlocked error page and masks the origin's
+                    // invalid cert. Tear down so the client surfaces a connection failure; a transient
+                    // failure still 502s and re-probes (mirrors the eager-dial path's handling).
+                    if Self.isCertVerifyFailure(error) {
+                        logger.warning("[MITM] \(self.dstHost): upstream certificate validation failed (\(error)); closing rather than masking as a 502")
+                        self.cancel(error: nil)
+                    } else {
+                        self.failPendingBridgeRequests(error: error)
+                    }
                 }
             }
         }
@@ -1331,14 +1373,12 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             return
         }
 
-        // Per-stream dial target. `resolvedUpstream` is the rewriter's latest transparent
-        // rewrite (last-write-wins): correct for a streamed request, which reads it
-        // synchronously right after its own request-phase rewrite, but a request buffered for
-        // a body script/rule resolves it here at emit time — after the async script hop — so a
-        // concurrent stream's rewrite to a *different* host can win. Harmless unless one
-        // origin's traffic is split across several transparent target hosts, which the guide
-        // advises against. (The Host header still tracks this stream via `head.authority`.)
-        let resolved = h2Rewriter.resolvedUpstream
+        // Per-stream dial target, taken from the head — captured synchronously at this request's
+        // own rewrite time (see `MITMRequestHead.resolvedUpstream`). Reading the rewriter's shared
+        // last-write-wins field here would be wrong for a request buffered for a body script/rule,
+        // whose dial happens after an async hop during which a concurrent stream could overwrite it.
+        // The dial target now stays consistent with the `:authority` baked into this same head.
+        let resolved = head.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
         dialer(host, port) { [weak self] result in
@@ -1426,7 +1466,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             serverName: host,
             alpn: ["http/1.1"],
             minVersion: .tls12,
-            maxVersion: clientSupportsTLS13 ? .tls13 : .tls12,
+            maxVersion: .tls13, // upstream TLS leg is independent of the client leg — don't cap it to the client's version
             fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
@@ -1459,10 +1499,18 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                     self.flushToBridgeUpstream(pending, streamID: streamID, record: record)
                     self.startBridgeUpstreamPump(streamID: streamID)
                 case .failure(let error):
-                    // Inner leg is up; answer the stream with a 502 instead of a bare RST_STREAM.
-                    logger.warning("\(self.dstHost): bridge upstream TLS failed for stream \(streamID): \(error)")
-                    self.bridgeAbortStream(streamID)
-                    self.bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
+                    // A cert-validation failure is host-level (the origin's cert is invalid for every
+                    // stream to it): a 502 over the trusted inner leg would mask it as a padlocked
+                    // page, so tear the connection down. A transient TLS/transport failure still
+                    // answers this stream 502 (mitmproxy's lazy-connect behavior) instead of a bare RST.
+                    if Self.isCertVerifyFailure(error) {
+                        logger.warning("\(self.dstHost): bridge upstream certificate validation failed for stream \(streamID) (\(error)); closing rather than masking as a 502")
+                        self.cancel(error: nil)
+                    } else {
+                        logger.warning("\(self.dstHost): bridge upstream TLS failed for stream \(streamID): \(error)")
+                        self.bridgeAbortStream(streamID)
+                        self.bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
+                    }
                 }
             }
         }

@@ -1666,8 +1666,14 @@ final class MITMScriptEngine {
             return mitmScriptTypedArrayBytes + count
         }()
         if projected > hardTypedArrayBudget && count > 0 {
-            logger.warning("[MITM][JS] typed-array budget exhausted (\(projected) B > \(hardTypedArrayBudget) B); returning empty Uint8Array")
-            return makeUint8Array(in: context, from: Data())  // count=0 bypasses the cap
+            // Budget exhausted: fail the allocation (undefined, like the JSObjectMake-failure path
+            // below) rather than hand back a non-empty→empty Uint8Array. An empty array would
+            // masquerade as a valid empty body and silently zero whatever the script writes back
+            // (ctx.body, a codec/http result); since the counter is process-global, one rule set's
+            // pinned buffers could otherwise corrupt another's body. Undefined makes readBack keep
+            // the original bytes — and a script that uses the value throws, reverting unchanged.
+            logger.warning("[MITM][JS] typed-array budget exhausted (\(projected) B > \(hardTypedArrayBudget) B); failing allocation (undefined)")
+            return JSValue(undefinedIn: context)
         }
         // Always allocate at least 1 byte: the deallocator needs a valid pointer.
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: max(count, 1), alignment: 1)

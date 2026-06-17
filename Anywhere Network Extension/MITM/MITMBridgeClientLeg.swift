@@ -93,8 +93,13 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let streamID: UInt32
         var fragments: Data
         let endStream: Bool
+        var continuationCount = 0
     }
     private var pending: Pending?
+    /// CONTINUATION-flood guard (CVE-2024-27316 class): bound the number of CONTINUATION frames per
+    /// header block. Generous for a legitimately large (≤256 KiB) block split into frames, but
+    /// closes the empty/tiny-CONTINUATION-without-END_HEADERS loop that the byte cap alone misses.
+    private static let maxContinuationFrames = 1024
 
     // MARK: Request streams
 
@@ -107,6 +112,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         /// True when buffering to run a body script; false when buffering only to frame a
         /// no-declared-length body with Content-Length (no script, no decompression).
         let scripted: Bool
+        /// The transparent-rewrite upstream captured at header-rewrite time, carried through the
+        /// body-buffering delay so the dial target can't be changed by a concurrent stream's rewrite.
+        let resolvedUpstream: (host: String, port: UInt16?)?
     }
 
     private enum RequestStream {
@@ -418,9 +426,15 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     private func handleContinuation(_ frame: Codec.RawFrame) -> Bool {
         guard var p = pending, p.streamID == frame.streamID else { fail("stray CONTINUATION"); return false }
+        let isFinal = frame.flags & 0x4 != 0
+        // Forward-progress + count bound: a stream of empty (or tiny) CONTINUATION frames that never
+        // set END_HEADERS never trips the byte cap and would spin the shared parser indefinitely.
+        if frame.payload.isEmpty && !isFinal { fail("zero-length CONTINUATION without END_HEADERS"); return false }
+        p.continuationCount += 1
+        if p.continuationCount > Self.maxContinuationFrames { fail("too many CONTINUATION frames"); return false }
         if p.fragments.count + frame.payload.count > Self.maxHeaderBlockBytes { fail("header block over cap"); return false }
         p.fragments.append(frame.payload)
-        if frame.flags & 0x4 != 0 {
+        if isFinal {
             pending = nil
             return finalizeHeaders(streamID: p.streamID, fragments: p.fragments, endStream: p.endStream)
         }
@@ -507,6 +521,10 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
 
         var rewritten = rewriter.transformRequestHeaders(decoded, streamID: streamID)
+        // Capture the resolved upstream NOW, synchronously, while it reflects *this* request's
+        // rewrite — before any body-buffering async hop lets a concurrent stream overwrite the
+        // rewriter's shared last-write-wins field. It rides the head (and BufferedReq) to the dial.
+        let resolvedUpstream = rewriter.resolvedUpstream
         let gateURL = MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(host)\($0)" } ?? requestURL
 
         // Expect: 100-continue — answer with an interim 100 ourselves and strip Expect before
@@ -525,7 +543,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let hasBufferedRule = rewriter.hasBufferedBodyRule(phase: .httpRequest, requestURL: gateURL)
         if hasBufferedRule, (endStream || shouldBuffer(headers: rewritten)) {
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
-            requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: true))
+            requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: true, resolvedUpstream: resolvedUpstream))
             if endStream { return finishBufferedRequest(streamID) }
             return false
         }
@@ -544,12 +562,12 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             framing = n == 0 ? .none : .contentLength(n)
         } else if bodylessMethod {
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
-            requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: false))
+            requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: false, resolvedUpstream: resolvedUpstream))
             return false
         } else {
             framing = .chunked
         }
-        guard let head = makeRequestHead(streamID: streamID, rewritten: rewritten, framing: framing, neverIndexed: neverIndexed) else {
+        guard let head = makeRequestHead(streamID: streamID, rewritten: rewritten, framing: framing, neverIndexed: neverIndexed, resolvedUpstream: resolvedUpstream) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: false)
             return false
         }
@@ -575,7 +593,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         streamID: UInt32,
         rewritten: [(name: String, value: String)],
         framing: MITMBridgeBodyFraming,
-        neverIndexed: Set<String>
+        neverIndexed: Set<String>,
+        resolvedUpstream: (host: String, port: UInt16?)?
     ) -> MITMRequestHead? {
         guard let method = firstHeaderValue(rewritten, name: ":method"),
               let path = firstHeaderValue(rewritten, name: ":path"),
@@ -599,7 +618,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             path: path,
             headers: MITMBridgeHeaders.upstreamRequestHeaders(decoded: rewritten),
             framing: framing,
-            neverIndexed: neverIndexed
+            neverIndexed: neverIndexed,
+            resolvedUpstream: resolvedUpstream
         )
     }
 
@@ -715,7 +735,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     private func abandonBufferedToChunked(streamID: UInt32, buf: BufferedReq) -> Bool {
         logger.warning("bridge \(host) stream \(streamID): request body over buffer cap; streaming remainder chunked")
-        guard let head = makeRequestHead(streamID: streamID, rewritten: buf.rewrittenHeaders, framing: .chunked, neverIndexed: buf.neverIndexed) else {
+        guard let head = makeRequestHead(streamID: streamID, rewritten: buf.rewrittenHeaders, framing: .chunked, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
             return false
         }
@@ -743,7 +763,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         guard case .buffering(let buf)? = requestStreams[streamID] else { return false }
         guard buf.scripted else {
             requestStreams.removeValue(forKey: streamID)
-            emitBufferedRequest(streamID: streamID, headers: buf.rewrittenHeaders, body: buf.data, neverIndexed: buf.neverIndexed)
+            emitBufferedRequest(streamID: streamID, headers: buf.rewrittenHeaders, body: buf.data, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream)
             return false
         }
         return runRequestScripts(streamID)
@@ -757,7 +777,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         if buf.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(buf.data, plan: buf.codec, host: host) else {
                 // Decompression failed: forward verbatim (content-encoding intact).
-                emitBufferedRequest(streamID: streamID, headers: buf.rewrittenHeaders, body: buf.data, neverIndexed: buf.neverIndexed)
+                emitBufferedRequest(streamID: streamID, headers: buf.rewrittenHeaders, body: buf.data, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream)
                 return false
             }
             plaintext = decoded
@@ -781,7 +801,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             guard let self, !self.torn else { return }
             switch outcome {
             case .message(let updated):
-                self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buf.neverIndexed)
+                self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream)
             case .synthesizedResponse(let response):
                 self.answerSynth(streamID: streamID, response: response)
             }
@@ -797,8 +817,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     /// Emits a fully-buffered request: head with explicit Content-Length, then the body.
-    private func emitBufferedRequest(streamID: UInt32, headers: [(name: String, value: String)], body: Data, neverIndexed: Set<String>) {
-        guard let head = makeRequestHead(streamID: streamID, rewritten: headers, framing: .contentLength(body.count), neverIndexed: neverIndexed) else {
+    private func emitBufferedRequest(streamID: UInt32, headers: [(name: String, value: String)], body: Data, neverIndexed: Set<String>, resolvedUpstream: (host: String, port: UInt16?)?) {
+        guard let head = makeRequestHead(streamID: streamID, rewritten: headers, framing: .contentLength(body.count), neverIndexed: neverIndexed, resolvedUpstream: resolvedUpstream) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
             return
         }
@@ -811,9 +831,10 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     private func answerSynth(streamID: UInt32, response: MITMScriptEngine.SynthesizedResponse) {
         requestStreams[streamID] = .synthAnswered // swallow further request DATA
-        let headers = response.sanitizedHeaders(lowercaseNames: true) { name in
+        let sanitized = response.sanitizedHeaders(lowercaseNames: true) { name in
             logger.warning("[MITM][JS] bridge \(host): Anywhere.respond dropping invalid header: \(name)")
         }
+        let headers = response.withDateStamp(sanitized, lowercaseName: true)
         let body = response.truncatedBody(cap: MITMBodyCodec.maxBufferedBodyBytes) { size in
             logger.warning("[MITM][JS] bridge \(host): Anywhere.respond body \(size) B over cap; truncating")
         }

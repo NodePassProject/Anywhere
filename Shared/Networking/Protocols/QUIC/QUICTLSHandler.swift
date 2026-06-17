@@ -903,8 +903,7 @@ nonisolated class QUICTLSHandler {
             return nil
         }
 
-        if let leafCert = serverCertificates.first,
-           Self.isUserTrusted(certificate: leafCert) {
+        if Self.isUserTrusted(chain: serverCertificates, serverName: serverName) {
             return nil
         }
 
@@ -975,12 +974,26 @@ nonisolated class QUICTLSHandler {
         }
     }
 
-    private static func isUserTrusted(certificate: SecCertificate) -> Bool {
+    /// A user-pinned leaf fingerprint waives **only** the chain-of-trust requirement — not the
+    /// hostname or validity period. After matching the pinned SHA-256, the leaf is re-evaluated as
+    /// its own trust anchor under the SSL policy for `serverName`, so a cert pinned for host A can't
+    /// be accepted for host B and an expired pinned cert is still rejected (the pin is host-scoped).
+    private static func isUserTrusted(chain: [SecCertificate], serverName: String) -> Bool {
+        guard let leaf = chain.first else { return false }
         let trusted = CertificatePolicy.trustedFingerprints
         guard !trusted.isEmpty else { return false }
-        let certData = SecCertificateCopyData(certificate) as Data
+        let certData = SecCertificateCopyData(leaf) as Data
         let sha256 = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
-        return trusted.contains(sha256)
+        guard trusted.contains(sha256) else { return false }
+        // Re-evaluate with the pinned leaf installed as the sole anchor: this trusts the exact pinned
+        // cert while the SSL policy still enforces hostname (SAN/CN) match and notBefore/notAfter.
+        var trust: SecTrust?
+        let policy = SecPolicyCreateSSL(true, serverName as CFString)
+        guard SecTrustCreateWithCertificates(chain as CFArray, policy, &trust) == errSecSuccess,
+              let trust else { return false }
+        guard SecTrustSetAnchorCertificates(trust, [leaf] as CFArray) == errSecSuccess,
+              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else { return false }
+        return SecTrustEvaluateWithError(trust, nil)
     }
 
     // MARK: - Helpers

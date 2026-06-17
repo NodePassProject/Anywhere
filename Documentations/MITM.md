@@ -728,7 +728,10 @@ state lives on `ctx`; cross-connection state belongs in
 - `Anywhere.respond({ status, headers, body })` — **request-phase only**. Drop
   the request before it reaches upstream and synthesize a response straight back
   to the client. All fields optional: `status` defaults to 200 (clamped to
-  100–599), `headers` to `[]`, `body` to empty. Ignored (with a warning) on the
+  100–599), `headers` to `[]`, `body` to empty. Anywhere owns framing, so
+  `Content-Length` and hop-by-hop headers (`transfer-encoding`, `connection`,
+  `keep-alive`, `upgrade`, `proxy-connection`, `te`, `trailer`) you set are
+  dropped, and a `Date` is stamped when absent. Ignored (with a warning) on the
   response phase and in `stream-script`.
 
 These set engine state and return; your code should `return` immediately after

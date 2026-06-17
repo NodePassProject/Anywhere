@@ -66,18 +66,16 @@ final class MITMScriptStore {
     func delete(scope: UUID, key: String, onDisk: Bool = false) {
         if onDisk { return MITMScriptDiskStore.shared.delete(scope: scope, key: key) }
         lock.lock(); defer { lock.unlock() }
-        guard var bucket = buckets[scope] else { return }
-        if let existing = bucket[key] {
-            let delta = existing.count + key.utf8.count
-            bucketSizes[scope] = (bucketSizes[scope] ?? 0) - delta
-            totalBytes -= delta
-        }
-        bucket.removeValue(forKey: key)
-        if bucket.isEmpty {
+        // Mutate through the subscript (not `var bucket = buckets[scope]` + reassign), so removing a
+        // key doesn't COW-copy the whole bucket — matching `set`'s in-place discipline.
+        guard let existing = buckets[scope]?[key] else { return }
+        let delta = existing.count + key.utf8.count
+        bucketSizes[scope] = (bucketSizes[scope] ?? 0) - delta
+        totalBytes -= delta
+        buckets[scope]?.removeValue(forKey: key)
+        if buckets[scope]?.isEmpty == true {
             buckets.removeValue(forKey: scope)
             bucketSizes.removeValue(forKey: scope)
-        } else {
-            buckets[scope] = bucket
         }
     }
 

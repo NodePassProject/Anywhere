@@ -211,13 +211,12 @@ nonisolated final class TLSServer {
     }
 
     private func processClientHello() throws {
-        guard let record = try peekTLSRecord() else { return }
-        guard record[record.startIndex] == TLSContentType.handshake else {
-            throw TLSError.handshakeFailed("Expected handshake record")
-        }
-        rxBuffer.removeFirst(record.count)
+        // A client may legally split the ClientHello across several TLS records (RFC 8446 §5.1);
+        // peeking only the first record would strand TLS-fragmenting / anti-censorship clients, so
+        // reassemble the whole handshake message before parsing.
+        guard let handshakeMessage = try peekReassembledClientHello() else { return }
 
-        let parsed = try TLSClientHelloParser.parse(record)
+        let parsed = try TLSClientHelloParser.parseHandshakeBody(handshakeMessage)
 
         // If the client and server have no application protocols in common the
         // server responds with a fatal "no_application_protocol" alert.
@@ -633,6 +632,63 @@ nonisolated final class TLSServer {
         let total = 5 + len
         guard rxBuffer.count >= total else { return nil }
         return rxBuffer.subdata(in: rxBuffer.startIndex..<(rxBuffer.startIndex + total))
+    }
+
+    /// Upper bound on a reassembled ClientHello; anything larger is treated as bogus rather than
+    /// buffered unboundedly across records.
+    private static let maxClientHelloBytes = 64 * 1024
+
+    /// Reassembles a (possibly record-fragmented) ClientHello handshake message from the head of
+    /// `rxBuffer`. Returns the bare handshake-message bytes (msg-type + 3-byte length + body) once
+    /// complete, consuming exactly the records it used; returns nil when more records are still
+    /// needed (leaving `rxBuffer` intact so the caller can retry after more bytes arrive). Throws on
+    /// a non-handshake record, an out-of-bounds record length, or an over-large message.
+    private func peekReassembledClientHello() throws -> Data? {
+        var payload = Data()
+        var offset = 0                  // bytes scanned from rxBuffer.startIndex
+        var messageLength: Int?         // 4 + bodyLen, once the handshake header is in hand
+        let available = rxBuffer.count
+        let base = rxBuffer.startIndex
+        while true {
+            guard available - offset >= 5 else { return nil }
+            let h = rxBuffer.index(base, offsetBy: offset)
+            guard rxBuffer[h] == TLSContentType.handshake else {
+                throw TLSError.handshakeFailed("Expected handshake record")
+            }
+            let len = (Int(rxBuffer[rxBuffer.index(h, offsetBy: 3)]) << 8)
+                    | Int(rxBuffer[rxBuffer.index(h, offsetBy: 4)])
+            // Reject zero-length records: they never advance `messageLength` (payload stays empty), so
+            // the per-message cap below never fires and a flood of them would grow rxBuffer without
+            // bound. Matches the sniffer's `fragLen > 0` guard.
+            guard len > 0, len <= 16384 + 256 else {
+                throw TLSError.handshakeFailed("record length \(len) out of bounds")
+            }
+            let recordTotal = 5 + len
+            guard available - offset >= recordTotal else { return nil }
+            let payloadStart = rxBuffer.index(h, offsetBy: 5)
+            let payloadEnd = rxBuffer.index(payloadStart, offsetBy: len)
+            payload.append(rxBuffer.subdata(in: payloadStart..<payloadEnd))
+            offset += recordTotal
+            if messageLength == nil, payload.count >= 4 {
+                let b = payload.startIndex
+                guard payload[b] == TLSHandshakeType.clientHello else {
+                    throw TLSError.handshakeFailed("Expected ClientHello")
+                }
+                let bodyLen = (Int(payload[payload.index(b, offsetBy: 1)]) << 16)
+                            | (Int(payload[payload.index(b, offsetBy: 2)]) << 8)
+                            | Int(payload[payload.index(b, offsetBy: 3)])
+                let total = 4 + bodyLen
+                guard total <= Self.maxClientHelloBytes else {
+                    throw TLSError.handshakeFailed("ClientHello too large (\(total) B)")
+                }
+                messageLength = total
+            }
+            if let total = messageLength, payload.count >= total {
+                rxBuffer.removeFirst(offset)
+                let start = payload.startIndex
+                return payload.subdata(in: start..<payload.index(start, offsetBy: total))
+            }
+        }
     }
 
     // MARK: - TLS 1.2 Handshake

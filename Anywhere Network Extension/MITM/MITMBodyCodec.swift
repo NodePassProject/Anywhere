@@ -336,6 +336,11 @@ enum MITMBodyCodec {
         // zlib-wrapped fallback: strip 2-byte header + 4-byte adler32 footer.
         // Require >6 bytes or the strip yields an empty slice "successfully" decoded blank.
         guard data.count > 6 else { return nil }
+        // FDICT (FLG bit 5, RFC 1950 §2.2): a 4-byte DICTID follows the 2-byte header, so the
+        // simple 2-byte strip would be wrong — and the Compression framework can't supply a preset
+        // dictionary anyway. Fail closed (forward verbatim) rather than mis-strip into garbage.
+        let flg = data[data.index(data.startIndex, offsetBy: 1)]
+        guard flg & 0x20 == 0 else { return nil }
         let body = data.subdata(in: (data.startIndex + 2)..<(data.endIndex - 4))
         return streamDecode(body, algorithm: COMPRESSION_ZLIB)
     }
@@ -422,7 +427,9 @@ enum MITMBodyCodec {
 
     // MARK: - Streaming encoder (JS codec bridge)
 
-    /// Streaming encode. No output cap: input is bounded by the JS engine's typed-array budget.
+    /// Streaming encode; nil on error or when output would exceed `maxBufferedBodyBytes`.
+    /// The cap mirrors the decode path so a script can't inflate extension memory by
+    /// (re)compressing an input larger than the typed-array budget would otherwise allow.
     private static func streamEncode(_ data: Data, algorithm: compression_algorithm) -> Data? {
         let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
         defer { stream.deallocate() }
@@ -452,6 +459,10 @@ enum MITMBodyCodec {
                 case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
+                        if output.count + written > maxBufferedBodyBytes {
+                            logger.warning("encode output would exceed cap \(maxBufferedBodyBytes) B; aborting")
+                            return nil
+                        }
                         output.append(buffer, count: written)
                     }
                     if status == COMPRESSION_STATUS_END {

@@ -56,8 +56,12 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let streamID: UInt32
         var fragments: Data
         let originalFlags: UInt8
+        var continuationCount = 0
     }
     private var pending: Pending?
+    /// CONTINUATION-flood guard (CVE-2024-27316 class): bound the CONTINUATION frame count per
+    /// header block, closing the empty/tiny-CONTINUATION-without-END_HEADERS loop the byte cap misses.
+    private static let maxContinuationFrames = 1024
 
     // MARK: Request side (toward upstream)
 
@@ -77,6 +81,13 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Provisional ceiling on open upstream streams before the origin's first SETTINGS
     /// tells us its real limit (RFC 9113 §5.1.2). Mirrors mitmproxy's pre-SETTINGS guess.
     private static let provisionalMaxConcurrentStreams = 10
+
+    /// Hard cap on the held-back request backlog. An origin may advertise a very low — or zero
+    /// (RFC 9113 §6.5.2: a temporary refusal) — MAX_CONCURRENT_STREAMS and never raise it; without
+    /// this bound the queue would grow without limit under a request flood. Past the cap, new
+    /// requests are RST (REFUSED_STREAM, retriable) rather than buffered. Set well above the client
+    /// leg's advertised 128 concurrent so a conformant client never trips it.
+    private static let maxQueuedRequests = 256
 
     /// Origin's advertised SETTINGS_MAX_CONCURRENT_STREAMS (0x3), once observed; sticky
     /// across later SETTINGS that omit it. nil until the origin first advertises a value.
@@ -304,6 +315,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // RFC 9113 §5.1.2: never open more concurrent streams than the origin allows. Hold
         // the request back rather than let the origin REFUSED_STREAM it; drained as slots free.
         guard ourStreamID.count < maxConcurrentStreams else {
+            // Bound the backlog: an origin advertising a very low (or zero) MAX_CONCURRENT_STREAMS
+            // and never raising it must not let the queue grow unboundedly under a flood. Past the
+            // cap, RST the new stream (retriable) so the client can make progress elsewhere.
+            guard queueOrder.count < Self.maxQueuedRequests else {
+                logger.warning("h2-upstream \(host) stream \(head.clientStreamID): request queue at cap \(Self.maxQueuedRequests) (origin MAX_CONCURRENT_STREAMS=\(maxConcurrentStreams)); refusing stream")
+                sink?.deliverResponseReset(streamID: head.clientStreamID, errorCode: Codec.ErrorCode.refusedStream)
+                return
+            }
             queuedRequests[head.clientStreamID] = QueuedRequest(head: head, endStreamOnHead: endStream)
             queueOrder.append(head.clientStreamID)
             return
@@ -695,9 +714,15 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     private func handleContinuation(_ frame: Codec.RawFrame) -> Bool {
         guard var p = pending, p.streamID == frame.streamID else { fail("stray CONTINUATION"); return false }
+        let isFinal = frame.flags & 0x4 != 0
+        // Forward-progress + count bound (CVE-2024-27316 class): an empty/tiny CONTINUATION stream
+        // that never sets END_HEADERS never trips the byte cap and would spin the shared parser.
+        if frame.payload.isEmpty && !isFinal { fail("zero-length CONTINUATION without END_HEADERS"); return false }
+        p.continuationCount += 1
+        if p.continuationCount > Self.maxContinuationFrames { fail("too many CONTINUATION frames"); return false }
         if p.fragments.count + frame.payload.count > Self.maxHeaderBlockBytes { fail("header block over cap"); return false }
         p.fragments.append(frame.payload)
-        if frame.flags & 0x4 != 0 {
+        if isFinal {
             pending = nil
             return finalizeHeaders(streamID: p.streamID, fragments: p.fragments, originalFlags: p.originalFlags)
         }
@@ -827,6 +852,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let endStream = frame.flags & 0x1 != 0
         let sid = frame.streamID
         guard let clientID = theirStreamID[sid] else {
+            // DATA on a stream id we never assigned (≥ our next-to-open) is a protocol error on an
+            // idle stream (RFC 9113 §5.1) — fail the connection, matching the client leg's
+            // idle-stream handling. (We assign every upstream stream id, so the origin can't
+            // legitimately send DATA on one we haven't opened.)
+            if sid >= nextUpstreamStreamID {
+                fail("DATA on idle upstream stream \(sid)")
+                return false
+            }
             // DATA on a stream we already released (late frames after a reset/completion). The
             // per-stream window is gone, but the bytes still count against the connection window —
             // credit it or our receive window toward the upstream leaks (RFC 9113 §6.9.1).

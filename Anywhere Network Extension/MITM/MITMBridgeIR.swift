@@ -38,6 +38,12 @@ struct MITMRequestHead {
     /// (RFC 7541 §6.2.3); an h2 upstream must re-emit them never-indexed (§7.1.3). Empty
     /// toward an h1 upstream, which has no such marker.
     let neverIndexed: Set<String>
+    /// The upstream this request's transparent rewrite resolved to, **captured synchronously at
+    /// rewrite time** (nil → dial the original destination). Carrying it on the head — rather than
+    /// reading the rewriter's shared last-write-wins field at dial time — keeps the dial target
+    /// consistent with the `:authority` baked into this same head, even when the request is buffered
+    /// for a body rewrite and a concurrent stream rewrites to a different host in the meantime.
+    let resolvedUpstream: (host: String, port: UInt16?)?
 }
 
 /// The upstream side of the bridge (HTTP/1.1 per-stream, or one multiplexed HTTP/2).
