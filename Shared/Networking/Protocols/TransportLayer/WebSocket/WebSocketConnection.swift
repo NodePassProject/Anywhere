@@ -66,7 +66,7 @@ nonisolated class WebSocketConnection {
         _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
         let wsKey = Data(keyBytes).base64EncodedString()
 
-        var request = "GET \(configuration.path) HTTP/1.1\r\n"
+        var request = "GET \(configuration.normalizedPath) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"
         request += "Upgrade: websocket\r\n"
         request += "Connection: Upgrade\r\n"

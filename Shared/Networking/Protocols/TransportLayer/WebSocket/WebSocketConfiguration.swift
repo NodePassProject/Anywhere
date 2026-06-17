@@ -36,6 +36,12 @@ struct WebSocketConfiguration: Codable, Equatable, Hashable {
         self.heartbeatPeriod = heartbeatPeriod
     }
 
+    /// Path with a guaranteed leading "/".
+    var normalizedPath: String {
+        if path.isEmpty { return "/" }
+        return path.hasPrefix("/") ? path : "/" + path
+    }
+
     /// Parse WebSocket parameters from VLESS URL query parameters.
     static func parse(from params: [String: String], serverAddress: String) -> WebSocketConfiguration? {
         let host = params["host"] ?? serverAddress
