@@ -25,6 +25,12 @@ struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
         self.headers = headers
     }
 
+    /// Path with a guaranteed leading "/".
+    var normalizedPath: String {
+        if path.isEmpty { return "/" }
+        return path.hasPrefix("/") ? path : "/" + path
+    }
+
     /// Parse HTTP upgrade parameters from VLESS URL query parameters.
     static func parse(from params: [String: String], serverAddress: String) -> HTTPUpgradeConfiguration? {
         let host = params["host"] ?? serverAddress

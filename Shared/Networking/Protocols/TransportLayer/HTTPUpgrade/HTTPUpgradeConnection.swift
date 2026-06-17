@@ -61,7 +61,7 @@ nonisolated class HTTPUpgradeConnection {
 
     /// Performs the HTTP upgrade handshake.
     func performUpgrade(completion: @escaping (Error?) -> Void) {
-        var request = "GET \(configuration.path) HTTP/1.1\r\n"
+        var request = "GET \(configuration.normalizedPath) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"
         request += "Connection: Upgrade\r\n"
         request += "Upgrade: websocket\r\n"
