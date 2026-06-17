@@ -34,7 +34,7 @@ struct ConnectionStatsView: View {
                 }
             }
         }
-        .frame(minWidth: 310, maxWidth: .infinity)
+        .frame(minWidth: 110, maxWidth: .infinity)
         .environment(\.statCardUnitLength, Self.unitLength(for: availableWidth))
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
@@ -75,10 +75,12 @@ struct ConnectionStatsView: View {
     }
 
     private static func columnCount(for width: CGFloat) -> Int {
-        max(2, Int((width + StatCardSize.spacing) / (StatCardSize.minUnitLength + StatCardSize.spacing)))
+        guard width > 330 else { return 2 }
+        return max(2, Int((width + StatCardSize.spacing) / (StatCardSize.minUnitLength + StatCardSize.spacing)))
     }
     
     private static func unitLength(for width: CGFloat) -> CGFloat {
+        guard width > 330 else { return width / 2 }
         let columns = columnCount(for: width)
         let unit = (width - CGFloat(columns - 1) * StatCardSize.spacing) / CGFloat(columns)
         return min(max(unit, StatCardSize.minUnitLength), StatCardSize.maxUnitLength)
