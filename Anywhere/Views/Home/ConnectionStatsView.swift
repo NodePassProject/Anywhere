@@ -17,7 +17,7 @@ struct ConnectionStatsView: View {
     private static let udpConnectionCeiling: Double = 256
     private static let memoryCeiling: Double = 50 * 1024 * 1024
 
-    @State private var availableWidth: CGFloat = 330
+    @State private var availableWidth: CGFloat = 353
 
     private func routeName(_ target: RouteTarget) -> String {
         target.displayName(configStore: configStore, chainStore: chainStore)
@@ -34,7 +34,7 @@ struct ConnectionStatsView: View {
                 }
             }
         }
-        .frame(minWidth: 350, maxWidth: .infinity)
+        .frame(minWidth: 310, maxWidth: .infinity)
         .environment(\.statCardUnitLength, Self.unitLength(for: availableWidth))
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width

@@ -58,7 +58,7 @@ struct HomeView: View {
                             .frame(minHeight: geometry.size.height)
                         }
                     }
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, 20)
                     .animation(.bouncy, value: isConnected)
                     .sensoryFeedback(.impact, trigger: isConnected)
                 }
