@@ -129,7 +129,7 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let spec, let tls, let route) = outbound else {
+        guard case .nowhere(let key, let spec, let tls) = outbound else {
             return ""
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
@@ -146,15 +146,6 @@ extension ProxyConfiguration {
         }
         if let ech = tls.echQueryValue {
             params.append("ech=\(ech)")
-        }
-        if route.tcpUpload != .quic {
-            params.append("up=tcp")
-        }
-        if route.tcpDownload != .quic {
-            params.append("down=tcp")
-        }
-        if !route.muxEnabled {
-            params.append("mux=off")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"

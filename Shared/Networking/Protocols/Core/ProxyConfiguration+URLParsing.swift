@@ -240,11 +240,6 @@ extension ProxyConfiguration {
         let alpn = params["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
         let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
         let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
-        let route = NowhereRoutePolicy(
-            tcpUpload: NowhereRoutePolicy.lane(from: params["up"]) ?? .quic,
-            tcpDownload: NowhereRoutePolicy.lane(from: params["down"]) ?? .quic,
-            muxEnabled: NowhereRoutePolicy.mux(from: params["mux"]) ?? true
-        )
 
         return ProxyConfiguration(
             name: fragmentName ?? "Nowhere",
@@ -253,8 +248,7 @@ extension ProxyConfiguration {
             outbound: .nowhere(
                 key: key,
                 spec: spec,
-                tls: tls,
-                route: route
+                tls: tls
             )
         )
     }

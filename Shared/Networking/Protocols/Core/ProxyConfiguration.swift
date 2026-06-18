@@ -113,8 +113,8 @@ enum Outbound: Hashable {
         portHopping: HysteriaPortHopping?,
         sni: String
     )
-    /// Nowhere runs over QUIC plus an optional TLS/TCP lane with per-flow duplex routing.
-    case nowhere(key: String, spec: String?, tls: TLSConfiguration, route: NowhereRoutePolicy)
+    /// Nowhere runs over QUIC with a shared-key auth frame and spec-shaped TLS ALPN.
+    case nowhere(key: String, spec: String?, tls: TLSConfiguration)
     /// Trojan: SHA224(password)+CRLF+request over mandatory TLS. No plaintext variant.
     case trojan(password: String, tls: TLSConfiguration)
     /// AnyTLS: stream multiplexer over pooled TLS sessions, authenticated with SHA256(password);
@@ -339,7 +339,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
         case hysteriaPorts, hysteriaHopInterval
         case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN, nowhereTLS
-        case nowhereUp, nowhereDown, nowhereMux
         case trojanPassword, trojanTLS
         case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
         case ssPassword, ssMethod
@@ -425,11 +424,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let explicitSNI = try container.decodeIfPresent(String.self, forKey: .nowhereSNI)
             let alpnString = try container.decodeIfPresent(String.self, forKey: .nowhereALPN)
             let alpn = alpnString.flatMap { $0.isEmpty ? nil : [$0] } ?? legacyTLS?.alpn
-            let route = NowhereRoutePolicy(
-                tcpUpload: NowhereRoutePolicy.lane(from: try container.decodeIfPresent(String.self, forKey: .nowhereUp)) ?? .quic,
-                tcpDownload: NowhereRoutePolicy.lane(from: try container.decodeIfPresent(String.self, forKey: .nowhereDown)) ?? .quic,
-                muxEnabled: try container.decodeIfPresent(Bool.self, forKey: .nowhereMux) ?? true
-            )
             outbound = .nowhere(
                 key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? "",
                 spec: try container.decodeIfPresent(String.self, forKey: .nowhereSpec),
@@ -438,8 +432,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                         ?? legacyTLS?.serverName
                         ?? serverAddress,
                     alpn: alpn
-                ),
-                route: route
+                )
             )
 
         case .trojan:
@@ -547,7 +540,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 try container.encode(portHopping.intervalSeconds, forKey: .hysteriaHopInterval)
             }
             try container.encode(sni, forKey: .hysteriaSNI)
-        case .nowhere(let key, let spec, let tls, let route):
+        case .nowhere(let key, let spec, let tls):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(key, forKey: .nowhereKey)
@@ -556,9 +549,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             if let alpn = tls.alpn?.first, !alpn.isEmpty {
                 try container.encode(alpn, forKey: .nowhereALPN)
             }
-            try container.encode(route.tcpUpload == .tcp ? "tcp" : "quic", forKey: .nowhereUp)
-            try container.encode(route.tcpDownload == .tcp ? "tcp" : "quic", forKey: .nowhereDown)
-            try container.encode(route.muxEnabled, forKey: .nowhereMux)
         case .trojan(let password, let tls):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)

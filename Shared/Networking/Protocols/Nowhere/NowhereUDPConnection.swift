@@ -95,7 +95,10 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     private func sendDatagramPayload(_ payload: Data, completion: @escaping (Error?) -> Void) {
         let maxSize = session.maxDatagramPayloadSize
-        let headerSize = NowhereProtocol.udpHeaderSize(target: destination)
+        let headerSize = NowhereProtocol.udpHeaderSize(
+            target: destination,
+            protocolSpec: session.protocolSpec
+        )
         guard maxSize > headerSize else {
             completion(NowhereError.destinationTooLargeForDatagram(maxFrame: maxSize, headerSize: headerSize))
             return
@@ -111,7 +114,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 type: .request,
                 flowID: flowID,
                 target: destination,
-                payload: payload
+                payload: payload,
+                protocolSpec: session.protocolSpec
             )
         } catch {
             completion(error)
@@ -165,7 +169,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             type: .close,
             flowID: flowID,
             target: destination,
-            payload: Data()
+            payload: Data(),
+            protocolSpec: session.protocolSpec
         )
         if let frame {
             session.writeDatagram(frame) { _ in }

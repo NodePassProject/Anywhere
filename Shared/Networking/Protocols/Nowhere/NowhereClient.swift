@@ -35,10 +35,7 @@ nonisolated final class NowhereClient {
         )
         registryLock.lock()
         defer { registryLock.unlock() }
-        if let existing = registry[key] {
-            existing.updateRoute(configuration.route)
-            return existing
-        }
+        if let existing = registry[key] { return existing }
         let client = NowhereClient(
             configuration: configuration,
             transport: nil,
@@ -118,10 +115,7 @@ nonisolated final class NowhereClient {
     private var chainHolders: [ProxyClient]
     private let poolKey: Key?
     private let lock = UnfairLock()
-    private var routePolicy: NowhereRoutePolicy
     private var session: NowhereSession?
-    private var tcpMux: NowhereTCPMuxClient?
-    private var retiredTCPMuxes: [NowhereTCPMuxClient] = []
     private var transportConsumed = false
 
     private init(
@@ -134,32 +128,6 @@ nonisolated final class NowhereClient {
         self.transport = transport
         self.chainHolders = chainHolders
         self.poolKey = poolKey
-        self.routePolicy = configuration.route
-    }
-
-    private func currentRoute() -> NowhereRoutePolicy {
-        lock.lock()
-        defer { lock.unlock() }
-        return routePolicy
-    }
-
-    private func updateRoute(_ route: NowhereRoutePolicy) {
-        lock.lock()
-        let previous = routePolicy
-        routePolicy = route
-        let muxToRetire: NowhereTCPMuxClient?
-        if previous.muxEnabled && !route.muxEnabled {
-            // Keep old muxed flows alive; new flows get dedicated TCP carriers.
-            muxToRetire = tcpMux
-            if let muxToRetire {
-                retiredTCPMuxes.append(muxToRetire)
-            }
-            tcpMux = nil
-        } else {
-            muxToRetire = nil
-        }
-        lock.unlock()
-        muxToRetire?.retireWhenIdle()
     }
 
     private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<NowhereSession, Error>) -> Void) {
@@ -220,10 +188,6 @@ nonisolated final class NowhereClient {
             return
         }
         session = nil
-        let muxToClose = tcpMux
-        tcpMux = nil
-        let retiredMuxes = retiredTCPMuxes
-        retiredTCPMuxes.removeAll()
         let holders = chainHolders
         chainHolders = []
         if transport != nil, let key = poolKey {
@@ -235,155 +199,21 @@ nonisolated final class NowhereClient {
         }
         lock.unlock()
 
-        muxToClose?.close()
-        for mux in retiredMuxes { mux.close() }
         for client in holders {
             client.cancel()
         }
     }
 
     func openTCP(destination: String, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        let route = currentRoute()
-        guard route.usesTCPLane else {
-            openQUICTCP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
-            return
-        }
-        guard transport == nil else {
-            completion(.failure(NowhereError.connectionFailed("TCP lane is unavailable for chained Nowhere")))
-            return
-        }
-        openRoutedTCP(destination: destination, route: route, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
+        openTCP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
     }
 
-    private func openRoutedTCP(
-        destination: String,
-        route: NowhereRoutePolicy,
-        retriesLeft: Int,
-        isDefaultProxy: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] sessionResult in
-            guard let self else {
-                completion(.failure(NowhereError.streamClosed))
-                return
-            }
-            switch sessionResult {
-            case .failure(let error):
-                if retriesLeft > 0, Self.isStaleSessionError(error) {
-                    self.openRoutedTCP(destination: destination, route: route, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
-                } else {
-                    completion(.failure(error))
-                }
-            case .success(let session):
-                self.acquireTCPMux(attachedTo: session, shared: route.muxEnabled) { muxResult in
-                    switch muxResult {
-                    case .failure(let error):
-                        completion(.failure(error))
-                    case .success(let mux):
-                        if route.tcpUpload == .tcp {
-                            mux.openTCP(
-                                destination: destination,
-                                uploadLane: route.tcpUpload,
-                                downloadLane: route.tcpDownload,
-                                retainClient: !route.muxEnabled,
-                                completion: completion
-                            )
-                        } else {
-                            let conn = NowhereConnection(
-                                session: session,
-                                destination: destination,
-                                uploadLane: route.tcpUpload,
-                                downloadLane: route.tcpDownload,
-                                tcpDownlinkMux: mux,
-                                retainedTCPDownlinkMux: route.muxEnabled ? nil : mux
-                            )
-                            conn.open { error in
-                                if let error {
-                                    conn.cancel()
-                                    completion(.failure(error))
-                                } else {
-                                    completion(.success(conn))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func acquireTCPMux(
-        attachedTo session: NowhereSession,
-        shared: Bool,
-        completion: @escaping (Result<NowhereTCPMuxClient, Error>) -> Void
-    ) {
-        guard shared else {
-            let mux = NowhereTCPMuxClient(configuration: configuration, session: session, closeWhenIdle: true)
-            mux.ensureReady { error in
-                if let error { completion(.failure(error)) }
-                else { completion(.success(mux)) }
-            }
-            return
-        }
-        lock.lock()
-        let existing = tcpMux
-        lock.unlock()
-        if let existing, !existing.isClosed, existing.isAttached(to: session) {
-            existing.ensureReady { error in
-                if let error { completion(.failure(error)) }
-                else { completion(.success(existing)) }
-            }
-            return
-        }
-        lock.lock()
-        if tcpMux !== existing {
-            lock.unlock()
-            acquireTCPMux(attachedTo: session, shared: shared, completion: completion)
-            return
-        }
-        let oldMux = tcpMux
-        if let oldMux {
-            retiredTCPMuxes.append(oldMux)
-            oldMux.retireWhenIdle()
-        }
-        let mux = NowhereTCPMuxClient(configuration: configuration, session: session)
-        tcpMux = mux
-        lock.unlock()
-        mux.onClose = { [weak self, weak mux] in
-            guard let self, let mux else { return }
-            self.handleTCPMuxClose(mux)
-        }
-        mux.ensureReady { [weak self, weak mux] error in
-            guard let mux else {
-                completion(.failure(NowhereError.streamClosed))
-                return
-            }
-            if let error {
-                self?.lock.lock()
-                if self?.tcpMux === mux { self?.tcpMux = nil }
-                self?.lock.unlock()
-                completion(.failure(error))
-            } else {
-                completion(.success(mux))
-            }
-        }
-    }
-
-    private func handleTCPMuxClose(_ closedMux: NowhereTCPMuxClient) {
-        lock.lock()
-        if tcpMux === closedMux {
-            tcpMux = nil
-        }
-        retiredTCPMuxes.removeAll { $0 === closedMux }
-        lock.unlock()
-    }
-
-    private func openQUICTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+    private func openTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
         acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {
             case .failure(let error):
                 if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                    self.openQUICTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
+                    self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                 } else {
                     completion(.failure(error))
                 }
@@ -393,7 +223,7 @@ nonisolated final class NowhereClient {
                     if let error {
                         conn.cancel()
                         if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                            self.openQUICTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
+                            self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                         } else {
                             completion(.failure(error))
                         }
@@ -450,10 +280,6 @@ nonisolated final class NowhereClient {
         session = nil
         let holders = chainHolders
         chainHolders = []
-        let mux = tcpMux
-        tcpMux = nil
-        let retiredMuxes = retiredTCPMuxes
-        retiredTCPMuxes.removeAll()
         if transport != nil, let key = poolKey {
             Self.registryLock.lock()
             if Self.registry[key] === self {
@@ -464,8 +290,6 @@ nonisolated final class NowhereClient {
         lock.unlock()
 
         current?.close()
-        mux?.close()
-        for mux in retiredMuxes { mux.close() }
 
         for client in holders {
             client.cancel()

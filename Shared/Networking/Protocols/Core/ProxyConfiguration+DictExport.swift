@@ -49,7 +49,7 @@ extension ProxyConfiguration {
                 configurationDict["hysteriaHopInterval"] = portHopping.intervalSeconds
             }
             configurationDict["hysteriaSNI"] = sni
-        case .nowhere(let key, let spec, let tls, let route):
+        case .nowhere(let key, let spec, let tls):
             configurationDict["nowhereKey"] = key
             if let spec, !spec.isEmpty {
                 configurationDict["nowhereSpec"] = spec
@@ -60,9 +60,6 @@ extension ProxyConfiguration {
             }
             if let ech = tls.echConfig { configurationDict["nowhereEch"] = ech }
             if tls.echEnabled != (tls.echConfig != nil) { configurationDict["nowhereEchEnabled"] = tls.echEnabled }
-            configurationDict["nowhereUp"] = route.tcpUpload == .tcp ? "tcp" : "quic"
-            configurationDict["nowhereDown"] = route.tcpDownload == .tcp ? "tcp" : "quic"
-            configurationDict["nowhereMux"] = route.muxEnabled
         case .trojan(let password, let tls):
             configurationDict["trojanPassword"] = password
             configurationDict["trojanSNI"] = tls.serverName
