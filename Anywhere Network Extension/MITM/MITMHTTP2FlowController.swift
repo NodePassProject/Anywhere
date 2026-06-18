@@ -54,8 +54,8 @@ final class MITMHTTP2FlowController {
         serverConnectionWindow = min(Self.maxWindow, serverConnectionWindow &+ increment)
     }
 
-    /// Records a new client SETTINGS_INITIAL_WINDOW_SIZE and returns the (possibly
-    /// negative) delta for retroactive adjustment of open synth stream windows (RFC 9113 §6.9.2).
+    /// Records a new client SETTINGS_INITIAL_WINDOW_SIZE and returns the (possibly negative)
+    /// delta for retroactive adjustment of open synth stream windows (RFC 9113 §6.9.2).
     func updateInitialStreamWindow(_ newValue: Int) -> Int {
         // RFC 9113 §6.5.2: values above 2^31-1 are a FLOW_CONTROL_ERROR; clamp our model too.
         let clamped = min(newValue, Self.maxWindow)

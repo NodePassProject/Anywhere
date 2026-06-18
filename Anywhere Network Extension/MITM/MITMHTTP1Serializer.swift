@@ -12,10 +12,9 @@ import Foundation
 /// coalesce `Cookie`, and frame the body.
 enum MITMHTTP1Serializer {
 
-    /// Builds `METHOD path HTTP/1.1` + headers + framing header + the blank line.
-    /// Derives `Host` from `head.authority` when absent, coalesces multiple `Cookie`
-    /// headers with `"; "` (RFC 6265 §5.4 — HTTP/1.1 forbids split `Cookie`), and
-    /// token-validates header names while dropping CR/LF/NUL values.
+    /// Builds the request line + headers + framing header + blank line. Derives `Host`
+    /// from `head.authority` when absent, coalesces `Cookie` with `"; "` (RFC 6265 §5.4 —
+    /// HTTP/1.1 forbids split `Cookie`), and token-validates names while dropping CR/LF/NUL values.
     static func requestHead(_ head: MITMRequestHead, host: String) -> Data {
         let startLine = "\(head.method) \(head.path) HTTP/1.1"
 
@@ -61,8 +60,8 @@ enum MITMHTTP1Serializer {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
-        // ISO-8859-1 bytes so a header octet the client sent (HPACK-decoded as latin-1) round-trips
-        // to the upstream unchanged rather than being re-encoded as multi-byte UTF-8.
+        // ISO-8859-1 bytes so a header octet (HPACK-decoded as latin-1) round-trips to the
+        // upstream unchanged rather than being re-encoded as multi-byte UTF-8.
         out.appendHeaderFieldBytes(startLine)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in safe {

@@ -10,13 +10,12 @@ import Foundation
 private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
 
 /// One multiplexed HTTP/2 upstream connection for the decoupled bridge. Encodes neutral
-/// request IR into upstream h2 (HEADERS + flow-controlled DATA) and decodes h2 responses,
-/// runs the response-phase rewrite, and delivers protocol-agnostic response events to the
-/// client leg's `MITMResponseSink`.
+/// request IR into upstream h2 (HEADERS + flow-controlled DATA), decodes h2 responses, runs
+/// the response-phase rewrite, and delivers response events to the client leg's `MITMResponseSink`.
 ///
-/// The connection is dedicated 1:1 to one client connection but assigns its own
-/// monotonically-increasing upstream stream IDs (client requests can arrive reordered,
-/// and RFC 9113 §5.1.1 forbids opening a lower ID after a higher one). lwIP-queue-confined.
+/// Dedicated 1:1 to one client connection but assigns its own monotonically-increasing upstream
+/// stream IDs (client requests can arrive reordered, and RFC 9113 §5.1.1 forbids opening a lower
+/// ID after a higher one). lwIP-queue-confined.
 final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     /// Receives response events (the h2 client leg).
@@ -26,7 +25,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Unrecoverable upstream-leg error; the session tears the connection down.
     var onFatalError: ((String) -> Void)?
     /// Origin sent GOAWAY: ask the client leg to emit its own so the client redials new
-    /// requests on a fresh connection instead of stalling them on this draining one.
+    /// requests on a fresh connection instead of stalling on this draining one.
     var onDraining: (() -> Void)?
 
     private let host: String
@@ -47,9 +46,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// In-flight streams ≤ the GOAWAY's last-stream-id keep running; new requests are refused.
     private var goingAway = false
 
-    /// Held to re-arm the feed after a *streaming-script* (per-frame) hop parks the pump.
-    /// Buffered response scripts (`runResponseScripts`) are non-blocking and never set this, so a
-    /// slow/async script doesn't stall the other streams multiplexed on this upstream connection.
+    /// Held to re-arm the feed after a streaming-script (per-frame) hop parks the pump. Buffered
+    /// response scripts are non-blocking and never set this, so a slow/async script doesn't stall
+    /// the other streams multiplexed on this connection.
     private var parkedCompletion: (() -> Void)?
 
     private struct Pending {
@@ -60,7 +59,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
     private var pending: Pending?
     /// CONTINUATION-flood guard (CVE-2024-27316 class): bound the CONTINUATION frame count per
-    /// header block, closing the empty/tiny-CONTINUATION-without-END_HEADERS loop the byte cap misses.
+    /// header block, closing the empty/tiny-CONTINUATION loop the byte cap misses.
     private static let maxContinuationFrames = 1024
 
     // MARK: Request side (toward upstream)
@@ -79,14 +78,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     // MARK: Concurrency limit (SETTINGS_MAX_CONCURRENT_STREAMS)
 
     /// Provisional ceiling on open upstream streams before the origin's first SETTINGS
-    /// tells us its real limit (RFC 9113 §5.1.2). Mirrors mitmproxy's pre-SETTINGS guess.
+    /// tells us its real limit (RFC 9113 §5.1.2).
     private static let provisionalMaxConcurrentStreams = 10
 
     /// Hard cap on the held-back request backlog. An origin may advertise a very low — or zero
     /// (RFC 9113 §6.5.2: a temporary refusal) — MAX_CONCURRENT_STREAMS and never raise it; without
-    /// this bound the queue would grow without limit under a request flood. Past the cap, new
-    /// requests are RST (REFUSED_STREAM, retriable) rather than buffered. Set well above the client
-    /// leg's advertised 128 concurrent so a conformant client never trips it.
+    /// this the queue would grow unboundedly under a flood. Past the cap, new requests are RST
+    /// (REFUSED_STREAM, retriable). Set well above the client leg's 128 so a conformant client
+    /// never trips it.
     private static let maxQueuedRequests = 256
 
     /// Origin's advertised SETTINGS_MAX_CONCURRENT_STREAMS (0x3), once observed; sticky
@@ -117,13 +116,11 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Re-entrancy guard: draining can release streams (backlog cap) and re-enter.
     private var draining = false
 
-    /// Client stream IDs can arrive reordered here (a buffered request's HEADERS emit
-    /// late), but HTTP/2 forbids opening a stream with a lower ID than one already
-    /// opened (RFC 9113 §5.1.1). So each client stream is mapped to a fresh, strictly
-    /// increasing upstream stream ID assigned in *send* order, and responses are mapped
-    /// back. All internal state (pendingRequestBodies, openRequestStreams, responseStreams)
-    /// and the request-log / response-sink boundaries are keyed by the **client** ID; only
-    /// the wire frames use the upstream ID.
+    /// Client stream IDs can arrive reordered (a buffered request's HEADERS emit late), but
+    /// HTTP/2 forbids opening a lower ID than one already opened (RFC 9113 §5.1.1). Each client
+    /// stream maps to a fresh, strictly increasing upstream ID assigned in send order, and
+    /// responses map back. All internal state and the request-log / response-sink boundaries
+    /// are keyed by the client ID; only the wire frames use the upstream ID.
     private var ourStreamID: [UInt32: UInt32] = [:]   // client → upstream
     private var theirStreamID: [UInt32: UInt32] = [:] // upstream → client
     private var nextUpstreamStreamID: UInt32 = 1
@@ -138,16 +135,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         return sid
     }
 
-    /// Releases every per-stream record for a finished or reset client stream — including
-    /// the upstream stream-ID mapping, which would otherwise accumulate for the life of
-    /// this (long-lived, multiplexed) connection.
+    /// Releases every per-stream record for a finished or reset client stream — including the
+    /// upstream stream-ID mapping, which would otherwise accumulate for the life of this
+    /// long-lived multiplexed connection.
     private func releaseStream(clientID: UInt32, resetOrigin: Bool = false) {
-        // When we abandon a stream the origin still considers open — the response never reached
-        // END_STREAM, or our request body never finished — the caller passes `resetOrigin` so we RST
-        // it. Otherwise the origin's stream and one of its MAX_CONCURRENT_STREAMS slots leak for the
-        // life of this long-lived multiplexed connection. Clean completions and origin-initiated
-        // closes (RST/GOAWAY, or a site that already sent its own RST) pass false so we don't
-        // re-RST a stream that is already closing.
+        // `resetOrigin` RSTs a stream the origin still considers open (response never reached
+        // END_STREAM, or our request body never finished); else that stream and one of its
+        // MAX_CONCURRENT_STREAMS slots leak. Clean completions and origin-initiated closes
+        // (RST/GOAWAY) pass false so we don't re-RST a stream already closing.
         if resetOrigin, let sid = ourStreamID[clientID] {
             onUpstreamBytes?(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.cancel))
         }
@@ -156,13 +151,13 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         pendingRequestBodies.removeValue(forKey: clientID)
         openRequestStreams.remove(clientID)
         if let sid = ourStreamID.removeValue(forKey: clientID) { theirStreamID.removeValue(forKey: sid) }
-        // A concurrency slot may have just freed; open as many queued requests as now fit.
+        // A concurrency slot may have freed; open as many queued requests as now fit.
         drainQueue()
     }
 
-    /// Opens queued requests in FIFO order while a concurrency slot is free. The upstream
-    /// stream ID is assigned here (at open time), so IDs remain monotonically increasing in
-    /// the order HEADERS hit the wire (RFC 9113 §5.1.1) even though requests were reordered.
+    /// Opens queued requests in FIFO order while a concurrency slot is free. The upstream stream
+    /// ID is assigned here (at open time), so IDs stay monotonic in the order HEADERS hit the wire
+    /// (RFC 9113 §5.1.1) even though requests were reordered.
     private func drainQueue() {
         guard !draining else { return }
         draining = true
@@ -216,16 +211,15 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
     private var responseStreams: [UInt32: ResponseStream] = [:]
 
-    /// Born-passthrough response streams whose per-stream receive credit is **deferred** until
-    /// the client drains the bytes (`creditDrainedResponse`), so a slow client backpressures the
-    /// origin rather than overflowing the client-bound buffer. Buffered/streaming (rewriting)
-    /// streams and the buffer-overflow→passthrough fallback stay eager-credited and are absent here.
+    /// Born-passthrough response streams whose per-stream receive credit is deferred until the
+    /// client drains the bytes (`creditDrainedResponse`), so a slow client backpressures the origin
+    /// rather than overflowing the client-bound buffer. Rewriting streams and the
+    /// buffer-overflow→passthrough fallback stay eager-credited and are absent here.
     private var drainCoupledStreams: Set<UInt32> = []
 
     /// Receive-window credit (toward the origin) accumulated during one pass and flushed once at
-    /// `finishPass` (and at the end of the out-of-pass `creditDrainedResponse`), so a burst of DATA
-    /// frames yields one WINDOW_UPDATE per stream plus one for the connection instead of a pair per
-    /// frame. Flushing every pass keeps the window from stalling. Keyed by upstream (wire) stream id.
+    /// `finishPass`, so a burst of DATA frames yields one WINDOW_UPDATE per stream plus one for the
+    /// connection instead of a pair per frame. Keyed by upstream (wire) stream id.
     private var batchedConnCredit = 0
     private var batchedStreamCredit: [UInt32: Int] = [:]
 
@@ -238,9 +232,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     /// Receive window the leg advertises to the origin — per-stream via SETTINGS_INITIAL_WINDOW_SIZE
     /// and the connection via an initial WINDOW_UPDATE. The 64 KiB default throttles a single
-    /// download to ~64 KiB/RTT (mitmproxy raises it to 2³¹−1 for the same reason); 4 MiB fills a
-    /// high bandwidth·delay path while staying under the 8 MiB client-bound cap, so a drain-coupled
-    /// stream stalls the origin (backpressure) before it can overflow that buffer.
+    /// download to ~64 KiB/RTT; 4 MiB fills a high bandwidth·delay path while staying under the
+    /// 8 MiB client-bound cap, so a drain-coupled stream stalls the origin (backpressure) before it
+    /// can overflow that buffer.
     private static let receiveWindow = 4 * 1024 * 1024
 
     init(
@@ -285,17 +279,16 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         d.append(contentsOf: [0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE (per-stream)
                               UInt8((w >> 24) & 0xFF), UInt8((w >> 16) & 0xFF),
                               UInt8((w >> 8) & 0xFF), UInt8(w & 0xFF)])
-        // Bound the decoded response-header list so a conformant origin self-limits (we also enforce
-        // it in the HPACK decoder — RFC 9113 §6.5.2).
+        // Bound the decoded response-header list so a conformant origin self-limits (also enforced
+        // in the HPACK decoder — RFC 9113 §6.5.2).
         let maxHeaderList = UInt32(HPACKDecoder.maxDecodedHeaderListSize)
         d.append(contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
                               UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
                               UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)])
         onUpstreamBytes?(d)
         // INITIAL_WINDOW_SIZE doesn't move the connection window (RFC 9113 §6.9.2); raise it
-        // explicitly so the connection isn't the ~64 KiB bottleneck either. Direct emit (not the
-        // batched path): this enlargement must reach the origin before any DATA pass, or the origin
-        // throttles the first response to the 64 KiB default.
+        // explicitly so the connection isn't the ~64 KiB bottleneck. Direct emit (not batched): must
+        // reach the origin before any DATA pass, or it throttles the first response to 64 KiB.
         onUpstreamBytes?(Codec.windowUpdate(streamID: 0, increment: Self.receiveWindow - 65_535))
     }
 
@@ -303,8 +296,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     func sendRequestHead(_ head: MITMRequestHead, endStream: Bool) {
         guard !torn else { return }
-        // The origin is going away and won't open new streams; refuse so the client retries on
-        // a fresh connection (it already got our GOAWAY) rather than stalling on this one.
+        // Origin is going away and won't open new streams; refuse so the client retries on a fresh
+        // connection (it already got our GOAWAY) rather than stalling on this one.
         guard !goingAway else {
             sink?.deliverResponseReset(streamID: head.clientStreamID, errorCode: Codec.ErrorCode.refusedStream)
             return
@@ -312,12 +305,12 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // Send our preface eagerly even when queueing: it prompts the origin's SETTINGS,
         // which carries the real concurrency limit and lets us drain the queue sooner.
         ensurePrefaceSent()
-        // RFC 9113 §5.1.2: never open more concurrent streams than the origin allows. Hold
-        // the request back rather than let the origin REFUSED_STREAM it; drained as slots free.
+        // RFC 9113 §5.1.2: never open more concurrent streams than the origin allows. Hold the
+        // request back rather than let the origin REFUSED_STREAM it; drained as slots free.
         guard ourStreamID.count < maxConcurrentStreams else {
-            // Bound the backlog: an origin advertising a very low (or zero) MAX_CONCURRENT_STREAMS
-            // and never raising it must not let the queue grow unboundedly under a flood. Past the
-            // cap, RST the new stream (retriable) so the client can make progress elsewhere.
+            // Bound the backlog under a flood (origin may advertise a very low/zero
+            // MAX_CONCURRENT_STREAMS and never raise it). Past the cap, RST the new stream
+            // (retriable) so the client can make progress elsewhere.
             guard queueOrder.count < Self.maxQueuedRequests else {
                 logger.warning("h2-upstream \(host) stream \(head.clientStreamID): request queue at cap \(Self.maxQueuedRequests) (origin MAX_CONCURRENT_STREAMS=\(maxConcurrentStreams)); refusing stream")
                 sink?.deliverResponseReset(streamID: head.clientStreamID, errorCode: Codec.ErrorCode.refusedStream)
@@ -333,9 +326,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Assigns the upstream stream ID and emits the request HEADERS. Caller has confirmed a
     /// concurrency slot is free.
     private func openUpstreamStream(_ head: MITMRequestHead, endStream: Bool) {
-        // RFC 9113 §5.1.1: client-initiated stream IDs are 31-bit and can't be reused. Past the
-        // last one, the connection can't open more — tear down (the client redials with fresh IDs)
-        // rather than overflow `nextUpstreamStreamID` into a trap or a masked-ID collision.
+        // RFC 9113 §5.1.1: client-initiated stream IDs are 31-bit and can't be reused. Past the last
+        // one, tear down (the client redials with fresh IDs) rather than overflow
+        // `nextUpstreamStreamID` into a trap or a masked-ID collision.
         guard nextUpstreamStreamID <= 0x7FFF_FFFF else {
             fail("upstream HTTP/2 stream IDs exhausted")
             return
@@ -361,8 +354,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         if endStream {
             openRequestStreams.remove(clientID)
         } else {
-            // Track the request-body send window from stream open so a WINDOW_UPDATE that lands
-            // before the first DATA isn't lost (the origin may grant credit up front, RFC 9113 §6.9.2).
+            // Track the request-body send window from stream open so a WINDOW_UPDATE before the
+            // first DATA isn't lost (the origin may grant credit up front, RFC 9113 §6.9.2).
             pendingRequestBodies[clientID] = PendingRequestBody(
                 remaining: Data(), streamWindow: flowController.serverInitialStreamWindow, endStream: false)
         }
@@ -372,7 +365,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let clientID = streamID
         // A queued (not-yet-opened) stream buffers its body so it replays after HEADERS. The
         // client's upload window is credited eagerly, so bound this like an open stream's backlog
-        // (the queue usually drains in milliseconds; this only guards a pathological client).
+        // (only guards a pathological client; the queue usually drains in milliseconds).
         if queuedRequests[clientID] != nil {
             queuedRequests[clientID]?.body.append((data, endStream))
             queuedRequests[clientID]?.bodyBytes += data.count
@@ -390,9 +383,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         if endStream { entry.endStream = true }
         pendingRequestBodies[clientID] = entry
         flushRequestBody(clientID)
-        // The client leg credits the client's upload window eagerly, so a stalled upstream
-        // flow-control window would let the backlog grow without bound. Reset the stream
-        // rather than buffer an unbounded body.
+        // The client's upload window is credited eagerly, so a stalled upstream flow-control window
+        // would let the backlog grow without bound. Reset rather than buffer an unbounded body.
         if let backlog = pendingRequestBodies[clientID]?.remaining.count, backlog > Self.maxUpstreamBufferedBytes {
             logger.warning("h2-upstream \(host) stream \(clientID): request backlog \(backlog) B over cap; resetting stream")
             if let sid = ourStreamID[clientID] {
@@ -427,9 +419,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             sendRequestData(streamID: clientID, Data(), endStream: true)
             return
         }
-        // Still queued (never opened upstream): we have no stream ID to emit a trailing HEADERS on,
-        // and threading trailers through the FIFO replay isn't worth this corner — end the body
-        // without them so the queued request still completes when it drains.
+        // Still queued (never opened upstream): no stream ID to emit a trailing HEADERS on, and
+        // threading trailers through the FIFO replay isn't worth this corner — end the body without
+        // them so the queued request still completes when it drains.
         if queuedRequests[clientID] != nil {
             logger.warning("h2-upstream \(host) stream \(clientID): request trailers on a still-queued stream; ending without them")
             queuedRequests[clientID]?.body.append((Data(), true))
@@ -460,9 +452,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         ))
     }
 
-    /// Sends as much of a pending request body as the connection and stream windows allow, up to `cap`
-    /// bytes (the round-robin distributor passes a single max-frame cap; direct callers leave it
-    /// unbounded). Returns whether it made progress so the distributor knows to keep cycling.
+    /// Sends as much of a pending request body as the connection and stream windows allow, up to
+    /// `cap` bytes (the distributor passes a fair-share cap; direct callers leave it unbounded).
+    /// Returns whether it made progress so the distributor knows to keep cycling.
     @discardableResult
     private func flushRequestBody(_ clientID: UInt32, cap: Int = .max) -> Bool {
         guard var entry = pendingRequestBodies[clientID], let sid = ourStreamID[clientID] else { return false }
@@ -497,14 +489,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         return available > 0
     }
 
-    /// Distributes the available upstream connection window across pending request bodies by an equal
-    /// share each, so a large upload on one stream can't drain it all first and starve its siblings
-    /// (mitmproxy distributes evenly). One `flushRequestBody` per stream — same cost as draining them
-    /// in turn — but each is capped to its fair slice; window a stream can't use flows to those after.
+    /// Distributes the available upstream connection window across pending request bodies by an
+    /// equal share each, so a large upload on one stream can't drain it all first and starve its
+    /// siblings. One `flushRequestBody` per stream, each capped to its fair slice; window a stream
+    /// can't use flows to those after.
     private func distributeServerConnectionWindow() {
-        // Only streams with unsent body contend for the connection window. Counting idle streams would
-        // shrink each share and leave window unused until the next WINDOW_UPDATE — a stall — so a sole
-        // sender must see the full window.
+        // Only streams with unsent body contend for the connection window. Counting idle streams
+        // would shrink each share and leave window unused until the next WINDOW_UPDATE (a stall), so
+        // a sole sender must see the full window.
         let ready = pendingRequestBodies.keys.filter { !(pendingRequestBodies[$0]?.remaining.isEmpty ?? true) }.sorted()
         var remaining = ready.count
         for id in ready {
@@ -598,8 +590,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         case Codec.FrameType.rstStream:    handleUpstreamRST(frame)
         case Codec.FrameType.goaway:       handleGoAway(frame)
         case Codec.FrameType.pushPromise:
-            // We advertise ENABLE_PUSH=0, so a PUSH_PROMISE is a protocol violation (RFC 9113 §6.6);
-            // tear down rather than leave the promised stream half-tracked.
+            // We advertise ENABLE_PUSH=0, so a PUSH_PROMISE is a protocol violation (RFC 9113 §6.6).
             fail("upstream sent PUSH_PROMISE despite ENABLE_PUSH=0")
         default:                           break
         }
@@ -612,8 +603,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let payload = frame.payload
         var i = payload.startIndex
         // RFC 9113 §6.5 makes a SETTINGS length not a multiple of 6 a FRAME_SIZE_ERROR. We apply
-        // whole 6-byte entries and ignore any trailing remainder instead: tolerating a quirky
-        // origin is safer for a transparent MITM than tearing down a working connection.
+        // whole 6-byte entries and ignore any trailing remainder: tolerating a quirky origin is
+        // safer for a transparent MITM than tearing down a working connection.
         while i + 6 <= payload.endIndex {
             let identifier = (UInt16(payload[i]) << 8) | UInt16(payload[i + 1])
             let value = (UInt32(payload[i + 2]) << 24) | (UInt32(payload[i + 3]) << 16)
@@ -624,8 +615,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         }
         firstSettingsSeen = true
         onUpstreamBytes?(Codec.settingsAck())
-        // The limit may have risen (provisional guess → real value, or an increase); open
-        // anything now permitted.
+        // The limit may have risen; open anything now permitted.
         drainQueue()
     }
 
@@ -640,7 +630,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // RFC 9113 §6.9.1 makes a 0 increment a PROTOCOL_ERROR; we ignore it (and a malformed,
         // non-4-byte payload) rather than reset — there's nothing to credit, and dropping a quirky
         // frame is safer for a MITM than tearing the upstream down. Over-credit past 2^31-1 is
-        // clamped in the flow controller, so we simply send less than the origin offered.
+        // clamped in the flow controller.
         guard let inc = Codec.windowUpdateIncrement(frame.payload), inc > 0 else { return }
         if frame.streamID == 0 {
             flowController.creditServerConnection(inc)
@@ -656,8 +646,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let sid = frame.streamID
         guard sid != 0, let clientID = theirStreamID[sid] else { return }
         releaseStream(clientID: clientID)
-        // Relay the origin's own error code so the client keeps a retriable REFUSED_STREAM
-        // distinct from a fatal reset (RFC 9113 §7) instead of always seeing INTERNAL_ERROR.
+        // Relay the origin's own error code so the client keeps a retriable REFUSED_STREAM distinct
+        // from a fatal reset (RFC 9113 §7) instead of always seeing INTERNAL_ERROR.
         sink?.deliverResponseReset(streamID: clientID, errorCode: Self.rstErrorCode(frame.payload))
     }
 
@@ -675,18 +665,18 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let s = p.startIndex
         let lastStreamID = (UInt32(p[s]) & 0x7F) << 24 | UInt32(p[s + 1]) << 16 | UInt32(p[s + 2]) << 8 | UInt32(p[s + 3])
         // lastStreamID is in upstream-id space; reset every mapped client stream above it —
-        // including requests already sent but not yet answered (in-flight, not in responseStreams),
+        // including in-flight requests already sent but not yet answered (not in responseStreams),
         // which the upstream is abandoning and would otherwise hang waiting for a response.
         for (clientID, upstreamID) in Array(ourStreamID) where upstreamID > lastStreamID {
             releaseStream(clientID: clientID)
-            // Above last-stream-id ⇒ the origin never processed these (RFC 9113 §6.8), so
-            // REFUSED_STREAM tells the client they're safe to retry rather than fatal.
+            // Above last-stream-id ⇒ origin never processed these (RFC 9113 §6.8), so
+            // REFUSED_STREAM tells the client they're safe to retry.
             sink?.deliverResponseReset(streamID: clientID, errorCode: Codec.ErrorCode.refusedStream)
         }
-        // The origin won't accept new streams now. Stop opening ours, refuse anything still
-        // queued (never sent ⇒ retriable), and have the client leg emit its own GOAWAY so the
-        // client redials new requests elsewhere. In-flight streams ≤ lastStreamID keep draining;
-        // the connection closes naturally when the origin finally drops it (read EOF → teardown).
+        // Origin won't accept new streams. Stop opening ours, refuse anything still queued (never
+        // sent ⇒ retriable), and have the client leg emit its own GOAWAY so the client redials
+        // elsewhere. In-flight streams ≤ lastStreamID keep draining; the connection closes when the
+        // origin drops it (read EOF → teardown).
         if !goingAway {
             goingAway = true
             refuseAllQueued()
@@ -699,7 +689,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     private func handleHeaders(_ frame: Codec.RawFrame) -> Bool {
         guard frame.streamID != 0 else { fail("HEADERS on stream 0"); return false }
         // Invalid padding is a connection error (RFC 9113 §6.1); skipping it would leave the
-        // undecoded block out of the persistent HPACK table and desync every later HEADERS.
+        // undecoded block out of the HPACK table and desync every later HEADERS.
         guard let block = Codec.stripHeadersPadding(payload: frame.payload, flags: frame.flags) else {
             fail("HEADERS with invalid padding")
             return false
@@ -715,8 +705,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     private func handleContinuation(_ frame: Codec.RawFrame) -> Bool {
         guard var p = pending, p.streamID == frame.streamID else { fail("stray CONTINUATION"); return false }
         let isFinal = frame.flags & 0x4 != 0
-        // Forward-progress + count bound (CVE-2024-27316 class): an empty/tiny CONTINUATION stream
-        // that never sets END_HEADERS never trips the byte cap and would spin the shared parser.
+        // Forward-progress bound (CVE-2024-27316 class): an empty CONTINUATION that never sets
+        // END_HEADERS never trips the byte cap and would spin the shared parser.
         if frame.payload.isEmpty && !isFinal { fail("zero-length CONTINUATION without END_HEADERS"); return false }
         p.continuationCount += 1
         if p.continuationCount > Self.maxContinuationFrames { fail("too many CONTINUATION frames"); return false }
@@ -738,21 +728,21 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let decoded = result.fields
         let neverIndexed = result.neverIndexed
         let endStream = originalFlags & 0x1 != 0
-        // `streamID` is the upstream wire ID; map back to the client stream for all
-        // state, request-log, and sink delivery.
+        // `streamID` is the upstream wire ID; map back to the client stream for all state,
+        // request-log, and sink delivery.
         let clientID = theirStreamID[streamID] ?? streamID
 
         // RFC 9113 §8.3: validate the response pseudo-header section (only :status, leading, no
-        // duplicates). A malformed block from the origin is a protocol error — tear down (matching
-        // the missing-:status handling below) so a malformed response is never re-encoded to the client.
+        // duplicates). A malformed block is a protocol error — tear down so it's never re-encoded
+        // to the client.
         guard MITMBridgeHeaders.pseudoHeadersValid(decoded, isRequest: false) else {
             fail("malformed response pseudo-header section")
             return false
         }
 
-        // RFC 9113 §8.2.1/§8.1.1: a response field with CR/LF/NUL or a non-tchar name is malformed.
-        // Treat it as a stream error (not a connection teardown — the HPACK table absorbed the block,
-        // so the connection stays in sync) and never re-encode the laundered bytes to the client.
+        // RFC 9113 §8.2.1/§8.1.1: a response field with an illegal name octet (uppercase / control /
+        // SP / DEL), or CR/LF/NUL / edge-whitespace in its value, is malformed. Stream error (HPACK
+        // table stayed in sync); never re-encode the bytes to the client.
         guard http2HeaderOctetsValid(decoded) else {
             logger.warning("h2-upstream \(host) stream \(clientID): response header with CR/LF/NUL or invalid field-name; resetting stream")
             sink?.deliverResponseReset(streamID: clientID)
@@ -760,14 +750,32 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             return false
         }
 
-        // A HEADERS on an already-open response stream is a trailer (carries END_STREAM). Relay
-        // its fields as the terminal frame once the body finalizes — gRPC puts grpc-status here,
-        // so dropping it breaks the call.
+        // RFC 9113 §8.2.2: HTTP/2 forbids connection-specific header fields (connection,
+        // proxy-connection, keep-alive, transfer-encoding, upgrade) and any `te` but `trailers`.
+        // Reject rather than re-encode stripped; stream reset (HPACK table in sync).
+        guard MITMBridgeHeaders.h2ConnectionHeadersAbsent(decoded) else {
+            logger.warning("h2-upstream \(host) stream \(clientID): connection-specific header in HTTP/2 response; resetting stream")
+            sink?.deliverResponseReset(streamID: clientID)
+            releaseStream(clientID: clientID, resetOrigin: true)
+            return false
+        }
+
+        // A HEADERS on an already-open response stream is a trailer (carries END_STREAM). Relay its
+        // fields as the terminal frame once the body finalizes — gRPC puts grpc-status here, so
+        // dropping it breaks the call.
         if responseStreams[clientID] != nil {
             // A trailer HEADERS MUST set END_STREAM (RFC 9113 §8.1); a non-final second HEADERS would
-            // otherwise truncate the response. Reset the stream rather than mis-finalize it.
+            // truncate the response. Reset rather than mis-finalize.
             guard endStream else {
                 logger.warning("h2-upstream \(host) stream \(clientID): response trailer without END_STREAM; resetting stream")
+                sink?.deliverResponseReset(streamID: clientID)
+                releaseStream(clientID: clientID, resetOrigin: true)
+                return false
+            }
+            // RFC 9113 §8.1: a trailer section MUST NOT contain a pseudo-header field. Reject rather
+            // than silently filtering it out.
+            guard !decoded.contains(where: { $0.name.hasPrefix(":") }) else {
+                logger.warning("h2-upstream \(host) stream \(clientID): pseudo-header in response trailer; resetting stream")
                 sink?.deliverResponseReset(streamID: clientID)
                 releaseStream(clientID: clientID, resetOrigin: true)
                 return false
@@ -783,10 +791,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         }
 
         // Interim 1xx (not 101): not the final response, so keep the request-log record for the
-        // response that follows. Forward it to the client as its own interim HEADERS — e.g. 103
-        // Early Hints, whose preload links are useful before the final response (RFC 9113 §8.1 /
-        // RFC 8297). Response header rules target the final response, so the interim's regular
-        // fields are relayed as-is.
+        // response that follows and forward it as its own interim HEADERS (e.g. 103 Early Hints,
+        // RFC 9113 §8.1 / RFC 8297). Response header rules target the final response, so the
+        // interim's regular fields are relayed as-is.
         let isInterim = (100..<200).contains(status) && status != 101
         let originatingRequest = isInterim
             ? rewriter.requestLog.peekHTTP2(streamID: clientID)
@@ -811,8 +818,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         if endStream || isHead || status == 204 || status == 304 {
             sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: true, neverIndexed: neverIndexed)
             // We tell the client the response is over, but the origin only really ended it if it set
-            // END_STREAM; a HEAD/204/304 whose origin omitted it (or a request body still in flight)
-            // leaves the origin stream open — RST it so it isn't leaked.
+            // END_STREAM; a HEAD/204/304 that omitted it (or a request body still in flight) leaves
+            // the origin stream open — RST it so it isn't leaked.
             releaseStream(clientID: clientID, resetOrigin: !endStream || openRequestStreams.contains(clientID))
             return false
         }
@@ -835,8 +842,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             return false
         }
 
-        // Passthrough: stream the body as it arrives. Drain-coupled so a slow client
-        // backpressures the origin instead of overflowing the client-bound buffer.
+        // Passthrough: stream the body as it arrives. Drain-coupled so a slow client backpressures
+        // the origin instead of overflowing the client-bound buffer.
         sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: false, neverIndexed: neverIndexed)
         responseStreams[clientID] = .passthrough
         drainCoupledStreams.insert(clientID)
@@ -853,16 +860,15 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let sid = frame.streamID
         guard let clientID = theirStreamID[sid] else {
             // DATA on a stream id we never assigned (≥ our next-to-open) is a protocol error on an
-            // idle stream (RFC 9113 §5.1) — fail the connection, matching the client leg's
-            // idle-stream handling. (We assign every upstream stream id, so the origin can't
-            // legitimately send DATA on one we haven't opened.)
+            // idle stream (RFC 9113 §5.1) — fail the connection. (We assign every upstream stream
+            // id, so the origin can't legitimately send DATA on one we haven't opened.)
             if sid >= nextUpstreamStreamID {
                 fail("DATA on idle upstream stream \(sid)")
                 return false
             }
-            // DATA on a stream we already released (late frames after a reset/completion). The
-            // per-stream window is gone, but the bytes still count against the connection window —
-            // credit it or our receive window toward the upstream leaks (RFC 9113 §6.9.1).
+            // DATA on an already-released stream (late frames after reset/completion). The per-stream
+            // window is gone, but the bytes still count against the connection window — credit it or
+            // our receive window toward the upstream leaks (RFC 9113 §6.9.1).
             creditConnectionWindow(onWireLength)
             return false
         }
@@ -871,8 +877,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         case .passthrough:
             // Connection window credited eagerly (aggregate stays open). Per-stream credit is the
             // backpressure lever: for a drain-coupled passthrough it waits until the client drains
-            // the bytes (`creditDrainedResponse`), so a slow client stalls the origin instead of
-            // overflowing the client buffer. Padding never reaches the client, so credit it now.
+            // (`creditDrainedResponse`). Padding never reaches the client, so credit it now.
             creditConnectionWindow(onWireLength)
             if drainCoupledStreams.contains(clientID) {
                 creditStreamWindow(sid, onWireLength - body.count) // padding only; body waits for drain
@@ -881,7 +886,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             }
             sink?.deliverResponseData(streamID: clientID, body, endStream: endStream)
             // Response done; if the client never finished uploading, the origin's request half is
-            // still open — RST so the stream isn't leaked on this multiplexed connection.
+            // still open — RST so the stream isn't leaked.
             if endStream { releaseStream(clientID: clientID, resetOrigin: openRequestStreams.contains(clientID)) }
             return false
 
@@ -891,7 +896,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             buf.data.append(body)
             if !endStream, buf.data.count > MITMBodyCodec.maxBufferedBodyBytes {
                 // Overflow: emit head + buffered prefix as passthrough, forward the rest. Stays
-                // eager-credited (not added to drainCoupledStreams) since the prefix already was.
+                // eager-credited since the prefix already was.
                 sink?.deliverResponseHead(streamID: clientID, status: buf.status,
                                           headers: buf.headers.filter { !$0.name.hasPrefix(":") }, endStream: false,
                                           neverIndexed: buf.neverIndexed)
@@ -909,7 +914,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             return handleStreamingData(streamID: clientID, body: body, endStream: endStream)
 
         case nil:
-            // DATA before HEADERS, or on a closed stream — ignore, but credit so the window doesn't leak.
+            // DATA before HEADERS or on a closed stream — ignore, but credit so the window doesn't leak.
             ackUpstream(upstreamStreamID: sid, length: onWireLength)
             return false
         }
@@ -920,11 +925,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// every received byte exactly once keeps the connection window from leaking shut.
     private func creditConnectionWindow(_ n: Int) {
         guard n > 0 else { return }
-        // Accumulate; flushed at `finishPass` (or the end of `creditDrainedResponse` off-pass).
+        // Accumulate; flushed at `finishPass`.
         batchedConnCredit += n
     }
 
-    /// Credits one stream's receive window on the wire.
     private func creditStreamWindow(_ upstreamStreamID: UInt32, _ n: Int) {
         guard n > 0 else { return }
         batchedStreamCredit[upstreamStreamID, default: 0] += n
@@ -1053,31 +1057,25 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
                 // Anywhere.respond is request-phase only; ignore on response and emit original.
                 self.deliverFinalResponse(streamID: streamID, status: buf.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buf.neverIndexed)
             }
-            // Non-blocking: the stream is already released and the connection pump kept running,
-            // so we just deliver here — no re-pump needed. Delivering out of stream order is valid
-            // (h2 streams complete independently) and, crucially, keeps a slow/async response
-            // script (e.g. one awaiting Anywhere.http) from stalling the *other* streams
-            // multiplexed on this one upstream connection.
+            // Non-blocking: the stream is already released and the pump kept running, so just
+            // deliver. Out-of-order delivery is valid (h2 streams complete independently) and keeps
+            // a slow/async response script from stalling the other multiplexed streams.
         }
-        // Don't park: a buffered response script runs at END_STREAM, after the stream is released,
-        // so sibling streams must keep flowing while it runs. (A per-frame streaming-script still
-        // parks — see handleStreamingData — but those are synchronous and short.)
+        // Don't park: a buffered response script runs at END_STREAM after the stream is released, so
+        // siblings keep flowing. (A per-frame streaming-script still parks — see handleStreamingData.)
         return false
     }
 
     // MARK: Streaming-script response rewrite
 
-    /// Runs one response DATA frame through the streaming script and delivers the result.
-    /// `frame.end` (isLast) coincides with END_STREAM. `trailers` is set only on the final
-    /// (empty) frame of a trailer-terminated stream: the script still sees `isLast`, but the
-    /// terminal trailer HEADERS carries END_STREAM instead of the body. Returns true when parked.
+    /// Runs one response DATA frame through the streaming script and delivers the result. `isLast`
+    /// coincides with END_STREAM. `trailers` is set only on the final (empty) frame of a
+    /// trailer-terminated stream: the script still sees `isLast`, but the terminal trailer HEADERS
+    /// carries END_STREAM instead of the body. Returns true when parked.
     ///
-    /// Unlike a buffered response script (`runResponseScripts`, made non-blocking), a streaming
-    /// script runs once per DATA frame and must keep per-frame order, so it parks the whole
-    /// upstream connection for each frame's script — a residual head-of-line block on sibling
-    /// streams. Tolerated because streaming scripts are synchronous and per small frame (they
-    /// can't `await Anywhere.http`), so the stall is brief; a full fix needs per-stream frame
-    /// queues so siblings keep flowing. See the parked-pump note on `feed`.
+    /// A streaming script runs once per DATA frame and must keep per-frame order, so it parks the
+    /// whole connection for each frame — a head-of-line block on siblings. Tolerated because such
+    /// scripts are synchronous and per small frame (no `await`), so the stall is brief.
     private func handleStreamingData(streamID: UInt32, body: Data, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
         guard case .streaming(let st)? = responseStreams[streamID] else { return false }
         if st.cursor.bypass {

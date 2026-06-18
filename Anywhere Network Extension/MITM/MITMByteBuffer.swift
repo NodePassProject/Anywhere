@@ -11,7 +11,7 @@ import Foundation
 /// (not the O(n²) memmove of `Data.removeFirst`). The visible region is always 0-indexed.
 struct MITMByteBuffer {
 
-    /// Compact once the consumed prefix exceeds this; 64 KiB matches the upstream TLS record size.
+    /// Compact once the consumed prefix exceeds this; 64 KiB = 4× the upstream TLS plaintext record size.
     private static let compactAbsoluteThreshold = 64 * 1024
 
     private var storage: Data

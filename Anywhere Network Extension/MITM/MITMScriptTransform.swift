@@ -213,9 +213,8 @@ enum MITMScriptTransform {
         init() {}
 
         deinit {
-            // state's final release runs JSValueUnprotect, which mutates VM bookkeeping; doing
-            // that off scriptQueue would race in-flight scripts and corrupt the VM heap, so
-            // hand the zero-refcount release to scriptQueue.
+            // state's final release runs JSValueUnprotect, which mutates VM bookkeeping; off
+            // scriptQueue that would race in-flight scripts and corrupt the VM heap.
             guard let state else { return }
             MITMScriptTransform.scriptQueue.async { withExtendedLifetime(state) {} }
         }

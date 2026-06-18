@@ -50,15 +50,41 @@ func isValidHTTPHeaderValue(_ value: String) -> Bool {
     return true
 }
 
-/// Rejects a decoded HTTP/2 header list carrying CR/LF/NUL in any field-value, or a non-`tchar`
-/// regular field-name — the splitting vector mitmproxy guards via `validate_headers` (RFC 9113
-/// §8.2.1). HPACK decoding only validates UTF-8, so control bytes otherwise slip through and get
-/// laundered to the peer (or downcast to HTTP/1.1). Pseudo-header names (`:`-prefixed) are validated
-/// structurally by the pseudo-header checker, so only their values are screened here.
+/// Screens a decoded HTTP/2 header list's octets (RFC 9113 §8.2.1): a non-conformant field is
+/// rejected, not folded, since HPACK decoding only validates UTF-8 and bad octets would otherwise
+/// launder to the peer or downcast to HTTP/1.1. Pseudo-header names allowed (leading `:` at index 0).
 func http2HeaderOctetsValid(_ headers: [(name: String, value: String)]) -> Bool {
     for (name, value) in headers {
-        if !isValidHTTPHeaderValue(value) { return false }
-        if !name.hasPrefix(":"), !isValidHTTPHeaderName(name) { return false }
+        if !http2FieldNameValid(name) { return false }
+        if !http2FieldValueValid(value) { return false }
+    }
+    return true
+}
+
+/// RFC 9113 §8.2.1: a field name MUST be non-empty and MUST NOT contain an uppercase letter
+/// (0x41–0x5A), any byte ≤0x20 or ≥0x7F, or a colon other than a single leading pseudo-header sigil.
+/// Not the HTTP/1 `tchar` set — h2 permits visible punctuation like `"`, `(`, `@` and bans only these
+/// ranges, so `isValidHTTPHeaderName` (tchar) is both too strict and too lax here.
+private func http2FieldNameValid(_ name: String) -> Bool {
+    let bytes = name.utf8
+    guard !bytes.isEmpty else { return false }
+    for (i, c) in bytes.enumerated() {
+        if c >= 0x41, c <= 0x5A { return false }   // uppercase
+        if c <= 0x20 || c >= 0x7F { return false } // control / SP / DEL / high
+        if c == 0x3A, i != 0 { return false }      // colon only as the leading pseudo-header sigil
+    }
+    return true
+}
+
+/// RFC 9113 §8.2.1: an empty value is permitted; a non-empty value MUST NOT carry NUL/LF/CR at any
+/// position, nor begin or end with an ASCII whitespace character (SP 0x20 or HTAB 0x09).
+private func http2FieldValueValid(_ value: String) -> Bool {
+    let bytes = value.utf8
+    guard let first = bytes.first else { return true } // empty value: allowed
+    if first == 0x20 || first == 0x09 { return false }
+    if let last = bytes.last, last == 0x20 || last == 0x09 { return false }
+    for c in bytes {
+        if c == 0x00 || c == 0x0A || c == 0x0D { return false }
     }
     return true
 }
@@ -129,11 +155,10 @@ extension String {
 
 extension Data {
 
-    /// Appends a header field-name or field-value as its on-the-wire bytes. HTTP/1 header octets and
-    /// HPACK string literals are byte strings (RFC 9110 §5.5 obs-text; RFC 7541 §5.2), so a value
-    /// parsed as ISO-8859-1 round-trips to the exact same octets when re-emitted the same way. Falls
-    /// back to UTF-8 only for a rule-/script-injected value carrying scalars > 0xFF, which latin-1
-    /// can't represent — preserving the prior behavior for those.
+    /// Appends a header field as its on-the-wire bytes. HTTP/1 header octets and HPACK string literals
+    /// are byte strings (RFC 9110 §5.5 obs-text; RFC 7541 §5.2), so a value parsed as ISO-8859-1
+    /// round-trips to the exact same octets. Falls back to UTF-8 only for an injected value carrying
+    /// scalars > 0xFF that latin-1 can't represent.
     mutating func appendHeaderFieldBytes(_ field: String) {
         if let latin1 = field.data(using: .isoLatin1) {
             append(latin1)

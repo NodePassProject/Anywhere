@@ -18,8 +18,8 @@ final class MITMGateRegex: @unchecked Sendable {
     /// Retained only for quarantine/strike log lines.
     private let pattern: String
 
-    /// No ICU metacharacters → can't backtrack, so the match runs inline. Empty patterns
-    /// are excluded: `range(of:)` finds nothing where `firstMatch` matches everywhere.
+    /// No ICU metacharacters → can't backtrack, so the match runs inline. Empty patterns are
+    /// excluded: `range(of:)` finds nothing where `firstMatch` matches everywhere.
     private let isLiteral: Bool
 
     /// Literal fast-path pattern with the authority lowercased; equals `pattern` for
@@ -38,7 +38,8 @@ final class MITMGateRegex: @unchecked Sendable {
         attributes: .concurrent
     )
 
-    /// Soft deadline per cache-miss match; far above the legitimate microsecond cost so scheduling hiccups don't false-trip it.
+    /// Soft deadline per cache-miss match; far above the legitimate microsecond cost so
+    /// scheduling hiccups don't false-trip it.
     static let matchDeadlineMillis = 100
 
     /// Hard cap on an abandoned match: a worker alive this long is a core pinned
@@ -100,7 +101,8 @@ final class MITMGateRegex: @unchecked Sendable {
     /// Whether the gate matches the URL (caller already lowercased the host and
     /// capped length). Fail-closed on timeout or quarantine.
     func matches(_ normalizedURL: String) -> Bool {
-        // Literal gates can't backtrack — match inline; `.literal` is code-unit-exact and unanchored like `firstMatch`.
+        // Literal gates can't backtrack — match inline; `.literal` is code-unit-exact and
+        // unanchored like `firstMatch`.
         if isLiteral {
             return normalizedURL.range(of: literalPattern, options: .literal) != nil
         }
@@ -130,7 +132,8 @@ final class MITMGateRegex: @unchecked Sendable {
         case timedOut
     }
 
-    /// Runs the match on the worker queue under the deadline; an abandoned worker that finishes still caches its verdict.
+    /// Runs the match on the worker queue under the deadline; an abandoned worker that finishes
+    /// still caches its verdict.
     private func boundedMatch(_ url: String) -> MatchOutcome {
         let box = VerdictBox()
         let done = DispatchSemaphore(value: 0)
@@ -152,8 +155,8 @@ final class MITMGateRegex: @unchecked Sendable {
         return .matched(box.value ?? false)
     }
 
-    /// One-shot hard-cap crash check; the match's own semaphore is the liveness
-    /// signal, so a match that finishes within the cap makes this a no-op.
+    /// One-shot hard-cap crash check; the match's own semaphore is the liveness signal, so a
+    /// match that finishes within the cap makes this a no-op.
     private static func scheduleHardCapCheck(_ done: DispatchSemaphore, pattern: String) {
         MITMWatchdogMonitor.queue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
             guard done.wait(timeout: .now()) != .success else { return }
@@ -162,8 +165,8 @@ final class MITMGateRegex: @unchecked Sendable {
         }
     }
 
-    /// FIFO-evicting memo store; no-op when quarantined. Idempotent so a caller
-    /// store and a concurrent late worker store can't desync `cacheOrder`.
+    /// FIFO-evicting memo store; no-op when quarantined. Idempotent so a caller store and a
+    /// concurrent late worker store can't desync `cacheOrder`.
     private func store(_ url: String, _ matched: Bool) {
         lock.lock()
         defer { lock.unlock() }
@@ -196,7 +199,8 @@ final class MITMGateRegex: @unchecked Sendable {
         }
     }
 
-    /// Synchronized by the semaphore (written before `signal`, read after `wait`) — hence `@unchecked Sendable`.
+    /// Synchronized by the semaphore (written before `signal`, read after `wait`) — hence
+    /// `@unchecked Sendable`.
     private final class VerdictBox: @unchecked Sendable {
         var value: Bool?
     }

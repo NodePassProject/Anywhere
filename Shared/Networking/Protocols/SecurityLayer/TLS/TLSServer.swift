@@ -512,6 +512,8 @@ nonisolated final class TLSServer {
             serverKey: applicationKeys.serverKey,
             serverIV: applicationKeys.serverIV,
             cipherSuite: chosenCipherSuite,
+            clientAppSecret: applicationKeys.clientTrafficSecret,
+            serverAppSecret: applicationKeys.serverTrafficSecret,
             direction: .server
         )
         record.negotiatedALPN = negotiatedALPN

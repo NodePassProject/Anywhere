@@ -27,7 +27,7 @@ final class MITMScriptStore {
 
     private let lock = NSLock()
     private var buckets: [UUID: [String: Data]] = [:]
-    /// Incremental sum of all scopes' bytes; allows O(1) aggregate-cap checks in `set`.
+    /// Incremental sum of all scopes' bytes for O(1) aggregate-cap checks in `set`.
     private var totalBytes: Int = 0
     /// Per-scope byte totals (key.utf8.count + value.count per entry), kept incrementally.
     private var bucketSizes: [UUID: Int] = [:]
@@ -44,8 +44,8 @@ final class MITMScriptStore {
     func set(scope: UUID, key: String, value: Data, onDisk: Bool = false) throws {
         if onDisk { return try MITMScriptDiskStore.shared.set(scope: scope, key: key, value: value) }
         lock.lock(); defer { lock.unlock() }
-        // Avoid `var bucket = buckets[scope]`: aliasing the COW storage makes every write
-        // copy the whole bucket; mutating through `buckets[scope, default:]` stays in-place.
+        // Mutate through `buckets[scope, default:]` to stay in-place; aliasing the COW
+        // storage would copy the whole bucket on every write.
         let keyBytes = key.utf8.count
         let oldEntryBytes = buckets[scope]?[key].map { $0.count + keyBytes } ?? 0
         let newEntryBytes = value.count + keyBytes
@@ -66,8 +66,7 @@ final class MITMScriptStore {
     func delete(scope: UUID, key: String, onDisk: Bool = false) {
         if onDisk { return MITMScriptDiskStore.shared.delete(scope: scope, key: key) }
         lock.lock(); defer { lock.unlock() }
-        // Mutate through the subscript (not `var bucket = buckets[scope]` + reassign), so removing a
-        // key doesn't COW-copy the whole bucket — matching `set`'s in-place discipline.
+        // Mutate through the subscript so removing a key stays in-place (no COW copy).
         guard let existing = buckets[scope]?[key] else { return }
         let delta = existing.count + key.utf8.count
         bucketSizes[scope] = (bucketSizes[scope] ?? 0) - delta

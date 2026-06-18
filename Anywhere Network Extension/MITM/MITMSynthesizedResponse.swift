@@ -9,17 +9,15 @@ import Foundation
 
 extension MITMScriptEngine.SynthesizedResponse {
 
-    /// Framing + connection-specific (hop-by-hop) header names a script must not set on a
-    /// locally-generated response: content-length/transfer-encoding are owned by the serializer, and
-    /// connection/keep-alive/upgrade/proxy-connection/te/trailer are hop-by-hop (RFC 9110 §7.6.1) —
-    /// and outright illegal on the HTTP/2 synth path (RFC 9113 §8.2.2). Dropping them keeps the wire
-    /// well-framed regardless of what the script supplies.
+    /// Header names a script must not set on a synth response: content-length/transfer-encoding
+    /// are serializer-owned; the rest are hop-by-hop (RFC 9110 §7.6.1) and illegal on the
+    /// HTTP/2 synth path (RFC 9113 §8.2.2). Dropping them keeps the wire well-framed.
     private static let disallowedSynthHeaders: Set<String> = [
         "content-length", "transfer-encoding", "connection", "keep-alive",
         "upgrade", "proxy-connection", "te", "trailer",
     ]
 
-    /// Sanitizes script/rule-supplied headers: drops framing and pseudo-headers, validates names/values
+    /// Sanitizes script/rule headers: drops framing/pseudo-headers, validates names/values
     /// (response-splitting defense). `lowercaseNames` enforces HTTP/2 lowercase (RFC 9113 §8.2.1).
     func sanitizedHeaders(
         lowercaseNames: Bool,
@@ -52,9 +50,8 @@ extension MITMScriptEngine.SynthesizedResponse {
         return f
     }()
 
-    /// Appends a `Date` (RFC 9110 §6.6.1: an origin generates one on every response) to a
-    /// locally-generated response unless the script already supplied one. `lowercaseName` matches
-    /// HTTP/2's lowercase-header requirement (RFC 9113 §8.2.1).
+    /// Appends a `Date` (RFC 9110 §6.6.1: origins generate one per response) unless the script
+    /// already supplied one. `lowercaseName` matches HTTP/2's requirement (RFC 9113 §8.2.1).
     func withDateStamp(_ headers: [(name: String, value: String)], lowercaseName: Bool) -> [(name: String, value: String)] {
         guard !headers.contains(where: { $0.name.equalsIgnoringASCIICase("date") }) else { return headers }
         return headers + [(name: lowercaseName ? "date" : "Date", value: Self.imfFixdateFormatter.string(from: Date()))]

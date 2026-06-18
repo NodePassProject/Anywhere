@@ -18,10 +18,8 @@ final class MITMHTTP2Rewriter {
     private let requestRules: [CompiledMITMRule]
     private let responseRules: [CompiledMITMRule]
     private let cachedRuleSetID: UUID?
-    /// When set, every subsequent request's `:authority` is rewritten to this value.
-    /// Each transparent rewrite updates it (last write wins). Single-upstream commitment
-    /// is enforced by the session, not here: the h1 inner leg tears down on a per-request
-    /// host change, and the h2 bridge commits to the first request's upstream.
+    /// When set, every subsequent request's `:authority` is rewritten to this value (last
+    /// write wins). Single-upstream commitment is enforced by the session, not here.
     private var effectiveAuthority: String?
 
     /// Upstream to dial when a transparent rewrite resolves a replacement host; nil falls
@@ -73,8 +71,8 @@ final class MITMHTTP2Rewriter {
 
     /// The `:path` pseudo-header value, or nil if absent.
     static func requestPath(in headers: [(name: String, value: String)]) -> String? {
-        // Case-insensitive on purpose: the HPACK decoder doesn't lowercase names, so
-        // a literal-encoded `:Path` would otherwise bypass every request-phase rule.
+        // Case-insensitive: the HPACK decoder doesn't lowercase names, so a literal-encoded
+        // `:Path` would otherwise bypass every request-phase rule.
         return firstHeaderValue(headers, name: ":path")
     }
 
@@ -116,9 +114,9 @@ final class MITMHTTP2Rewriter {
     /// Matched rule set ID used as the script-store scope key.
     var ruleSetID: UUID? { cachedRuleSetID }
 
-    /// Applies matching script/body rules off-queue, resuming on `resumeQueue`.
-    /// Caller must pass a decompressed body. `.synthesizedResponse` fires only on
-    /// request phase — caller must suppress upstream emission and answer on the inner leg.
+    /// Applies matching script/body rules off-queue, resuming on `resumeQueue`. Caller must pass
+    /// a decompressed body. `.synthesizedResponse` fires only on request phase — caller must then
+    /// suppress upstream emission and answer on the inner leg.
     func applyScripts(
         _ message: HTTPMessage,
         phase: MITMPhase,
@@ -136,9 +134,9 @@ final class MITMHTTP2Rewriter {
 
     // MARK: - Authority rewrite
 
-    /// Rewrites `:authority`, inserting it before regular headers if absent (RFC 9113
-    /// §8.3). Skips trailers — pseudo-headers there are forbidden (§8.1) and strict
-    /// receivers RST_STREAM mid-body.
+    /// Rewrites `:authority`, inserting it before regular headers if absent (RFC 9113 §8.3).
+    /// Skips trailers — pseudo-headers there are forbidden (§8.1) and strict receivers
+    /// RST_STREAM mid-body.
     private func applyAuthorityRewrite(
         _ headers: [(name: String, value: String)]
     ) -> [(name: String, value: String)] {

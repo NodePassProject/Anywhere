@@ -75,11 +75,11 @@ final class MITMScriptEngine {
     /// span so store/control/http blocks act on the right one.
     fileprivate final class Invocation {
         let scope: UUID?
-        /// False on ``applyFrame`` (head is already on the wire) and the sync path.
+        /// False on ``applyFrame`` (head is already on the wire).
         let allowsHTTP: Bool
         var directive: Directive?
 
-        // Async buffered-script fields — nil/unused on sync + frame paths.
+        // Async buffered-script fields — nil/unused on the frame path.
         let original: Message?
         var ctxValue: JSValue?
         let resumeQueue: DispatchQueue?
@@ -134,7 +134,7 @@ final class MITMScriptEngine {
 
     /// GC-nudge threshold for pinned NoCopy bytes (JSC's GC can't see them).
     private static let softTypedArrayBudget: Int = 16 * 1024 * 1024
-    /// Hard cap: new NoCopy allocations past this return an empty Uint8Array.
+    /// Hard cap: NoCopy allocations past this fail with `undefined`.
     private static let hardTypedArrayBudget: Int = 32 * 1024 * 1024
 
     // MARK: Anywhere.http caps
@@ -522,9 +522,9 @@ final class MITMScriptEngine {
         return Int(raw)
     }
 
-    /// Decodes a JS `[[name, value], ...]` array; nil (caller keeps the original headers) for non-array
-    /// input or when every entry fails validation. Names must be RFC 9110 tokens; values must not
-    /// contain CR/LF/NUL (response splitting).
+    /// Decodes a JS `[[name, value], ...]` array; nil (caller keeps original headers) for non-array
+    /// input or when every entry fails. Names must be RFC 9110 tokens; values must not contain
+    /// CR/LF/NUL (response splitting).
     private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
         guard value.isArray else { return nil }
         guard let length = Self.validatedArrayLength(value, max: 100_000) else {
@@ -1423,7 +1423,7 @@ final class MITMScriptEngine {
     // MARK: - Anywhere.http
 
     /// Anywhere.http — `get/post/request` returning a Promise of `{ status, headers, body, url }`.
-    /// Available only in async buffered scripts; rejects in stream-script and on the sync path.
+    /// Available only in async buffered scripts; rejects in stream-script.
     private func installHTTPGlobals(on anywhere: JSValue) {
         let http = JSValue(newObjectIn: context)!
         let getBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
@@ -1451,7 +1451,7 @@ final class MITMScriptEngine {
     private func startHTTP(defaultMethod: String, urlVal: JSValue, optsVal: JSValue, in ctx: JSContext) -> JSValue {
         guard let inv = currentInvocation, inv.allowsHTTP, inv.resumeQueue != nil else {
             return Self.rejected(
-                "Anywhere.http is only available inside a buffered `script` rule — an `async function process(ctx)` that awaits it. It is unavailable in stream-script and on the synchronous path.",
+                "Anywhere.http is only available inside a buffered `script` rule — an `async function process(ctx)` that awaits it. It is unavailable in stream-script.",
                 in: ctx
             )
         }
@@ -1666,12 +1666,10 @@ final class MITMScriptEngine {
             return mitmScriptTypedArrayBytes + count
         }()
         if projected > hardTypedArrayBudget && count > 0 {
-            // Budget exhausted: fail the allocation (undefined, like the JSObjectMake-failure path
-            // below) rather than hand back a non-empty→empty Uint8Array. An empty array would
-            // masquerade as a valid empty body and silently zero whatever the script writes back
-            // (ctx.body, a codec/http result); since the counter is process-global, one rule set's
-            // pinned buffers could otherwise corrupt another's body. Undefined makes readBack keep
-            // the original bytes — and a script that uses the value throws, reverting unchanged.
+            // Budget exhausted: fail with undefined, not an empty Uint8Array. An empty array would
+            // masquerade as a valid empty body and zero whatever the script writes back; with a
+            // process-global counter, one rule set could corrupt another's. Undefined makes readBack
+            // keep the original bytes and a script that uses the value throws (reverting unchanged).
             logger.warning("[MITM][JS] typed-array budget exhausted (\(projected) B > \(hardTypedArrayBudget) B); failing allocation (undefined)")
             return JSValue(undefinedIn: context)
         }
@@ -1685,8 +1683,7 @@ final class MITMScriptEngine {
             mitmScriptTypedArrayBytes += count
             mitmScriptTypedArrayLock.unlock()
         }
-        // JSTypedArrayBytesDeallocator is a C function pointer and can't capture state; pass the
-        // byte count via deallocatorContext so the deallocator can subtract from the global.
+        // C deallocator can't capture state; pass the byte count via deallocatorContext to subtract from the global.
         let lengthBox = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         lengthBox.initialize(to: count)
         let deallocator: JSTypedArrayBytesDeallocator = { ptr, ctx in

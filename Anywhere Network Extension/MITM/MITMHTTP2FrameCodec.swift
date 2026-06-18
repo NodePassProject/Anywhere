@@ -7,18 +7,12 @@
 
 import Foundation
 
-/// Self-contained HTTP/2 frame primitives for the bridge's two legs. It implements only
-/// the wire-format pieces the bridge needs — parsing peer frames and emitting HEADERS /
-/// DATA / control frames — rather than a full HTTP/2 stack. RFC 9113.
+/// Self-contained HTTP/2 frame primitives for the bridge's two legs (RFC 9113): parsing peer
+/// frames and emitting HEADERS / DATA / control frames, not a full HTTP/2 stack.
 ///
-/// NOTE: this is the *second* hand-rolled HTTP/2 implementation in the codebase. The first is
-/// `NaiveHTTP2Multiplexer` (Shared/Networking/Protocols/Naive), which multiplexes CONNECT tunnels
-/// over one connection. The split is deliberate — opaque tunnel relay vs. full request/response
-/// MITM with header/body rewriting. The two share the stateless wire-format primitives
-/// (`HTTP2FrameWire`) and the HPACK codec (`HPACKEncoder`/`HPACKDecoder`), but keep their own frame
-/// structs, decode loops, flow control, and state machines — so a *stateful* protocol fix (e.g.
-/// GOAWAY draining, which each implements independently in its own `goingAway` state) must be
-/// applied in both.
+/// Shares the stateless wire-format primitives (`HTTP2FrameWire`) and HPACK codec with
+/// `NaiveHTTP2Multiplexer`, but keeps its own frame structs, decode loops, flow control, and
+/// state machines — so a stateful protocol fix (e.g. GOAWAY draining) must be applied in both.
 enum MITMHTTP2FrameCodec {
 
     // MARK: Frame type codes
@@ -55,11 +49,10 @@ enum MITMHTTP2FrameCodec {
     /// no larger value, so the client must not exceed it.
     static let maxFramePayloadSize = 16_384
 
-    /// Hard cap on an accepted frame payload — far above the advertised 16 KiB max, so a peer
-    /// can't force an unbounded allocation. We deliberately don't enforce SETTINGS_MAX_FRAME_SIZE
-    /// (RFC 9113 §4.2) strictly: a frame between 16 KiB and this cap is accepted rather than
-    /// FRAME_SIZE_ERROR'd, which is safe because flow control accounts the true on-wire length.
-    /// Past this cap is unrecoverable: the buffer is dropped.
+    /// Hard cap on an accepted frame payload, above the advertised 16 KiB max so a peer can't force
+    /// an unbounded allocation. SETTINGS_MAX_FRAME_SIZE (RFC 9113 §4.2) isn't enforced strictly: a
+    /// frame between 16 KiB and this cap is accepted rather than FRAME_SIZE_ERROR'd (safe because
+    /// flow control accounts the true on-wire length). Past this cap the buffer is dropped.
     static let maxReceivedFramePayloadSize = 1 * 1024 * 1024
 
     /// The h2 connection preface octets a client sends first (RFC 9113 §3.4).

@@ -27,12 +27,10 @@ enum MITMBodyReplace {
 
     /// Applies every compiled edit in order; fail-closed on an undecodable body or a blown budget.
     ///
-    /// Decodes as UTF-8 first; on failure falls back to ISO-8859-1 (latin-1), which round-trips any
-    /// byte sequence losslessly, so single-byte-charset bodies (Windows-125x / ISO-8859-x) are
-    /// edited in place instead of silently passing through (mitmproxy's latin-1 fallback). The body
-    /// is re-encoded in the same charset; if the replacement introduced characters that charset
-    /// can't represent, the edit is abandoned and the original body is returned unchanged.
-    /// Multi-byte charsets (UTF-16, GBK, …) are still not covered — those bodies pass through.
+    /// Decodes as UTF-8, falling back to ISO-8859-1 (latin-1) which round-trips any byte sequence
+    /// losslessly, so single-byte-charset bodies (Windows-125x / ISO-8859-x) are edited in place.
+    /// Re-encoded in the same charset; an edit introducing characters that charset can't represent
+    /// is abandoned and the original returned. Multi-byte charsets (UTF-16, GBK, …) pass through.
     static func applyAll(_ ops: [CompiledOp], to body: Data) -> Data {
         guard !ops.isEmpty else { return body }
         let encoding: String.Encoding
@@ -59,8 +57,8 @@ enum MITMBodyReplace {
         return out
     }
 
-    /// Soft budget per substitution; Swift Regex has no execution limit, so a runaway
-    /// pattern is abandoned to avoid head-of-line blocking. Generous for the 4 MiB body cap.
+    /// Soft budget per substitution; Swift Regex has no execution limit, so a runaway pattern
+    /// is abandoned to avoid head-of-line blocking. Generous for the 4 MiB body cap.
     private static let substitutionTimeLimit: DispatchTimeInterval = .seconds(1)
 
     /// Hard crash deadline after the soft budget: a Regex match is uninterruptible and the
