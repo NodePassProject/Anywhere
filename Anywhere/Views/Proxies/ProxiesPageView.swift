@@ -53,13 +53,13 @@ struct ProxiesPageView: View {
                 ForEach(subscriptionStore.subscriptions) { subscription in
                     let editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(for: subscription.url)
                     Section {
-                        if !collapsedSubscriptions.contains(subscription.id) {
+                        DisclosureGroup(isExpanded: expansionBinding(for: subscription)) {
                             ForEach(items(for: subscription)) { item in
                                 proxyRow(item, editingDisabled: editingDisabled)
                             }
+                        } label: {
+                            subscriptionLabel(subscription)
                         }
-                    } header: {
-                        subscriptionHeader(subscription)
                     }
                 }
             } else {
@@ -193,72 +193,75 @@ struct ProxiesPageView: View {
     }
 
     // MARK: - Subscription Header
-
-    @ViewBuilder
-    private func subscriptionHeader(_ subscription: Subscription) -> some View {
-        HStack {
-            Button {
-                let id = subscription.id
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    if collapsedSubscriptions.contains(id) {
-                        collapsedSubscriptions.remove(id)
-                    } else {
-                        collapsedSubscriptions.insert(id)
-                    }
+    
+    private func expansionBinding(for subscription: Subscription) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedSubscriptions.contains(subscription.id) },
+            set: { expanded in
+                if expanded {
+                    collapsedSubscriptions.remove(subscription.id)
+                } else {
+                    collapsedSubscriptions.insert(subscription.id)
                 }
-                subscriptionStore.toggleCollapsed(subscription)
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.bold())
-                        .frame(width: 10)
-                        .rotationEffect(.degrees(collapsedSubscriptions.contains(subscription.id) ? 0 : 90))
-                    Text(subscription.name)
+                if subscription.collapsed == expanded {
+                    subscriptionStore.toggleCollapsed(subscription)
                 }
             }
-            .buttonStyle(.plain)
-            Spacer()
-            HStack(spacing: 20) {
-                if updatingSubscription?.id == subscription.id {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Button {
-                        updateSubscription(subscription)
+        )
+    }
+
+    @ViewBuilder
+    private func subscriptionLabel(_ subscription: Subscription) -> some View {
+        VStack(alignment: .leading) {
+            HStack {
+                Text(subscription.name)
+                    .font(.body.weight(.medium))
+                Spacer()
+                HStack(spacing: 20) {
+                    if updatingSubscription?.id == subscription.id {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button {
+                            updateSubscription(subscription)
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    Menu {
+                        Button {
+                            viewModel.testLatencies(for: configStore.configurations(for: subscription))
+                        } label: {
+                            Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                        }
+                        Button {
+                            renameText = subscription.name
+                            renamingSubscription = subscription
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button {
+                            updateSubscription(subscription)
+                        } label: {
+                            Label("Update", systemImage: "arrow.clockwise")
+                        }
+                        Button(role: .destructive) {
+                            subscriptionStore.delete(subscription)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: "ellipsis.circle")
                     }
                     .buttonStyle(.borderless)
                 }
-                Menu {
-                    Button {
-                        viewModel.testLatencies(for: configStore.configurations(for: subscription))
-                    } label: {
-                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                    }
-                    Button {
-                        renameText = subscription.name
-                        renamingSubscription = subscription
-                    } label: {
-                        Label("Rename", systemImage: "pencil")
-                    }
-                    Button {
-                        updateSubscription(subscription)
-                    } label: {
-                        Label("Update", systemImage: "arrow.clockwise")
-                    }
-                    Button(role: .destructive) {
-                        subscriptionStore.delete(subscription)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .buttonStyle(.borderless)
             }
         }
+        .padding(.trailing, 10)
     }
+
+    // MARK: - Formatting
 
     private func updateSubscription(_ subscription: Subscription) {
         guard updatingSubscription == nil else { return }
