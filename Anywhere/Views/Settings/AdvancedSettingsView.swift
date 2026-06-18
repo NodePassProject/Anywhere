@@ -36,20 +36,11 @@ struct AdvancedSettingsView: View {
             }
 
             Section("Network") {
-                Picker("Block QUIC", selection: $settings.quicPolicy) {
-                    ForEach(QUICPolicy.allCases, id: \.self) { policy in
-                        Text(policy.title).tag(policy)
-                    }
-                }
-                Toggle("Block WebRTC", isOn: $settings.blockWebRTC)
                 NavigationLink("IPv6") {
                     IPv6SettingsView()
                 }
                 NavigationLink("Encrypted DNS") {
                     EncryptedDNSSettingsView()
-                }
-                NavigationLink("Reflection") {
-                    ReflectionSettingsView()
                 }
             }
 
