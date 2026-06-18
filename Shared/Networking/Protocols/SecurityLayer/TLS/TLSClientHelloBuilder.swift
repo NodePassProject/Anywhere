@@ -104,7 +104,7 @@ struct TLSClientHelloBuilder {
     /// 0x0010 — ALPN.
     private static func alpnExt(_ protocols: [String]) -> Data {
         var list = Data()
-        for proto in protocols {
+        for proto in protocols where !proto.isEmpty {
             let bytes = Array(proto.utf8)
             list.append(UInt8(bytes.count))
             list.append(contentsOf: bytes)
