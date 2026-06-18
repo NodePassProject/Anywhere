@@ -876,39 +876,12 @@ nonisolated class QUICTLSHandler {
     // MARK: - Certificate Validation
 
     private func validateCertificate() -> Error? {
-        if CertificatePolicy.allowInsecure {
+        switch CertificatePolicy.verify(chain: serverCertificates, serverName: serverName) {
+        case .trusted:
             return nil
+        case .rejected(let reason):
+            return TLSError.certificateValidationFailed(reason)
         }
-
-        guard !serverCertificates.isEmpty else {
-            return TLSError.certificateValidationFailed("No server certificates received")
-        }
-
-        var trust: SecTrust?
-        let policy = SecPolicyCreateSSL(true, serverName as CFString)
-
-        let status = SecTrustCreateWithCertificates(
-            serverCertificates as CFArray,
-            policy,
-            &trust
-        )
-
-        guard status == errSecSuccess, let trust else {
-            return TLSError.certificateValidationFailed("Failed to create trust object")
-        }
-
-        var cfError: CFError?
-        let isValid = SecTrustEvaluateWithError(trust, &cfError)
-        if isValid {
-            return nil
-        }
-
-        if Self.isUserTrusted(chain: serverCertificates, serverName: serverName) {
-            return nil
-        }
-
-        let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
-        return TLSError.certificateValidationFailed(message)
     }
 
     private func verifyCertificateVerify(
@@ -972,28 +945,6 @@ nonisolated class QUICTLSHandler {
         case TLSSignatureScheme.rsa_pkcs1_sha1:         return .rsaSignatureMessagePKCS1v15SHA1
         default:                                        return .rsaSignatureMessagePSSSHA256
         }
-    }
-
-    /// A user-pinned leaf fingerprint waives **only** the chain-of-trust requirement — not the
-    /// hostname or validity period. After matching the pinned SHA-256, the leaf is re-evaluated as
-    /// its own trust anchor under the SSL policy for `serverName`, so a cert pinned for host A can't
-    /// be accepted for host B and an expired pinned cert is still rejected (the pin is host-scoped).
-    private static func isUserTrusted(chain: [SecCertificate], serverName: String) -> Bool {
-        guard let leaf = chain.first else { return false }
-        let trusted = CertificatePolicy.trustedFingerprints
-        guard !trusted.isEmpty else { return false }
-        let certData = SecCertificateCopyData(leaf) as Data
-        let sha256 = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
-        guard trusted.contains(sha256) else { return false }
-        // Re-evaluate with the pinned leaf installed as the sole anchor: this trusts the exact pinned
-        // cert while the SSL policy still enforces hostname (SAN/CN) match and notBefore/notAfter.
-        var trust: SecTrust?
-        let policy = SecPolicyCreateSSL(true, serverName as CFString)
-        guard SecTrustCreateWithCertificates(chain as CFArray, policy, &trust) == errSecSuccess,
-              let trust else { return false }
-        guard SecTrustSetAnchorCertificates(trust, [leaf] as CFArray) == errSecSuccess,
-              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else { return false }
-        return SecTrustEvaluateWithError(trust, nil)
     }
 
     // MARK: - Helpers
