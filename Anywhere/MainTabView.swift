@@ -95,7 +95,6 @@ struct MainTabView: View {
                     Image(systemName: "gearshape")
                 }
             }
-            .tabViewStyle(.sidebarAdaptable)
         } else {
             TabView(selection: $selectedTab) {
                 NavigationStack {
