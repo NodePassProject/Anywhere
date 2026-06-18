@@ -10,7 +10,6 @@ import CryptoKit
 import Security
 
 enum NowhereProtocol {
-    static let authFrameLength = 72
     static let maxTargetLength = 512
     
     static let closeErrCodeOK: UInt64 = 0x100
@@ -23,11 +22,24 @@ enum NowhereProtocol {
     private static let authMagicLength = 8
     private static let authInfoLength = 32
     private static let authContextLength = 32
+    private static let authTagLength = 32
+    private static let authPaddingLengthSeedLength = 2
+    private static let authPaddingMaxLength = 255
+    private static let authPaddingKeyLength = 32
+    private static let tcpPaddingLengthSeedLength = 1
+    private static let tcpPaddingMaxLength = 64
+    private static let tcpPaddingKeyLength = 32
 
     private static let specIDLabel = Data("spec id".utf8)
     private static let authMagicLabel = Data("auth magic".utf8)
     private static let authInfoLabel = Data("auth hmac info".utf8)
     private static let authContextLabel = Data("auth context".utf8)
+    private static let authPaddingLengthLabel = Data("auth padding length".utf8)
+    private static let authPaddingKeyLabel = Data("auth padding key".utf8)
+    private static let authPaddingBytesLabel = Data("auth padding bytes".utf8)
+    private static let tcpPaddingLengthLabel = Data("tcp request padding length".utf8)
+    private static let tcpPaddingKeyLabel = Data("tcp request padding key".utf8)
+    private static let tcpPaddingBytesLabel = Data("tcp request padding bytes".utf8)
     private static let frameLayoutLabel = Data("proxy frame layout".utf8)
 
     enum FrameElement: UInt8, Hashable {
@@ -35,6 +47,7 @@ enum NowhereProtocol {
         case type
         case flowID
         case target
+        case padding
     }
 
     struct EffectiveSpec: Hashable {
@@ -44,6 +57,10 @@ enum NowhereProtocol {
         let authMagic: Data
         let authInfo: Data
         let authContext: Data
+        let authPaddingLength: UInt8
+        let authPaddingKey: Data
+        let tcpPaddingLength: UInt8
+        let tcpPaddingKey: Data
         let tcpFrameOrder: [FrameElement]
         let udpFrameOrder: [FrameElement]
     }
@@ -74,6 +91,18 @@ enum NowhereProtocol {
         let specSalt = Data(SHA256.hash(data: effectiveSpec))
         let specPRK = hkdfExtract(salt: specSalt, input: effectiveSpec)
         let frameOrder = buildFrameOrder(seed: hkdfExpand(prk: specPRK, info: frameLayoutLabel, count: 8))
+        let authPaddingLengthSeed = hkdfExpand(
+            prk: specPRK,
+            info: authPaddingLengthLabel,
+            count: authPaddingLengthSeedLength
+        )
+        let authPaddingLengthValue = 1 + (readUInt16(authPaddingLengthSeed, at: 0) % authPaddingMaxLength)
+        let tcpPaddingLengthSeed = hkdfExpand(
+            prk: specPRK,
+            info: tcpPaddingLengthLabel,
+            count: tcpPaddingLengthSeedLength
+        )
+        let tcpPaddingLengthValue = Int(byte(tcpPaddingLengthSeed, at: 0)) % tcpPaddingMaxLength
 
         let effectiveALPN: String
         if let alpn, !alpn.isEmpty {
@@ -90,6 +119,10 @@ enum NowhereProtocol {
             authMagic: hkdfExpand(prk: specPRK, info: authMagicLabel, count: authMagicLength),
             authInfo: hkdfExpand(prk: specPRK, info: authInfoLabel, count: authInfoLength),
             authContext: hkdfExpand(prk: specPRK, info: authContextLabel, count: authContextLength),
+            authPaddingLength: UInt8(authPaddingLengthValue),
+            authPaddingKey: hkdfExpand(prk: specPRK, info: authPaddingKeyLabel, count: authPaddingKeyLength),
+            tcpPaddingLength: UInt8(tcpPaddingLengthValue),
+            tcpPaddingKey: hkdfExpand(prk: specPRK, info: tcpPaddingKeyLabel, count: tcpPaddingKeyLength),
             tcpFrameOrder: frameOrder.tcp,
             udpFrameOrder: frameOrder.udp
         )
@@ -105,10 +138,13 @@ enum NowhereProtocol {
             throw NowhereError.connectionFailed("Failed to generate auth nonce")
         }
 
+        let padding = authPaddingBytes(protocolSpec: protocolSpec, nonce: nonce)
         var message = Data()
         message.append(protocolSpec.authInfo)
         message.append(protocolSpec.authContext)
         message.append(nonce)
+        message.append(protocolSpec.authPaddingLength)
+        message.append(padding)
 
         let authKey = Data(SHA256.hash(data: Data(key.utf8)))
         let tag = HMAC<SHA256>.authenticationCode(
@@ -116,9 +152,11 @@ enum NowhereProtocol {
             using: SymmetricKey(data: authKey)
         )
 
-        var frame = Data(capacity: authFrameLength)
+        var frame = Data(capacity: protocolSpec.authMagic.count + nonce.count + 1 + padding.count + authTagLength)
         frame.append(protocolSpec.authMagic)
         frame.append(nonce)
+        frame.append(protocolSpec.authPaddingLength)
+        frame.append(padding)
         frame.append(contentsOf: tag)
         return frame
     }
@@ -167,6 +205,31 @@ enum NowhereProtocol {
         return output.prefix(count)
     }
 
+    private static func authPaddingBytes(protocolSpec: EffectiveSpec, nonce: Data) -> Data {
+        var info = Data(capacity: authPaddingBytesLabel.count + nonce.count + 1)
+        info.append(authPaddingBytesLabel)
+        info.append(nonce)
+        info.append(protocolSpec.authPaddingLength)
+        return hkdfExpand(
+            prk: protocolSpec.authPaddingKey,
+            info: info,
+            count: Int(protocolSpec.authPaddingLength)
+        )
+    }
+
+    private static func tcpRequestPaddingBytes(protocolSpec: EffectiveSpec, target: String) -> Data {
+        let targetBytes = Data(target.utf8)
+        var info = Data(capacity: tcpPaddingBytesLabel.count + targetBytes.count + 1)
+        info.append(tcpPaddingBytesLabel)
+        info.append(targetBytes)
+        info.append(protocolSpec.tcpPaddingLength)
+        return hkdfExpand(
+            prk: protocolSpec.tcpPaddingKey,
+            info: info,
+            count: Int(protocolSpec.tcpPaddingLength)
+        )
+    }
+
     private static func base64URLNoPadding(_ data: Data) -> String {
         data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
@@ -175,9 +238,11 @@ enum NowhereProtocol {
     }
 
     private static func buildFrameOrder(seed: Data) -> (tcp: [FrameElement], udp: [FrameElement]) {
-        var tcp: [FrameElement] = [.version, .target]
-        if (seed.first ?? 0) & 1 == 1 {
-            tcp.swapAt(0, 1)
+        var tcp: [FrameElement] = [.version, .target, .padding]
+        for i in stride(from: tcp.count - 1, through: 1, by: -1) {
+            let seedIndex = tcp.count - 1 - i
+            let seedByte = seedIndex < seed.count ? byte(seed, at: seedIndex) : 0
+            tcp.swapAt(i, Int(seedByte) % (i + 1))
         }
 
         var udp: [FrameElement] = [.version, .type, .flowID, .target]
@@ -192,13 +257,17 @@ enum NowhereProtocol {
 
     static func encodeTCPRequest(address: String, protocolSpec: EffectiveSpec) throws -> Data {
         let targetBytes = try encodeTarget(address)
-        var out = Data(capacity: 1 + targetBytes.count)
+        let padding = tcpRequestPaddingBytes(protocolSpec: protocolSpec, target: address)
+        var out = Data(capacity: 1 + targetBytes.count + 1 + padding.count)
         for element in protocolSpec.tcpFrameOrder {
             switch element {
             case .version:
                 out.append(proxyFrameVersion)
             case .target:
                 out.append(targetBytes)
+            case .padding:
+                out.append(protocolSpec.tcpPaddingLength)
+                out.append(padding)
             case .type, .flowID:
                 break
             }
@@ -227,6 +296,8 @@ enum NowhereProtocol {
                 out.append(uint64Bytes(flowID))
             case .target:
                 out.append(targetBytes)
+            case .padding:
+                break
             }
         }
         return out
@@ -255,6 +326,8 @@ enum NowhereProtocol {
                 guard let parsed = decodeTarget(data, offset: offset) else { return nil }
                 target = parsed.target
                 offset = data.distance(from: data.startIndex, to: parsed.nextOffset)
+            case .padding:
+                break
             }
         }
         guard let type = frameType,
@@ -302,6 +375,11 @@ enum NowhereProtocol {
             memcpy(&value, raw.baseAddress!.advanced(by: offset), 8)
             return UInt64(bigEndian: value)
         }
+    }
+
+    private static func readUInt16(_ data: Data, at offset: Int) -> Int {
+        guard offset + 2 <= data.count else { return 0 }
+        return (Int(byte(data, at: offset)) << 8) | Int(byte(data, at: offset + 1))
     }
 
     private static func byte(_ data: Data, at offset: Int) -> UInt8 {
