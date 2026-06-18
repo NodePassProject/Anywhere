@@ -141,7 +141,7 @@ struct ImportRuleSetsView: View {
     private func performImport() {
         for item in model.items where item.isSelected && item.status == .ready {
             if let routingSet = item.routingSet {
-                routingStore.addCustomRuleSet(routingSet)
+                routingStore.addCustomRuleSet(routingSet, initialAssignment: item.routingRoute.assignmentId)
             } else if let mitmSet = item.mitmSet {
                 mitmStore.addRuleSet(mitmSet)
             }
@@ -180,6 +180,7 @@ final class ImportRuleSetsModel {
         var displayName: String
         var summary: String = ""
         var routingSet: CustomRoutingRuleSet?
+        var routingRoute: RuleSetImportRoute = .default
         var mitmSet: MITMRuleSet?
     }
 
@@ -266,6 +267,7 @@ final class ImportRuleSetsModel {
                     $0.displayName = name
                     $0.summary = summary
                     $0.routingSet = set
+                    $0.routingRoute = parsed.routing
                 }
 
             case .mitm:

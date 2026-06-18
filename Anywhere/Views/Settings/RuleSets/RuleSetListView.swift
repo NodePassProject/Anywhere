@@ -221,7 +221,7 @@ struct RuleSetListView: View {
                 ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
                 : parsed.name
             let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules)
-            RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
+            RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
             customRuleSets = RoutingRuleSetStore.shared.customRuleSets
         } catch {
             importError = error.localizedDescription
@@ -253,7 +253,7 @@ struct RuleSetListView: View {
                     ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
                     : parsed.name
                 let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
-                RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
+                RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
                 customRuleSets = RoutingRuleSetStore.shared.customRuleSets
             } catch {
                 subscribeError = error.localizedDescription

@@ -209,11 +209,16 @@ class RoutingRuleSetStore {
         rebuildRuleSets()
         return ruleSet
     }
-
-    func addCustomRuleSet(_ ruleSet: CustomRoutingRuleSet) {
+    
+    func addCustomRuleSet(_ ruleSet: CustomRoutingRuleSet, initialAssignment: String? = nil) {
         customTombstones.removeAll { $0.id == ruleSet.id }
         customRuleSets.append(ruleSet)
         saveCustomRuleSets()
+        if let initialAssignment {
+            var assignments = AWCore.getRuleSetAssignments()
+            assignments[ruleSet.id.uuidString] = initialAssignment
+            AWCore.setRuleSetAssignments(assignments)
+        }
         rebuildRuleSets()
     }
 
