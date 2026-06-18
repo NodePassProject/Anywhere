@@ -65,10 +65,11 @@ struct ReflectionSettingsView: View {
             }
         }
         .navigationTitle("Reflection")
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem {
-                EditButton()
+            if settings.reflectionEnabled {
+                ToolbarItem {
+                    EditButton()
+                }
             }
         }
         .onAppear { loadInitial() }
