@@ -61,8 +61,8 @@ final class MITMLeafCertCache {
         }
         lock.unlock()
 
-        // Mint outside the lock; deliberately no single-flight — racing mints both produce
-        // valid leaves, while blocking a waiter on the serial lwIP queue would deadlock.
+        // Mint outside the lock; no single-flight — racing mints both produce valid leaves,
+        // and blocking a waiter on the serial lwIP queue would deadlock.
         let leaf = try mintLeaf(for: normalized)
 
         lock.lock()

@@ -244,6 +244,10 @@ struct TLSApplicationKeys {
     let clientIV: Data
     let serverKey: Data
     let serverIV: Data
+    /// The application traffic secrets the keys/IVs were derived from. Retained so the
+    /// record layer can advance them on a post-handshake KeyUpdate (RFC 8446 §7.2).
+    let clientTrafficSecret: Data
+    let serverTrafficSecret: Data
 }
 
 /// Client-side handshake-time TLS 1.3 state; populated incrementally, then reset once
@@ -412,8 +416,22 @@ struct TLS13KeyDerivation {
 
         return TLSApplicationKeys(
             clientKey: clientKey, clientIV: clientIV,
-            serverKey: serverKey, serverIV: serverIV
+            serverKey: serverKey, serverIV: serverIV,
+            clientTrafficSecret: clientATS,
+            serverTrafficSecret: serverATS
         )
+    }
+
+    /// Advance an application traffic secret to its next generation and derive the matching
+    /// AEAD key + IV, per RFC 8446 §7.2:
+    ///   application_traffic_secret_N+1 = HKDF-Expand-Label(secret_N, "traffic upd", "", Hash.length)
+    func nextApplicationGeneration(trafficSecret: Data) -> (secret: Data, key: Data, iv: Data) {
+        let next = expandLabel(secret: SymmetricKey(data: trafficSecret),
+                               label: "traffic upd", context: Data(), length: hashLength)
+        let nextKey = SymmetricKey(data: next)
+        let key = expandLabel(secret: nextKey, label: "key", context: Data(), length: keyLength)
+        let iv = expandLabel(secret: nextKey, label: "iv", context: Data(), length: 12)
+        return (next, key, iv)
     }
 
     /// The expected payload of Finished for the given traffic secret (client or server).

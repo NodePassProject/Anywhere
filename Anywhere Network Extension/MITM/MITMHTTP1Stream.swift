@@ -62,14 +62,13 @@ final class MITMHTTP1Stream {
     /// Fired when a head is rejected as a request-smuggling / header-injection framing violation,
     /// or a chunked body overruns the buffer cap. The stream stops forwarding (`.draining`) and
     /// asks the session to close the connection — fail closed rather than relay malformed bytes or
-    /// deliver a truncated body framed as complete. Mirrors mitmproxy's `400/502 + CloseConnection`.
-    /// Used only *before* a head is committed to the wire, so the response leg can still answer 502.
+    /// deliver a truncated body framed as complete. Used only *before* a head is committed to the
+    /// wire, so the response leg can still answer 502.
     var onFatalClose: (() -> Void)?
     /// Fired when chunked framing breaks *mid-body*, after the head is already on the wire. The
-    /// session must tear down both legs (a plain TCP close) — it cannot answer a 502, and
+    /// session must tear down both legs (a plain TCP close): it cannot answer a 502, and
     /// synthesizing a `0\r\n\r\n` terminator + passthrough would frame a truncated body as complete
-    /// and then desync the peer onto the next message. Mirrors mitmproxy's `CloseConnection` on a
-    /// body `ProtocolError`.
+    /// and then desync the peer onto the next message.
     var onHardClose: (() -> Void)?
     /// Lazy JS runtime, shared across both directions.
     private let scriptEngineProvider: MITMScriptEngine.Provider
@@ -190,8 +189,8 @@ final class MITMHTTP1Stream {
     private var mode: Mode = .awaitingHead
 
     /// When set (the h2→h1 bridge's per-stream response stream), the response path delivers IR to
-    /// this sink instead of producing HTTP/1.1 bytes. nil ⇒ byte output (the main h1↔h1 path),
-    /// byte-for-byte unchanged. Response phase only; set once before the first `transform`.
+    /// this sink instead of producing HTTP/1.1 bytes. nil ⇒ byte output (the main h1↔h1 path).
+    /// Response phase only; set once before the first `transform`.
     weak var responseIRSink: MITMHTTP1ResponseIRSink?
 
     /// In-flight completion, retained while a script hop is outstanding.
@@ -218,10 +217,9 @@ final class MITMHTTP1Stream {
     /// Synth bytes held until the current response finishes streaming. Response phase only.
     private var pendingSynthAfterCurrentResponse = Data()
 
-    /// True when the stream is between messages — awaiting a head, with nothing buffered, parked, or
-    /// pending. The session checks this on the *response* stream to know an h1 upstream leg is fully
-    /// idle (no response in flight) and so can be safely closed to reconnect to a different
-    /// transparent-rewrite target. Conservative by construction: any in-progress state reads false.
+    /// True when the stream is between messages (awaiting a head, nothing buffered/parked/pending).
+    /// Checked on the *response* stream to know an h1 upstream leg is fully idle and can be safely
+    /// closed to reconnect to a different transparent-rewrite target. Any in-progress state reads false.
     var isBetweenMessages: Bool {
         guard case .awaitingHead = mode else { return false }
         return rxBuffer.isEmpty
@@ -441,11 +439,9 @@ final class MITMHTTP1Stream {
         guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
             if rxBuffer.count > Self.maxHeadBytes {
                 // An over-cap head with no CRLF CRLF (giant headers, or bare-LF framing we never
-                // terminate) used to downgrade to verbatim passthrough — relaying bytes that skip
-                // every parseHead smuggling check, a trivially-triggered inspection bypass. Fail
-                // closed instead, like the `.smuggling` path: never relay an unparseable head
-                // (mitmproxy answers 400/502 + close). onFatalClose closes the connection on the
-                // request leg, or answers the client 502 on the response leg.
+                // terminate) would skip every parseHead smuggling check if relayed verbatim. Fail
+                // closed like the `.smuggling` path: never relay an unparseable head. onFatalClose
+                // closes the connection on the request leg, or answers the client 502 on the response leg.
                 logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; closing the connection without forwarding")
                 rxBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
@@ -472,8 +468,8 @@ final class MITMHTTP1Stream {
             return true
         case .smuggling:
             // A request-smuggling / header-injection framing violation (RFC 9112 §6). Fail closed:
-            // do not relay the offending bytes (mitmproxy answers 400 + CloseConnection). The session
-            // closes the connection; `.draining` drops anything already buffered behind this head.
+            // do not relay the offending bytes. The session closes the connection; `.draining`
+            // drops anything already buffered behind this head.
             logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
             mode = .draining
             onFatalClose?()
@@ -518,8 +514,8 @@ final class MITMHTTP1Stream {
         // Authority rewrite first so a headerReplace on Host can still override it.
         let withAuthority = applyAuthorityRewrite(parsed.headers)
         var rewrittenHeaders = applyHeaderRules(withAuthority, requestURL: gateURL)
-        // Clamp the request's Accept-Encoding to codings we can decode (mitmproxy `constrain_encoding`)
-        // so a buffered body rule isn't silently defeated by an undecodable Content-Encoding (e.g. zstd).
+        // Clamp the request's Accept-Encoding to codings we can decode so a buffered body rule
+        // isn't defeated by an undecodable Content-Encoding (e.g. zstd).
         if phase == .httpRequest {
             rewrittenHeaders = rewrittenHeaders.map { entry in
                 entry.name.equalsIgnoringASCIICase("accept-encoding")
@@ -739,8 +735,8 @@ final class MITMHTTP1Stream {
         // (stream scripts can't mutate head fields).
         if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
             if responseIRSink != nil {
-                // The bridge can't run a streaming response script across the h2→h1 boundary
-                // (mirrors the request side); forward the body unscripted as IR rather than stall.
+                // The bridge can't run a streaming response script across the h2→h1 boundary;
+                // forward the body unscripted as IR rather than stall.
                 logger.warning("HTTP/1 \(host): response stream-script unsupported on the bridge; forwarding unscripted")
                 emitResponseHead(startLine: rewrittenStartLine, headers: rewrittenHeaders, bodyFollows: true, into: &output)
                 mode = .forwardingChunked(reader: ChunkedReader())
@@ -847,7 +843,7 @@ final class MITMHTTP1Stream {
             // Chunked framing broke mid-body. Bridge: reset the stream. Main path: the head is
             // already on the wire, so we can't answer an error — synthesizing a `0\r\n\r\n`
             // terminator + passthrough would frame a truncated body as complete and then desync the
-            // peer onto the next message. Fail closed (close both legs), matching mitmproxy.
+            // peer onto the next message. Fail closed (close both legs).
             if bridgeResetIfNeeded() { return false }
             logger.warning("HTTP/1 \(host): chunked framing broke mid-body; closing the connection rather than truncating + desyncing")
             rxBuffer.removeAll(keepingCapacity: false)
@@ -897,11 +893,9 @@ final class MITMHTTP1Stream {
         case .needMore:
             // No up-front length. On cap overflow we can neither buffer the whole body nor cleanly
             // stream the remainder un-rewritten (the head is withheld and decode-while-buffering has
-            // already consumed the original chunk framing). Emitting the partial buffer with an
-            // *exact* Content-Length would frame a silently-truncated body as complete — which a
-            // client trusts (corrupt JSON / file). Fail honestly instead: answer a 502 on the
-            // response phase (output is client-bound there; mirrors mitmproxy's RESPONSE_TOO_LARGE)
-            // and close, never presenting a truncated body as whole.
+            // already consumed the original chunk framing). Emitting the partial buffer with an exact
+            // Content-Length would frame a silently-truncated body as complete, which a client trusts.
+            // Fail closed instead (502 on the response phase, then close).
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("HTTP/1 \(host): chunked body exceeded \(MITMBodyCodec.maxBufferedBodyBytes) B buffer cap; failing closed rather than truncating to a fake-complete length")
                 mode = .draining
@@ -920,10 +914,9 @@ final class MITMHTTP1Stream {
             )
             return !parked
         case .malformed:
-            // Bridge: no head emitted yet (buffered rewrite), so reset the client stream rather
-            // than strand it. Main path: the head is still withheld (we were buffering to rewrite),
-            // so fail closed — answer 502 / close — instead of going passthrough, which would emit
-            // raw body bytes with no response head and desync the peer.
+            // Head still withheld (buffering to rewrite). Bridge: reset the client stream. Main
+            // path: fail closed (502 / close) rather than passthrough, which would emit raw body
+            // bytes with no response head and desync the peer.
             if bridgeResetIfNeeded() { return false }
             logger.warning("HTTP/1 \(host): chunked framing broke while buffering for a rewrite; failing closed")
             mode = .draining
@@ -1091,10 +1084,9 @@ final class MITMHTTP1Stream {
                 // RFC 9112 §7.1.2: forward trailer lines verbatim until the empty-line terminator.
                 guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
-                        // Oversized/garbage trailer with the final CRLF still unseen: the upstream
-                        // framing is broken. We already emitted `0\r\n` but not the closing `\r\n`,
-                        // so the peer sees an unterminated body — close both legs (the honest signal)
-                        // rather than paper over it and desync onto trailer garbage.
+                        // Oversized/garbage trailer, final CRLF unseen: framing is broken. `0\r\n` is
+                        // already emitted but not the closing `\r\n`, so the peer sees an unterminated
+                        // body — close both legs rather than paper over it and desync onto garbage.
                         logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
                         rxBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
@@ -1226,8 +1218,8 @@ final class MITMHTTP1Stream {
 
     /// Parses the hex chunk-size, ignoring any extensions after `;`.
     fileprivate static func parseHexSize(_ data: Data) -> Int? {
-        // latin-1 never fails (a non-ASCII byte in a chunk extension shouldn't kill an otherwise-valid
-        // body); the hex chunk-size itself is still validated as ASCII hex digits below.
+        // latin-1 never fails (a non-ASCII byte in a chunk extension shouldn't kill a valid body);
+        // the hex chunk-size itself is still validated as ASCII hex digits below.
         guard let raw = String(data: data, encoding: .isoLatin1) else { return nil }
         let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
         let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
@@ -1456,14 +1448,14 @@ final class MITMHTTP1Stream {
         }
     }
 
-    /// Statuses that forbid a body (RFC 9110 §15): 1xx except 101, 204, 205, 304.
+    /// Statuses that forbid a body (RFC 9110 §15): 1xx except 101, 204, 304.
     private func isNoBodyStatus(_ status: Int?) -> Bool {
         guard let status else { return false }
         switch status {
         case 204, 304:
             // RFC 9112 §6.3's framing no-body set is 1xx/204/304 (plus HEAD and CONNECT-2xx). 205 is
-            // *not* in it — though it carries no content (RFC 9110 §15.3.6), `bodyFraming` honors an
-            // explicit Content-Length/Transfer-Encoding on a 205 and only then defaults it to empty.
+            // *not* in it: though it carries no content (RFC 9110 §15.3.6), `bodyFraming` honors an
+            // explicit Content-Length/Transfer-Encoding on a 205 before defaulting it to empty.
             return true
         default:
             return (100..<200).contains(status) && status != 101
@@ -1536,10 +1528,9 @@ final class MITMHTTP1Stream {
         let headers: [Header]
     }
 
-    /// Outcome of `parseHead`, distinguishing the two reasons it can decline a head so the caller
-    /// can act differently: a non-HTTP / tolerable head is forwarded verbatim (`.forward`), while an
-    /// HTTP head carrying a request-smuggling / injection framing violation fails closed
-    /// (`.smuggling`) instead of being relayed.
+    /// Outcome of `parseHead`. The two decline reasons act differently: a non-HTTP / tolerable head
+    /// forwards verbatim (`.forward`), while a request-smuggling / injection framing violation fails
+    /// closed (`.smuggling`) instead of being relayed.
     private enum ParsedHeadResult {
         case ok(ParsedHead)
         case forward
@@ -1548,31 +1539,33 @@ final class MITMHTTP1Stream {
 
     private func parseHead(_ data: Data) -> ParsedHeadResult {
         // ISO-8859-1, not ASCII: HTTP/1 header octets are a byte string (RFC 9110 §5.5 obs-text), and
-        // latin-1 maps every byte 1:1 so it never fails. An ASCII decode returned nil on any byte > 0x7F
-        // (common in real Set-Cookie / Content-Disposition / Server fields), which dropped the whole
-        // connection to verbatim passthrough and silently disabled all rewriting. `serializeHead`
-        // re-emits these via `appendHeaderFieldBytes`, so the original octets round-trip exactly.
+        // latin-1 maps every byte 1:1 so it never fails (ASCII would reject any byte > 0x7F, common in
+        // real Set-Cookie / Content-Disposition / Server fields). `serializeHead` re-emits these via
+        // `appendHeaderFieldBytes`, so the original octets round-trip exactly.
         guard let raw = String(data: data, encoding: .isoLatin1) else { return .forward }
         let lines = raw.components(separatedBy: "\r\n")
         guard let startLine = lines.first, !startLine.isEmpty else { return .forward }
-        guard isHTTPStartLine(startLine) else { return .forward }
-        // A lone CR/LF survives the exact-CRLF split and could smuggle a header
-        // on re-emission; NUL is forbidden too (RFC 9112 §2.2).
-        if Self.containsControlChars(startLine) { return .smuggling }
-        // RFC 9112 §3: a request-line is exactly `method SP request-target SP HTTP-version`. The
-        // incoming target is otherwise re-emitted verbatim, so validate it here — an embedded
-        // SP/TAB/DEL/CTL is a target-confusion / request-smuggling primitive, and would also desync
-        // the URL gate (which splits on SP). Responses skip this: the reason phrase may contain SP.
-        if phase == .httpRequest {
-            let parts = startLine.split(separator: " ", omittingEmptySubsequences: false)
-            guard parts.count == 3, Self.isValidRequestTarget(String(parts[1])) else {
-                return .smuggling
-            }
+        guard isHTTPStartLine(startLine) else {
+            // Not a head Anywhere rewrites (some other `HTTP/<d>.<d>` version). Forward it verbatim if
+            // it still parses as a valid start-line grammar; fail closed only on a true non-HTTP or
+            // malformed-version/status head rather than laundering it through.
+            return parsesStartLine(startLine) ? .forward : .smuggling
         }
-        // RFC 9112 §5.2 / RFC 7230 §3.2.4: obs-fold is deprecated. Rather than forward a folded head
-        // verbatim — which would let a field value split across a fold skip the CL/TE smuggling
-        // checks below — unfold it (append each continuation to the prior field value with a single
-        // SP) and validate the unfolded result.
+        // RFC 9112 §2.2: a lone CR/LF in the start line would split into a smuggled header on
+        // re-emission. NUL / other control / DEL bytes are not a line-splitting vector here, so they
+        // forward verbatim (rejecting them would diverge from the endpoint parser).
+        if Self.containsCRorLF(startLine) { return .smuggling }
+        // Validate the start-line grammar (request-line: `method SP target SP version` tokenized on
+        // whitespace runs, so a target with SP yields ≠3 tokens and is rejected; status-line needs
+        // an HTTP/d.d version and integer status).
+        guard parsesStartLine(startLine) else { return .smuggling }
+        // RFC 9110 §9.3.6: refuse CONNECT in transparent mode — inside an already-intercepted
+        // connection a tunnel request is a misconfiguration / smuggling attempt. Case-sensitive:
+        // lowercase `connect` is a different, unregistered method that forwards normally.
+        if phase == .httpRequest, isConnectRequestLine(startLine) { return .smuggling }
+        // RFC 9112 §5.2 / RFC 7230 §3.2.4: obs-fold is deprecated. Unfold it (append each
+        // continuation to the prior field value with a single SP) and validate the result, so a
+        // value split across a fold can't skip the CL/TE smuggling checks below.
         var headerLines: [String] = []
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
@@ -1588,16 +1581,17 @@ final class MITMHTTP1Stream {
         var contentLengthValues: [String] = []
         var transferEncodingValues: [String] = []
         for line in headerLines {
-            // RFC 9112 §5.1: no colon is a syntax error; forward verbatim (it isn't itself a
-            // CL/TE framing manipulation) and let the upstream reject it.
-            guard let colon = line.firstIndex(of: ":") else { return .forward }
+            // RFC 9112 §5.1 / RFC 9110 §5.6: a header field with no colon is malformed; fail closed
+            // rather than forwarding it.
+            guard let colon = line.firstIndex(of: ":") else { return .smuggling }
             let name = String(line[..<colon])
             let value = String(line[line.index(after: colon)...])
                 .trimmingCharacters(in: CharacterSet.whitespaces)
             // RFC 9110 §5.6.2: SP/CTL in a field-name is the classic obfuscated-TE smuggle.
             guard isValidHTTPHeaderName(name) else { return .smuggling }
-            // CR/LF/NUL in a field-value would split the line on re-emission.
-            if Self.containsControlChars(value) { return .smuggling }
+            // CR/LF in a field-value would split the line on re-emission (request/response splitting).
+            // NUL / other control bytes are not a splitting vector here and pass through verbatim.
+            if Self.containsCRorLF(value) { return .smuggling }
             if name.equalsIgnoringASCIICase("content-length") {
                 contentLengthValues.append(
                     value.trimmingCharacters(in: CharacterSet.whitespaces)
@@ -1607,63 +1601,54 @@ final class MITMHTTP1Stream {
             }
             headers.append((name: name, value: value))
         }
-        // Reject any Content-Length that `bodyFraming` wouldn't honor — a
-        // forward/frame divergence is a request-smuggling vector.
+        // Reject any Content-Length that isn't a clean decimal (`NaN`, `-1`, `007`, comma-joined
+        // `5, 5` are all framing-confusion vectors).
         if contentLengthValues.contains(where: { !Self.isCleanContentLength($0) }) {
             return .smuggling
         }
-        // RFC 9112 §6.1: a request's Transfer-Encoding must end in `chunked` — a non-chunked final
-        // coding is unframable and a smuggling vector. A *response* may carry a non-chunked
-        // transfer-coding (e.g. `gzip`), framed by connection close (RFC 9112 §6.3); `bodyFraming`
-        // resolves that to `.readUntilClose`. Multiple TE field lines are always a smuggling vector.
-        if !transferEncodingValues.isEmpty {
-            if transferEncodingValues.count > 1 { return .smuggling }
-            // RFC 9112 §6.1 / RFC 9110: Transfer-Encoding is an HTTP/1.1-only feature. A TE on an
-            // HTTP/1.0 message is a smuggling vector — HTTP/1.0 hops ignore TE and frame by close, so
-            // two hops disagree on the body boundary (mitmproxy rejects this in validate.py).
-            guard startLineIsHTTP11(startLine) else { return .smuggling }
-            // RFC 9112 §6.1: `chunked` must be applied at most once and only as the final coding.
-            // `chunked, chunked` (or chunked in a non-final position) means two hops can disagree on
-            // the body length — reject it on both phases, matching mitmproxy's TE allow-list.
-            let teTokens = transferEncodingValues[0]
-                .split(separator: ",", omittingEmptySubsequences: false)
-                .map { $0.trimmingCharacters(in: CharacterSet.whitespaces) }
-            let chunkedCount = teTokens.filter { $0.equalsIgnoringASCIICase("chunked") }.count
-            if chunkedCount > 1 { return .smuggling }
-            if chunkedCount == 1, teTokens.last?.equalsIgnoringASCIICase("chunked") != true {
-                return .smuggling
-            }
-            if !Self.transferEncodingIsChunked(transferEncodingValues[0]), phase == .httpRequest {
-                return .smuggling
-            }
-        }
-        // RFC 9112 §6.3.5: differing Content-Length values are a primary smuggling vector.
-        let uniqueLengths = Set(contentLengthValues)
-        if uniqueLengths.count > 1 {
+        // RFC 9112 §6.3.5: more than one Content-Length field is rejected outright, even when the
+        // values are identical — a duplicate CL is a smuggling signal, not collapsed.
+        if contentLengthValues.count > 1 {
             return .smuggling
         }
-        // RFC 9112 §6.3: Transfer-Encoding overrides Content-Length. When both are present, strip
-        // Content-Length so the two framing sources can't disagree (the classic TE+CL smuggle).
+        // Transfer-Encoding framing checks (RFC 9112 §6.1).
+        if !transferEncodingValues.isEmpty {
+            // At most one Transfer-Encoding field line.
+            if transferEncodingValues.count > 1 { return .smuggling }
+            // RFC 9112 §6.1: TE is HTTP/1.1-only. On HTTP/1.0 two hops disagree on framing (smuggle).
+            guard startLineIsHTTP11(startLine) else { return .smuggling }
+            // A server MUST NOT send Transfer-Encoding on a 1xx or 204 response (RFC 9110 §6.1 / §15).
+            if phase == .httpResponse, let status = responseStatusCode(from: startLine),
+               (100..<200).contains(status) || status == 204 {
+                return .smuggling
+            }
+            // Known-coding allow-list (chunked / compress / deflate / gzip [± chunked] / identity).
+            // Rejects unknown codings (`br`), `chunked, chunked`, chunked-not-final, and non-ASCII
+            // homoglyphs `.lowercased()` would fold into a valid coding.
+            guard let te = Self.normalizedTransferEncoding(transferEncodingValues[0]) else {
+                return .smuggling
+            }
+            // On a request the final coding MUST be `chunked`; a non-chunked final coding is
+            // unframable (a response may carry one, framed by connection close → `.readUntilClose`).
+            if phase == .httpRequest, !te.hasSuffix("chunked") {
+                return .smuggling
+            }
+        }
+        // RFC 9112 §6.3.3: a message carrying BOTH Transfer-Encoding and Content-Length is rejected
+        // (request smuggling / response splitting), on requests and responses alike.
         if !transferEncodingValues.isEmpty && !contentLengthValues.isEmpty {
-            headers = headers.filter {
-                !$0.name.equalsIgnoringASCIICase("content-length")
-            }
-        } else if contentLengthValues.count > 1 {
-            // Duplicate identical Content-Length values: collapse to one.
-            var filtered = headers.filter {
-                !$0.name.equalsIgnoringASCIICase("content-length")
-            }
-            filtered.append((name: "Content-Length", value: contentLengthValues[0]))
-            headers = filtered
+            return .smuggling
         }
         return .ok(ParsedHead(startLine: startLine, headers: headers))
     }
 
-    /// Pure non-negative integer Content-Length; rejects `+5`, `5 5`, overflow
-    /// (RFC 9112 §6.3). Shared by `parseHead` and `bodyFraming` so they can't drift.
+    /// A clean Content-Length: a lone `0` or a no-leading-zero decimal (`^(?:0|[1-9][0-9]*)$`).
+    /// Rejects `+5`, `-1`, `5 5`, `NaN`, comma-joined `5, 5`, and leading-zero `007` (an
+    /// octal/decimal split-interpretation smuggle). No upper bound; `bodyFraming` clamps an
+    /// over-`Int64` value to `Int.max`. Shared by `parseHead` and `bodyFraming` so they can't drift.
     static func isCleanContentLength(_ trimmed: String) -> Bool {
         guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
-        guard let length = Int(trimmed), length >= 0 else { return false }
+        if trimmed.count > 1, trimmed.first == "0" { return false }
         return true
     }
 
@@ -1683,10 +1668,62 @@ final class MITMHTTP1Stream {
         return last?.equalsIgnoringASCIICase("chunked") == true
     }
 
-    /// True when `s` contains CR, LF, or NUL — bytes that would split a line on re-emission.
-    private static func containsControlChars(_ s: String) -> Bool {
+    /// Returns the normalized Transfer-Encoding (lowercased, whitespace around commas removed) iff it is
+    /// ASCII and one of the allowed codings; nil otherwise. The ASCII guard defeats a non-ASCII homoglyph
+    /// `.lowercased()` would otherwise fold into a valid coding (e.g. a Kelvin-sign "K" in `chunKed`).
+    static func normalizedTransferEncoding(_ value: String) -> String? {
+        guard value.allSatisfy({ $0.isASCII }) else { return nil }
+        let te = value.lowercased()
+            .replacingOccurrences(of: "[\t ]*,[\t ]*", with: ",", options: .regularExpression)
+        let allowed: Set<String> = [
+            "chunked", "compress,chunked", "deflate,chunked", "gzip,chunked",
+            "compress", "deflate", "gzip", "identity",
+        ]
+        return allowed.contains(te) ? te : nil
+    }
+
+    /// A valid HTTP version token `^HTTP/\d\.\d$`: the literal `HTTP/`, one ASCII digit, `.`, one
+    /// ASCII digit — eight bytes exactly.
+    static func isHTTPVersionToken(_ s: Substring) -> Bool {
+        let u = Array(s.utf8)
+        return u.count == 8
+            && u[0] == 0x48 && u[1] == 0x54 && u[2] == 0x54 && u[3] == 0x50 && u[4] == 0x2F
+            && (0x30...0x39).contains(u[5]) && u[6] == 0x2E && (0x30...0x39).contains(u[7])
+    }
+
+    /// Whether `startLine` parses as a valid HTTP/1 request- or status-line. The sole start-line
+    /// gate. Tokenizes on runs of ASCII whitespace (SP/TAB/VT/FF; CR/LF rejected upstream),
+    /// discarding empties, so multiple spaces or a tab collapse to one separator.
+    private func parsesStartLine(_ startLine: String) -> Bool {
+        let tokens = startLine.split(whereSeparator: {
+            $0 == " " || $0 == "\t" || $0 == "\u{0B}" || $0 == "\u{0C}"
+        })
+        switch phase {
+        case .httpRequest:
+            // Exactly three whitespace-separated tokens, the third an HTTP/d.d version. A target
+            // containing SP/TAB splits into ≠3 tokens and is rejected.
+            return tokens.count == 3 && Self.isHTTPVersionToken(tokens[2])
+        case .httpResponse:
+            guard tokens.count >= 2, Self.isHTTPVersionToken(tokens[0]) else { return false }
+            return Int(tokens[1]) != nil
+        }
+    }
+
+    /// True when the request-line's method token is exactly `CONNECT` (case-sensitive). The tokenizer
+    /// matches `parsesStartLine`, so the first token is the method on any line that parsed.
+    private func isConnectRequestLine(_ startLine: String) -> Bool {
+        let tokens = startLine.split(whereSeparator: {
+            $0 == " " || $0 == "\t" || $0 == "\u{0B}" || $0 == "\u{0C}"
+        })
+        return tokens.first == "CONNECT"
+    }
+
+    /// True when `s` contains CR or LF — the bytes that split an HTTP/1 line on re-emission (the
+    /// request-/response-splitting primitive). NUL / other control / DEL bytes are not a splitting
+    /// vector and forward verbatim.
+    private static func containsCRorLF(_ s: String) -> Bool {
         for byte in s.utf8 {
-            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+            if byte == 0x0D || byte == 0x0A {
                 return true
             }
         }
@@ -1742,11 +1779,13 @@ final class MITMHTTP1Stream {
     }
 
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
-        // Defense-in-depth: enforce the no-CR/LF/NUL invariant at the serialization boundary.
+        // Defense-in-depth: enforce the no-CR/LF invariant at the serialization boundary.
         let safeHeaders = headers.filter { entry in
-            guard !Self.containsControlChars(entry.name),
-                  !Self.containsControlChars(entry.value) else {
-                logger.warning("HTTP/1 \(host): dropping header with CR/LF/NUL from serialized head: \(entry.name)")
+            // CR/LF backstop: would split the field into a smuggled header on the wire (NUL is
+            // already screened upstream via `isValidHTTPHeaderValue`).
+            guard !Self.containsCRorLF(entry.name),
+                  !Self.containsCRorLF(entry.value) else {
+                logger.warning("HTTP/1 \(host): dropping header with CR/LF from serialized head: \(entry.name)")
                 return false
             }
             return true
@@ -1757,8 +1796,8 @@ final class MITMHTTP1Stream {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
-        // Emit as ISO-8859-1 bytes so a header octet parsed as latin-1 round-trips exactly (a plain
-        // `.utf8` would re-encode a 0x80–0xFF octet as a 2-byte sequence, corrupting it).
+        // Emit as ISO-8859-1 bytes so a latin-1 header octet round-trips exactly (plain `.utf8`
+        // would re-encode a 0x80–0xFF octet as a 2-byte sequence, corrupting it).
         out.appendHeaderFieldBytes(startLine)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in safeHeaders {
@@ -1850,8 +1889,9 @@ final class MITMHTTP1Stream {
                 if isNoBodyStatus(status) { return .none }
             }
         }
-        // RFC 9112 §6.3: TE takes precedence over Content-Length.
-        // `parseHead` already normalized the TE+CL smuggling case.
+        // RFC 9112 §6.3: TE takes precedence over Content-Length. `parseHead` already rejected any
+        // incoming TE+CL combination, so this applies only to a post-rule header set (a rule could add
+        // one), which is not re-validated.
         var transferEncoding: String?
         var contentLength: String?
         for (name, value) in headers {
@@ -1869,8 +1909,11 @@ final class MITMHTTP1Stream {
         }
         if let cl = contentLength {
             let trimmed = cl.trimmingCharacters(in: CharacterSet.whitespaces)
-            // `Int` accepts a leading `+`; use the same gate as `parseHead`.
-            if Self.isCleanContentLength(trimmed), let length = Int(trimmed) {
+            if Self.isCleanContentLength(trimmed) {
+                // A clean CL that overflows Int64 (only a pathological >9-exabyte value) clamps to
+                // Int.max: forward the head and stream the body until the declared count or EOF. The
+                // clamp stays positive, so buffer math can't trap.
+                let length = Int(trimmed) ?? Int.max
                 return length == 0 ? .none : .contentLength(length)
             }
         }
@@ -1929,10 +1972,9 @@ final class MITMHTTP1Stream {
         }) else { return .rewritten(startLine) }
 
         // Each request re-resolves its own upstream. Clear any target a *previous* request on this
-        // keep-alive leg set, so a later request that matches no transparent rewrite resolves to the
-        // original origin (and the session tears the leg down if that differs from the dialed host)
-        // rather than inheriting the prior request's target and `Host`. Without this, request #2 on a
-        // connection whose request #1 rewrote A→B is misrouted to B.
+        // keep-alive leg set, so a later request matching no transparent rewrite resolves to the
+        // original origin (and the session tears the leg down if it differs from the dialed host)
+        // rather than inheriting the prior request's target and `Host`.
         effectiveAuthority = nil
         resolvedUpstream = nil
 
@@ -2250,9 +2292,8 @@ private final class ChunkedReader {
     }
 
     /// Like `consumeForward`, but delivers each decoded chunk payload to `deliver` instead of
-    /// re-framing it as HTTP/1.1 (the h2→h1 bridge frames payloads as HTTP/2 DATA). Trailer lines
-    /// are dropped. `state` / `scanCursor` are shared, so a reader is used in exactly one mode for
-    /// its lifetime.
+    /// re-framing it as HTTP/1.1 (the bridge frames payloads as HTTP/2 DATA); trailer lines are
+    /// dropped. `state` / `scanCursor` are shared, so a reader is used in exactly one mode for life.
     func consumeForwardIR(_ buffer: inout MITMByteBuffer, deliver: (Data) -> Void) -> ForwardResult {
         while !buffer.isEmpty {
             switch state {

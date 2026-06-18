@@ -72,8 +72,7 @@ enum CompiledMITMOperation {
     case headerDelete(nameLower: String)
     /// Overwrites every matching header (case-insensitive); absent headers are left untouched.
     case headerReplace(name: String, value: String)
-    /// JavaScript transform; sourceKey is the compile-cache key, precomputed at
-    /// rule load. At most one script fires per message.
+    /// JavaScript transform; sourceKey is the compile-cache key. At most one script fires per message.
     case script(source: String, sourceKey: Int)
     /// Like `script` but invoked per DATA chunk so streaming bodies flow unbuffered; at most one fires per stream.
     case streamScript(source: String, sourceKey: Int)
@@ -286,9 +285,8 @@ final class MITMRewritePolicy {
 
     /// Framing (RFC 9112 §6) and connection-management headers are blocked for add/replace: divergent
     /// framing is the request-smuggling primitive, and an injected Connection/Upgrade/Keep-Alive/TE
-    /// token desyncs keep-alive or smuggles a connection directive (and on the h1 leg, which doesn't
-    /// strip hop-by-hop, would reach the upstream). Delete only makes framing more conservative, so
-    /// it stays allowed.
+    /// token desyncs keep-alive (the h1 leg doesn't strip hop-by-hop, so it would reach upstream).
+    /// Delete only makes framing more conservative, so it stays allowed.
     private static func isFramingHeader(_ name: String) -> Bool {
         switch name.lowercased() {
         case "content-length", "transfer-encoding",

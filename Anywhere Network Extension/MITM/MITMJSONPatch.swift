@@ -131,7 +131,7 @@ enum MITMJSONPatch {
     // MARK: - Parse / serialize
 
     /// Parses with mutable containers and `.fragmentsAllowed`; nil for empty/malformed input.
-    /// NSNumber round-tripping isn't contractual, so applyAll only re-serializes changed documents.
+    /// NSNumber round-tripping isn't contractual, so only changed documents are re-serialized.
     static func parse(_ data: Data) -> Any? {
         guard !data.isEmpty else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
@@ -298,8 +298,8 @@ enum MITMJSONPatch {
         return root
     }
 
-    /// Depth ceiling for recursive walkers. Must exceed JSONSerialization's parse-depth limit
-    /// (empirically 512) or deep sub-trees silently no-op; 600 stays within NE stack bounds.
+    /// Depth ceiling for recursive walkers. Exceeds JSONSerialization's parse-depth limit (~512)
+    /// so deep sub-trees aren't silently skipped; 600 stays within NE stack bounds.
     private static let maxRecursionDepth = 600
 
     /// Overwrites every existing `key` member at any depth (replace, not insert);

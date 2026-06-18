@@ -8,8 +8,8 @@
 import Foundation
 
 /// Outbound HTTP for the Anywhere.http script API. Requests go out as the NE's own URLSession
-/// traffic, which the kernel keeps out of the managed tunnel — no loopback through the MITM.
-/// Each call gets its own ephemeral session for independent redirect/TLS policy and no shared cookie jar.
+/// traffic, which the kernel keeps out of the managed tunnel. Each call gets its own ephemeral
+/// session for independent redirect/TLS policy and no shared cookie jar.
 final class MITMScriptHTTPClient {
     static let shared = MITMScriptHTTPClient()
     private init() {}
@@ -31,7 +31,7 @@ final class MITMScriptHTTPClient {
         return true
     }
 
-    /// Returns `count` previously-reserved bytes to the budget, clamped at 0 to guard against double-release.
+    /// Returns `count` reserved bytes to the budget, clamped at 0 to guard against double-release.
     private static func releaseInFlight(_ count: Int) {
         guard count > 0 else { return }
         inFlightLock.lock(); defer { inFlightLock.unlock() }
@@ -64,8 +64,7 @@ final class MITMScriptHTTPClient {
     }
 
     /// Sends `request`, calling `completion` exactly once. The body cap is enforced as the response
-    /// streams — the convenience API would buffer a transparently-inflated gzip bomb in full before
-    /// the size check fires.
+    /// streams, so a transparently-inflated gzip bomb is caught before being buffered in full.
     func send(
         _ request: URLRequest,
         followRedirects: Bool,
@@ -82,8 +81,8 @@ final class MITMScriptHTTPClient {
             completion: completion
         )
         let configuration = URLSessionConfiguration.ephemeral
-        // timeoutInterval bounds inactivity; timeoutIntervalForResource is the wall-clock cap,
-        // set to the engine's invocation ceiling so one fetch can't outlive the script's backstop.
+        // Wall-clock cap, set to the engine's invocation ceiling so one fetch can't outlive
+        // the script's backstop.
         configuration.timeoutIntervalForResource = resourceTimeout
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         session.dataTask(with: request).resume()

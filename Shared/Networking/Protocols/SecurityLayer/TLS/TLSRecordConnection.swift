@@ -25,18 +25,30 @@ nonisolated class TLSRecordConnection {
     /// The value of the ALPN sent by the peer; empty when the peer selected none.
     var negotiatedALPN: String = ""
 
-    private let clientKey: Data
-    private let clientIV: Data
-    private let serverKey: Data
-    private let serverIV: Data
+    // Mutable so a TLS 1.3 post-handshake KeyUpdate (RFC 8446 §7.2) can install the next
+    // key generation. Egress (`*Key`/`*IV` for our send direction) is only mutated under
+    // `sendLock`; ingress (our read direction) only from the receive path. See `rekeyIngress`.
+    private var clientKey: Data
+    private var clientIV: Data
+    private var serverKey: Data
+    private var serverIV: Data
 
     private let clientMACKey: Data
     private let serverMACKey: Data
 
     private let cipherSuite: UInt16
 
-    private let clientSymmetricKey: SymmetricKey
-    private let serverSymmetricKey: SymmetricKey
+    private var clientSymmetricKey: SymmetricKey
+    private var serverSymmetricKey: SymmetricKey
+
+    /// TLS 1.3 application traffic secrets, retained so KeyUpdate can derive the next
+    /// generation. `nil` for TLS 1.2 (which has no KeyUpdate) and disables KeyUpdate handling.
+    private var clientAppSecret: Data?
+    private var serverAppSecret: Data?
+
+    /// Set on the receive path when a peer KeyUpdate(update_requested) arrives; consumed after
+    /// `receiveLock` is released so we can send our own KeyUpdate without holding it.
+    private var keyUpdateResponsePending = false
 
     private var clientSeqNum: UInt64 = 0
     private var serverSeqNum: UInt64 = 0
@@ -60,6 +72,7 @@ nonisolated class TLSRecordConnection {
 
     init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data,
          cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+         clientAppSecret: Data? = nil, serverAppSecret: Data? = nil,
          direction: Direction = .client) {
         self.tlsVersion = 0x0304
         self.clientKey = clientKey
@@ -71,6 +84,8 @@ nonisolated class TLSRecordConnection {
         self.cipherSuite = cipherSuite
         self.clientSymmetricKey = SymmetricKey(data: clientKey)
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
+        self.clientAppSecret = clientAppSecret
+        self.serverAppSecret = serverAppSecret
         self.direction = direction
     }
 
@@ -164,7 +179,13 @@ nonisolated class TLSRecordConnection {
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         receiveLock.lock()
         let processed = processBuffer()
+        let needsKeyUpdateResponse = keyUpdateResponsePending
+        keyUpdateResponsePending = false
         receiveLock.unlock()
+
+        if needsKeyUpdateResponse {
+            sendKeyUpdateResponseAndRekeyEgress()
+        }
 
         if let result = processed {
             switch result {
@@ -304,7 +325,13 @@ nonisolated class TLSRecordConnection {
             self.receiveLock.lock()
             self.receiveBuffer.append(data)
             let processed = self.processBuffer()
+            let needsKeyUpdateResponse = self.keyUpdateResponsePending
+            self.keyUpdateResponsePending = false
             self.receiveLock.unlock()
+
+            if needsKeyUpdateResponse {
+                self.sendKeyUpdateResponseAndRekeyEgress()
+            }
 
             if let result = processed {
                 switch result {
@@ -562,8 +589,11 @@ nonisolated class TLSRecordConnection {
             throw TLSRecordError.noContentTypeFound
         }
 
-        // Skip handshake records (e.g. NewSessionTicket)
+        // Post-handshake handshake messages (NewSessionTicket, KeyUpdate). They carry no
+        // application data, but a KeyUpdate must rekey the read side here or every subsequent
+        // record fails AEAD authentication (RFC 8446 §7.2).
         if innerContentType == TLSContentType.handshake {
+            handlePostHandshakeTLS13(Data(decrypted.prefix(Int(contentLen))))
             return Data()
         }
 
@@ -578,6 +608,106 @@ nonisolated class TLSRecordConnection {
         }
 
         return decrypted.prefix(Int(contentLen))
+    }
+
+    // MARK: - TLS 1.3 KeyUpdate (RFC 8446 §7.2)
+
+    /// Parse post-handshake handshake messages from a decrypted TLS 1.3 record and act on any
+    /// KeyUpdate. Runs on the receive path with `receiveLock` held (and never `seqLock`).
+    private func handlePostHandshakeTLS13(_ messages: Data) {
+        var i = messages.startIndex
+        let end = messages.endIndex
+        while i + 4 <= end {
+            let type = messages[i]
+            let len = Int(messages[i + 1]) << 16 | Int(messages[i + 2]) << 8 | Int(messages[i + 3])
+            let bodyStart = i + 4
+            let bodyEnd = bodyStart + len
+            guard bodyEnd <= end else { break }
+
+            if type == TLSHandshakeType.keyUpdate {
+                // The peer has switched its sending keys, so advance ours for reading now.
+                rekeyIngress()
+                // request_update == 1 ("update_requested") obliges us to KeyUpdate back.
+                let requestUpdate = len >= 1 ? messages[bodyStart] : 0
+                if requestUpdate == 1 {
+                    keyUpdateResponsePending = true
+                }
+            }
+            // NewSessionTicket and any other post-handshake messages need no record-layer
+            // change and are intentionally ignored.
+            i = bodyEnd
+        }
+    }
+
+    /// Advance the *read* (ingress) traffic secret, key and IV, and reset the read sequence
+    /// number, after the peer sent a KeyUpdate. Ingress is the server keys for a client and the
+    /// client keys for a server. No-op when the traffic secret is unavailable (e.g. TLS 1.2).
+    private func rekeyIngress() {
+        let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
+        if direction == .server {
+            guard let current = clientAppSecret else { return }
+            let next = kd.nextApplicationGeneration(trafficSecret: current)
+            seqLock.lock()
+            clientAppSecret = next.secret
+            clientKey = next.key
+            clientIV = next.iv
+            clientSymmetricKey = SymmetricKey(data: next.key)
+            clientSeqNum = 0
+            seqLock.unlock()
+        } else {
+            guard let current = serverAppSecret else { return }
+            let next = kd.nextApplicationGeneration(trafficSecret: current)
+            seqLock.lock()
+            serverAppSecret = next.secret
+            serverKey = next.key
+            serverIV = next.iv
+            serverSymmetricKey = SymmetricKey(data: next.key)
+            serverSeqNum = 0
+            seqLock.unlock()
+        }
+    }
+
+    /// Reply to a KeyUpdate(update_requested): send our own KeyUpdate(update_not_requested) using
+    /// the *current* write keys, then advance the write (egress) traffic secret, key and IV and
+    /// reset the write sequence number. Held under `sendLock` so the key switch is atomic with
+    /// respect to application sends; called only after `receiveLock` has been released.
+    private func sendKeyUpdateResponseAndRekeyEgress() {
+        sendLock.lock()
+        defer { sendLock.unlock() }
+
+        guard let connection else { return }
+
+        // KeyUpdate message: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).
+        let keyUpdate = Data([TLSHandshakeType.keyUpdate, 0x00, 0x00, 0x01, 0x00])
+        do {
+            let record = try encryptTLS13Record(plaintext: keyUpdate, contentType: TLSContentType.handshake)
+            connection.send(data: record)
+        } catch {
+            return
+        }
+
+        let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
+        if direction == .server {
+            guard let current = serverAppSecret else { return }
+            let next = kd.nextApplicationGeneration(trafficSecret: current)
+            seqLock.lock()
+            serverAppSecret = next.secret
+            serverKey = next.key
+            serverIV = next.iv
+            serverSymmetricKey = SymmetricKey(data: next.key)
+            serverSeqNum = 0
+            seqLock.unlock()
+        } else {
+            guard let current = clientAppSecret else { return }
+            let next = kd.nextApplicationGeneration(trafficSecret: current)
+            seqLock.lock()
+            clientAppSecret = next.secret
+            clientKey = next.key
+            clientIV = next.iv
+            clientSymmetricKey = SymmetricKey(data: next.key)
+            clientSeqNum = 0
+            seqLock.unlock()
+        }
     }
 
     // MARK: - TLS 1.2 Record Crypto

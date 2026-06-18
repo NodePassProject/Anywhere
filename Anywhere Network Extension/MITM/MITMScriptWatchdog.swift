@@ -13,10 +13,9 @@ enum MITMWatchdogMonitor {
     static let queue = DispatchQueue(label: AWCore.Identifier.mitmMonitorQueue, qos: .utility)
 }
 
-/// Crash-on-runaway watchdog for synchronous JS spans. JSC sync execution is uninterruptible
-/// (JSContextGroupSetExecutionTimeLimit is App Review-flagged SPI), so crashing the extension
-/// for a clean OS relaunch is the only recovery. Samples from the monitor queue, never
-/// scriptQueue; a suspended `await` already called end(), so slow async fetches never trip this.
+/// Crash-on-runaway watchdog for synchronous JS spans. JSC sync execution is uninterruptible,
+/// so crashing the extension for a clean OS relaunch is the only recovery. Samples from the
+/// monitor queue; a suspended `await` already called end(), so slow async fetches never trip this.
 enum MITMScriptWatchdog {
 
     /// Hard wall-clock cap on one synchronous JS span; any legitimate span finishes far inside this.
@@ -30,7 +29,7 @@ enum MITMScriptWatchdog {
     /// Script source string surfaced in the crash report to identify the offending rule.
     private static var spanLabel = ""
 
-    /// Repeating sampler, lazily started on the first begin() and run for the process's life.
+    /// Repeating sampler, lazily started on the first begin().
     private static let sampler: DispatchSourceTimer = {
         let timer = DispatchSource.makeTimerSource(queue: MITMWatchdogMonitor.queue)
         timer.schedule(
@@ -45,7 +44,7 @@ enum MITMScriptWatchdog {
 
     /// Marks a synchronous JS span as started; must be paired with end() (use `defer`) or a phantom span stays armed.
     static func begin(_ label: String) {
-        _ = sampler   // lazy-start the sampler on first use
+        _ = sampler
         lock.lock()
         spanStart = .now()
         spanLabel = label

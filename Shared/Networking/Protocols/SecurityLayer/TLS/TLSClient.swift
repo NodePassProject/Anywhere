@@ -1048,7 +1048,9 @@ nonisolated class TLSClient {
                 clientIV: appKeys.clientIV,
                 serverKey: appKeys.serverKey,
                 serverIV: appKeys.serverIV,
-                cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+                cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+                clientAppSecret: appKeys.clientTrafficSecret,
+                serverAppSecret: appKeys.serverTrafficSecret
             )
             tlsConnection.connection = self.connection
             tlsConnection.negotiatedALPN = self.negotiatedALPN

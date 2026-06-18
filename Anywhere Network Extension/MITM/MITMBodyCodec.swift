@@ -73,10 +73,9 @@ enum MITMBodyCodec {
     /// `Accept-Encoding` is clamped to so an origin never selects an encoding we can't reverse.
     static let decodableContentCodings: Set<String> = ["gzip", "x-gzip", "deflate", "br", "identity"]
 
-    /// Clamps an `Accept-Encoding` value to ``decodableContentCodings`` (mitmproxy's
-    /// `constrain_encoding`): drops any coding — notably `zstd` and `*` — we couldn't decode, so a
-    /// buffered body rule is never silently defeated by an undecodable `Content-Encoding`. An empty
-    /// result falls back to `identity`. Per-coding `;q=` weights are preserved on kept codings.
+    /// Clamps an `Accept-Encoding` value to ``decodableContentCodings``: drops any coding (notably
+    /// `zstd` and `*`) we can't decode, so a buffered body rule isn't defeated by an undecodable
+    /// `Content-Encoding`. Empty result falls back to `identity`; `;q=` weights are preserved.
     static func constrainedAcceptEncoding(_ value: String) -> String {
         let kept = value
             .split(separator: ",")
@@ -202,12 +201,9 @@ enum MITMBodyCodec {
         case capExceeded
     }
 
-    /// Decodes a gzip body per RFC 1952. The Compression framework's raw-deflate
-    /// decoder swallows the whole input while emitting just member 1, so the loop
-    /// never advances past it; the trailer check catches the multi-member case.
-    /// When `allowMultiMember` is true (the single-codec JS `Anywhere.codec.gzip` bridge) every
-    /// concatenated member is returned. The default fails closed on a multi-member trailer mismatch
-    /// so the buffered transform forwards such a body verbatim rather than risk corrupting it.
+    /// Decodes a gzip body per RFC 1952. The raw-deflate decoder emits only member 1, so the trailer
+    /// check catches the multi-member case. `allowMultiMember` returns every member; otherwise fails
+    /// closed on a multi-member trailer mismatch (forwarding the body verbatim).
     private static func gunzip(_ data: Data, allowMultiMember: Bool = false) -> (decoded: Data?, failure: GzipFailure?) {
         var combined = Data()
         var cursor = data.startIndex
@@ -226,12 +222,9 @@ enum MITMBodyCodec {
                 cursor = data.index(cursor, offsetBy: consumed)
             }
         }
-        // The single-codec bridge wants every member's plaintext; only the buffered transform
-        // fails closed on a multi-member body (forwarding it verbatim instead of rewriting).
         if allowMultiMember { return (combined, nil) }
-        // Multi-member detection via the whole-body trailer pair (RFC 1952 §2.3.1):
-        // a member-1-only decode of a multi-member body fails the ISIZE/CRC-32 check.
-        // On mismatch fail closed — forward verbatim so the client decodes all members.
+        // Multi-member detection via the whole-body trailer pair (RFC 1952 §2.3.1): a member-1-only
+        // decode of a multi-member body fails the ISIZE/CRC-32 check. On mismatch forward verbatim.
         guard gzipTrailerISIZE(data) == UInt32(truncatingIfNeeded: combined.count),
               gzipTrailerCRC32(data) == crc32(combined) else {
             return (nil, .multiMember)
@@ -336,9 +329,8 @@ enum MITMBodyCodec {
         // zlib-wrapped fallback: strip 2-byte header + 4-byte adler32 footer.
         // Require >6 bytes or the strip yields an empty slice "successfully" decoded blank.
         guard data.count > 6 else { return nil }
-        // FDICT (FLG bit 5, RFC 1950 §2.2): a 4-byte DICTID follows the 2-byte header, so the
-        // simple 2-byte strip would be wrong — and the Compression framework can't supply a preset
-        // dictionary anyway. Fail closed (forward verbatim) rather than mis-strip into garbage.
+        // FDICT (FLG bit 5, RFC 1950 §2.2): a 4-byte DICTID follows the header so the 2-byte strip
+        // would be wrong, and a preset dictionary isn't supported anyway. Fail closed.
         let flg = data[data.index(data.startIndex, offsetBy: 1)]
         guard flg & 0x20 == 0 else { return nil }
         let body = data.subdata(in: (data.startIndex + 2)..<(data.endIndex - 4))
@@ -427,9 +419,8 @@ enum MITMBodyCodec {
 
     // MARK: - Streaming encoder (JS codec bridge)
 
-    /// Streaming encode; nil on error or when output would exceed `maxBufferedBodyBytes`.
-    /// The cap mirrors the decode path so a script can't inflate extension memory by
-    /// (re)compressing an input larger than the typed-array budget would otherwise allow.
+    /// Streaming encode; nil on error or when output would exceed `maxBufferedBodyBytes` (cap
+    /// mirrors the decode path so a script can't inflate memory by recompressing oversized input).
     private static func streamEncode(_ data: Data, algorithm: compression_algorithm) -> Data? {
         let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
         defer { stream.deallocate() }
@@ -442,8 +433,8 @@ enum MITMBodyCodec {
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
 
-        // Factored out so empty input (nil base address from withUnsafeBytes)
-        // still produces a valid empty stream instead of nil.
+        // Helper so empty input (nil base address from withUnsafeBytes) still
+        // produces a valid empty stream instead of nil.
         func run(srcBase: UnsafePointer<UInt8>?, srcCount: Int) -> Data? {
             // src_size 0 means src_ptr is never read; buffer is a safe placeholder.
             stream.pointee.src_ptr = srcBase ?? UnsafePointer(buffer)

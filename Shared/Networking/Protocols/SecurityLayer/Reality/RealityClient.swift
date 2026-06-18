@@ -578,7 +578,9 @@ nonisolated class RealityClient {
                     clientIV: appKeys.clientIV,
                     serverKey: appKeys.serverKey,
                     serverIV: appKeys.serverIV,
-                    cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+                    cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+                    clientAppSecret: appKeys.clientTrafficSecret,
+                    serverAppSecret: appKeys.serverTrafficSecret
                 )
                 realityConnection.connection = self.connection
                 self.connection = nil

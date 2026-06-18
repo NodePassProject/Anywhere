@@ -150,8 +150,8 @@ final class MITMScriptDiskStore {
     }
 
     /// Reads `url` under an `NSFileCoordinator` read so a concurrent writer in another App Group
-    /// process (e.g. the main app) can't be observed mid-write. (Cache coherence across processes
-    /// would additionally need an `NSFilePresenter`; today only the serialized NE writes this store.)
+    /// process can't be observed mid-write. (Cross-process cache coherence would additionally
+    /// need an `NSFilePresenter`; only the serialized NE writes this store.)
     private func coordinatedRead(_ url: URL) -> Data? {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?
@@ -169,9 +169,8 @@ final class MITMScriptDiskStore {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
         // Coordinate the write across App Group processes so concurrent writers can't clobber each
-        // other's whole-bucket plist (last-writer-wins corruption). FirstUserAuthentication matches
-        // the CA-key accessibility: the background NE can read/write after the first unlock even
-        // while the device is later locked.
+        // other's whole-bucket plist. FirstUserAuthentication file protection lets the background NE
+        // read/write after the first unlock even while the device is later locked.
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?
         var writeError: Error?
