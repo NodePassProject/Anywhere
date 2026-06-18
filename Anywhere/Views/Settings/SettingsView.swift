@@ -78,9 +78,19 @@ struct SettingsView: View {
                     TextWithColorfulIcon(title: "Trusted Certificates", comment: nil, systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
                 }
             }
-
-            if settings.experimentalEnabled {
-                Section("Utilities") {
+            
+            Section("Utilities") {
+                NavigationLink {
+                    PurifySettingsView()
+                } label: {
+                    TextWithColorfulIcon(title: "Purify", comment: nil, systemName: "drop.fill", foregroundColor: .white, backgroundColor: .blue)
+                }
+                NavigationLink {
+                    ReflectionSettingsView()
+                } label: {
+                    TextWithColorfulIcon(title: "Reflection", comment: nil, systemName: "arrow.turn.up.left", foregroundColor: .white, backgroundColor: .pink)
+                }
+                if settings.experimentalEnabled {
                     NavigationLink {
                         MITMSettingsView()
                     } label: {
