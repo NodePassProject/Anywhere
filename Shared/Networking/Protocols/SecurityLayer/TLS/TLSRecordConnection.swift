@@ -60,6 +60,8 @@ nonisolated class TLSRecordConnection {
 
     private var receiveBuffer = Data(capacity: 256 * 1024)
     private let receiveLock = UnfairLock()
+    
+    private var receivedCloseNotify = false
 
     // MARK: Initialization
 
@@ -197,6 +199,8 @@ nonisolated class TLSRecordConnection {
                 fetchMore(completion: completion)
             case .skip:
                 self.receive(completion: completion)
+            case .closed:
+                completion(nil, nil)
             }
             return
         }
@@ -295,6 +299,7 @@ nonisolated class TLSRecordConnection {
         case error(Error)
         case needMore
         case skip
+        case closed
     }
 
     private func fetchMore(completion: @escaping (Data?, Error?) -> Void) {
@@ -343,6 +348,8 @@ nonisolated class TLSRecordConnection {
                     self.fetchMore(completion: completion)
                 case .skip:
                     self.receive(completion: completion)
+                case .closed:
+                    completion(nil, nil)
                 }
             } else {
                 self.fetchMore(completion: completion)
@@ -351,6 +358,10 @@ nonisolated class TLSRecordConnection {
     }
 
     private func processBuffer() -> BufferResult? {
+        if receivedCloseNotify {
+            return .closed
+        }
+        
         if receiveBuffer.count == 0 {
             return nil
         }
@@ -409,6 +420,7 @@ nonisolated class TLSRecordConnection {
                     if !decrypted.isEmpty {
                         batchedData.append(decrypted)
                     }
+                    if receivedCloseNotify { break }
                 } catch {
                     if case TLSRecordError.tlsAlert = error {
                         receiveBuffer.removeAll()
@@ -439,8 +451,12 @@ nonisolated class TLSRecordConnection {
                     consumed += totalLen
                     if let alert = try? decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum),
                        alert.count >= 2 {
-                        hasError = TLSRecordError.tlsAlert(level: alert[alert.startIndex],
-                                                           description: alert[alert.startIndex + 1])
+                        if alert[alert.startIndex + 1] == TLSAlertDescription.closeNotify {
+                            receivedCloseNotify = true
+                        } else {
+                            hasError = TLSRecordError.tlsAlert(level: alert[alert.startIndex],
+                                                               description: alert[alert.startIndex + 1])
+                        }
                     } else {
                         hasError = TLSRecordError.unexpectedAlert
                     }
@@ -470,6 +486,13 @@ nonisolated class TLSRecordConnection {
                 return .data(batchedData)
             }
             return .error(error)
+        }
+
+        if receivedCloseNotify {
+            if !batchedData.isEmpty {
+                return .data(batchedData)
+            }
+            return .closed
         }
 
         if !batchedData.isEmpty {
@@ -602,6 +625,7 @@ nonisolated class TLSRecordConnection {
             let level = body.first ?? 0
             let description = body.count >= 2 ? body[body.startIndex + 1] : 0
             if description == TLSAlertDescription.closeNotify {
+                receivedCloseNotify = true
                 return Data()
             }
             throw TLSRecordError.tlsAlert(level: level, description: description)
