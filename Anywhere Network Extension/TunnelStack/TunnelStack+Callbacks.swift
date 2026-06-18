@@ -196,6 +196,7 @@ extension TunnelStack {
                 dstPort: dstPort,
                 configuration: connectionConfiguration,
                 routeTarget: routeTarget,
+                viaDefault: viaDefault,
                 sniffSNI: sniffSNI,
                 lwipQueue: shared.lwipQueue
             )
