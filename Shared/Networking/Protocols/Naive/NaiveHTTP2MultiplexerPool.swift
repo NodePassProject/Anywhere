@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveHTTP2Pool")
+nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Pool")
 
 /// Pools HTTP/2 multiplexers keyed by `host:port:sni` so many CONNECT tunnels share one
 /// TCP/TLS connection; multiplexers self-evict via `onClose` on GOAWAY or transport close.

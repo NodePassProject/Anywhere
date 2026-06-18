@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITMBridgeClientLeg")
+nonisolated private let logger = AnywhereLogger(category: "MITMBridgeClientLeg")
 
 /// Session-facing side of the h2 client leg: the leg decodes client h2 into neutral request
 /// events, the session dials and binds an upstream leg (HTTP/1.1 or HTTP/2), then routes to it.

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "LatencyTester")
+nonisolated private let logger = AnywhereLogger(category: "LatencyTester")
 
 private enum LatencyTestError: Error, LocalizedError {
     case unexpectedStatus(String)

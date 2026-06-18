@@ -8,7 +8,7 @@
 import Foundation
 import Network
 
-private let logger = AnywhereLogger(category: "MITMProfileServer")
+nonisolated private let logger = AnywhereLogger(category: "MITMProfileServer")
 
 final class MITMProfileServer {
     static let shared = MITMProfileServer()

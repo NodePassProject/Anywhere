@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveHTTP11Connection")
+nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP11Connection")
 
 // MARK: - NaiveHTTP11Connection
 

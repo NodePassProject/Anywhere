@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "MITMLeafCertCache")
+nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
 
 final class MITMLeafCertCache {
 

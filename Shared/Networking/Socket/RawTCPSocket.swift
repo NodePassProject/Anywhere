@@ -8,7 +8,7 @@
 import Foundation
 import Darwin
 
-private let logger = AnywhereLogger(category: "RawTCPSocket")
+nonisolated private let logger = AnywhereLogger(category: "RawTCPSocket")
 
 // MARK: - RawTransport
 

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "TrojanUDPConnection")
+nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
 
 // MARK: - TrojanUDPConnection
 

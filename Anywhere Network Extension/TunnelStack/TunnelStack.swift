@@ -8,7 +8,7 @@
 import Foundation
 import NetworkExtension
 
-private let logger = AnywhereLogger(category: "TunnelStack")
+nonisolated private let logger = AnywhereLogger(category: "TunnelStack")
 
 // MARK: - Traffic Accounting
 

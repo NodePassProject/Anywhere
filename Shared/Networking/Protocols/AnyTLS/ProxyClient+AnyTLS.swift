@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "ProxyClient+AnyTLS")
+nonisolated private let logger = AnywhereLogger(category: "ProxyClient+AnyTLS")
 
 extension ProxyClient {
     /// Connects through an AnyTLS server: TCP → TLS → AnyTLS handshake → stream + destination.

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveHTTP3Stream")
+nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP3Stream")
 
 nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 

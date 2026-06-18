@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HysteriaUDPConnection")
+nonisolated private let logger = AnywhereLogger(category: "HysteriaUDPConnection")
 
 nonisolated final class HysteriaUDPConnection: ProxyConnection {
 

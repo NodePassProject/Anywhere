@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveHTTP2Stream")
+nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Stream")
 
 /// A single CONNECT tunnel multiplexed on an HTTP/2 multiplexer, with its own flow-control
 /// window; response headers are exposed so the proxy layer can run its own negotiation.

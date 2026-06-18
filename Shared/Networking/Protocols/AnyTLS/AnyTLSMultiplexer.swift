@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AnyTLSMultiplexer")
+nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexer")
 
 /// Owns one TLS connection and multiplexes logical streams over it via AnyTLS framing.
 nonisolated final class AnyTLSMultiplexer: Multiplexer {

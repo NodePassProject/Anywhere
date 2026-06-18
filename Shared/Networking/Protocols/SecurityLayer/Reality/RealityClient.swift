@@ -10,7 +10,7 @@ import Compression
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "RealityClient")
+nonisolated private let logger = AnywhereLogger(category: "RealityClient")
 
 // MARK: - RealityClient
 

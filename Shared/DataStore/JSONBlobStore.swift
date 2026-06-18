@@ -8,7 +8,7 @@
 import Foundation
 import SwiftData
 
-private let logger = AnywhereLogger(category: "JSONBlobStore")
+nonisolated private let logger = AnywhereLogger(category: "JSONBlobStore")
 
 @Model
 final class JSONBlob {

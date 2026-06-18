@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HysteriaSession")
+nonisolated private let logger = AnywhereLogger(category: "HysteriaSession")
 
 // MARK: - Errors
 

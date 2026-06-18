@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITMScriptDiskStore")
+nonisolated private let logger = AnywhereLogger(category: "MITMScriptDiskStore")
 
 final class MITMScriptDiskStore {
 

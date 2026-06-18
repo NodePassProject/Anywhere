@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITMRewritePolicy")
+nonisolated private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
 /// Runtime form: regexes pre-compiled, header names case-folded.
 struct CompiledMITMRule {

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
+nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
 
 /// One multiplexed HTTP/2 upstream connection. Dedicated 1:1 to one client connection but
 /// assigns its own monotonically-increasing upstream stream IDs (client requests can arrive

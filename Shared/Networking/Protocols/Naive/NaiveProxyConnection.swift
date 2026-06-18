@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveProxyConnection")
+nonisolated private let logger = AnywhereLogger(category: "NaiveProxyConnection")
 
 // MARK: - NaiveTunnel Protocol
 

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "UDPFlow")
+nonisolated private let logger = AnywhereLogger(category: "UDPFlow")
 
 class UDPFlow {
     let flowKey: TunnelStack.UDPFlowKey

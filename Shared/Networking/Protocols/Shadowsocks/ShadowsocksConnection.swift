@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "ShadowsocksConnection")
+nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection")
 
 // MARK: - ShadowsocksConnection
 

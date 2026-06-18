@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
+nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
 
 /// Per-server AnyTLS multiplexer pool.
 nonisolated final class AnyTLSMultiplexerPool {

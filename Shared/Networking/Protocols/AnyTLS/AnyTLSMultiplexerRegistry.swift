@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
+nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
 
 /// Process-wide registry of `AnyTLSMultiplexerPool`s keyed by `(host, port, password)`;
 /// configs sharing the same triple reuse the same warm TLS-multiplexer pool.

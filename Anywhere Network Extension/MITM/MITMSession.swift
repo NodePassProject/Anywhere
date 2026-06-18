@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITMSession")
+nonisolated private let logger = AnywhereLogger(category: "MITMSession")
 
 struct MITMDialResult {
     let connection: ProxyConnection

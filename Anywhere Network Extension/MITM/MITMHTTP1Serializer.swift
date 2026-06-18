@@ -87,4 +87,4 @@ enum MITMHTTP1Serializer {
     static let chunkTerminator = Data([0x30, 0x0D, 0x0A, 0x0D, 0x0A])
 }
 
-private let logger = AnywhereLogger(category: "MITMH1Serializer")
+nonisolated private let logger = AnywhereLogger(category: "MITMH1Serializer")

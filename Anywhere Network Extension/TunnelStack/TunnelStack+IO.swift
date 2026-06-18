@@ -8,7 +8,7 @@
 import Foundation
 import NetworkExtension
 
-private let logger = AnywhereLogger(category: "TunnelStack+IO")
+nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
 
 extension TunnelStack {
 

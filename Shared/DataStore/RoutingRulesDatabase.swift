@@ -8,7 +8,7 @@
 import Foundation
 import SQLite3
 
-private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
+nonisolated private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
 /// Read-only SQLite database of bundled routing rules: `rules(source, type, value)`
 /// and `metadata(key, value)` with JSON-encoded values.

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AnyTLSStream")
+nonisolated private let logger = AnywhereLogger(category: "AnyTLSStream")
 
 /// One logical stream multiplexed inside an `AnyTLSMultiplexer`.
 nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {

@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "QUICTLSHandler")
+nonisolated private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
 // MARK: - Session Ticket Cache
 

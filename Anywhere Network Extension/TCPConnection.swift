@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "TCPConnection")
+nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
 private struct HandshakeTimeoutError: LocalizedError {
     let phase: String

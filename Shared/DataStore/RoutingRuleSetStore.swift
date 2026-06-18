@@ -8,7 +8,7 @@
 import Foundation
 import Observation
 
-private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
+nonisolated private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
 
 struct RoutingRuleSet: Identifiable, Equatable {
     let id: String   // built-in: name, custom: UUID string

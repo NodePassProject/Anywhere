@@ -11,7 +11,7 @@ import Combine
 import SwiftUI
 import Observation
 
-private let logger = AnywhereLogger(category: "VPNViewModel")
+nonisolated private let logger = AnywhereLogger(category: "VPNViewModel")
 
 @MainActor
 @Observable

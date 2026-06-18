@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveHTTP2Multiplexer")
+nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Multiplexer")
 
 /// Multiplexed HTTP/2 multiplexer hosting many concurrent CONNECT tunnels on one TLS
 /// connection, with a read loop demultiplexing frames to individual streams.

@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
+nonisolated private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
 /// h2→h1 bridge response delivery: the rewritten response is delivered as IR (head / body / reset)
 /// rather than HTTP/1.1 bytes the bridge would only re-parse. Chunked response trailers are dropped.

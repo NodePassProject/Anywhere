@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "DomainRouter")
+nonisolated private let logger = AnywhereLogger(category: "DomainRouter")
 
 class DomainRouter {
 

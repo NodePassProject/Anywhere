@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "XHTTPConnection")
+nonisolated private let logger = AnywhereLogger(category: "XHTTPConnection")
 
 // MARK: - XHTTP Channel Role
 

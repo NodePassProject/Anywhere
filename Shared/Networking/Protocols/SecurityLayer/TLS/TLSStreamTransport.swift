@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "TLSStreamTransport")
+nonisolated private let logger = AnywhereLogger(category: "TLSStreamTransport")
 
 // MARK: - Error
 

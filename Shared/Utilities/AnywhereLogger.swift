@@ -11,7 +11,7 @@ import os.log
 /// Unified logger. Every level goes to os.log (`debug` in DEBUG builds only);
 /// `info` and above also reach the bounded user-facing log viewer, so keep
 /// `info` to low-volume milestones or it evicts the warnings and errors.
-struct AnywhereLogger {
+nonisolated struct AnywhereLogger {
     private let osLogger: Logger
 
     /// Sink for the user-facing log viewer; set by the Network Extension at

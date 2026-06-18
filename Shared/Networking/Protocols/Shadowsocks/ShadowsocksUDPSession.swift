@@ -10,7 +10,7 @@ import CryptoKit
 import CommonCrypto
 import Security
 
-private let logger = AnywhereLogger(category: "ShadowsocksUDPSession")
+nonisolated private let logger = AnywhereLogger(category: "ShadowsocksUDPSession")
 
 // MARK: - ShadowsocksUDPSession
 

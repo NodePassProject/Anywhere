@@ -8,7 +8,7 @@
 import Foundation
 import dnssd
 
-private let logger = AnywhereLogger(category: "DNSResolver")
+nonisolated private let logger = AnywhereLogger(category: "DNSResolver")
 
 // MARK: - DNSResolver
 

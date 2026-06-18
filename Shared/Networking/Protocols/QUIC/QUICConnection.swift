@@ -11,7 +11,7 @@ import Dispatch
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "QUICConnection")
+nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
 // MARK: - QUICPortHopping
 

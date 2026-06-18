@@ -10,7 +10,7 @@ import Foundation
 /// Shared error-reporting helper for TCP/UDP connections: terminal failures log
 /// exactly once via ConnectionFailureReporter, transient sends log at warning,
 /// and inner transport layers propagate errors instead of logging.
-enum TransportErrorLogger {
+nonisolated enum TransportErrorLogger {
 
     // MARK: - Formatting
 

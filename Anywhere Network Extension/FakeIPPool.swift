@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "FakeIPPool")
+nonisolated private let logger = AnywhereLogger(category: "FakeIPPool")
 
 class FakeIPPool {
 

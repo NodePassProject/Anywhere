@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
+nonisolated private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
 
 // MARK: - HTTP3StreamHandler
 

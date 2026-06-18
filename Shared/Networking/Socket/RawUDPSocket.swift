@@ -8,7 +8,7 @@
 import Foundation
 import Darwin
 
-private let logger = AnywhereLogger(category: "RawUDPSocket")
+nonisolated private let logger = AnywhereLogger(category: "RawUDPSocket")
 
 // MARK: - RawUDPSocket
 

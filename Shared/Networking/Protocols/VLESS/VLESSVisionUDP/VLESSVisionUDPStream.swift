@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "VLESSVisionUDPStream")
+nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPStream")
 
 nonisolated class VLESSVisionUDPStream: MultiplexerStreamSink {
     let sessionID: UInt16

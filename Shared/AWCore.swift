@@ -7,9 +7,9 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AWCore")
+nonisolated private let logger = AnywhereLogger(category: "AWCore")
 
-final class AWCore {
+nonisolated final class AWCore {
     // MARK: - Identifiers
 
     enum Identifier {

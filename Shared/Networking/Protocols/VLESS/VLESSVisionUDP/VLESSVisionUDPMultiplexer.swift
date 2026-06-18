@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "VLESSVisionUDPMultiplexer")
+nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPMultiplexer")
 
 nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
 
