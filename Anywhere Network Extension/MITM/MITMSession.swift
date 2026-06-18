@@ -777,7 +777,8 @@ final class MITMSession {
         let port = resolved?.port ?? dstPort
         dialedHost = host
         dialedPort = port
-        let innerALPN = innerRecord?.negotiatedALPN ?? "http/1.1"
+        let negotiatedInnerALPN = innerRecord?.negotiatedALPN ?? ""
+        let innerALPN = negotiatedInnerALPN.isEmpty ? "http/1.1" : negotiatedInnerALPN
         dialer(host, port) { [weak self] result in
             // The dialer hops to lwipQueue before calling back.
             guard let self, !self.torn else {
