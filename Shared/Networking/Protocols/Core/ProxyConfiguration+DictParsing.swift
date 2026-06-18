@@ -74,10 +74,18 @@ extension ProxyConfiguration {
                 sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
         case .nowhere:
+            let route = NowhereRoutePolicy(
+                tcpUpload: NowhereRoutePolicy.lane(from: configurationDict["nowhereUp"] as? String) ?? .quic,
+                tcpDownload: NowhereRoutePolicy.lane(from: configurationDict["nowhereDown"] as? String) ?? .quic,
+                muxEnabled: (configurationDict["nowhereMux"] as? Bool)
+                    ?? NowhereRoutePolicy.mux(from: configurationDict["nowhereMux"] as? String)
+                    ?? true
+            )
             outbound = .nowhere(
                 key: (configurationDict["nowhereKey"] as? String) ?? "",
                 spec: (configurationDict["nowhereSpec"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                tls: Self.parseNowhereTLS(from: configurationDict, serverAddress: serverAddress)
+                tls: Self.parseNowhereTLS(from: configurationDict, serverAddress: serverAddress),
+                route: route
             )
         case .trojan:
             let password = (configurationDict["trojanPassword"] as? String) ?? ""

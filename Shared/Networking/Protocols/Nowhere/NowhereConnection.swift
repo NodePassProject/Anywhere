@@ -7,12 +7,16 @@
 
 import Foundation
 
-nonisolated final class NowhereConnection: ProxyConnection {
+nonisolated final class NowhereConnection: ProxyConnection, NowhereTCPFlowSink {
 
     enum State { case idle, openingStream, handshaking, ready, closed }
 
     private let session: NowhereSession
     private let destination: String
+    private let uploadLane: NowhereProtocol.LaneKind
+    private let downloadLane: NowhereProtocol.LaneKind
+    private weak var tcpDownlinkMux: NowhereTCPMuxClient?
+    private let retainedTCPDownlinkMux: NowhereTCPMuxClient?
 
     private var _state: State = .idle
     private var state: State {
@@ -26,17 +30,31 @@ nonisolated final class NowhereConnection: ProxyConnection {
     private var _isReady = false
 
     private var streamID: Int64 = -1
+    private var flowID: UInt64 = 0
     private var readClosed = false
     private var receiveBuffer = Data()
+    private var frameBuffer = Data()
     private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var pendingQuicBytes = 0
     private var openCompletion: ((Error?) -> Void)?
 
-    init(session: NowhereSession, destination: String) {
+    init(
+        session: NowhereSession,
+        destination: String,
+        uploadLane: NowhereProtocol.LaneKind = .quic,
+        downloadLane: NowhereProtocol.LaneKind = .quic,
+        tcpDownlinkMux: NowhereTCPMuxClient? = nil,
+        retainedTCPDownlinkMux: NowhereTCPMuxClient? = nil
+    ) {
         self.session = session
         self.destination = destination
+        self.uploadLane = uploadLane
+        self.downloadLane = downloadLane
+        self.tcpDownlinkMux = tcpDownlinkMux
+        self.retainedTCPDownlinkMux = retainedTCPDownlinkMux
         super.init()
     }
+
+    var flowIdentifier: UInt64 { flowID }
 
     override var isConnected: Bool {
         readyLock.withLock { _isReady }
@@ -63,6 +81,10 @@ nonisolated final class NowhereConnection: ProxyConnection {
                         return
                     }
                     self.streamID = sid
+                    self.flowID = UInt64(sid)
+                    if self.downloadLane == .tcp {
+                        self.tcpDownlinkMux?.registerFlowSink(self, flowID: self.flowID)
+                    }
                     self.sendTCPRequest()
                 }
             }
@@ -73,7 +95,12 @@ nonisolated final class NowhereConnection: ProxyConnection {
         state = .handshaking
         let frame: Data
         do {
-            frame = try NowhereProtocol.encodeTCPRequest(address: destination)
+            frame = try NowhereProtocol.encodeTCPRequest(
+                address: destination,
+                flowID: flowID,
+                uploadLane: uploadLane,
+                downloadLane: downloadLane
+            )
         } catch {
             fail(error)
             return
@@ -97,21 +124,22 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 
     func handleStreamData(_ data: Data, fin: Bool) {
-        if state == .ready, receiveBuffer.isEmpty, !data.isEmpty,
-           let cb = pendingReceive {
-            pendingReceive = nil
-            let ackCount = pendingQuicBytes + data.count
-            pendingQuicBytes = 0
-            let out = Data(data)
-            if fin { readClosed = true }
-            session.extendStreamOffset(streamID, count: ackCount)
-            cb(out, nil)
-            return
-        }
-
         if !data.isEmpty {
-            pendingQuicBytes += data.count
-            receiveBuffer.append(data)
+            frameBuffer.append(data)
+            session.extendStreamOffset(streamID, count: data.count)
+            while let frame = NowhereProtocol.takeFrame(from: &frameBuffer) {
+                guard frame.flowID == flowID else { continue }
+                switch frame.type {
+                case .flowData where frame.flags == NowhereProtocol.frameFlagDownload:
+                    if !frame.payload.isEmpty {
+                        receiveBuffer.append(frame.payload)
+                    }
+                case .flowClose:
+                    readClosed = true
+                default:
+                    break
+                }
+            }
         }
         if fin { readClosed = true }
 
@@ -119,13 +147,32 @@ nonisolated final class NowhereConnection: ProxyConnection {
         deliverBufferedOrEOF(eof: readClosed)
     }
 
+    func handleIncomingData(_ data: Data) {
+        session.queue.async { [weak self] in
+            guard let self, self.state != .closed else { return }
+            if !data.isEmpty {
+                self.receiveBuffer.append(data)
+            }
+            guard self.state == .ready else { return }
+            self.deliverBufferedOrEOF(eof: self.readClosed)
+        }
+    }
+
+    func handleRemoteClose() {
+        session.queue.async { [weak self] in
+            guard let self, self.state != .closed else { return }
+            self.readClosed = true
+            self.tcpDownlinkMux?.releaseFlowSink(self.flowID)
+            guard self.state == .ready else { return }
+            self.deliverBufferedOrEOF(eof: true)
+        }
+    }
+
     private func deliverBufferedOrEOF(eof: Bool) {
         if let cb = pendingReceive, !receiveBuffer.isEmpty {
             pendingReceive = nil
             let out = receiveBuffer
             receiveBuffer = Data()
-            let ackCount = takePendingQuicBytes()
-            session.extendStreamOffset(streamID, count: ackCount)
             cb(out, nil)
             return
         }
@@ -134,12 +181,6 @@ nonisolated final class NowhereConnection: ProxyConnection {
             pendingReceive = nil
             cb(nil, nil)
         }
-    }
-
-    private func takePendingQuicBytes() -> Int {
-        let count = pendingQuicBytes
-        pendingQuicBytes = 0
-        return count
     }
 
     func handleSessionError(_ error: Error) {
@@ -162,6 +203,11 @@ nonisolated final class NowhereConnection: ProxyConnection {
             pendingReceive = nil
             cb(nil, nil)
         }
+        tcpDownlinkMux?.releaseFlowSink(flowID)
+    }
+
+    func handleClientError(_ error: Error) {
+        handleSessionError(error)
     }
 
     private func fail(_ error: Error) {
@@ -176,6 +222,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
             pendingReceive = nil
             cb(nil, error)
         }
+        tcpDownlinkMux?.releaseFlowSink(flowID)
     }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
@@ -185,7 +232,11 @@ nonisolated final class NowhereConnection: ProxyConnection {
                 completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
                 return
             }
-            self.session.writeStream(self.streamID, data: data, completion: completion)
+            self.session.writeStream(
+                self.streamID,
+                data: NowhereProtocol.encodeTCPData(flowID: self.flowID, payload: data),
+                completion: completion
+            )
         }
     }
 
@@ -202,8 +253,6 @@ nonisolated final class NowhereConnection: ProxyConnection {
             if !self.receiveBuffer.isEmpty && self.state == .ready {
                 let out = self.receiveBuffer
                 self.receiveBuffer = Data()
-                let ackCount = self.takePendingQuicBytes()
-                self.session.extendStreamOffset(self.streamID, count: ackCount)
                 completion(out, nil)
                 return
             }
@@ -224,9 +273,14 @@ nonisolated final class NowhereConnection: ProxyConnection {
             guard let self, self.state != .closed else { return }
             self.state = .closed
             if self.streamID >= 0 {
+                self.session.writeStream(
+                    self.streamID,
+                    data: NowhereProtocol.encodeTCPClose(flowID: self.flowID)
+                ) { _ in }
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)
             }
+            self.tcpDownlinkMux?.releaseFlowSink(self.flowID)
             if let cb = self.pendingReceive {
                 self.pendingReceive = nil
                 cb(nil, NowhereError.streamClosed)
