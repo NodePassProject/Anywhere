@@ -31,7 +31,9 @@ struct RuleSetListView: View {
     @State private var showSubscribeAlert = false
     @State private var subscribeURL = ""
     @State private var subscribeError: String?
-    
+
+    @State private var showResetConfirmAlert = false
+
     var body: some View {
         List {
             Section {
@@ -92,9 +94,8 @@ struct RuleSetListView: View {
                     } label: {
                         Label("Subscribe Rule Set", systemImage: "link")
                     }
-                    Button {
-                        RoutingRuleSetStore.shared.resetAssignments()
-                        builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
+                    Button(role: .destructive) {
+                        showResetConfirmAlert = true
                     } label: {
                         Label("Reset", systemImage: "arrow.clockwise")
                     }
@@ -162,6 +163,15 @@ struct RuleSetListView: View {
             Button("OK") { subscribeError = nil }
         } message: {
             Text(subscribeError ?? "")
+        }
+        .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
+            Button("Reset", role: .destructive) {
+                RoutingRuleSetStore.shared.resetAssignments()
+                builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Reset all rule set assignments to Default.")
         }
     }
     
