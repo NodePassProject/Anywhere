@@ -42,6 +42,9 @@ class TCPConnection {
     /// Committed routing identity for traffic accounting and the dial path; an SNI re-match can change it.
     private var routeTarget: RouteTarget
 
+    /// Whether the accept-time route is the default outbound.
+    private let acceptedViaDefault: Bool
+
     private var bypass: Bool {
         if case .direct = routeTarget { return true }
         return false
@@ -107,6 +110,7 @@ class TCPConnection {
 
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
          configuration: ProxyConfiguration, routeTarget: RouteTarget,
+         viaDefault: Bool,
          sniffSNI: Bool = false,
          lwipQueue: DispatchQueue) {
         self.pcb = pcb
@@ -115,6 +119,7 @@ class TCPConnection {
         self.configuration = configuration
         self.lwipQueue = lwipQueue
         self.routeTarget = routeTarget
+        self.acceptedViaDefault = viaDefault
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
@@ -433,18 +438,19 @@ class TCPConnection {
         }
     }
 
-    /// Re-evaluates routing from the sniffed SNI; call only after the sniffer is cleared.
-    /// `dstHost` is never rewritten — the caller's own DNS resolution is authoritative.
+    /// Evaluates routing from the sniffed SNI; call only after the sniffer is cleared.
     private func applySNI(_ sni: String) {
         guard let stack = TunnelStack.shared else { return }
-        let router = stack.domainRouter
 
         // MITM (intercept TLS?) is decided independently of routing (which leg).
         if stack.mitmEnabled, stack.mitmPolicy.matches(sni) {
             mitmEnabled = true
             mitmSNI = sni
+            // Routing is deferred to the dialer.
+            return
         }
 
+        let router = stack.domainRouter
         guard let action = router.matchDomain(sni) else {
             // No domain rule — keep the IP-derived route.
             return
@@ -664,55 +670,121 @@ class TCPConnection {
         session.start(sni: sni)
     }
 
-    /// Builds the dialer for the session's deferred dial on the committed route; the
-    /// session owns the resulting connection, and completion runs on `lwipQueue`.
+    private enum UpstreamRoute {
+        case direct
+        case reject
+        case proxy(routeTarget: RouteTarget, configuration: ProxyConfiguration)
+    }
+    
     private func makeMITMDialer() -> MITMDialer {
         return { [weak self] host, port, completion in
             guard let self else { completion(.failure(SocketError.notConnected)); return }
             self.lwipQueue.async {
                 guard !self.closed else { completion(.failure(SocketError.notConnected)); return }
-                if self.bypass {
-                    let transport = RawTCPSocket()
-                    // Direct/bypass — not a proxied connection, exclude from Dial.
-                    transport.dialTimer.enabled = false
-                    let connection = DirectProxyConnection(connection: transport)
-                    transport.connect(host: host, port: port) { [weak self] error in
-                        guard let self else {
-                            connection.cancel()
-                            completion(.failure(error ?? SocketError.notConnected))
-                            return
-                        }
-                        self.lwipQueue.async {
-                            if let error {
-                                // onTeardown reports the failure; don't double-report.
-                                completion(.failure(error))
-                            } else {
-                                completion(.success(MITMDialResult(connection: connection, proxyClient: nil)))
-                            }
-                        }
-                    }
+                switch self.commitUpstreamRoute(forDialHost: host, port: port) {
+                case .reject:
+                    completion(.failure(SocketError.connectionFailed("rejected by routing rule: \(host)")))
+                case .direct:
+                    self.dialDirectUpstream(host: host, port: port, completion: completion)
+                case .proxy(_, let configuration):
+                    self.dialProxyUpstream(configuration: configuration, host: host, port: port, completion: completion)
+                }
+            }
+        }
+    }
+    
+    private func commitUpstreamRoute(forDialHost host: String, port: UInt16) -> UpstreamRoute {
+        let resolved = resolveUpstreamRoute(forDialHost: host)
+        switch resolved.route {
+        case .direct:
+            routeTarget = .direct
+        case .reject:
+            routeTarget = .reject
+        case .proxy(let target, let configuration):
+            routeTarget = target
+            self.configuration = configuration
+        }
+        TunnelStack.shared?.requestLog.record(
+            proto: "TCP", host: host, port: port,
+            routeTarget: routeTarget, viaDefault: resolved.viaDefault
+        )
+        return resolved.route
+    }
+    
+    private func resolveUpstreamRoute(forDialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool) {
+        // A rule matching the real dial host is an explicit route, never the default.
+        if let router = TunnelStack.shared?.domainRouter, let action = router.matchDomain(host) {
+            switch action {
+            case .direct:
+                return (.direct, false)
+            case .reject:
+                return (.reject, false)
+            case .proxy:
+                if let configuration = router.resolveConfiguration(action: action) {
+                    return (.proxy(routeTarget: action, configuration: configuration), false)
+                }
+            }
+        }
+        if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
+            // Unchanged host keeps the accept-time route — and carries its default-ness.
+            let route: UpstreamRoute = bypass ? .direct : .proxy(routeTarget: routeTarget, configuration: configuration)
+            return (route, acceptedViaDefault)
+        }
+        return (defaultUpstreamRoute(), true)
+    }
+    
+    private func defaultUpstreamRoute() -> UpstreamRoute {
+        guard let stack = TunnelStack.shared,
+              case .proxy = stack.defaultRouteTarget,
+              let configuration = stack.configuration else {
+            return .direct
+        }
+        return .proxy(routeTarget: stack.defaultRouteTarget, configuration: configuration)
+    }
+    
+    private func dialDirectUpstream(host: String, port: UInt16,
+                                    completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
+        let transport = RawTCPSocket()
+        // Direct/bypass — not a proxied connection, exclude from Dial.
+        transport.dialTimer.enabled = false
+        let connection = DirectProxyConnection(connection: transport)
+        transport.connect(host: host, port: port) { [weak self] error in
+            guard let self else {
+                connection.cancel()
+                completion(.failure(error ?? SocketError.notConnected))
+                return
+            }
+            self.lwipQueue.async {
+                if let error {
+                    // onTeardown reports the failure; don't double-report.
+                    completion(.failure(error))
                 } else {
-                    let client = ProxyClient(
-                        configuration: self.configuration,
-                        isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(self.configuration.id) ?? false
-                    )
-                    client.connect(to: host, port: port, initialData: nil) { [weak self] result in
-                        guard let self else {
-                            if case .success(let conn) = result { conn.cancel() }
-                            client.cancel()
-                            completion(.failure(SocketError.notConnected))
-                            return
-                        }
-                        self.lwipQueue.async {
-                            switch result {
-                            case .success(let conn):
-                                completion(.success(MITMDialResult(connection: conn, proxyClient: client)))
-                            case .failure(let error):
-                                // onTeardown reports the failure; don't double-report.
-                                completion(.failure(error))
-                            }
-                        }
-                    }
+                    completion(.success(MITMDialResult(connection: connection, proxyClient: nil)))
+                }
+            }
+        }
+    }
+    
+    private func dialProxyUpstream(configuration: ProxyConfiguration, host: String, port: UInt16,
+                                   completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
+        let client = ProxyClient(
+            configuration: configuration,
+            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+        )
+        client.connect(to: host, port: port, initialData: nil) { [weak self] result in
+            guard let self else {
+                if case .success(let conn) = result { conn.cancel() }
+                client.cancel()
+                completion(.failure(SocketError.notConnected))
+                return
+            }
+            self.lwipQueue.async {
+                switch result {
+                case .success(let conn):
+                    completion(.success(MITMDialResult(connection: conn, proxyClient: client)))
+                case .failure(let error):
+                    // onTeardown reports the failure; don't double-report.
+                    completion(.failure(error))
                 }
             }
         }
