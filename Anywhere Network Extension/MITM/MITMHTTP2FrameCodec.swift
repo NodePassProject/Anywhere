@@ -7,12 +7,9 @@
 
 import Foundation
 
-/// Self-contained HTTP/2 frame primitives for the bridge's two legs (RFC 9113): parsing peer
-/// frames and emitting HEADERS / DATA / control frames, not a full HTTP/2 stack.
-///
-/// Shares the stateless wire-format primitives (`HTTP2FrameWire`) and HPACK codec with
-/// `NaiveHTTP2Multiplexer`, but keeps its own frame structs, decode loops, flow control, and
-/// state machines — so a stateful protocol fix (e.g. GOAWAY draining) must be applied in both.
+/// Self-contained HTTP/2 frame primitives for the bridge's two legs (RFC 9113), not a full
+/// HTTP/2 stack. Keeps its own frame structs, decode loops, flow control, and state machines,
+/// so a stateful protocol fix (e.g. GOAWAY draining) must be applied here too.
 enum MITMHTTP2FrameCodec {
 
     // MARK: Frame type codes
@@ -49,10 +46,9 @@ enum MITMHTTP2FrameCodec {
     /// no larger value, so the client must not exceed it.
     static let maxFramePayloadSize = 16_384
 
-    /// Hard cap on an accepted frame payload, above the advertised 16 KiB max so a peer can't force
-    /// an unbounded allocation. SETTINGS_MAX_FRAME_SIZE (RFC 9113 §4.2) isn't enforced strictly: a
-    /// frame between 16 KiB and this cap is accepted rather than FRAME_SIZE_ERROR'd (safe because
-    /// flow control accounts the true on-wire length). Past this cap the buffer is dropped.
+    /// Hard cap on an accepted frame payload, above the advertised 16 KiB so a peer can't force an
+    /// unbounded allocation. Frames between 16 KiB and this cap are accepted rather than
+    /// FRAME_SIZE_ERROR'd (safe: flow control accounts the true on-wire length); past it, dropped.
     static let maxReceivedFramePayloadSize = 1 * 1024 * 1024
 
     /// The h2 connection preface octets a client sends first (RFC 9113 §3.4).

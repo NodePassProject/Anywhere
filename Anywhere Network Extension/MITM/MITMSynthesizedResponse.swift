@@ -57,7 +57,6 @@ extension MITMScriptEngine.SynthesizedResponse {
         return headers + [(name: lowercaseName ? "date" : "Date", value: Self.imfFixdateFormatter.string(from: Date()))]
     }
 
-    /// Truncates the body to `cap` bytes, invoking `onTruncate(originalSize)` when it exceeds the cap.
     func truncatedBody(cap: Int, onTruncate: (Int) -> Void) -> Data {
         guard body.count > cap else { return body }
         onTruncate(body.count)

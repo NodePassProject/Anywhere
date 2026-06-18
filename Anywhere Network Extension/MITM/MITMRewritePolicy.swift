@@ -9,7 +9,7 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
-/// One rewrite as the runtime sees it: regexes pre-compiled, header names case-folded.
+/// Runtime form: regexes pre-compiled, header names case-folded.
 struct CompiledMITMRule {
     let phase: MITMPhase
     /// Regex over the whole request URL; bounded so a ReDoS pattern can't stall the tunnel.
@@ -41,7 +41,47 @@ extension CompiledMITMRule {
     }
 }
 
-/// A replacement URL parsed once at compile time: host/port for the deferred dial, requestTarget for the start line.
+extension CompiledMITMRule {
+    /// Capture groups from the gate match (index 0 = whole match), or nil on no match /
+    /// over-long. Mirrors ``matchesURL(_:)``'s host normalization so a templated rewrite
+    /// captures from the same string the gate matched.
+    func capturesForURL(_ url: String?) -> [String?]? {
+        guard let url, url.utf16.count <= Self.maxGateURLLength else { return nil }
+        return gate.firstMatchCaptures(Self.lowercasingHost(url))
+    }
+
+    /// Resolves this rule's rewrite action for `url`, expanding any capture template.
+    /// nil when the operation isn't a rewrite, the gate doesn't match, or a templated
+    /// target expands to an invalid URL (rule then no-ops). Static targets reuse their
+    /// compile-time parse.
+    func resolvedRewriteAction(for url: String?) -> ResolvedRewriteAction? {
+        guard case .rewrite(let action) = operation else { return nil }
+        switch action {
+        case .transparent(.resolved(let replacement)):
+            return matchesURL(url) ? .transparent(replacement) : nil
+        case .transparent(.templated(let template)):
+            guard let captures = capturesForURL(url),
+                  let replacement = MITMRewritePolicy.resolveTransparentTemplate(template, captures: captures)
+            else { return nil }
+            return .transparent(replacement)
+        case .redirect302(.location(let location)):
+            return matchesURL(url) ? .redirect302(location: location) : nil
+        case .redirect302(.templated(let template)):
+            guard let captures = capturesForURL(url),
+                  let location = MITMRewritePolicy.resolveRedirectTemplate(template, captures: captures)
+            else { return nil }
+            return .redirect302(location: location)
+        case .reject200Text(let content):
+            return matchesURL(url) ? .reject200Text(content: content) : nil
+        case .reject200Gif:
+            return matchesURL(url) ? .reject200Gif : nil
+        case .reject200Data(let base64):
+            return matchesURL(url) ? .reject200Data(base64: base64) : nil
+        }
+    }
+}
+
+/// Replacement URL parsed once at compile time: host/port for the dial, requestTarget for the start line.
 struct ReplacementURL: Equatable {
     /// IPv6 URI brackets stripped, matching the form the resolver expects.
     let host: String
@@ -57,8 +97,30 @@ struct ReplacementURL: Equatable {
     }
 }
 
-/// `transparent` drives the request rewrite + deferred dial; the rest synthesize an inner-leg response.
+/// Transparent rewrite target: parsed at compile time, or a per-request capture template.
+enum TransparentTarget {
+    case resolved(ReplacementURL)
+    case templated(MITMCaptureTemplate)
+}
+
+/// 302 `Location` target: validated literal, or a per-request capture template.
+enum RedirectTarget {
+    case location(String)
+    case templated(MITMCaptureTemplate)
+}
+
+/// `transparent` drives the request rewrite + deferred dial; the rest synthesize an
+/// inner-leg response. transparent/302 targets may carry a `$1`-style capture template.
 enum CompiledRewriteAction {
+    case transparent(TransparentTarget)
+    case redirect302(RedirectTarget)
+    case reject200Text(content: String)
+    case reject200Gif
+    case reject200Data(base64: String)
+}
+
+/// Rewrite action with every capture template expanded for one specific request.
+enum ResolvedRewriteAction {
     case transparent(ReplacementURL)
     case redirect302(location: String)
     case reject200Text(content: String)
@@ -76,21 +138,21 @@ enum CompiledMITMOperation {
     case script(source: String, sourceKey: Int)
     /// Like `script` but invoked per DATA chunk so streaming bodies flow unbuffered; at most one fires per stream.
     case streamScript(source: String, sourceKey: Int)
-    /// Native regex find-and-replace over the text body (import op id `4`); matching rules compose in rule order.
-    case bodyReplace(search: Regex<AnyRegexOutput>, replacement: String)
-    /// Native JSON body edit (import op id `5`); composes in rule order before any script.
+    /// Regex find-and-replace over the text body (import op id `4`); matching rules compose in rule order.
+    case bodyReplace(MITMBodyReplace.CompiledOp)
+    /// JSON body edit (import op id `5`); composes in rule order before any script.
     case bodyJSON(MITMJSONPatch.CompiledOp)
 }
 
-/// Compiled rule set at one trie terminal; a multi-suffix source set produces one
-/// per suffix. `id` is the source set's, used as the stable script-store scope key.
+/// Compiled rule set at one trie terminal (one per suffix). `id` is the source set's,
+/// used as the stable script-store scope key.
 struct CompiledMITMRuleSet {
     let id: UUID
     let domainSuffix: String
     let rules: [CompiledMITMRule]
 }
 
-/// Owns compiled MITM rule sets; domain-suffix matching is most-specific-wins via a trie of reversed labels.
+/// Domain-suffix matching is most-specific-wins via a trie of reversed labels.
 final class MITMRewritePolicy {
 
     private var trie = FlatLabelTrie<CompiledMITMRuleSet>()
@@ -248,7 +310,7 @@ final class MITMRewritePolicy {
                 logger.warning("bodyReplace dropped: search is not a valid regex (suffix=\(suffix))")
                 return nil
             }
-            return .bodyReplace(search: compiled.search, replacement: compiled.replacement)
+            return .bodyReplace(compiled)
         case .bodyJSON(let operation):
             guard let compiled = MITMJSONPatch.compile(operation) else {
                 logger.warning("bodyJSON dropped: malformed JSON path in \(operation.action) (suffix=\(suffix))")
@@ -280,13 +342,13 @@ final class MITMRewritePolicy {
 
     // MARK: - Static-rule validation
     //
-    // Rule sets are untrusted; serializers emit header bytes verbatim, so CR/LF
-    // in a value enables response-splitting. Validated once at compile time.
+    // Rule sets are untrusted; serializers emit header bytes verbatim, so CR/LF in a
+    // value enables response-splitting. Validated once at compile time.
 
-    /// Framing (RFC 9112 §6) and connection-management headers are blocked for add/replace: divergent
-    /// framing is the request-smuggling primitive, and an injected Connection/Upgrade/Keep-Alive/TE
-    /// token desyncs keep-alive (the h1 leg doesn't strip hop-by-hop, so it would reach upstream).
-    /// Delete only makes framing more conservative, so it stays allowed.
+    /// Framing (RFC 9112 §6) and connection-management headers are blocked for add/replace:
+    /// divergent framing is the request-smuggling primitive, and an injected token desyncs
+    /// keep-alive (the h1 leg doesn't strip hop-by-hop, so it reaches upstream). Delete only
+    /// makes framing more conservative, so it stays allowed.
     private static func isFramingHeader(_ name: String) -> Bool {
         switch name.lowercased() {
         case "content-length", "transfer-encoding",
@@ -313,6 +375,12 @@ final class MITMRewritePolicy {
     private static func compileRewrite(_ action: MITMRewriteAction, suffix: String) -> CompiledRewriteAction? {
         switch action {
         case .transparent(let url):
+            // A `$1`-style target's final URL is only known per request — keep the
+            // template and validate the expansion when the gate matches.
+            let template = MITMCaptureTemplate(url)
+            if template.referencesCaptures {
+                return .transparent(.templated(template))
+            }
             guard let parsed = parseReplacementURL(url) else {
                 logger.warning("rewrite(transparent) dropped: \"\(url)\" is not an absolute URL with a host (suffix=\(suffix))")
                 return nil
@@ -321,15 +389,19 @@ final class MITMRewritePolicy {
                 logger.warning("rewrite(transparent) dropped: replacement path is not wire-safe (suffix=\(suffix))")
                 return nil
             }
-            return .transparent(parsed)
+            return .transparent(.resolved(parsed))
         case .redirect302(let url):
+            let template = MITMCaptureTemplate(url)
+            if template.referencesCaptures {
+                return .redirect302(.templated(template))
+            }
             // Trim first: isValidHTTPHeaderValue allows SP/HTAB, and stray whitespace in Location trips some clients.
             let trimmed = url.trimmingCharacters(in: .whitespaces)
             guard parseReplacementURL(trimmed) != nil, isValidHTTPHeaderValue(trimmed) else {
                 logger.warning("rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
                 return nil
             }
-            return .redirect302(location: trimmed)
+            return .redirect302(.location(trimmed))
         case .reject200Text(let content):
             return .reject200Text(content: content)
         case .reject200Gif:
@@ -373,16 +445,35 @@ final class MITMRewritePolicy {
         }
         return ReplacementURL(host: host, port: port, requestTarget: target)
     }
+
+    // MARK: - Per-request template resolution
+
+    /// Expands a transparent target template, then parses and wire-safety-checks the result.
+    /// nil (rule no-ops) when the expansion isn't an absolute URL with a host, or the path
+    /// isn't wire-safe.
+    static func resolveTransparentTemplate(_ template: MITMCaptureTemplate, captures: [String?]) -> ReplacementURL? {
+        let url = template.expand(captures: captures)
+        guard let parsed = parseReplacementURL(url),
+              isValidRequestTargetReplacement(parsed.requestTarget) else { return nil }
+        return parsed
+    }
+
+    /// Expands a 302 target template, then trims and validates it as a wire-safe `Location`.
+    /// nil leaves the rule a no-op for this request.
+    static func resolveRedirectTemplate(_ template: MITMCaptureTemplate, captures: [String?]) -> String? {
+        let location = template.expand(captures: captures).trimmingCharacters(in: .whitespaces)
+        guard parseReplacementURL(location) != nil, isValidHTTPHeaderValue(location) else { return nil }
+        return location
+    }
 }
 
 // MARK: - Binary deserialization
 
-/// Decodes the `AMR1` MITM blob the host exports (see `MITMBinaryFormat`) back
-/// into `MITMRuleSet` models for `MITMRewritePolicy.load`.
+/// Decodes the `AMR1` MITM blob the host exports back into `MITMRuleSet` models.
 enum MITMBinaryReader {
     private enum ReadError: Error { case badMagic, badVersion, truncated, malformed }
 
-    /// Returns `(enabled, liveRuleSets)`, or nil on bad magic/version/truncation.
+    /// nil on bad magic/version/truncation.
     static func decode(_ data: Data) -> (enabled: Bool, ruleSets: [MITMRuleSet])? {
         data.withUnsafeBytes { raw -> (enabled: Bool, ruleSets: [MITMRuleSet])? in
             var cursor = Cursor(bytes: raw.bindMemory(to: UInt8.self))

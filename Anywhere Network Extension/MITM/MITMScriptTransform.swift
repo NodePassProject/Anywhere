@@ -8,7 +8,6 @@
 import Foundation
 import JavaScriptCore
 
-/// Applies the script subset of a compiled rule list; shared by the HTTP/1.1 and HTTP/2 rewriters.
 /// At most one `.script` and one `.streamScript` fire per message (last match wins): chaining would
 /// collide on rule-set-scoped store keys and the single-valued per-stream state slot.
 enum MITMScriptTransform {
@@ -160,8 +159,8 @@ enum MITMScriptTransform {
     ) -> [MITMBodyReplace.CompiledOp] {
         var ops: [MITMBodyReplace.CompiledOp] = []
         for rule in rules {
-            if case .bodyReplace(let search, let replacement) = rule.operation, rule.matchesURL(requestURL) {
-                ops.append(MITMBodyReplace.CompiledOp(search: search, replacement: replacement))
+            if case .bodyReplace(let op) = rule.operation, rule.matchesURL(requestURL) {
+                ops.append(op)
             }
         }
         return ops
@@ -208,7 +207,7 @@ enum MITMScriptTransform {
         var state: JSValue?
         /// Set by a done/exit directive; subsequent frames bypass the script.
         var bypass: Bool = false
-        /// Memoized stream-script resolution; outer nil = unresolved, `.some(nil)` = no rule matches.
+        /// Outer nil = unresolved, `.some(nil)` = no rule matches.
         fileprivate var resolvedMatch: ScriptMatch??
         init() {}
 
@@ -288,7 +287,6 @@ enum MITMScriptTransform {
 
     // MARK: - Last-match selection
 
-    /// Source and precomputed cache key for a matched script rule.
     fileprivate struct ScriptMatch {
         let source: String
         let sourceKey: Int

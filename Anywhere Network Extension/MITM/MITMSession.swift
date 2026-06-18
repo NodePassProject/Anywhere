@@ -9,14 +9,13 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMSession")
 
-/// Result of the deferred upstream dial.
 struct MITMDialResult {
     let connection: ProxyConnection
     /// nil for a direct connection; the session owns its lifetime.
     let proxyClient: ProxyClient?
 }
 
-/// Dials the upstream once the first request resolves the host/port; completion runs on the lwIP queue.
+/// Dials the upstream once the first request resolves host/port; completion runs on the lwIP queue.
 typealias MITMDialer = (
     _ host: String,
     _ port: UInt16,
@@ -153,8 +152,8 @@ final class MITMSession {
     /// True while the dial is in flight; further upstream-bound bytes buffer instead of redialing.
     private var dialing = false
 
-    /// True when the inbound pump paused under backpressure (the pre-dial buffer reached the
-    /// high-water mark). `finishDialAndShuttle` resumes it once the outer leg exists and drains.
+    /// True when the inbound pump paused under backpressure (pre-dial buffer at the high-water mark);
+    /// resumed once the outer leg exists and drains.
     private var inboundReadPaused = false
 
     /// Upstream the dial committed to; a later request resolving a different one is torn down rather than misrouted.
@@ -167,14 +166,14 @@ final class MITMSession {
     /// Client bytes buffered until the inner TLSServer exists.
     private var pendingClientBytes: Data
 
-    /// Pre-handshake buffer cap (256 KiB: tolerates large ClientHellos, bounds memory against a
-    /// hostile local app). Also the pre-dial inbound high-water mark: when the upstream-bound buffer
-    /// reaches it while dialing, the inner read pauses (backpressure) rather than buffering on.
+    /// Pre-handshake buffer cap (256 KiB: tolerates large ClientHellos, bounds memory against a hostile
+    /// local app). Also the pre-dial inbound high-water mark: while dialing, the inner read pauses
+    /// (backpressure) when the upstream-bound buffer reaches it.
     private static let maxPendingClientBytes: Int = 256 * 1024
 
     /// Hard backstop on the pre-dial upstream buffer; sits above the 4 MiB body cap (one buffered-body
-    /// rewrite can deliver that much in one chunk). Backpressure keeps it near `maxPendingClientBytes`
-    /// in practice, so tearing down here means a genuinely pathological case.
+    /// rewrite can deliver that much in one chunk). Backpressure keeps it near `maxPendingClientBytes`,
+    /// so tripping it means a pathological case.
     private static let maxPendingUpstreamBytes: Int = 8 * 1024 * 1024
 
     private var tlsServer: TLSServer?
@@ -194,12 +193,9 @@ final class MITMSession {
     //
     // An h2 client's `bridgeClient` decodes into protocol-neutral request IR. The first request
     // triggers one dial offering both ALPNs; the upstream leg is bound from the negotiated protocol
-    // (one multiplexed h2 leg, or per-stream h1 legs).
-    //
-    // Upstream host/port is committed from the first request's transparent rewrite. An h2 upstream
-    // multiplexes every stream over that one connection, so a later stream resolving a different host
-    // is still sent there (the h1 inner leg tears down on such a mismatch; the h1 bridge dials per
-    // stream and so follows each stream's host).
+    // (one multiplexed h2 leg, or per-stream h1 legs). An h2 upstream multiplexes every stream over
+    // its one connection, so a later stream resolving a different host is still sent there; the h1
+    // bridge dials per stream and so follows each stream's host.
 
     private var bridgeClient: MITMBridgeClientLeg?
 
@@ -219,8 +215,7 @@ final class MITMSession {
     }
     private var pendingRequestEvents: [PendingRequestEvent] = []
 
-    /// One http/1.1 upstream connection per client h2 stream: carries one
-    /// request/response, then closes.
+    /// One http/1.1 upstream connection per client h2 stream: carries one request/response, then closes.
     private final class BridgeStream {
         let clientStreamID: UInt32
         var proxyClient: ProxyClient?
@@ -237,9 +232,8 @@ final class MITMSession {
         var framing: MITMBridgeBodyFraming = .none
         /// Serialized request bytes held until the per-stream TLS handshake completes.
         var pendingToUpstream = Data()
-        /// Upstream-bound bytes accepted from the client but not yet confirmed written (in
-        /// `pendingToUpstream` or in flight). Bounds the eagerly credited client against a slow
-        /// upstream (see `maxBridgeUpstreamBufferedBytes`).
+        /// Upstream-bound bytes accepted from the client but not yet confirmed written. Bounds the
+        /// eagerly credited client against a slow upstream (see `maxBridgeUpstreamBufferedBytes`).
         var unsentUpstreamBytes = 0
         var handshakeDone = false
 
@@ -251,8 +245,7 @@ final class MITMSession {
     }
 
     /// Adapts a per-stream response stream's IR to the client leg's sink, tagging each event with the
-    /// client stream ID. A reset RSTs the client stream and (deferred off the in-progress `transform`)
-    /// tears down the dead h1 upstream.
+    /// client stream ID.
     private final class BridgeResponseIRSink: MITMHTTP1ResponseIRSink {
         let streamID: UInt32
         weak var client: MITMBridgeClientLeg?
@@ -281,27 +274,27 @@ final class MITMSession {
     /// are refused (REFUSED_STREAM) so the client may retry later.
     private static let maxConcurrentBridgeStreams = 128
 
-    /// Per-stream cap on h2→h1 bridge upstream-bound bytes buffered or in flight. The client leg must
-    /// credit the upload window eagerly (else one stalled stream freezes the multiplexed connection),
-    /// so a fast client to a slow h1 origin would otherwise grow memory unbounded. Over cap the stream
-    /// is reset.
+    /// Per-stream cap on h2→h1 bridge upstream-bound bytes buffered or in flight. The client leg credits
+    /// the upload window eagerly (else one stalled stream freezes the multiplexed connection), so a fast
+    /// client to a slow h1 origin would otherwise grow memory unbounded. Over cap the stream is reset.
     private static let maxBridgeUpstreamBufferedBytes = 8 * 1024 * 1024
 
     /// The first dial's established upstream connection. For h2 it's the multiplexed connection (kept
-    /// for the session); for h1.1 it's reused by the first stream then cleared (others dial their own).
+    /// for the session); for h1.1 the first stream reuses it then clears it (others dial their own).
     private var sharedUpstreamRecord: TLSRecordConnection?
     private var sharedUpstreamConnection: ProxyConnection?
     private var sharedUpstreamProxyClient: ProxyClient?
     private var sharedUpstreamTLSClient: TLSClient?
 
-    /// Active inbound/outbound rewriter for an HTTP/1.1 *inner* leg (h2 inner uses the
-    /// decoupled client leg above, not these).
+    /// Active inbound/outbound rewriter for an HTTP/1.1 *inner* leg (h2 inner uses the decoupled
+    /// client leg above, not these).
     private var inbound: any MITMMessageRewriter { requestStream }
     private var outbound: any MITMMessageRewriter { responseStream }
 
     private let h2Rewriter: MITMHTTP2Rewriter
 
-    /// Tracks the client's HTTP/2 receive windows so synthesized bodies are paced rather than truncated; shared by both h2 legs.
+    /// Tracks the client's HTTP/2 receive windows so synthesized bodies are paced rather than
+    /// truncated; shared by both h2 legs.
     private let h2FlowController = MITMHTTP2FlowController()
 
     /// JS engine handle, shared per rule set; materializes only when a script rule fires.
@@ -378,8 +371,8 @@ final class MITMSession {
             self?.handleResponseUpgrade()
         }
         // Fail closed on a smuggling/injection head or over-cap body (deferred off the parse pass to
-        // avoid re-entrant teardown). The request direction can't cleanly answer the client, so it
-        // just closes; the response direction answers a 502 first.
+        // avoid re-entrant teardown). The request direction can't cleanly answer the client so it just
+        // closes; the response direction answers a 502 first.
         requestStream.onFatalClose = { [weak self] in
             self?.lwipQueue.async { self?.cancel(error: nil) }
         }
@@ -405,7 +398,6 @@ final class MITMSession {
         )
     }
 
-    /// Routes client bytes to the current inner-leg stage.
     func feedClientBytes(_ data: Data) {
         guard !torn else { return }
         if innerRecord != nil {
@@ -434,8 +426,8 @@ final class MITMSession {
     func cancel(error: Error? = nil) {
         guard !torn else { return }
         // Best-effort GOAWAY to an h2 client before suppressing writes (`torn`) so it learns the last
-        // processed stream and can retry (RFC 9113 §6.8). Idempotent: no-ops if a client-side fatal
-        // already sent one; nil (no-op) for an h1 inner leg or pre-handshake teardown.
+        // processed stream and can retry (RFC 9113 §6.8). Idempotent; nil-safe for an h1 inner leg or
+        // pre-handshake teardown.
         bridgeClient?.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.internalError)
         torn = true
         // Disarm in-flight script resumes before they can write to torn legs.
@@ -566,9 +558,9 @@ final class MITMSession {
                     self.outerRecord = record
                     self.finishDialAndShuttle(inner: inner, outer: record)
                 case .failure(let error):
-                    // A certificate-validation failure is a security signal: a 502 over the trusted
-                    // inner leg would render as a padlocked error page and mask the origin's invalid
-                    // cert. Tear down instead so the client surfaces a connection failure.
+                    // A cert-validation failure is a security signal: a 502 over the trusted inner leg
+                    // would render as a padlocked error page and mask the origin's invalid cert. Tear
+                    // down instead so the client surfaces a connection failure.
                     if Self.isCertVerifyFailure(error) {
                         logger.warning("[MITM] \(self.dstHost): upstream certificate validation failed (\(error)); closing rather than masking as a 502")
                         self.cancel(error: nil)
@@ -809,8 +801,7 @@ final class MITMSession {
 
     /// While the dial is in flight, keep reading client bytes until the upstream-bound buffer reaches
     /// the high-water mark, then pause — filling the client's TCP window so a fast local uploader is
-    /// throttled instead of buffering an unbounded first-request body. `finishDialAndShuttle` resumes
-    /// the pump once the outer leg exists and the buffer is flushed. lwipQueue only.
+    /// throttled instead of buffering an unbounded first-request body. lwipQueue only.
     private func resumeOrPauseInboundPreDial(inner: TLSRecordConnection) {
         if pendingUpstreamBytes.count >= Self.maxPendingClientBytes {
             inboundReadPaused = true
@@ -831,7 +822,7 @@ final class MITMSession {
     /// resolved a different upstream host. Safe only when the leg is fully idle: response stream
     /// between messages and the just-routed request the only one outstanding (`http1InFlightCount == 1`;
     /// higher means an earlier request is still owed a response). Else the caller tears down rather
-    /// than truncate an in-flight response. Pure so it can be unit-tested in isolation.
+    /// than truncate an in-flight response.
     static func canSwapOuterLeg(responseBetweenMessages: Bool, http1InFlightCount: Int) -> Bool {
         responseBetweenMessages && http1InFlightCount == 1
     }
@@ -881,9 +872,9 @@ final class MITMSession {
 
     /// Bounds a deferred upstream TLS handshake. The per-connection `handshakeTimer` is cancelled once
     /// the session takes over the inner handshake, so the outer handshake would otherwise have only the
-    /// 300–600 s idle timer, letting a black-holing origin park the connection for minutes. Returns a
-    /// `disarm` closure the completion must call: `true` if the handshake won the race (proceed),
-    /// `false` if the timeout already fired (bail); first to run wins. lwipQueue only.
+    /// 300–600 s idle timer, letting a black-holing origin park the connection for minutes. The returned
+    /// `disarm` closure must be called by the completion: `true` if the handshake won the race, `false`
+    /// if the timeout already fired; first to run wins. lwipQueue only.
     private func armUpstreamHandshakeTimeout(_ onTimeout: @escaping () -> Void) -> () -> Bool {
         var settled = false
         lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout) { [weak self] in
@@ -930,7 +921,6 @@ final class MITMSession {
         }
     }
 
-    /// Pumps server plaintext from the outer record to the inner record.
     private func startOutboundPump(inner: TLSRecordConnection, outer: TLSRecordConnection) {
         outer.receive { [weak self] data, error in
             guard let self else { return }
@@ -1353,9 +1343,8 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         }
 
         // Per-stream dial target from the head (`MITMRequestHead.resolvedUpstream`), captured at this
-        // request's own rewrite time. The rewriter's shared last-write-wins field would be wrong for a
-        // request buffered for a body script/rule, whose dial happens after an async hop a concurrent
-        // stream could overwrite — this stays consistent with the `:authority` in this same head.
+        // request's own rewrite time, not the rewriter's shared last-write-wins field — a request
+        // buffered for a body script/rule dials after an async hop a concurrent stream could overwrite.
         let resolved = head.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort

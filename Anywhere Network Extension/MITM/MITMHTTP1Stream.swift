@@ -9,10 +9,9 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
-/// Structured response delivery for the h2→h1 bridge. When a `MITMHTTP1Stream` (response phase) is
-/// given a sink, it delivers the rewritten response as IR — head / body / reset — instead of
-/// serializing HTTP/1.1 bytes the bridge would only re-parse. Chunked response trailers are not
-/// surfaced (dropped). lwIP-queue-confined.
+/// h2→h1 bridge response delivery: the rewritten response is delivered as IR (head / body / reset)
+/// rather than HTTP/1.1 bytes the bridge would only re-parse. Chunked response trailers are dropped.
+/// lwIP-queue-confined.
 protocol MITMHTTP1ResponseIRSink: AnyObject {
     /// `endStream` true ⇒ no body follows (the IR consumer ends the stream on the head).
     func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool)
@@ -24,9 +23,8 @@ protocol MITMHTTP1ResponseIRSink: AnyObject {
     func http1ResponseReset()
 }
 
-/// One direction of an HTTP/1.x byte stream through the MITM: framing state
-/// machine plus chunked decoder, emitting rewritten plaintext for the opposite
-/// TLS leg. Unparseable input permanently downgrades to passthrough.
+/// One direction of an HTTP/1.x byte stream through the MITM, emitting rewritten plaintext for the
+/// opposite TLS leg. Unparseable input permanently downgrades to passthrough.
 final class MITMHTTP1Stream {
 
     /// Cap on bytes buffered awaiting the CRLF CRLF head terminator (Apache's
@@ -314,11 +312,9 @@ final class MITMHTTP1Stream {
     /// script chain; fires `completion` inline in all other modes.
     func finish(completion: @escaping (Data) -> Void) {
         guard parkedCompletion == nil else { return failClosedReentry(completion) }
-        // Bridge (IR) EOF handling, by current mode:
         if responseIRSink != nil {
             switch mode {
             case .bridgeForwardUntilClose:
-                // read-until-close: EOF ends the body cleanly.
                 _ = emitBridgeBody(Data(), endStream: true)
                 mode = .draining
                 completion(Data())
@@ -1987,11 +1983,12 @@ final class MITMHTTP1Stream {
         if target == "*" { return .rewritten(startLine) } // RFC 9112 §3.2.4 asterisk-form
 
         for rule in rules {
-            guard case .rewrite(let action) = rule.operation else { continue }
-            guard rule.matchesURL("https://\(host)\(target)") else { continue }
-            switch action {
+            guard case .rewrite = rule.operation else { continue }
+            // Resolves the gate match and expands any `$1`-style target template in one step.
+            guard let resolved = rule.resolvedRewriteAction(for: "https://\(host)\(target)") else { continue }
+            switch resolved {
             case .transparent(let replacement):
-                // Re-validate at use time as a backstop (validated at load time too).
+                // Re-validate at use time as a backstop (validated at load/resolve time too).
                 guard Self.isValidRequestTarget(replacement.requestTarget) else {
                     logger.warning("HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
                     continue
@@ -2000,7 +1997,7 @@ final class MITMHTTP1Stream {
                 resolvedUpstream = (host: replacement.host, port: replacement.port)
                 return .rewritten("\(method) \(replacement.requestTarget) \(version)")
             case .redirect302, .reject200Text, .reject200Gif, .reject200Data:
-                guard let response = MITMRespondBuilder.response(for: action) else { continue }
+                guard let response = MITMRespondBuilder.response(for: resolved) else { continue }
                 return .synthesize(response)
             }
         }

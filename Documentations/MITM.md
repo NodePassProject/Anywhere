@@ -206,17 +206,22 @@ remaining field(s) depend on it. When the `url-pattern` gate matches, the
 
 | Sub-mode | Name             | Args          | Effect |
 | -------- | ---------------- | ------------- | ------ |
-| `0`      | transparent      | `<full-url>`  | Replace the whole request URL with `<full-url>` (literal). The request-target becomes the replacement's path+query; the outer leg is dialed to the replacement **host** and `Host` / `:authority` is rewritten to match it (a no-op in effect when the host is unchanged). The client still sees the **original** host on the leaf certificate. |
+| `0`      | transparent      | `<full-url>`  | Replace the whole request URL with `<full-url>` (which may carry `$1`-style capture references — see below). The request-target becomes the replacement's path+query; the outer leg is dialed to the replacement **host** and `Host` / `:authority` is rewritten to match it (a no-op in effect when the host is unchanged). The client still sees the **original** host on the leaf certificate. |
 | `1`      | 302 redirect     | `<full-url>`  | Synthesize a `302 Found` whose `Location` is `<full-url>`. No upstream dial. |
 | `2`      | reject 200 text  | `[<content>]` | Synthesize a `200 OK` with a `text/plain; charset=utf-8` body. Empty `<content>` → a short default line. No upstream dial. |
 | `3`      | reject 200 gif   | *(none)*      | Synthesize a `200 OK` carrying the canned 1×1 `image/gif`. No upstream dial. |
 | `4`      | reject 200 data  | `[<base64>]`  | Synthesize a `200 OK` with an `application/octet-stream` body decoded from `<base64>`. Empty → a default payload. No upstream dial. |
 
-For sub-modes `0` and `1` the URL must be a full absolute URL with a host
-(`https://host[:port]/path?query`); a URL with no path uses `/`. The replacement
-is **literal** — there is no `$1` capture expansion, so every URL matching the
-`url-pattern` maps to the one exact replacement URL. Author the `url-pattern`
-specifically.
+For sub-modes `0` and `1` the URL — **after** capture expansion — must be a full
+absolute URL with a host (`https://host[:port]/path?query`); a URL with no path
+uses `/`. The replacement supports **capture references** against the
+`url-pattern` match: `$0` is the whole match, `$1`…`$9` (and `${10}`, `${11}`, …
+for higher indices) are its capture groups, and `$$` is a literal `$`. A
+replacement containing no `$` is used verbatim, so existing rules are unaffected.
+References resolve **per request**, so one `url-pattern` with capture groups can
+rewrite many URLs to matching targets; a group that didn't participate expands to
+the empty string, and if the expanded URL isn't a valid absolute URL the rule is
+skipped for that request.
 
 Because a transparent rewrite can change the dial target, the upstream dial is
 **deferred**: the inner TLS handshake completes first (negotiating ALPN from the
@@ -242,11 +247,13 @@ stream over the one committed connection, so a later stream whose rewrite resolv
 *different* host is sent to that committed upstream rather than re-routed. Either way,
 avoid splitting one origin's traffic across several transparent target hosts.)
 
-Examples — transparently send one host's traffic to another, redirect with a
-`302`, and block an ad path with a tiny GIF:
+Examples — transparently send one host's traffic to another, move a host's
+traffic while preserving the path with a `$1` capture, redirect with a `302`, and
+block an ad path with a tiny GIF:
 
 ```
 0, 0, ^https://a\.example\.com/, 0, https://b.example.com/
+0, 0, ^https://old\.example\.com/(.*), 0, https://new.example.com/$1
 0, 0, ^https://old\.example\.com/page, 1, https://new.example.com/page
 0, 0, .*/ads/, 3
 ```
@@ -285,12 +292,15 @@ and a `replacement`:
 ```
 1, 4, .*, http://, https://
 1, 4, .*, (?i)debug=true, debug=false
+1, 4, .*, (\d{4})-(\d{2})-(\d{2}), $3/$2/$1
 ```
 
 `search` is a Swift `Regex` (default Unicode semantics) matched against the
-**whole decompressed body**, and every match is swapped for the **literal**
-`replacement` (no `$1` capture expansion — the substitution runs through
-`String.replacing`); an **empty** replacement deletes every match. A rule whose
+**whole decompressed body**, and every match is swapped for `replacement`. The
+replacement supports **capture references** to the `search` match: `$0` is the
+whole match, `$1`…`$9` (and `${10}`, `${11}`, … for higher indices) are its
+capture groups, and `$$` is a literal `$`. A replacement with no `$` is inserted
+verbatim, and an **empty** replacement deletes every match. A rule whose
 `search` is empty or won't compile as a regex is dropped. Per the
 [Fields and quoting](#fields-and-quoting) rules, quote either field when it
 contains a comma or begins with `"`, doubling any inner `"` — so searching for
@@ -812,12 +822,12 @@ hostname = api.example.com
 0, 1, ^/v2/, X-Trace-Id, anywhere
 ```
 
-### Redirect an old path (transparent URL rewrite)
+### Redirect an old path, preserving the tail (transparent URL rewrite)
 
 ```
 name     = Path Migration
 hostname = example.com
-0, 0, ^https://example\.com/old/, 0, https://example.com/new/
+0, 0, ^https://example\.com/old/(.*), 0, https://example.com/new/$1
 ```
 
 ### Block a host with a 1×1 GIF

@@ -9,8 +9,7 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMHTTP2Rewriter")
 
-/// HTTP/2 rule applier over decoded (name, value) header arrays and whole-body
-/// buffers. Stateless — per-stream buffering lives on the connection.
+/// HTTP/2 rule applier. Stateless — per-stream buffering lives on the connection.
 final class MITMHTTP2Rewriter {
 
     let host: String
@@ -18,17 +17,15 @@ final class MITMHTTP2Rewriter {
     private let requestRules: [CompiledMITMRule]
     private let responseRules: [CompiledMITMRule]
     private let cachedRuleSetID: UUID?
-    /// When set, every subsequent request's `:authority` is rewritten to this value (last
-    /// write wins). Single-upstream commitment is enforced by the session, not here.
+    /// Every subsequent request's `:authority` is rewritten to this value (last write wins).
+    /// Single-upstream commitment is enforced by the session, not here.
     private var effectiveAuthority: String?
 
     /// Upstream to dial when a transparent rewrite resolves a replacement host; nil falls
     /// back to the original destination. Reflects the latest transparent rewrite only.
     private(set) var resolvedUpstream: (host: String, port: UInt16?)?
-    /// Lazy JS runtime, shared session-wide; touched only when a script rule fires.
     let scriptEngineProvider: MITMScriptEngine.Provider
-    /// Cross-direction bookkeeping: inbound records post-rewrite method/url per stream;
-    /// outbound reads them for response-script ctx.
+    /// Inbound records post-rewrite method/url per stream; outbound reads them for response-script ctx.
     let requestLog: MITMRequestLog
 
     init(
@@ -69,7 +66,6 @@ final class MITMHTTP2Rewriter {
         applyHeaderRules(headers, phase: .httpResponse, requestURL: requestURL)
     }
 
-    /// The `:path` pseudo-header value, or nil if absent.
     static func requestPath(in headers: [(name: String, value: String)]) -> String? {
         // Case-insensitive: the HPACK decoder doesn't lowercase names, so a literal-encoded
         // `:Path` would otherwise bypass every request-phase rule.
@@ -81,16 +77,22 @@ final class MITMHTTP2Rewriter {
     func requestSynthResponse(requestURL: String?) -> MITMScriptEngine.SynthesizedResponse? {
         for rule in requestRules {
             guard case .rewrite(let action) = rule.operation else { continue }
-            guard rule.matchesURL(requestURL) else { continue }
-            if case .transparent = action { return nil }
-            return MITMRespondBuilder.response(for: action)
+            // A transparent rewrite never synthesizes; it's handled in the header path.
+            // Defer to it only when it actually resolves — an unresolvable template is
+            // skipped so a later matching rule can still synthesize.
+            if case .transparent = action {
+                if rule.resolvedRewriteAction(for: requestURL) != nil { return nil }
+                continue
+            }
+            guard let resolved = rule.resolvedRewriteAction(for: requestURL) else { continue }
+            return MITMRespondBuilder.response(for: resolved)
         }
         return nil
     }
 
     // MARK: - Script preflight + application
 
-    /// Whether any streaming-script rule applies (HEADERS emitted immediately, scripts per-frame).
+    /// HEADERS emitted immediately, scripts run per-frame.
     func hasStreamScriptRule(phase: MITMPhase, requestURL: String?) -> Bool {
         MITMScriptTransform.hasStreamScriptRule(
             in: rules(phase: phase),
@@ -98,8 +100,8 @@ final class MITMHTTP2Rewriter {
         )
     }
 
-    /// Whether any buffered body transform applies. Check ``hasStreamScriptRule``
-    /// first — streaming takes precedence and never coexists with buffered mode.
+    /// Check ``hasStreamScriptRule`` first — streaming takes precedence and never
+    /// coexists with buffered mode.
     func hasBufferedBodyRule(phase: MITMPhase, requestURL: String?) -> Bool {
         MITMScriptTransform.hasBufferedBodyRule(
             in: rules(phase: phase),
@@ -114,9 +116,9 @@ final class MITMHTTP2Rewriter {
     /// Matched rule set ID used as the script-store scope key.
     var ruleSetID: UUID? { cachedRuleSetID }
 
-    /// Applies matching script/body rules off-queue, resuming on `resumeQueue`. Caller must pass
-    /// a decompressed body. `.synthesizedResponse` fires only on request phase — caller must then
-    /// suppress upstream emission and answer on the inner leg.
+    /// Runs off-queue, resuming on `resumeQueue`. Caller must pass a decompressed body.
+    /// `.synthesizedResponse` fires only on request phase — caller must then suppress
+    /// upstream emission and answer on the inner leg.
     func applyScripts(
         _ message: HTTPMessage,
         phase: MITMPhase,
@@ -135,8 +137,7 @@ final class MITMHTTP2Rewriter {
     // MARK: - Authority rewrite
 
     /// Rewrites `:authority`, inserting it before regular headers if absent (RFC 9113 §8.3).
-    /// Skips trailers — pseudo-headers there are forbidden (§8.1) and strict receivers
-    /// RST_STREAM mid-body.
+    /// Skips trailers — pseudo-headers there are forbidden (§8.1) and strict receivers RST_STREAM.
     private func applyAuthorityRewrite(
         _ headers: [(name: String, value: String)]
     ) -> [(name: String, value: String)] {
@@ -180,10 +181,12 @@ final class MITMHTTP2Rewriter {
                 : requestURL
             guard rule.matchesURL(gateURL) else { continue }
             switch rule.operation {
-            case .rewrite(let action):
+            case .rewrite:
                 // Request-phase only; 302/reject sub-modes were handled by the pre-check.
+                // resolvedRewriteAction expands any `$1`-style target template against the match.
                 guard phase == .httpRequest, !rewroteRequest,
-                      case .transparent(let replacement) = action else { continue }
+                      let resolved = rule.resolvedRewriteAction(for: gateURL),
+                      case .transparent(let replacement) = resolved else { continue }
                 rewroteRequest = true
                 effectiveAuthority = replacement.authority
                 resolvedUpstream = (host: replacement.host, port: replacement.port)

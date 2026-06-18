@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Native, declarative JSON body editing; the path-walking core is shared with the
-/// scripted `Anywhere.json` API. Fail-closed: any miss yields the body unchanged.
+/// Declarative JSON body editing. Fail-closed: any miss yields the body unchanged.
 enum MITMJSONPatch {
 
     // MARK: - Path model
@@ -23,7 +22,6 @@ enum MITMJSONPatch {
 
     // MARK: - Compiled operation
 
-    /// An operation with path and value pre-parsed at rule-load time.
     enum CompiledOp {
         case add(path: [PathSegment], value: Any)
         case replace(path: [PathSegment], value: Any)
@@ -196,7 +194,7 @@ enum MITMJSONPatch {
                         inner.append(d)
                         chars = chars.dropFirst()
                     }
-                    guard chars.first == quote else { return nil } // unterminated
+                    guard chars.first == quote else { return nil }
                     inner.append(quote)
                     chars = chars.dropFirst()
                 }

@@ -215,6 +215,8 @@ struct MITMRuleEditorView: View {
                 if let validationError {
                     Text(validationError)
                         .foregroundStyle(.red)
+                } else if let captureHint {
+                    Text(captureHint)
                 }
             }
         }
@@ -234,6 +236,23 @@ struct MITMRuleEditorView: View {
             }
         }
         .onAppear { loadInitial() }
+    }
+
+    /// Footer hint shown when the active operation's text supports capture references.
+    private var captureHint: String? {
+        switch operationKind {
+        case .rewrite:
+            switch rewriteMode {
+            case .transparent, .redirect302:
+                return String(localized: "Tip: use $1, $2, … in the URL to insert capture groups from the URL Pattern. Write $$ for a literal $.")
+            default:
+                return nil
+            }
+        case .bodyReplace:
+            return String(localized: "Tip: use $1, $2, … in the Replacement to insert capture groups from Search. Write $$ for a literal $.")
+        default:
+            return nil
+        }
     }
 
     // MARK: - Save

@@ -7,12 +7,10 @@
 
 import Foundation
 
-/// Builds the synthesized response for non-transparent rewrite sub-modes (302 redirect /
-/// 200 reject); the caller's serializer adds the status line and framing.
+/// Builds synthesized responses for non-transparent rewrite modes (302 redirect / 200 reject).
 enum MITMRespondBuilder {
 
-    /// Returns the synthesized response for the action, or nil for `.transparent`.
-    static func response(for action: CompiledRewriteAction) -> MITMScriptEngine.SynthesizedResponse? {
+    static func response(for action: ResolvedRewriteAction) -> MITMScriptEngine.SynthesizedResponse? {
         switch action {
         case .transparent:
             return nil
@@ -49,7 +47,7 @@ enum MITMRespondBuilder {
     /// Non-empty so clients don't treat a zero-length 200 as an error.
     private static let defaultText = "Success from Anywhere"
 
-    /// Default body for `.reject200Data` when blank: base64 of "Anywhere".
+    /// Used when `.reject200Data` is blank: base64 of "Anywhere".
     private static let defaultDataBase64 = "QW55d2hlcmU="
 
     /// 43-byte 1×1 transparent GIF89a (the canonical tracking-pixel payload).

@@ -9,20 +9,14 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
 
-/// One multiplexed HTTP/2 upstream connection for the decoupled bridge. Encodes neutral
-/// request IR into upstream h2 (HEADERS + flow-controlled DATA), decodes h2 responses, runs
-/// the response-phase rewrite, and delivers response events to the client leg's `MITMResponseSink`.
-///
-/// Dedicated 1:1 to one client connection but assigns its own monotonically-increasing upstream
-/// stream IDs (client requests can arrive reordered, and RFC 9113 §5.1.1 forbids opening a lower
-/// ID after a higher one). lwIP-queue-confined.
+/// One multiplexed HTTP/2 upstream connection. Dedicated 1:1 to one client connection but
+/// assigns its own monotonically-increasing upstream stream IDs (client requests can arrive
+/// reordered, and RFC 9113 §5.1.1 forbids opening a lower ID after a higher one).
+/// lwIP-queue-confined.
 final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
-    /// Receives response events (the h2 client leg).
     weak var sink: MITMResponseSink?
-    /// Emits upstream-bound bytes (the session writes them to the upstream TLS record).
     var onUpstreamBytes: ((Data) -> Void)?
-    /// Unrecoverable upstream-leg error; the session tears the connection down.
     var onFatalError: ((String) -> Void)?
     /// Origin sent GOAWAY: ask the client leg to emit its own so the client redials new
     /// requests on a fresh connection instead of stalling on this draining one.
@@ -81,11 +75,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// tells us its real limit (RFC 9113 §5.1.2).
     private static let provisionalMaxConcurrentStreams = 10
 
-    /// Hard cap on the held-back request backlog. An origin may advertise a very low — or zero
-    /// (RFC 9113 §6.5.2: a temporary refusal) — MAX_CONCURRENT_STREAMS and never raise it; without
-    /// this the queue would grow unboundedly under a flood. Past the cap, new requests are RST
-    /// (REFUSED_STREAM, retriable). Set well above the client leg's 128 so a conformant client
-    /// never trips it.
+    /// Hard cap on the held-back request backlog: an origin may advertise a very low or zero
+    /// (RFC 9113 §6.5.2) MAX_CONCURRENT_STREAMS and never raise it, so without this the queue
+    /// grows unboundedly under a flood. Past the cap, requests are RST (REFUSED_STREAM, retriable).
+    /// Above the client leg's 128 so a conformant client never trips it.
     private static let maxQueuedRequests = 256
 
     /// Origin's advertised SETTINGS_MAX_CONCURRENT_STREAMS (0x3), once observed; sticky
@@ -102,9 +95,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         return firstSettingsSeen ? Int.max : Self.provisionalMaxConcurrentStreams
     }
 
-    /// A request held back because opening it would exceed ``maxConcurrentStreams``. Its
-    /// HEADERS (and any body/abort that arrive while queued) wait until a stream closes;
-    /// the upstream stream ID is assigned at open time so IDs stay monotonic in send order.
+    /// A request held back because opening it would exceed ``maxConcurrentStreams``. The
+    /// upstream stream ID is assigned at open time, not here, so IDs stay monotonic in send order.
     private struct QueuedRequest {
         let head: MITMRequestHead
         let endStreamOnHead: Bool
@@ -116,16 +108,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Re-entrancy guard: draining can release streams (backlog cap) and re-enter.
     private var draining = false
 
-    /// Client stream IDs can arrive reordered (a buffered request's HEADERS emit late), but
-    /// HTTP/2 forbids opening a lower ID than one already opened (RFC 9113 §5.1.1). Each client
-    /// stream maps to a fresh, strictly increasing upstream ID assigned in send order, and
-    /// responses map back. All internal state and the request-log / response-sink boundaries
-    /// are keyed by the client ID; only the wire frames use the upstream ID.
+    /// Client stream IDs can arrive reordered, but HTTP/2 forbids opening a lower ID than one
+    /// already opened (RFC 9113 §5.1.1). Each client stream maps to a fresh, strictly increasing
+    /// upstream ID assigned in send order. All internal state and the request-log / response-sink
+    /// boundaries are keyed by the client ID; only the wire frames use the upstream ID.
     private var ourStreamID: [UInt32: UInt32] = [:]   // client → upstream
     private var theirStreamID: [UInt32: UInt32] = [:] // upstream → client
     private var nextUpstreamStreamID: UInt32 = 1
 
-    /// Assigns (or returns) the upstream stream ID for a client stream.
     private func upstreamID(forClient clientID: UInt32) -> UInt32 {
         if let existing = ourStreamID[clientID] { return existing }
         let sid = nextUpstreamStreamID
@@ -135,9 +125,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         return sid
     }
 
-    /// Releases every per-stream record for a finished or reset client stream — including the
-    /// upstream stream-ID mapping, which would otherwise accumulate for the life of this
-    /// long-lived multiplexed connection.
+    /// Releases every per-stream record (including the stream-ID mapping, which would otherwise
+    /// accumulate for the life of this long-lived connection).
     private func releaseStream(clientID: UInt32, resetOrigin: Bool = false) {
         // `resetOrigin` RSTs a stream the origin still considers open (response never reached
         // END_STREAM, or our request body never finished); else that stream and one of its
@@ -211,15 +200,15 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
     private var responseStreams: [UInt32: ResponseStream] = [:]
 
-    /// Born-passthrough response streams whose per-stream receive credit is deferred until the
-    /// client drains the bytes (`creditDrainedResponse`), so a slow client backpressures the origin
-    /// rather than overflowing the client-bound buffer. Rewriting streams and the
-    /// buffer-overflow→passthrough fallback stay eager-credited and are absent here.
+    /// Born-passthrough streams whose per-stream receive credit is deferred until the client drains
+    /// (`creditDrainedResponse`), so a slow client backpressures the origin rather than overflowing
+    /// the client-bound buffer. Rewriting streams and the overflow→passthrough fallback stay
+    /// eager-credited and are absent here.
     private var drainCoupledStreams: Set<UInt32> = []
 
     /// Receive-window credit (toward the origin) accumulated during one pass and flushed once at
     /// `finishPass`, so a burst of DATA frames yields one WINDOW_UPDATE per stream plus one for the
-    /// connection instead of a pair per frame. Keyed by upstream (wire) stream id.
+    /// connection instead of a pair per frame. `batchedStreamCredit` keyed by upstream (wire) id.
     private var batchedConnCredit = 0
     private var batchedStreamCredit: [UInt32: Int] = [:]
 
@@ -230,11 +219,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// it; only a stalled flow-control window plus a large upload trips it.
     private static let maxUpstreamBufferedBytes = 8 * 1024 * 1024
 
-    /// Receive window the leg advertises to the origin — per-stream via SETTINGS_INITIAL_WINDOW_SIZE
-    /// and the connection via an initial WINDOW_UPDATE. The 64 KiB default throttles a single
-    /// download to ~64 KiB/RTT; 4 MiB fills a high bandwidth·delay path while staying under the
-    /// 8 MiB client-bound cap, so a drain-coupled stream stalls the origin (backpressure) before it
-    /// can overflow that buffer.
+    /// Receive window advertised to the origin (per-stream via SETTINGS_INITIAL_WINDOW_SIZE,
+    /// connection via an initial WINDOW_UPDATE). The 64 KiB default throttles a download to
+    /// ~64 KiB/RTT; 4 MiB fills a high bandwidth·delay path while staying under the 8 MiB
+    /// client-bound cap, so a drain-coupled stream stalls the origin before overflowing that buffer.
     private static let receiveWindow = 4 * 1024 * 1024
 
     init(
@@ -308,9 +296,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // RFC 9113 §5.1.2: never open more concurrent streams than the origin allows. Hold the
         // request back rather than let the origin REFUSED_STREAM it; drained as slots free.
         guard ourStreamID.count < maxConcurrentStreams else {
-            // Bound the backlog under a flood (origin may advertise a very low/zero
-            // MAX_CONCURRENT_STREAMS and never raise it). Past the cap, RST the new stream
-            // (retriable) so the client can make progress elsewhere.
+            // Past the backlog cap, RST the new stream (retriable) so the client can make
+            // progress elsewhere rather than the queue growing unboundedly under a flood.
             guard queueOrder.count < Self.maxQueuedRequests else {
                 logger.warning("h2-upstream \(host) stream \(head.clientStreamID): request queue at cap \(Self.maxQueuedRequests) (origin MAX_CONCURRENT_STREAMS=\(maxConcurrentStreams)); refusing stream")
                 sink?.deliverResponseReset(streamID: head.clientStreamID, errorCode: Codec.ErrorCode.refusedStream)
@@ -323,8 +310,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         openUpstreamStream(head, endStream: endStream)
     }
 
-    /// Assigns the upstream stream ID and emits the request HEADERS. Caller has confirmed a
-    /// concurrency slot is free.
+    /// Caller has confirmed a concurrency slot is free.
     private func openUpstreamStream(_ head: MITMRequestHead, endStream: Bool) {
         // RFC 9113 §5.1.1: client-initiated stream IDs are 31-bit and can't be reused. Past the last
         // one, tear down (the client redials with fresh IDs) rather than overflow

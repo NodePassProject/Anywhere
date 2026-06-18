@@ -15,8 +15,7 @@ enum MITMBridgeBodyFraming: Equatable {
     case chunked
 }
 
-/// Protocol-agnostic request head the HTTP/2 client leg emits; each upstream leg
-/// (HTTP/1.1 or HTTP/2) applies its own protocol translation.
+/// Protocol-agnostic request head; each upstream leg applies its own translation.
 struct MITMRequestHead {
     let clientStreamID: UInt32
     let method: String
@@ -39,8 +38,7 @@ struct MITMRequestHead {
     let resolvedUpstream: (host: String, port: UInt16?)?
 }
 
-/// Upstream side of the bridge (HTTP/1.1 per-stream, or one multiplexed HTTP/2).
-/// Driven by neutral request events; delivers responses back through a `MITMResponseSink`.
+/// Upstream side of the bridge; delivers responses back through a `MITMResponseSink`.
 protocol MITMUpstreamLeg: AnyObject {
     func sendRequestHead(_ head: MITMRequestHead, endStream: Bool)
     func sendRequestData(streamID: UInt32, _ data: Data, endStream: Bool)
@@ -58,9 +56,8 @@ extension MITMUpstreamLeg {
     }
 }
 
-/// Client-bound side of the bridge: an upstream leg delivers protocol-agnostic response
-/// events; the h2 client leg encodes them with flow-control pacing. The sink normalizes
-/// headers to HTTP/2 (lowercase, hop-by-hop stripped).
+/// Client-bound side of the bridge. The sink normalizes headers to HTTP/2
+/// (lowercase, hop-by-hop stripped).
 protocol MITMResponseSink: AnyObject {
     /// `neverIndexed`: lowercased names the upstream marked never-indexed (RFC 7541 §6.2.3);
     /// the sink re-emits them never-indexed toward the client (§7.1.3).
@@ -90,8 +87,7 @@ extension MITMResponseSink {
     }
 }
 
-/// HTTP/2 ⇄ HTTP/1.1 header translation: strips connection-specific and framing fields,
-/// and normalizes field-name case for the target protocol.
+/// HTTP/2 ⇄ HTTP/1.1 header translation.
 enum MITMBridgeHeaders {
 
     /// Hop-by-hop / connection-specific fields not forwarded across the bridge

@@ -27,7 +27,7 @@ enum MITMBodyCodec {
         case brotli
     }
 
-    /// Parsed `Content-Encoding` header value with a flag for full decodability.
+    /// Parsed `Content-Encoding` with a flag for full decodability.
     struct Plan: Equatable {
         let codecs: [Codec]
         let supported: Bool
@@ -73,9 +73,9 @@ enum MITMBodyCodec {
     /// `Accept-Encoding` is clamped to so an origin never selects an encoding we can't reverse.
     static let decodableContentCodings: Set<String> = ["gzip", "x-gzip", "deflate", "br", "identity"]
 
-    /// Clamps an `Accept-Encoding` value to ``decodableContentCodings``: drops any coding (notably
-    /// `zstd` and `*`) we can't decode, so a buffered body rule isn't defeated by an undecodable
-    /// `Content-Encoding`. Empty result falls back to `identity`; `;q=` weights are preserved.
+    /// Clamps `Accept-Encoding` to ``decodableContentCodings`` (drops `zstd`, `*`, …) so a
+    /// buffered body rule isn't defeated by an undecodable `Content-Encoding`. Empty result
+    /// falls back to `identity`; `;q=` weights are preserved.
     static func constrainedAcceptEncoding(_ value: String) -> String {
         let kept = value
             .split(separator: ",")
@@ -201,9 +201,9 @@ enum MITMBodyCodec {
         case capExceeded
     }
 
-    /// Decodes a gzip body per RFC 1952. The raw-deflate decoder emits only member 1, so the trailer
-    /// check catches the multi-member case. `allowMultiMember` returns every member; otherwise fails
-    /// closed on a multi-member trailer mismatch (forwarding the body verbatim).
+    /// Decodes a gzip body (RFC 1952). The raw-deflate decoder emits only member 1, so the
+    /// trailer check catches the multi-member case. `allowMultiMember` returns every member;
+    /// otherwise fails closed on a multi-member trailer mismatch (forwards verbatim).
     private static func gunzip(_ data: Data, allowMultiMember: Bool = false) -> (decoded: Data?, failure: GzipFailure?) {
         var combined = Data()
         var cursor = data.startIndex
@@ -224,7 +224,7 @@ enum MITMBodyCodec {
         }
         if allowMultiMember { return (combined, nil) }
         // Multi-member detection via the whole-body trailer pair (RFC 1952 §2.3.1): a member-1-only
-        // decode of a multi-member body fails the ISIZE/CRC-32 check. On mismatch forward verbatim.
+        // decode of a multi-member body fails the ISIZE/CRC-32 check. On mismatch, forward verbatim.
         guard gzipTrailerISIZE(data) == UInt32(truncatingIfNeeded: combined.count),
               gzipTrailerCRC32(data) == crc32(combined) else {
             return (nil, .multiMember)

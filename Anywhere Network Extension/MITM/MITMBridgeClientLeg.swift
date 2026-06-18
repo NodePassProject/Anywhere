@@ -9,9 +9,8 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMBridgeClientLeg")
 
-/// Session-facing side of the decoupled h2 client leg. The leg decodes client h2 into
-/// protocol-neutral request events; the session dials and binds an upstream leg
-/// (HTTP/1.1 or HTTP/2) after the first request, then routes events to it.
+/// Session-facing side of the h2 client leg: the leg decodes client h2 into neutral request
+/// events, the session dials and binds an upstream leg (HTTP/1.1 or HTTP/2), then routes to it.
 protocol MITMBridgeClientLegDelegate: AnyObject {
     /// A request head is ready. The session dials (on the first request), binds the
     /// upstream leg from the negotiated ALPN, and forwards the head. `url` seeds the
@@ -19,8 +18,8 @@ protocol MITMBridgeClientLegDelegate: AnyObject {
     func clientLegSendRequestHead(_ head: MITMRequestHead, url: String?, endStream: Bool)
     /// Raw (unframed) request body bytes; the upstream leg applies its own framing.
     func clientLegSendRequestData(streamID: UInt32, _ data: Data, endStream: Bool)
-    /// Terminal request trailers (a HEADERS block with no `:method`) decoded after the body;
-    /// h2 forwards a trailing HEADERS block with END_STREAM, h1 ends the body without them.
+    /// Terminal request trailers (a HEADERS block with no `:method`): h2 forwards a trailing
+    /// HEADERS block with END_STREAM, h1 ends the body without them.
     func clientLegSendRequestTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)])
     /// Client reset/cancelled the stream: drop its upstream.
     func clientLegAbortRequest(streamID: UInt32)
@@ -32,10 +31,9 @@ protocol MITMBridgeClientLegDelegate: AnyObject {
     func clientLegFatalError(_ message: String)
 }
 
-/// The client-facing HTTP/2 endpoint. Decodes client frames into neutral request IR (running
-/// request-phase rewrites) and encodes response IR (from the bound upstream leg) back into the
-/// multiplexed client h2 stream, pacing bodies against the client's flow-control windows.
-/// lwIP-queue-confined.
+/// The client-facing HTTP/2 endpoint: decodes client frames into neutral request IR and encodes
+/// response IR back into the multiplexed client stream, pacing bodies against client flow-control
+/// windows. lwIP-queue-confined.
 final class MITMBridgeClientLeg: MITMResponseSink {
 
     weak var delegate: MITMBridgeClientLegDelegate?
@@ -56,18 +54,16 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     private static let maxHeaderBlockBytes = 256 * 1024
     /// Bounds tracked client streams (each can pin buffers); past it new streams are refused.
     private static let maxTrackedStreams = 256
-    /// Advertised SETTINGS_MAX_CONCURRENT_STREAMS. Kept ≤ the session's concurrent-bridge-stream
-    /// cap (`MITMSession.maxConcurrentBridgeStreams`) so a conformant client self-throttles below
-    /// the point we'd start answering with REFUSED_STREAM.
+    /// Advertised SETTINGS_MAX_CONCURRENT_STREAMS. Kept ≤ the session's concurrent-bridge-stream cap
+    /// so a conformant client self-throttles below the point we'd answer with REFUSED_STREAM.
     private static let advertisedMaxConcurrentStreams = 128
     /// Client-bound response backlog cap. A draining client never approaches it; a stalled
     /// one (closed or exhausted window) trips it instead of buffering an unbounded response.
     private static let maxClientBufferedBytes = 8 * 1024 * 1024
 
-    /// Receive window advertised to the client — per-stream via SETTINGS_INITIAL_WINDOW_SIZE and the
-    /// connection via an initial WINDOW_UPDATE. The 64 KiB default throttles a single client→server
-    /// upload to ~64 KiB/RTT; 4 MiB fills a high bandwidth·delay path while staying within the
-    /// upstream-bound backlog caps, which bound buffering against a slow origin.
+    /// Receive window advertised to the client (per-stream INITIAL_WINDOW_SIZE + initial connection
+    /// WINDOW_UPDATE). The 64 KiB default throttles an upload to ~64 KiB/RTT; 4 MiB fills a high
+    /// bandwidth·delay path while staying within the upstream-bound backlog caps.
     private static let receiveWindow = 4 * 1024 * 1024
 
     // MARK: Connection state
@@ -108,15 +104,15 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         /// True when buffering to run a body script; false when buffering only to frame a
         /// no-declared-length body with Content-Length (no script, no decompression).
         let scripted: Bool
-        /// The transparent-rewrite upstream captured at header-rewrite time, carried through the
-        /// body-buffering delay so the dial target can't be changed by a concurrent stream's rewrite.
+        /// Upstream captured at header-rewrite time, carried through the body-buffering delay so a
+        /// concurrent stream's rewrite can't change this dial target.
         let resolvedUpstream: (host: String, port: UInt16?)?
     }
 
     private enum RequestStream {
-        /// Head already emitted; forward raw body bytes (the upstream leg frames them). `remaining`
-        /// is the still-unsent declared Content-Length (nil for chunked / no declared length),
-        /// enforced so surplus body bytes can't smuggle a second request.
+        /// Head emitted; forward raw body bytes (the upstream leg frames them). `remaining` is the
+        /// still-unsent declared Content-Length (nil for chunked), enforced so surplus body bytes
+        /// can't smuggle a second request.
         case streaming(remaining: Int?)
         /// Accumulating the body for a buffered rewrite; head emitted at END_STREAM.
         case buffering(BufferedReq)
@@ -142,9 +138,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     /// into the window when the PaceState is created so the credit isn't lost (RFC 9113 §6.9.2).
     private var pendingStreamCredit: [UInt32: Int] = [:]
 
-    /// Receive-window credit (client uploads) accumulated during one pump pass and flushed once at
+    /// Receive-window credit (client uploads) accumulated during one pump pass and flushed at
     /// `finishPass`, coalescing many DATA frames into one WINDOW_UPDATE per stream plus one for the
-    /// connection. Safe because the client can't exceed a window's worth before we credit.
+    /// connection. Safe: the client can't exceed a window's worth before we credit.
     private var batchedConnCredit = 0
     private var batchedStreamCredit: [UInt32: Int] = [:]
 
@@ -174,14 +170,13 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         pending = nil
     }
 
-    /// Refuses a stream the session can't service (concurrency cap): RST to the client.
     func rejectStream(_ streamID: UInt32, errorCode: UInt32) {
         guard !torn else { return }
         rstToClient(streamID, errorCode: errorCode, abortUpstream: false)
     }
 
-    /// Synthesizes a minimal error response (e.g. 502) for a stream whose upstream couldn't be
-    /// established, keeping the h2 connection up for the client's other streams instead of dropping it.
+    /// Synthesizes a minimal error response for a stream whose upstream couldn't be established,
+    /// keeping the h2 connection up for the client's other streams instead of dropping it.
     func failStream(streamID: UInt32, status: Int, message: String) {
         guard !torn else { return }
         let body = Data(message.utf8)
@@ -270,8 +265,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     /// Emits the WINDOW_UPDATEs accumulated this pass (one per credited stream plus one for the
-    /// connection), then clears the batch. A stream-level update for a since-closed stream is
-    /// harmless (the client ignores it, RFC 9113 §5.1).
+    /// connection). A stream-level update for a since-closed stream is harmless (RFC 9113 §5.1).
     private func flushBatchedCredits() {
         if batchedConnCredit > 0 {
             delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
@@ -372,8 +366,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
     }
 
-    /// Builds a response stream's pacing state, seeding the send window with the current initial
-    /// window plus any WINDOW_UPDATE credit that arrived before the stream had a PaceState.
+    /// Seeds the send window with the current initial window plus any WINDOW_UPDATE credit that
+    /// arrived before the stream had a PaceState.
     private func makePaceState(_ streamID: UInt32) -> PaceState {
         let seed = flowController.clientInitialStreamWindow + (pendingStreamCredit.removeValue(forKey: streamID) ?? 0)
         return PaceState(streamWindow: min(MITMHTTP2FlowController.maxWindow, max(0, seed)))
@@ -436,9 +430,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let decoded = result.fields
         let neverIndexed = result.neverIndexed
 
-        // RFC 9113 §8.3: a malformed pseudo-header section (pseudo after a regular field, duplicate,
-        // or unknown) is malformed and a smuggling vector once re-serialized to HTTP/1.1. RST the
-        // stream; the HPACK table already absorbed the block so the connection stays in sync.
+        // RFC 9113 §8.3: a malformed pseudo-header section is a smuggling vector once re-serialized
+        // to HTTP/1.1. RST the stream; the HPACK table already absorbed the block, so it stays in sync.
         guard MITMBridgeHeaders.pseudoHeadersValid(decoded, isRequest: true) else {
             logger.warning("bridge \(host) stream \(streamID): malformed pseudo-header section; RST")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
@@ -447,8 +440,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
 
         // RFC 9113 §8.2.1: an illegal field-name octet or CR/LF/NUL/edge-whitespace in a value is a
-        // request-splitting vector once re-serialized to HTTP/1.1 (HPACK only checks UTF-8). RST
-        // just this stream; the table already absorbed the block.
+        // request-splitting vector once re-serialized to HTTP/1.1 (HPACK only checks UTF-8). RST.
         guard http2HeaderOctetsValid(decoded) else {
             logger.warning("bridge \(host) stream \(streamID): header with CR/LF/NUL or invalid field-name; RST")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
@@ -529,15 +521,14 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
 
         var rewritten = rewriter.transformRequestHeaders(decoded, streamID: streamID)
-        // Capture the resolved upstream synchronously, while it reflects this request's rewrite,
-        // before a body-buffering hop lets a concurrent stream overwrite the rewriter's shared
-        // field. It rides the head (and BufferedReq) to the dial.
+        // Capture synchronously, while it still reflects this request's rewrite, before a
+        // body-buffering hop lets a concurrent stream overwrite the rewriter's shared field.
         let resolvedUpstream = rewriter.resolvedUpstream
         let gateURL = MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(host)\($0)" } ?? requestURL
 
-        // Expect: 100-continue — answer with an interim 100 ourselves and strip Expect before
-        // forwarding. Stripping it upstream means the origin never sends its own 100, so without
-        // our synthesized one an h2 client withholding its body would stall.
+        // Expect: 100-continue — answer with an interim 100 ourselves and strip Expect upstream.
+        // The origin then never sends its own 100; without our synthesized one an h2 client
+        // withholding its body would stall.
         if !endStream, Self.expectsContinue(rewritten) {
             sendInterimContinue(streamID)
             rewritten = rewritten.filter { !$0.name.equalsIgnoringASCIICase("expect") }
@@ -555,10 +546,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
 
-        // Streamed / passthrough framing: END_STREAM → no body; a declared Content-Length is
-        // honored so a body is never dropped. A bodyless method that streams a body with no
-        // declared length is buffered to frame it with Content-Length, since chunked risks
-        // rejection (an h1 origin can refuse a chunked GET).
+        // A bodyless method streaming a body with no declared length is buffered to frame it with
+        // Content-Length, since an h1 origin can refuse a chunked GET.
         let bodylessMethod = ["GET", "HEAD", "DELETE", "OPTIONS", "TRACE"].contains(method.uppercased())
         let framing: MITMBridgeBodyFraming
         if endStream {
@@ -577,9 +566,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: false)
             return false
         }
-        // Track the still-unsent declared Content-Length so surplus body bytes can't be forwarded
-        // past it and smuggled as a second request to an h1 upstream (RFC 9113 §8.1.2.6).
-        // chunked / no-declared-length self-delimits via END_STREAM, so nil.
+        // Track the unsent declared Content-Length so surplus bytes can't smuggle a second request
+        // to an h1 upstream (RFC 9113 §8.1.2.6); chunked self-delimits via END_STREAM, so nil.
         let remaining: Int?
         switch framing {
         case .none: remaining = 0
@@ -587,14 +575,12 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         case .chunked: remaining = nil
         }
         requestStreams[streamID] = .streaming(remaining: remaining)
-        // Correlate the response on the post-rewrite gate URL so one url-pattern can match a
-        // request and its response.
+        // Correlate the response on the post-rewrite gate URL so one url-pattern matches both.
         delegate?.clientLegSendRequestHead(head, url: gateURL, endStream: endStream)
         if endStream { requestStreams.removeValue(forKey: streamID) }
         return false
     }
 
-    /// Builds a neutral `MITMRequestHead` from rewritten h2 headers; nil if pseudo-headers missing.
     private func makeRequestHead(
         streamID: UInt32,
         rewritten: [(name: String, value: String)],
@@ -804,17 +790,15 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             case .synthesizedResponse(let response):
                 self.answerSynth(streamID: streamID, response: response)
             }
-            // Non-blocking: the stream was already removed and the pump kept running, so emit here
+            // Non-blocking: the stream was already removed and the pump kept running, so emit
             // without re-pumping. Out-of-order forwarding is fine (the h2 upstream leg reorders to
-            // monotonic IDs; an h1 upstream dials per stream) and keeps a slow script from stalling
-            // sibling streams.
+            // monotonic IDs; an h1 upstream dials per stream).
         }
         // Don't park: the script runs at END_STREAM after the stream is removed, so sibling streams
         // must keep flowing while it runs.
         return false
     }
 
-    /// Emits a fully-buffered request: head with explicit Content-Length, then the body.
     private func emitBufferedRequest(streamID: UInt32, headers: [(name: String, value: String)], body: Data, neverIndexed: Set<String>, resolvedUpstream: (host: String, port: UInt16?)?) {
         guard let head = makeRequestHead(streamID: streamID, rewritten: headers, framing: .contentLength(body.count), neverIndexed: neverIndexed, resolvedUpstream: resolvedUpstream) else {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
@@ -842,7 +826,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: Expect: 100-continue
 
-    /// True when the request asks the server to confirm before sending the body (RFC 9110 §10.1.1).
+    /// Expect: 100-continue — client asks the server to confirm before sending the body (RFC 9110 §10.1.1).
     private static func expectsContinue(_ headers: [(name: String, value: String)]) -> Bool {
         headers.contains { entry in
             entry.name.equalsIgnoringASCIICase("expect")
@@ -852,7 +836,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
     }
 
-    /// Emits an interim `100 Continue` HEADERS. Interim 1xx precede the final response and don't end
+    /// Emits an interim `100 Continue` HEADERS. A 1xx precedes the final response and doesn't end
     /// the stream (RFC 9113 §8.1), so no PaceState is created and the real head follows later.
     private func sendInterimContinue(_ streamID: UInt32) {
         let block: [(name: String, value: String)] = [(name: ":status", value: "100")]
@@ -865,9 +849,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: - MITMResponseSink (upstream → client)
 
-    /// A response stream is live from its request HEADERS until it finishes or is reset. Sink entry
-    /// points guard on this so an upstream event losing the race with a client RST_STREAM is dropped,
-    /// not re-materialized onto a closed stream — which would draw STREAM_CLOSED, a connection error.
+    /// Sink entry points guard on this so an upstream event losing the race with a client RST_STREAM
+    /// is dropped, not re-materialized onto a closed stream — which would draw STREAM_CLOSED, a
+    /// connection error.
     private func isLiveResponseStream(_ streamID: UInt32) -> Bool {
         streamMethods[streamID] != nil || paceStates[streamID] != nil
     }
@@ -918,8 +902,6 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     func deliverResponseReset(streamID: UInt32, errorCode: UInt32) {
-        // If the stream is already gone (client RST raced this reset), dropping it avoids an
-        // RST_STREAM on a closed stream.
         guard !torn, isLiveResponseStream(streamID) else { return }
         rstToClient(streamID, errorCode: errorCode, abortUpstream: false)
     }
@@ -939,17 +921,17 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         if endStream { st.sawEnd = true }
         paceStates[streamID] = st
         flushResponse(streamID)
-        // The upstream is read eagerly, so a client that stops draining would let the backlog grow
-        // without bound. Reset the stream (and drop its upstream) rather than buffer unboundedly.
+        // The upstream is read eagerly, so a client that stops draining would grow the backlog
+        // unbounded. Reset the stream (and drop its upstream) rather than buffer unboundedly.
         if let backlog = paceStates[streamID]?.pending.count, backlog > Self.maxClientBufferedBytes {
             logger.warning("bridge \(host) stream \(streamID): client-bound backlog \(backlog) B over cap; resetting stream")
             rstToClient(streamID, errorCode: Codec.ErrorCode.internalError, abortUpstream: true)
         }
     }
 
-    /// Sends as much of a response stream's buffered body as the connection and stream windows allow,
-    /// up to `cap` bytes (the distributor passes a fair-share cap; direct callers leave it unbounded).
-    /// Returns whether it made progress, so the distributor knows to keep cycling.
+    /// Sends as much buffered body as the connection and stream windows allow, up to `cap` bytes (the
+    /// distributor passes a fair-share cap; direct callers leave it unbounded). Returns whether it
+    /// made progress, so the distributor knows to keep cycling.
     @discardableResult
     private func flushResponse(_ streamID: UInt32, cap: Int = .max) -> Bool {
         guard var st = paceStates[streamID] else { return false }

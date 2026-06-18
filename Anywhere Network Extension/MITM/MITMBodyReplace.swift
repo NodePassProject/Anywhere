@@ -9,28 +9,30 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
-/// Native regex find-and-replace over a text body. Replacements are literal — no `$1`
-/// capture expansion; a body decodable as neither UTF-8 nor latin-1 is returned unchanged.
+/// Native regex find-and-replace over a text body, with a ``MITMCaptureTemplate``
+/// replacement. A body decodable as neither UTF-8 nor latin-1 is returned unchanged.
 enum MITMBodyReplace {
 
-    /// Pre-compiled so the per-message hot path skips pattern parsing.
+    /// Pre-compiled so the per-message hot path skips pattern + template parsing.
     struct CompiledOp {
         let search: Regex<AnyRegexOutput>
-        let replacement: String
+        let template: MITMCaptureTemplate
+        /// Non-nil when the replacement references no captures — lets the hot path use the
+        /// verbatim `String.replacing(_:with:)` overload.
+        let staticReplacement: String?
     }
 
-    /// Returns nil when the pattern won't compile; the replacement is never validated.
+    /// Returns nil on an uncompilable pattern; the replacement template never fails to parse.
     static func compile(search: String, replacement: String) -> CompiledOp? {
         guard let regex = try? Regex(search) else { return nil }
-        return CompiledOp(search: regex, replacement: replacement)
+        let template = MITMCaptureTemplate(replacement)
+        return CompiledOp(search: regex, template: template, staticReplacement: template.staticReplacement)
     }
 
-    /// Applies every compiled edit in order; fail-closed on an undecodable body or a blown budget.
-    ///
-    /// Decodes as UTF-8, falling back to ISO-8859-1 (latin-1) which round-trips any byte sequence
-    /// losslessly, so single-byte-charset bodies (Windows-125x / ISO-8859-x) are edited in place.
-    /// Re-encoded in the same charset; an edit introducing characters that charset can't represent
-    /// is abandoned and the original returned. Multi-byte charsets (UTF-16, GBK, …) pass through.
+    /// Applies every compiled edit in order; fail-closed on an undecodable body or blown budget.
+    /// Decodes UTF-8, else latin-1 (round-trips any bytes losslessly, so single-byte charsets are
+    /// edited in place) and re-encodes in that charset — an unrepresentable edit is abandoned.
+    /// Multi-byte charsets (UTF-16, GBK, …) pass through unedited.
     static func applyAll(_ ops: [CompiledOp], to body: Data) -> Data {
         guard !ops.isEmpty else { return body }
         let encoding: String.Encoding
@@ -52,7 +54,6 @@ enum MITMBodyReplace {
             }
             current = replaced
         }
-        // Re-encode in the source charset; a replacement that isn't representable there fails closed.
         guard let out = current.data(using: encoding) else { return body }
         return out
     }
@@ -88,7 +89,13 @@ enum MITMBodyReplace {
         let box = ResultBox()
         let done = DispatchSemaphore(value: 0)
         watchdogQueue.async {
-            box.value = text.replacing(op.search, with: op.replacement)
+            if let literal = op.staticReplacement {
+                box.value = text.replacing(op.search, with: literal)
+            } else {
+                box.value = text.replacing(op.search) { match in
+                    op.template.expand(output: match.output)
+                }
+            }
             inFlightLock.lock()
             substitutionInFlight = false
             inFlightLock.unlock()

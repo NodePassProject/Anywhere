@@ -48,7 +48,6 @@ final class MITMLeafCertCache {
         self.leafPrivateKeySecKey = try Self.importSoftwareP256(key)
     }
 
-    /// Returns a cached leaf for the SNI, minting one if absent or near expiry; throws on CA/signing failure.
     func leaf(for hostname: String) throws -> Leaf {
         let normalized = hostname.lowercased()
         lock.lock()
@@ -118,7 +117,6 @@ final class MITMLeafCertCache {
         }
     }
 
-    /// Wraps the ephemeral P256 key as a Security.framework `SecKey`.
     private static func importSoftwareP256(_ key: P256.Signing.PrivateKey) throws -> SecKey {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,

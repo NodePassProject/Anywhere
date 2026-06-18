@@ -7,14 +7,10 @@
 
 import Foundation
 
-/// Tracks the peer receive windows the MITM must respect when it emits DATA the
-/// real sender didn't produce (synth and buffered-rewrite bodies), pacing instead
-/// of overflowing into a FLOW_CONTROL_ERROR. Only connection-level windows live
-/// here; per-stream windows live on the connection.
-///
-/// Shared by a session's two h2 legs on the serial lwIP queue — no internal
-/// synchronization. Windows are signed (RFC 9113 §6.9.2 allows going negative);
-/// negative just gates synth emission until credited positive again.
+/// Tracks peer connection-level receive windows so MITM-emitted DATA (synth and
+/// buffered-rewrite bodies) is paced instead of overflowing into a FLOW_CONTROL_ERROR.
+/// No internal sync — confined to the serial lwIP queue. Windows are signed (RFC 9113
+/// §6.9.2 allows negative); negative gates synth emission until credited positive.
 final class MITMHTTP2FlowController {
 
     /// Largest legal flow-control window (RFC 9113 §6.9.1, 2^31 - 1); credits clamp here.

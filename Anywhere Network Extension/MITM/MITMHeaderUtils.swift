@@ -50,9 +50,9 @@ func isValidHTTPHeaderValue(_ value: String) -> Bool {
     return true
 }
 
-/// Screens a decoded HTTP/2 header list's octets (RFC 9113 §8.2.1): a non-conformant field is
-/// rejected, not folded, since HPACK decoding only validates UTF-8 and bad octets would otherwise
-/// launder to the peer or downcast to HTTP/1.1. Pseudo-header names allowed (leading `:` at index 0).
+/// Screens decoded HTTP/2 header octets (RFC 9113 §8.2.1): a non-conformant field is rejected, not
+/// folded, since HPACK only validates UTF-8 and bad octets would otherwise launder to the peer or
+/// downcast to HTTP/1.1. Pseudo-header names allowed (leading `:` at index 0).
 func http2HeaderOctetsValid(_ headers: [(name: String, value: String)]) -> Bool {
     for (name, value) in headers {
         if !http2FieldNameValid(name) { return false }
@@ -63,8 +63,8 @@ func http2HeaderOctetsValid(_ headers: [(name: String, value: String)]) -> Bool 
 
 /// RFC 9113 §8.2.1: a field name MUST be non-empty and MUST NOT contain an uppercase letter
 /// (0x41–0x5A), any byte ≤0x20 or ≥0x7F, or a colon other than a single leading pseudo-header sigil.
-/// Not the HTTP/1 `tchar` set — h2 permits visible punctuation like `"`, `(`, `@` and bans only these
-/// ranges, so `isValidHTTPHeaderName` (tchar) is both too strict and too lax here.
+/// Not the HTTP/1 `tchar` set — h2 permits visible punctuation like `"`, `(`, `@` and bans only
+/// these ranges, so the tchar check is both too strict and too lax here.
 private func http2FieldNameValid(_ name: String) -> Bool {
     let bytes = name.utf8
     guard !bytes.isEmpty else { return false }
@@ -89,7 +89,6 @@ private func http2FieldValueValid(_ value: String) -> Bool {
     return true
 }
 
-/// First value for `name` (ASCII case-insensitive), or nil.
 func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
     for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
         return v
@@ -155,10 +154,9 @@ extension String {
 
 extension Data {
 
-    /// Appends a header field as its on-the-wire bytes. HTTP/1 header octets and HPACK string literals
-    /// are byte strings (RFC 9110 §5.5 obs-text; RFC 7541 §5.2), so a value parsed as ISO-8859-1
-    /// round-trips to the exact same octets. Falls back to UTF-8 only for an injected value carrying
-    /// scalars > 0xFF that latin-1 can't represent.
+    /// Appends a header field as its on-the-wire bytes. HTTP/1 octets and HPACK string literals are
+    /// byte strings (RFC 9110 §5.5 obs-text; RFC 7541 §5.2), so a value parsed as ISO-8859-1
+    /// round-trips to the same octets. Falls back to UTF-8 only for scalars > 0xFF latin-1 can't hold.
     mutating func appendHeaderFieldBytes(_ field: String) {
         if let latin1 = field.data(using: .isoLatin1) {
             append(latin1)

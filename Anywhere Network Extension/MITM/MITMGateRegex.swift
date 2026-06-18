@@ -127,6 +127,60 @@ final class MITMGateRegex: @unchecked Sendable {
         }
     }
 
+    /// Capture groups of the first match (index 0 = whole match), or nil on no
+    /// match, timeout, or quarantine. Unlike ``matches(_:)`` the result is **not**
+    /// memoized — capture arrays are URL-specific with an unbounded working set and
+    /// only templated rewrites (uncommon) need them — but it shares the same
+    /// deadline, hard-cap crash, and strike/quarantine machinery.
+    func firstMatchCaptures(_ normalizedURL: String) -> [String?]? {
+        // A literal pattern has no capturing groups; group 0 is the matched span.
+        if isLiteral {
+            guard let r = normalizedURL.range(of: literalPattern, options: .literal) else { return nil }
+            return [String(normalizedURL[r])]
+        }
+        lock.lock()
+        let isQuarantined = quarantined
+        lock.unlock()
+        if isQuarantined { return nil }
+
+        let box = CaptureBox()
+        let done = DispatchSemaphore(value: 0)
+        // Strong regex, no self: a runaway can outlive a reload without pinning the cache.
+        let regex = self.regex
+        Self.matchQueue.async {
+            box.captures = Self.captureGroups(regex, in: normalizedURL)
+            box.hasValue = true
+            done.signal()
+        }
+        // The semaphore establishes happens-before for the unsynchronized box.
+        guard done.wait(timeout: .now() + .milliseconds(Self.matchDeadlineMillis)) == .success else {
+            Self.scheduleHardCapCheck(done, pattern: pattern)
+            recordStrike()
+            return nil
+        }
+        return box.hasValue ? box.captures : nil
+    }
+
+    /// Extracts the first match's groups (index 0 = whole match); a non-participating
+    /// group is `nil`. nil overall means the pattern did not match.
+    private static func captureGroups(_ regex: NSRegularExpression, in url: String) -> [String?]? {
+        let range = NSRange(url.startIndex..., in: url)
+        guard let match = regex.firstMatch(in: url, options: [], range: range) else { return nil }
+        var groups: [String?] = []
+        groups.reserveCapacity(match.numberOfRanges)
+        for i in 0..<match.numberOfRanges {
+            let nsRange = match.range(at: i)
+            if nsRange.location == NSNotFound {
+                groups.append(nil)
+            } else if let r = Range(nsRange, in: url) {
+                groups.append(String(url[r]))
+            } else {
+                groups.append(nil)
+            }
+        }
+        return groups
+    }
+
     private enum MatchOutcome {
         case matched(Bool)
         case timedOut
@@ -203,5 +257,12 @@ final class MITMGateRegex: @unchecked Sendable {
     /// `@unchecked Sendable`.
     private final class VerdictBox: @unchecked Sendable {
         var value: Bool?
+    }
+
+    /// Capture-path counterpart of ``VerdictBox``; `hasValue` distinguishes a
+    /// computed no-match (`captures == nil`) from a worker that never finished.
+    private final class CaptureBox: @unchecked Sendable {
+        var captures: [String?]?
+        var hasValue = false
     }
 }

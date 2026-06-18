@@ -20,9 +20,9 @@ private let mitmScriptTypedArrayLock = UnfairLock()
 private nonisolated(unsafe) var mitmScriptGlobalFetchCount: Int = 0
 private let mitmScriptGlobalFetchLock = UnfairLock()
 
-/// JavaScript runtime for `script` rules: one JSContext per rule set, compiled functions cached by source hash.
-/// Runaway JS cannot be preempted (JSContextGroupSetExecutionTimeLimit is App Review-flagged WebKit SPI);
-/// a hung sync span trips MITMScriptWatchdog, and an unsettled promise is reverted by the idle watchdog.
+/// One JSContext per rule set, functions cached by source hash. JS cannot be preempted
+/// (the execution-time-limit SPI is App Review-flagged); a hung sync span trips MITMScriptWatchdog,
+/// an unsettled promise is reverted by the idle watchdog.
 final class MITMScriptEngine {
 
     typealias Message = HTTPMessage
@@ -42,7 +42,7 @@ final class MITMScriptEngine {
         case respond(SynthesizedResponse)
     }
 
-    /// Per-frame context for applyFrame. All ctx fields except body are read-only — HEADERS are already on the wire.
+    /// All fields except body are read-only: headers are already on the wire.
     struct FrameContext {
         let phase: MITMPhase
         let method: String?

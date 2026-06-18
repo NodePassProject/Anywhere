@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// Serializes a neutral `MITMRequestHead` into an HTTP/1.1 request head plus body
-/// chunk framing — the h2→h1 request translation: derive `Host` from the authority,
-/// coalesce `Cookie`, and frame the body.
+/// h2→h1 request translation: serializes a neutral `MITMRequestHead` into an
+/// HTTP/1.1 head plus body chunk framing.
 enum MITMHTTP1Serializer {
 
     /// Builds the request line + headers + framing header + blank line. Derives `Host`

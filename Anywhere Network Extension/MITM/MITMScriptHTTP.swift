@@ -23,7 +23,6 @@ final class MITMScriptHTTPClient {
     private static let inFlightLock = UnfairLock()
     private static var inFlightBytes = 0
 
-    /// Reserves `count` bytes against the global budget; returns false without reserving if it would exceed the cap.
     private static func reserveInFlight(_ count: Int) -> Bool {
         inFlightLock.lock(); defer { inFlightLock.unlock() }
         guard inFlightBytes + count <= maxGlobalInFlightBytes else { return false }
@@ -31,14 +30,14 @@ final class MITMScriptHTTPClient {
         return true
     }
 
-    /// Returns `count` reserved bytes to the budget, clamped at 0 to guard against double-release.
+    /// Clamped at 0 to guard against double-release.
     private static func releaseInFlight(_ count: Int) {
         guard count > 0 else { return }
         inFlightLock.lock(); defer { inFlightLock.unlock() }
         inFlightBytes = max(0, inFlightBytes - count)
     }
 
-    /// One HTTP response handed back to a script; `finalURL` reflects the URL after any followed redirects.
+    /// `finalURL` reflects the URL after any followed redirects.
     struct Response {
         let status: Int
         let headers: [(name: String, value: String)]
@@ -63,8 +62,8 @@ final class MITMScriptHTTPClient {
         }
     }
 
-    /// Sends `request`, calling `completion` exactly once. The body cap is enforced as the response
-    /// streams, so a transparently-inflated gzip bomb is caught before being buffered in full.
+    /// Calls `completion` exactly once. The body cap is enforced as the response streams, so a
+    /// transparently-inflated gzip bomb is caught before being buffered in full.
     func send(
         _ request: URLRequest,
         followRedirects: Bool,
@@ -81,14 +80,13 @@ final class MITMScriptHTTPClient {
             completion: completion
         )
         let configuration = URLSessionConfiguration.ephemeral
-        // Wall-clock cap, set to the engine's invocation ceiling so one fetch can't outlive
-        // the script's backstop.
+        // Set to the engine's invocation ceiling so one fetch can't outlive the script's backstop.
         configuration.timeoutIntervalForResource = resourceTimeout
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         session.dataTask(with: request).resume()
     }
 
-    /// Per-request delegate; callbacks arrive on the session's private serial queue, so mutable state needs no locking.
+    /// Callbacks arrive on the session's private serial queue, so mutable state needs no locking.
     private final class SessionDelegate: NSObject, URLSessionDataDelegate {
         private let followRedirects: Bool
         private let insecure: Bool
@@ -97,7 +95,6 @@ final class MITMScriptHTTPClient {
 
         private var response: HTTPURLResponse?
         private var buffer = Data()
-        /// Bytes reserved against the global budget; released when the task completes.
         private var reservedBytes = 0
         /// Set before self-cancelling so `didCompleteWithError` reports the real cause, not a generic cancellation.
         private var cancelReason: ClientError?
@@ -134,8 +131,8 @@ final class MITMScriptHTTPClient {
             MITMScriptHTTPClient.releaseInFlight(reservedBytes)
             reservedBytes = 0
             self.response = response as? HTTPURLResponse
-            // Early reject on Content-Length; it's the on-wire (possibly compressed) size,
-            // so the per-chunk check below remains the definitive guard.
+            // Content-Length is the on-wire (possibly compressed) size, so the per-chunk
+            // check below remains the definitive guard.
             if response.expectedContentLength >= 0,
                response.expectedContentLength > Int64(maxBytes) {
                 cancelReason = .responseTooLarge(maxBytes)
@@ -153,7 +150,6 @@ final class MITMScriptHTTPClient {
             didReceive data: Data
         ) {
             guard cancelReason == nil else { return }
-            // Reserve against the shared global budget before holding the bytes.
             guard MITMScriptHTTPClient.reserveInFlight(data.count) else {
                 cancelReason = .globalBudgetExceeded(MITMScriptHTTPClient.maxGlobalInFlightBytes)
                 buffer.removeAll(keepingCapacity: false)

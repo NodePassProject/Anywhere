@@ -35,7 +35,6 @@ struct MITMByteBuffer {
         return storage[storage.startIndex + offset + i]
     }
 
-    /// Returns the first ``n`` bytes as a fresh ``Data``, clamped to ``count``.
     func prefix(_ n: Int) -> Data {
         let take = Swift.min(n, count)
         let s = storage.startIndex + offset

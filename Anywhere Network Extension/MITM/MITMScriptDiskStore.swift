@@ -9,7 +9,6 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITMScriptDiskStore")
 
-/// Disk-backed companion to `MITMScriptStore`.
 final class MITMScriptDiskStore {
 
     static let shared = MITMScriptDiskStore()
@@ -21,13 +20,12 @@ final class MITMScriptDiskStore {
     
     private let directory: URL?
 
-    /// Loaded scope buckets; a scope is absent until first touched, then cached for the
-    /// session. An empty dictionary means "loaded, no keys" (distinct from not-yet-loaded).
+    /// An empty dictionary means "loaded, no keys", distinct from a not-yet-loaded scope.
     private var cache: [UUID: [String: Data]] = [:]
     private var loaded: Set<UUID> = []
 
-    /// Serialized file size per scope on disk — the basis for both caps. Seeded by a one-time
-    /// directory scan so the total cap counts scopes that were never loaded this session.
+    /// Serialized file size per scope, the basis for both caps. Seeded by a one-time directory
+    /// scan so the total cap counts scopes never loaded this session.
     private var fileSizes: [UUID: Int] = [:]
     private var totalBytes: Int = 0
     private var didScan = false
@@ -149,9 +147,9 @@ final class MITMScriptDiskStore {
         cache[scope] = dict
     }
 
-    /// Reads `url` under an `NSFileCoordinator` read so a concurrent writer in another App Group
-    /// process can't be observed mid-write. (Cross-process cache coherence would additionally
-    /// need an `NSFilePresenter`; only the serialized NE writes this store.)
+    /// Coordinated read so a concurrent writer in another App Group process can't be observed
+    /// mid-write. (Cross-process cache coherence would also need an `NSFilePresenter`; only the
+    /// serialized NE writes this store.)
     private func coordinatedRead(_ url: URL) -> Data? {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?
@@ -168,8 +166,8 @@ final class MITMScriptDiskStore {
         if !fileManager.fileExists(atPath: directory.path) {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        // Coordinate the write across App Group processes so concurrent writers can't clobber each
-        // other's whole-bucket plist. FirstUserAuthentication file protection lets the background NE
+        // Coordinate across App Group processes so concurrent writers can't clobber each other's
+        // whole-bucket plist. FirstUserAuthentication file protection lets the background NE
         // read/write after the first unlock even while the device is later locked.
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?

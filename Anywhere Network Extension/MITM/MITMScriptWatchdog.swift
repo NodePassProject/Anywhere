@@ -58,7 +58,6 @@ enum MITMScriptWatchdog {
         lock.unlock()
     }
 
-    /// Crashes when the in-flight span has exceeded hardCapSeconds.
     private static func checkInFlightSpan() {
         lock.lock()
         let start = spanStart
