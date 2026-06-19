@@ -565,7 +565,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - Key Installation
 
-    private func installHandshakeKeys(conn: OpaquePointer, keys: TLSHandshakeKeys) {
+    private func installHandshakeKeys(conn: OpaquePointer, keys: TLS13HandshakeKeys) {
         let aead = ngtcp2_crypto_aead()
         let md = ngtcp2_crypto_md()
 
@@ -626,7 +626,7 @@ nonisolated class QUICTLSHandler {
         }
     }
 
-    private func installApplicationKeys(conn: OpaquePointer, keys: TLSApplicationKeys) {
+    private func installApplicationKeys(conn: OpaquePointer, keys: TLS13ApplicationKeys) {
         let kd = keyDerivation!
         var ctx = ngtcp2_crypto_ctx()
         ngtcp2_crypto_ctx_tls(&ctx, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))

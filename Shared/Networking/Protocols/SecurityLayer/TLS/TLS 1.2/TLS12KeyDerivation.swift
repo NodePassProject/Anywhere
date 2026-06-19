@@ -2,30 +2,11 @@
 //  TLS12KeyDerivation.swift
 //  Anywhere
 //
-//  TLS 1.2 key derivation (PRF per RFC 5246)
+//  Created by NodePassProject on 6/19/26.
 //
 
 import Foundation
 import CryptoKit
-
-struct TLS12Keys {
-    let clientMACKey: Data
-    let serverMACKey: Data
-    let clientKey: Data
-    let serverKey: Data
-    let clientIV: Data
-    let serverIV: Data
-}
-
-struct TLS12ServerHandshakeState {
-    var transcript: Data = Data()
-    var masterSecret: Data?
-    var keys: TLS12Keys?
-    var clientRandom: Data?
-    var serverRandom: Data?
-    var extendedMasterSecret: Bool = false
-    var receivedCCS: Bool = false
-}
 
 struct TLS12KeyDerivation {
 
@@ -92,7 +73,7 @@ struct TLS12KeyDerivation {
         keyLen: Int,
         ivLen: Int,
         useSHA384: Bool = false
-    ) -> TLS12Keys {
+    ) -> TLS12HandshakeKeys {
         var seed = serverRandom
         seed.append(clientRandom)
         let totalLen = 2 * macLen + 2 * keyLen + 2 * ivLen
@@ -106,7 +87,7 @@ struct TLS12KeyDerivation {
         let clientIV = keyBlock.subdata(in: offset..<(offset + ivLen)); offset += ivLen
         let serverIV = keyBlock.subdata(in: offset..<(offset + ivLen))
 
-        return TLS12Keys(
+        return TLS12HandshakeKeys(
             clientMACKey: clientMACKey, serverMACKey: serverMACKey,
             clientKey: clientKey, serverKey: serverKey,
             clientIV: clientIV, serverIV: serverIV
