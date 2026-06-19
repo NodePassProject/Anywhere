@@ -553,6 +553,15 @@ enum HPACKHuffman {
         return nodes
     }()
 
+    /// Byte length of `string` once Huffman-encoded per RFC 7541 Appendix B.
+    static func encodedByteLength(_ string: String) -> Int {
+        var bits = 0
+        for byte in string.utf8 {
+            bits += Int(huffmanTable[Int(byte)].1)
+        }
+        return (bits + 7) / 8
+    }
+
     /// Decodes Huffman bytes, rejecting any RFC 7541 §5.2 violation (off-tree bit,
     /// explicit EOS, bad padding) so the MITM never re-emits "laundered" malformed input.
     static func decode(_ data: some Collection<UInt8>) -> [UInt8]? {

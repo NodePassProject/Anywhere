@@ -379,17 +379,26 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
     }
 
-    /// Generates base62 "tokenish" padding of approximately `targetBytes` bytes.
+    /// Generates base62 "tokenish" padding whose *Huffman-encoded* length is within ±2 bytes of `targetBytes`.
     private func generateTokenishPadding(targetBytes: Int) -> String {
-        // base62 chars average ~0.8 bytes per char in Huffman encoding
-        let n = max(1, Int(ceil(Double(targetBytes) / 0.8)))
         let charset = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-        var result = ""
-        result.reserveCapacity(n)
-        for _ in 0..<n {
-            result.append(charset[Int.random(in: 0..<charset.count)])
+        let n = max(1, Int(ceil(Double(targetBytes) / 0.8)))
+        var chars = (0..<n).map { _ in charset[Int.random(in: 0..<charset.count)] }
+        var adjust: Character = "X"
+        // validationTolerance = 2, maxIter = 150 (both mirror the reference).
+        for _ in 0..<150 {
+            let diff = HPACKHuffman.encodedByteLength(String(chars)) - targetBytes
+            if abs(diff) <= 2 { break }
+            if diff < 0 {
+                chars.append(adjust)
+                adjust = (adjust == "X") ? "Z" : "X"
+            } else if chars.count > 1 {
+                chars.removeLast()
+            } else {
+                break
+            }
         }
-        return result
+        return String(chars)
     }
 
     /// Parses XHTTP parameters from VLESS URL query parameters. Host fallback order:
@@ -521,14 +530,16 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             scMinPostsIntervalMs = val
         }
 
+        // xPaddingBytes may be an int, {"from":a,"to":b}, or an "a-b" string (the form used in
+        // subscription URLs). The server validates each request's padding length against this
+        // range, so an unparsed "a-b" silently falling back to the default makes a fraction of
+        // packet-up POSTs land out of range and get a 400 (intermittent connection failures).
         var xPaddingFrom = 100
         var xPaddingTo = 1000
-        if let range = extra["xPaddingBytes"] as? [String: Any] {
-            xPaddingFrom = range["from"] as? Int ?? 100
-            xPaddingTo = range["to"] as? Int ?? 1000
-        } else if let val = extra["xPaddingBytes"] as? Int {
-            xPaddingFrom = val
-            xPaddingTo = val
+        let xPaddingRange = XHTTPXMUXMultiplexerRange.parse(extra["xPaddingBytes"])
+        if !xPaddingRange.isZero {
+            xPaddingFrom = xPaddingRange.from
+            xPaddingTo = xPaddingRange.to
         }
 
         let xPaddingObfsMode = extra["xPaddingObfsMode"] as? Bool ?? false
