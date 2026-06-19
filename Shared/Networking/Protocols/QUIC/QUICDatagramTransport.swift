@@ -49,20 +49,17 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
     /// True for per-datagram errors ("this packet didn't fit"), false for terminal
     /// ones ("the transport is broken"); the outer QUIC must NOT close on transient errors.
     private static func isTransientDatagramError(_ error: Error) -> Bool {
-        if let qErr = error as? QUICConnection.QUICError {
-            switch qErr {
-            case .closed, .streamReset, .streamClosedWithError, .handshakeFailed:
+        if let quicError = error as? QUICConnection.QUICError {
+            switch quicError {
+            case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
                 return false
             case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
                 return true
             }
         }
-        if let hErr = error as? HysteriaError {
-            switch hErr {
-            case .streamClosed, .authRejected, .udpNotSupported,
-                 .destinationTooLargeForDatagram:
-                // destinationTooLargeForDatagram is permanent — the Hysteria header
-                // never shrinks for this destination — so fail fast.
+        if let hysteriaError = error as? HysteriaError {
+            switch hysteriaError {
+            case .authRejected, .udpNotSupported, .destinationTooLargeForDatagram, .streamClosed:
                 return false
             case .notReady, .connectionFailed, .tunnelFailed:
                 // connectionFailed covers per-packet outcomes; notReady is a
@@ -70,10 +67,9 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
                 return true
             }
         }
-        if let nErr = error as? NowhereError {
-            switch nErr {
-            case .streamClosed, .authFailed, .invalidTargetLength,
-                 .destinationTooLargeForDatagram:
+        if let nowhereError = error as? NowhereError {
+            switch nowhereError {
+            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed:
                 return false
             case .notReady, .connectionFailed:
                 return true

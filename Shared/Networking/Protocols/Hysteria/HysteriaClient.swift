@@ -283,8 +283,8 @@ nonisolated final class HysteriaClient {
     /// True for failures meaning the cached session went away mid-acquire;
     /// `udpNotSupported` is excluded as a permanent server-side property.
     private static func isStaleSessionError(_ error: Error) -> Bool {
-        guard let hErr = error as? HysteriaError else { return false }
-        switch hErr {
+        guard let hysteriaError = error as? HysteriaError else { return false }
+        switch hysteriaError {
         case .notReady, .streamClosed: return true
         default: return false
         }

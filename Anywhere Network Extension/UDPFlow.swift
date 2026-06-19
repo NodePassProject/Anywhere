@@ -117,30 +117,27 @@ class UDPFlow {
 
     /// Terminal = the connection is gone for good; transient = the connection is still usable.
     private static func isTerminalProxySendError(_ error: Error, connection: ProxyConnection) -> Bool {
-        if let hErr = error as? HysteriaError {
-            switch hErr {
-            case .streamClosed, .authRejected, .udpNotSupported,
-                 .destinationTooLargeForDatagram:
-                // destinationTooLargeForDatagram is permanent for this destination.
+        if let quicError = error as? QUICConnection.QUICError {
+            switch quicError {
+            case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
+                return true
+            case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
+                return false
+            }
+        }
+        if let hysteriaError = error as? HysteriaError {
+            switch hysteriaError {
+            case .authRejected, .udpNotSupported, .destinationTooLargeForDatagram, .streamClosed:
                 return true
             case .notReady, .connectionFailed, .tunnelFailed:
                 return false
             }
         }
-        if let nErr = error as? NowhereError {
-            switch nErr {
-            case .streamClosed, .authFailed, .invalidTargetLength,
-                 .destinationTooLargeForDatagram:
+        if let nowhereError = error as? NowhereError {
+            switch nowhereError {
+            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed:
                 return true
             case .notReady, .connectionFailed:
-                return false
-            }
-        }
-        if let qErr = error as? QUICConnection.QUICError {
-            switch qErr {
-            case .closed, .streamReset, .streamClosedWithError, .handshakeFailed:
-                return true
-            case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
                 return false
             }
         }
