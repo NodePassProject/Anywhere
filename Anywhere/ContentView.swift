@@ -17,6 +17,7 @@ struct ContentView: View {
                 .onOpenURL { url in
                     deepLinkManager.handle(url: url)
                 }
+                .environment(VoyagerStore.shared)
                 .environment(AppSettings.shared)
                 .environment(VPNViewModel.shared)
                 .environment(ConfigurationStore.shared)
