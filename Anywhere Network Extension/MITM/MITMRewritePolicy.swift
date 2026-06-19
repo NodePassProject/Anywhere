@@ -262,7 +262,7 @@ final class MITMRewritePolicy {
             guard let compiled = Self.compileRewrite(action, suffix: suffix) else { return nil }
             return .rewrite(compiled)
         case .headerAdd(let name, let value):
-            guard isValidHTTPHeaderName(name) else {
+            guard HTTPHeader.isValidName(name) else {
                 logger.warning("headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
@@ -270,19 +270,19 @@ final class MITMRewritePolicy {
                 logger.warning("headerAdd dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
                 return nil
             }
-            guard isValidHTTPHeaderValue(value) else {
+            guard HTTPHeader.isValidValue(value) else {
                 logger.warning("headerAdd dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
             return .headerAdd(name: name, value: value)
         case .headerDelete(let name):
-            guard isValidHTTPHeaderName(name) else {
+            guard HTTPHeader.isValidName(name) else {
                 logger.warning("headerDelete dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
             return .headerDelete(nameLower: name.lowercased())
         case .headerReplace(let name, let value):
-            guard isValidHTTPHeaderName(name) else {
+            guard HTTPHeader.isValidName(name) else {
                 logger.warning("headerReplace dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
@@ -290,7 +290,7 @@ final class MITMRewritePolicy {
                 logger.warning("headerReplace dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
                 return nil
             }
-            guard isValidHTTPHeaderValue(value) else {
+            guard HTTPHeader.isValidValue(value) else {
                 logger.warning("headerReplace dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
@@ -395,9 +395,9 @@ final class MITMRewritePolicy {
             if template.referencesCaptures {
                 return .redirect302(.templated(template))
             }
-            // Trim first: isValidHTTPHeaderValue allows SP/HTAB, and stray whitespace in Location trips some clients.
+            // Trim first: HTTPHeader.isValidValue allows SP/HTAB, and stray whitespace in Location trips some clients.
             let trimmed = url.trimmingCharacters(in: .whitespaces)
-            guard parseReplacementURL(trimmed) != nil, isValidHTTPHeaderValue(trimmed) else {
+            guard parseReplacementURL(trimmed) != nil, HTTPHeader.isValidValue(trimmed) else {
                 logger.warning("rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
                 return nil
             }
@@ -462,7 +462,7 @@ final class MITMRewritePolicy {
     /// nil leaves the rule a no-op for this request.
     static func resolveRedirectTemplate(_ template: MITMCaptureTemplate, captures: [String?]) -> String? {
         let location = template.expand(captures: captures).trimmingCharacters(in: .whitespaces)
-        guard parseReplacementURL(location) != nil, isValidHTTPHeaderValue(location) else { return nil }
+        guard parseReplacementURL(location) != nil, HTTPHeader.isValidValue(location) else { return nil }
         return location
     }
 }

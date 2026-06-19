@@ -17,7 +17,7 @@ enum MITMHTTP1Serializer {
     static func requestHead(_ head: MITMRequestHead, host: String) -> Data {
         let startLine = "\(head.method) \(head.path) HTTP/1.1"
 
-        let hasHost = head.headers.contains { $0.name.equalsIgnoringASCIICase("host") }
+        let hasHost = head.headers.contains { ASCII.equalsIgnoringCase($0.name, "host") }
         var safe: [(name: String, value: String)] = []
         safe.reserveCapacity(head.headers.count + 2)
 
@@ -28,15 +28,15 @@ enum MITMHTTP1Serializer {
 
         var cookies: [String] = []
         for (name, value) in head.headers {
-            if name.equalsIgnoringASCIICase("content-length")
-                || name.equalsIgnoringASCIICase("transfer-encoding") {
+            if ASCII.equalsIgnoringCase(name, "content-length")
+                || ASCII.equalsIgnoringCase(name, "transfer-encoding") {
                 continue // the bridge owns framing
             }
-            if name.equalsIgnoringASCIICase("cookie") {
+            if ASCII.equalsIgnoringCase(name, "cookie") {
                 cookies.append(value)
                 continue
             }
-            guard isValidHTTPHeaderName(name), isValidHTTPHeaderValue(value) else {
+            guard HTTPHeader.isValidName(name), HTTPHeader.isValidValue(value) else {
                 logger.warning("HTTP/1 bridge \(host): dropping invalid request header \(name)")
                 continue
             }
@@ -61,12 +61,12 @@ enum MITMHTTP1Serializer {
         var out = Data(capacity: size)
         // ISO-8859-1 bytes so a header octet (HPACK-decoded as latin-1) round-trips to the
         // upstream unchanged rather than being re-encoded as multi-byte UTF-8.
-        out.appendHeaderFieldBytes(startLine)
+        HTTPHeader.appendFieldBytes(startLine, to: &out)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in safe {
-            out.appendHeaderFieldBytes(name)
+            HTTPHeader.appendFieldBytes(name, to: &out)
             out.append(0x3A); out.append(0x20)
-            out.appendHeaderFieldBytes(value)
+            HTTPHeader.appendFieldBytes(value, to: &out)
             out.append(0x0D); out.append(0x0A)
         }
         out.append(0x0D); out.append(0x0A)

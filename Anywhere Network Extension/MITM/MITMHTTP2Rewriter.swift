@@ -69,7 +69,7 @@ final class MITMHTTP2Rewriter {
     static func requestPath(in headers: [(name: String, value: String)]) -> String? {
         // Case-insensitive: the HPACK decoder doesn't lowercase names, so a literal-encoded
         // `:Path` would otherwise bypass every request-phase rule.
-        return firstHeaderValue(headers, name: ":path")
+        return HTTPHeader.firstValue(in: headers, named: ":path")
     }
 
     /// Synthesized response when the first matching request-phase rewrite rule is a
@@ -143,12 +143,12 @@ final class MITMHTTP2Rewriter {
     ) -> [(name: String, value: String)] {
         guard let authority = effectiveAuthority else { return headers }
         // Trailer check kept local so caller classification can't break the invariant.
-        let hasMethod = headers.contains { $0.name.equalsIgnoringASCIICase(":method") }
+        let hasMethod = headers.contains { ASCII.equalsIgnoringCase($0.name, ":method") }
         guard hasMethod else { return headers }
         var sawAuthority = false
         var result = headers.map { entry -> (name: String, value: String) in
             // RFC 9113 §8.2.1: normalise a peer's mis-cased `:Authority` on the way out.
-            if entry.name.equalsIgnoringASCIICase(":authority") {
+            if ASCII.equalsIgnoringCase(entry.name, ":authority") {
                 sawAuthority = true
                 return (name: ":authority", value: authority)
             }
@@ -193,10 +193,10 @@ final class MITMHTTP2Rewriter {
                 var sawAuthority = false
                 current = current.map { entry in
                     // RFC 9113 §8.2.1: normalise mis-cased pseudo-headers on the way out.
-                    if entry.name.equalsIgnoringASCIICase(":path") {
+                    if ASCII.equalsIgnoringCase(entry.name, ":path") {
                         return (name: ":path", value: replacement.requestTarget)
                     }
-                    if entry.name.equalsIgnoringASCIICase(":authority") {
+                    if ASCII.equalsIgnoringCase(entry.name, ":authority") {
                         sawAuthority = true
                         return (name: ":authority", value: replacement.authority)
                     }
@@ -213,11 +213,11 @@ final class MITMHTTP2Rewriter {
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
                 guard !nameLower.hasPrefix(":") else { continue }
-                current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
+                current.removeAll { ASCII.equalsIgnoringCase($0.name, nameLower) }
             case .headerReplace(let name, let value):
                 guard !name.hasPrefix(":") else { continue }
                 current = current.map { entry in
-                    entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
+                    ASCII.equalsIgnoringCase(entry.name, name) ? (name: name, value: value) : entry
                 }
             case .script, .streamScript, .bodyReplace, .bodyJSON:
                 continue
