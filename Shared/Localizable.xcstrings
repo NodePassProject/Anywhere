@@ -6738,58 +6738,6 @@
         }
       }
     },
-    "Help Anywhere community thrive." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ساعد مجتمع Anywhere على الازدهار."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Help Anywhere community thrive."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ayuda a que la comunidad de Anywhere prospere."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "به شکوفایی جامعه Anywhere کمک کنید."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Помогите сообществу Anywhere процветать."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Anywhere topluluğunun gelişmesine yardımcı olun."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Giúp cộng đồng Anywhere phát triển."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "帮助 Anywhere 社区繁荣。"
-          }
-        }
-      }
-    },
     "Hide VPN Icon" : {
       "localizations" : {
         "ar" : {
@@ -7858,6 +7806,110 @@
         }
       }
     },
+    "Join" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "انضم"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Join"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Únete"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بپیوندید"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Присоединяйтесь"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katılın"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tham gia"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入"
+          }
+        }
+      }
+    },
+    "Join Public Beta and try new features first." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "انضم إلى النسخة التجريبية العامة وجرّب الميزات الجديدة أولاً."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Join Public Beta and try new features first."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Únete a la beta pública y prueba las nuevas funciones antes que nadie."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "به نسخه آزمایشی عمومی بپیوندید و ویژگی‌های جدید را زودتر امتحان کنید."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Присоединяйтесь к публичной бета-версии и первыми пробуйте новые функции."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Herkese açık beta sürümüne katılın ve yeni özellikleri ilk siz deneyin."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tham gia bản beta công khai và trải nghiệm tính năng mới trước tiên."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入公开测试版并抢先体验新特色功能。"
+          }
+        }
+      }
+    },
     "Join Telegram Group" : {
       "localizations" : {
         "ar" : {
@@ -7906,58 +7958,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "加入 Telegram 群组"
-          }
-        }
-      }
-    },
-    "Join the TestFlight beta and try new features first." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "انضم إلى نسخة TestFlight التجريبية وجرّب الميزات الجديدة أولاً."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Join the TestFlight beta and try new features first."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Únete a la beta de TestFlight y prueba las nuevas funciones antes que nadie."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "به نسخه آزمایشی TestFlight بپیوندید و ویژگی‌های جدید را زودتر امتحان کنید."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Присоединяйтесь к бета-версии в TestFlight и первыми пробуйте новые функции."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "TestFlight beta sürümüne katılın ve yeni özellikleri ilk siz deneyin."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tham gia bản beta TestFlight và trải nghiệm tính năng mới trước tiên."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "加入 TestFlight beta 并抢先体验新特色功能。"
           }
         }
       }
@@ -8280,6 +8280,58 @@
     },
     "Mbps" : {
       "shouldTranslate" : false
+    },
+    "Member %@" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عضو %@"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Member %@"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Miembro %@"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عضو %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Участник %@"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Üye %@"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thành viên %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "成员 %@"
+          }
+        }
+      }
     },
     "Memory" : {
       "localizations" : {
@@ -10700,7 +10752,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Public Beta 授权"
+            "value" : "公开测试版授权"
           }
         }
       }
@@ -13533,54 +13585,54 @@
     "Shadowsocks" : {
       "shouldTranslate" : false
     },
-    "Share Voyager with family members." : {
+    "Share Voyager membership with family." : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "شارِك Voyager مع أفراد عائلتك."
+            "value" : "شارِك عضوية Voyager مع عائلتك."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Share Voyager with family members."
+            "value" : "Share Voyager membership with family."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Comparte Voyager con los miembros de tu familia."
+            "value" : "Comparte la membresía de Voyager con tu familia."
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voyager را با اعضای خانواده‌تان به اشتراک بگذارید."
+            "value" : "عضویت Voyager را با خانواده‌تان به اشتراک بگذارید."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Делитесь Voyager с членами семьи."
+            "value" : "Делитесь членством Voyager со своей семьёй."
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voyager'ı aile üyelerinizle paylaşın."
+            "value" : "Voyager üyeliğinizi ailenizle paylaşın."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Chia sẻ Voyager với các thành viên trong gia đình."
+            "value" : "Chia sẻ tư cách thành viên Voyager với gia đình."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "与家庭成员分享。"
+            "value" : "与家庭成员分享 Voyager 成员身份。"
           }
         }
       }
@@ -14386,6 +14438,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "以下路由规则使用的代理已被删除，它们已重置为默认: %@"
+          }
+        }
+      }
+    },
+    "The road is long. Walk it with us." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الطريق طويل، فلنَسِر فيه معًا."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The road is long. Walk it with us."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El camino es largo. Recorrámoslo juntos."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "راه دراز است؛ بیا تا با هم بپیماییمش."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Путь долог. Пройдём его вместе."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yol uzun. Bu yolu birlikte yürüyelim."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chặng đường còn dài. Hãy sát cánh cùng chúng tôi."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前路漫漫，让我们共同砥砺前行。"
           }
         }
       }

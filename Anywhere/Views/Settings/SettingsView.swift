@@ -23,16 +23,9 @@ struct SettingsView: View {
         @Bindable var settings = settings
         @Bindable var ruleSetStore = ruleSetStore
         Form {
-            Section {
-                Toggle(isOn: Binding(
-                    get: { voyagerStore.isMember },
-                    set: { newValue in
-                        if newValue && !voyagerStore.isMember {
-                            showVoyager = true
-                        }
-                    }
-                )) {
-                    TextWithColorfulIcon(title: "Anywhere Voyager", comment: nil, systemName: "sparkles.2", foregroundColor: .white, backgroundColor: Color(hex: 0x05060F0))
+            if settings.experimentalEnabled {
+                Section {
+                    voyagerRow
                 }
             }
             
@@ -176,6 +169,35 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
+        }
+    }
+    
+    @ViewBuilder
+    private var voyagerRow: some View {
+        HStack {
+            TextWithColorfulIcon(title: "Anywhere Voyager", comment: nil, systemName: "sparkles.2", foregroundColor: .white, backgroundColor: Color(hex: 0x5060F0))
+            Spacer()
+            HStack {
+                if voyagerStore.isMember {
+                    Text("Member \(Image(systemName: "checkmark.seal.fill"))")
+                        .textCase(.uppercase)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Color(hex: 0x5060F0))
+                } else {
+                    Button {
+                        showVoyager = true
+                    } label: {
+                        Text("Join")
+                            .textCase(.uppercase)
+                            .font(.system(size: 14).weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 15)
+                            .background(Color(hex: 0x5060F0).gradient, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
