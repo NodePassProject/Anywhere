@@ -40,7 +40,15 @@ enum NowhereProtocol {
     private static let tcpPaddingLengthLabel = Data("tcp request padding length".utf8)
     private static let tcpPaddingKeyLabel = Data("tcp request padding key".utf8)
     private static let tcpPaddingBytesLabel = Data("tcp request padding bytes".utf8)
+    private static let authFrameLayoutLabel = Data("auth frame layout".utf8)
     private static let frameLayoutLabel = Data("proxy frame layout".utf8)
+
+    enum AuthFrameElement: UInt8, Hashable {
+        case magic
+        case nonce
+        case padding
+        case tag
+    }
 
     enum FrameElement: UInt8, Hashable {
         case version
@@ -55,6 +63,7 @@ enum NowhereProtocol {
         let defaultALPN: String
         let effectiveSpecID: String
         let authMagic: Data
+        let authFrameOrder: [AuthFrameElement]
         let authInfo: Data
         let authContext: Data
         let authPaddingLength: UInt8
@@ -90,6 +99,7 @@ enum NowhereProtocol {
 
         let specSalt = Data(SHA256.hash(data: effectiveSpec))
         let specPRK = hkdfExtract(salt: specSalt, input: effectiveSpec)
+        let authFrameOrder = buildAuthFrameOrder(seed: hkdfExpand(prk: specPRK, info: authFrameLayoutLabel, count: 8))
         let frameOrder = buildFrameOrder(seed: hkdfExpand(prk: specPRK, info: frameLayoutLabel, count: 8))
         let authPaddingLengthSeed = hkdfExpand(
             prk: specPRK,
@@ -117,6 +127,7 @@ enum NowhereProtocol {
             defaultALPN: defaultALPN,
             effectiveSpecID: base64URLNoPadding(hkdfExpand(prk: specPRK, info: specIDLabel, count: specIDLength)),
             authMagic: hkdfExpand(prk: specPRK, info: authMagicLabel, count: authMagicLength),
+            authFrameOrder: authFrameOrder,
             authInfo: hkdfExpand(prk: specPRK, info: authInfoLabel, count: authInfoLength),
             authContext: hkdfExpand(prk: specPRK, info: authContextLabel, count: authContextLength),
             authPaddingLength: UInt8(authPaddingLengthValue),
@@ -152,12 +163,23 @@ enum NowhereProtocol {
             using: SymmetricKey(data: authKey)
         )
 
+        var paddingBlock = Data(capacity: 1 + padding.count)
+        paddingBlock.append(protocolSpec.authPaddingLength)
+        paddingBlock.append(padding)
+
         var frame = Data(capacity: protocolSpec.authMagic.count + nonce.count + 1 + padding.count + authTagLength)
-        frame.append(protocolSpec.authMagic)
-        frame.append(nonce)
-        frame.append(protocolSpec.authPaddingLength)
-        frame.append(padding)
-        frame.append(contentsOf: tag)
+        for element in protocolSpec.authFrameOrder {
+            switch element {
+            case .magic:
+                frame.append(protocolSpec.authMagic)
+            case .nonce:
+                frame.append(nonce)
+            case .padding:
+                frame.append(paddingBlock)
+            case .tag:
+                frame.append(contentsOf: tag)
+            }
+        }
         return frame
     }
 
@@ -235,6 +257,20 @@ enum NowhereProtocol {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func buildAuthFrameOrder(seed: Data) -> [AuthFrameElement] {
+        let canonical: [AuthFrameElement] = [.magic, .nonce, .padding, .tag]
+        var order = canonical
+        for i in stride(from: order.count - 1, through: 1, by: -1) {
+            let seedIndex = order.count - 1 - i
+            let seedByte = seedIndex < seed.count ? byte(seed, at: seedIndex) : 0
+            order.swapAt(i, Int(seedByte) % (i + 1))
+        }
+        if order == canonical {
+            order.append(order.removeFirst())
+        }
+        return order
     }
 
     private static func buildFrameOrder(seed: Data) -> (tcp: [FrameElement], udp: [FrameElement]) {
