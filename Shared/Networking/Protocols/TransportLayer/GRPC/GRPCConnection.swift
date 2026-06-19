@@ -400,7 +400,9 @@ extension GRPCConnection {
                 return
             }
             guard let data, !data.isEmpty else {
-                completion(.failure(GRPCError.connectionClosed))
+                // Clean transport FIN at a frame boundary (no transport error) is a graceful
+                // end of stream, not a failure — surfaced as EOF in readAndDecode.
+                completion(.failure(GRPCError.streamEnded))
                 return
             }
 
@@ -838,7 +840,17 @@ extension GRPCConnection {
             }
             switch result {
             case .failure(let error):
-                completion(nil, error)
+                if let grpcError = error as? GRPCError, case .streamEnded = grpcError {
+                    // Graceful end of stream → flush any buffered payload, then EOF.
+                    self.lock.lock()
+                    self.h2StreamClosed = true
+                    let leftover = self.decodedBuffer
+                    self.decodedBuffer.removeAll(keepingCapacity: true)
+                    self.lock.unlock()
+                    completion(leftover.isEmpty ? nil : leftover, nil)
+                } else {
+                    completion(nil, error)
+                }
 
             case .success(let frame):
                 let isOurStream = frame.streamId == Self.streamId

@@ -1049,8 +1049,13 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         frameReader.readFrame { [weak self] result in
             guard let self else { return }
             switch result {
-            case .failure:
-                self.failAll(XHTTPError.connectionClosed)
+            case .failure(let error):
+                if let x = error as? XHTTPError, case .streamEnded = x {
+                    // Clean FIN of the shared H2 connection → EOF for every muxed stream.
+                    self.failAll(nil)
+                } else {
+                    self.failAll(XHTTPError.connectionClosed)
+                }
             case .success(let f):
                 self.routeFrame(f)
                 self.lock.lock()
@@ -1279,7 +1284,10 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
 
     func cancel() { failAll(XHTTPError.connectionClosed) }
 
-    private func failAll(_ error: Error) {
+    /// Tears down all muxed streams. A nil error delivers a graceful EOF to each pending
+    /// receive (e.g. a clean transport FIN of the shared H2 connection); a non-nil error
+    /// surfaces as a failure.
+    private func failAll(_ error: Error?) {
         lock.lock()
         if closedFlag { lock.unlock(); return }
         closedFlag = true
