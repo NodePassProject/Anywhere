@@ -429,7 +429,15 @@ extension XHTTPConnection {
 
             switch result {
             case .failure(let error):
-                completion(nil, error)
+                if let xhttpError = error as? XHTTPError, case .streamEnded = xhttpError {
+                    // Graceful end of stream (clean transport FIN) → EOF.
+                    self.lock.lock()
+                    self.h2StreamClosed = true
+                    self.lock.unlock()
+                    completion(nil, nil)
+                } else {
+                    completion(nil, error)
+                }
 
             case .success(let frame):
                 let isDownloadStream = frame.streamId == 0 || frame.streamId == self.h2DownloadStreamId

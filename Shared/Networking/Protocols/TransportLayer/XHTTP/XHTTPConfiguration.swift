@@ -764,6 +764,8 @@ enum XHTTPError: Error, LocalizedError {
     case setupFailed(String)
     case httpError(String)
     case connectionClosed
+    /// Clean transport EOF at an HTTP/2 frame boundary.
+    case streamEnded
 
     var errorDescription: String? {
         switch self {
@@ -773,6 +775,8 @@ enum XHTTPError: Error, LocalizedError {
             return "XHTTP HTTP error: \(reason)"
         case .connectionClosed:
             return "XHTTP connection closed"
+        case .streamEnded:
+            return "XHTTP stream ended"
         }
     }
 }

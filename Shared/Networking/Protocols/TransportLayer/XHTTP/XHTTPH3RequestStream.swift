@@ -196,6 +196,16 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
     }
 
     func handleSessionError(_ error: Error) {
+        // A benign QUIC connection close (NO_ERROR / H3_NO_ERROR) is a graceful end of the
+        // response — surface EOF rather than a reset.
+        if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
+            endStreamReceived = true
+            if let pending = pendingReceive, receiveQueue.isEmpty {
+                pendingReceive = nil
+                pending(nil, nil)
+            }
+            return
+        }
         handleStreamError(error)
     }
 

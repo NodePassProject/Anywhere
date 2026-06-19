@@ -379,7 +379,13 @@ nonisolated class WebSocketConnection {
             let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
             transportSend(closeFrame) { _ in }
             lock.withLock { _isConnected = false }
-            completion(nil, WebSocketError.connectionClosed(code, reason))
+            // A normal (1000) or no-status (1005) close is a graceful end-of-stream, not a
+            // failure — surface it as EOF so callers half-close instead of resetting.
+            if code == 1000 || code == 1005 {
+                completion(nil, nil)
+            } else {
+                completion(nil, WebSocketError.connectionClosed(code, reason))
+            }
         }
     }
 

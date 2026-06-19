@@ -63,6 +63,9 @@ nonisolated class QUICConnection {
         case datagramTooLarge(maxBound: Int)
         case timeout
         case closed
+        /// Peer closed the whole connection with a benign code (transport NO_ERROR, or
+        /// application H3_NO_ERROR / `closeErrCodeOK` 0x100).
+        case closedOK
 
         var errorDescription: String? {
             switch self {
@@ -74,6 +77,7 @@ nonisolated class QUICConnection {
             case .datagramTooLarge(let b): return "QUIC datagram exceeds path MTU (max \(b) B)"
             case .timeout: return "QUIC timeout"
             case .closed: return "QUIC closed"
+            case .closedOK: return "QUIC closed (OK)"
             }
         }
     }
@@ -1009,6 +1013,18 @@ nonisolated class QUICConnection {
 
     // MARK: Packet Processing
 
+    /// A peer CONNECTION_CLOSE is benign (graceful) when it carries transport NO_ERROR (0)
+    /// or an application code of 0 / 0x100 (HTTP/3 H3_NO_ERROR).
+    private func isBenignConnectionClose(_ ccerr: ngtcp2_ccerr) -> Bool {
+        if ccerr.type == NGTCP2_CCERR_TYPE_TRANSPORT {
+            return ccerr.error_code == 0
+        }
+        if ccerr.type == NGTCP2_CCERR_TYPE_APPLICATION {
+            return ccerr.error_code == 0 || ccerr.error_code == 0x100
+        }
+        return false
+    }
+
     fileprivate func handleReceivedPacket(_ data: Data) {
         guard let conn else { return }
         let ts = currentTimestamp()
@@ -1042,7 +1058,15 @@ nonisolated class QUICConnection {
             // has no read pressure and would otherwise sit on a dead connection for the keep-alive window.
             let error: Error
             switch rv {
-            case NGTCP2_ERR_DRAINING, NGTCP2_ERR_CLOSING:
+            case NGTCP2_ERR_DRAINING:
+                // Peer sent CONNECTION_CLOSE. A benign code (NO_ERROR / H3_NO_ERROR 0x100)
+                // is a graceful end-of-connection.
+                if let ccerr = ngtcp2_conn_get_ccerr(conn), isBenignConnectionClose(ccerr.pointee) {
+                    error = QUICError.closedOK
+                } else {
+                    error = QUICError.closed
+                }
+            case NGTCP2_ERR_CLOSING:
                 error = QUICError.closed
             case NGTCP2_ERR_CALLBACK_FAILURE, NGTCP2_ERR_CRYPTO:
                 error = QUICError.handshakeFailed("ngtcp2 error: \(rv)")
@@ -1308,6 +1332,12 @@ private let quicAckedCB: @convention(c) (
 /// the bare `#define` isn't imported into Swift.
 private let ngtcp2StreamCloseFlagAppErrorCodeSet: UInt32 = 0x01
 
+/// QUIC application close codes that signal a graceful end-of-stream rather than a
+/// failure: 0 (QUIC "no error") and 0x100 (HTTP/3 H3_NO_ERROR).
+private func isBenignQUICCloseCode(_ code: UInt64) -> Bool {
+    code == 0x00 || code == 0x100
+}
+
 /// Fires after both directions of a stream terminate. `recv_stream_data` doesn't
 /// fire for RESET_STREAM, so this is the app's only signal the stream is gone.
 private let quicStreamCloseCB: @convention(c) (
@@ -1316,9 +1346,11 @@ private let quicStreamCloseCB: @convention(c) (
 ) -> Int32 = { _, flags, sid, appErrorCode, ud, _ in
     guard let qc = qcFromUserData(ud) else { return 0 }
     let hasError = (flags & ngtcp2StreamCloseFlagAppErrorCodeSet) != 0
-    let error: Error? = hasError
+    let error: Error? = (hasError && !isBenignQUICCloseCode(appErrorCode))
         ? QUICConnection.QUICError.streamClosedWithError(appErrorCode: appErrorCode)
         : nil
+    // Pending writes always fail (the stream is gone), but a benign code is a clean
+    // read-side EOF, so only `streamTerminationHandler` distinguishes the two.
     qc.failPendingWrites(
         streamId: sid,
         error: error ?? QUICConnection.QUICError.closed
@@ -1334,8 +1366,10 @@ private let quicStreamResetCB: @convention(c) (
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, sid, _, appErrorCode, ud, _ in
     guard let qc = qcFromUserData(ud) else { return 0 }
-    let error = QUICConnection.QUICError.streamReset(appErrorCode: appErrorCode)
-    qc.failPendingWrites(streamId: sid, error: error)
+    let error: Error? = isBenignQUICCloseCode(appErrorCode)
+        ? nil
+        : QUICConnection.QUICError.streamReset(appErrorCode: appErrorCode)
+    qc.failPendingWrites(streamId: sid, error: error ?? QUICConnection.QUICError.closed)
     qc.streamTerminationHandler?(sid, error)
     return 0
 }

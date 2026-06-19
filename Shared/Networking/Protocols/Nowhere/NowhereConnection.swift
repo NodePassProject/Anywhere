@@ -146,6 +146,10 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 
     func handleSessionError(_ error: Error) {
+        if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
+            session.queue.async { [weak self] in self?.handleStreamTermination(error: nil) }
+            return
+        }
         session.queue.async { [weak self] in self?.fail(error) }
     }
 

@@ -117,7 +117,9 @@ nonisolated final class H2FrameReader {
                 return
             }
             guard let data, !data.isEmpty else {
-                completion(.failure(XHTTPError.connectionClosed))
+                // Clean transport FIN at a frame boundary (no transport error) is a graceful
+                // end of stream, not a failure — consumers convert this to EOF.
+                completion(.failure(XHTTPError.streamEnded))
                 return
             }
             self.lock.lock()

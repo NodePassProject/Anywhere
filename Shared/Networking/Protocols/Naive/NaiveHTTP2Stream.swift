@@ -238,6 +238,10 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
     }
 
     func handleReset(errorCode: UInt32) {
+        if errorCode == 0x0 /* NO_ERROR */ || errorCode == 0x8 /* CANCEL */ {
+            handleData(Data(), endStream: true)
+            return
+        }
         handleStreamError(NaiveHTTP2Error.streamReset(streamID))
     }
 
