@@ -1066,12 +1066,23 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         }
     }
 
+    /// Returns a description for a non-200 response `:status` (HPACK static-indexed error codes),
+    /// or nil for 200 / an encoding we don't decode.
+    private static func h2StatusError(_ block: Data) -> String? {
+        guard let first = block.first else { return nil }
+        switch first {
+        case 0x89: return "HTTP 204"; case 0x8a: return "HTTP 206"; case 0x8b: return "HTTP 304"
+        case 0x8c: return "HTTP 400"; case 0x8d: return "HTTP 404"; case 0x8e: return "HTTP 500"
+        default:   return nil
+        }
+    }
+
     private func routeFrame(_ f: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
         switch f.type {
         case XHTTPConnection.h2FrameData:
             handleData(streamId: f.streamId, flags: f.flags, payload: f.payload)
         case XHTTPConnection.h2FrameHeaders:
-            handleHeaders(streamId: f.streamId, flags: f.flags)
+            handleHeaders(streamId: f.streamId, flags: f.flags, payload: f.payload)
         case XHTTPConnection.h2FrameWindowUpdate:
             if f.streamId == 0 { handleConnWindowUpdate(f.payload) }
             else { handleStreamWindowUpdate(streamId: f.streamId, payload: f.payload) }
@@ -1116,7 +1127,20 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         work?()
     }
 
-    private func handleHeaders(streamId: UInt32, flags: UInt8) {
+    private func handleHeaders(streamId: UInt32, flags: UInt8, payload: Data) {
+        // A non-200 response means the request was rejected (e.g. a 400 on a detached download GET
+        // whose session the server can't pair). Surface it as an explicit error.
+        if let statusError = Self.h2StatusError(payload) {
+            lock.lock()
+            guard let stream = streams[streamId] else { lock.unlock(); return }
+            if stream.failure == nil {
+                stream.failure = XHTTPError.setupFailed("shared H2 stream \(streamId): \(statusError)")
+            }
+            let work = makeDeliveryLocked(stream)
+            lock.unlock()
+            work?()
+            return
+        }
         // Body arrives as DATA; only a HEADERS carrying END_STREAM closes the stream.
         guard flags & XHTTPConnection.h2FlagEndStream != 0 else { return }
         handleEnd(streamId: streamId)

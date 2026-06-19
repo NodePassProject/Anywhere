@@ -408,7 +408,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             extra = json
         }
 
-        let downloadSettings = parseDownloadSettings(from: extra["downloadSettings"] as? [String: Any])
+        let downloadSettings = parseDownloadSettings(from: extra["downloadSettings"] as? [String: Any], parentExtra: extra)
         return build(host: host, path: path, mode: mode, extra: extra, downloadSettings: downloadSettings)
     }
 
@@ -423,7 +423,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
     /// Parses `downloadSettings` from `extra`; returns nil when absent or unusable
     /// so callers fall back to a normal single-server connection.
-    static func parseDownloadSettings(from json: [String: Any]?) -> XHTTPDownloadSettings? {
+    static func parseDownloadSettings(from json: [String: Any]?, parentExtra: [String: Any] = [:]) -> XHTTPDownloadSettings? {
         guard let json else { return nil }
         guard let address = ((json["address"] as? String) ?? (json["server"] as? String)), !address.isEmpty else {
             return nil
@@ -456,10 +456,16 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             break
         }
 
-        let xhttpJSON = (json["xhttpSettings"] as? [String: Any])
+        // The server pairs the upload (POST) and download (GET) legs by session id, so the
+        // download GET must use the SAME session/seq/xPadding placement as the upload leg.
+        var mergedExtra = parentExtra
+        mergedExtra.removeValue(forKey: "xmux")
+        mergedExtra.removeValue(forKey: "downloadSettings")
+        let ownXhttpJSON = (json["xhttpSettings"] as? [String: Any])
             ?? (json["splithttpSettings"] as? [String: Any])
             ?? [:]
-        let xhttp = parse(fromJSON: xhttpJSON, serverAddress: address,
+        for (key, value) in ownXhttpJSON { mergedExtra[key] = value }
+        let xhttp = parse(fromJSON: mergedExtra, serverAddress: address,
                           tlsServerName: tls?.serverName, realityServerName: reality?.serverName)
 
         return XHTTPDownloadSettings(serverAddress: address, serverPort: port,
