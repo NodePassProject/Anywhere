@@ -514,7 +514,7 @@ final class MITMHTTP1Stream {
         // isn't defeated by an undecodable Content-Encoding (e.g. zstd).
         if phase == .httpRequest {
             rewrittenHeaders = rewrittenHeaders.map { entry in
-                entry.name.equalsIgnoringASCIICase("accept-encoding")
+                ASCII.equalsIgnoringCase(entry.name, "accept-encoding")
                     ? (name: entry.name, value: MITMBodyCodec.constrainedAcceptEncoding(entry.value))
                     : entry
             }
@@ -543,7 +543,7 @@ final class MITMHTTP1Stream {
                     warnIfBufferedScriptDeStreams(rewrittenHeaders)
                     // Force Connection: close so success and overflow paths both frame correctly.
                     var headers = rewrittenHeaders.filter {
-                        !$0.name.equalsIgnoringASCIICase("connection")
+                        !ASCII.equalsIgnoringCase($0.name, "connection")
                     }
                     headers.append((name: "Connection", value: "close"))
                     mode = .rewritingUntilClose(
@@ -566,7 +566,7 @@ final class MITMHTTP1Stream {
             let finalHeaders: [Header]
             if case .readUntilClose = framing {
                 var headers = rewrittenHeaders.filter {
-                    !$0.name.equalsIgnoringASCIICase("connection")
+                    !ASCII.equalsIgnoringCase($0.name, "connection")
                 }
                 headers.append((name: "Connection", value: "close"))
                 finalHeaders = headers
@@ -784,14 +784,15 @@ final class MITMHTTP1Stream {
     private func handleExpectContinue(startLine: String, headers: [Header]) -> [Header] {
         guard phase == .httpRequest, startLine.hasSuffix(" HTTP/1.1") else { return headers }
         let expectsContinue = headers.contains { entry in
-            entry.name.equalsIgnoringASCIICase("expect")
-                && entry.value
-                    .trimmingCharacters(in: CharacterSet.whitespaces)
-                    .equalsIgnoringASCIICase("100-continue")
+            ASCII.equalsIgnoringCase(entry.name, "expect")
+                && ASCII.equalsIgnoringCase(
+                    entry.value.trimmingCharacters(in: CharacterSet.whitespaces),
+                    "100-continue"
+                )
         }
         guard expectsContinue else { return headers }
         pendingClientBytes.append(serializeHead(startLine: "HTTP/1.1 100 Continue", headers: []))
-        return headers.filter { !$0.name.equalsIgnoringASCIICase("expect") }
+        return headers.filter { !ASCII.equalsIgnoringCase($0.name, "expect") }
     }
 
     // MARK: - Body forwarding (no rewrite)
@@ -1209,7 +1210,7 @@ final class MITMHTTP1Stream {
         guard phase == .httpResponse else { return nil }
         let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
-        return parseHTTPStatusCode(parts[1])
+        return HTTPHeader.parseStatusCode(parts[1])
     }
 
     /// Parses the hex chunk-size, ignoring any extensions after `;`.
@@ -1416,7 +1417,7 @@ final class MITMHTTP1Stream {
         if isHeadResponse {
             // Preserve server framing headers; the receiver knows not to read a body.
             finalHeaders = codecRequiresDecompression
-                ? result.headers.filter { !$0.name.equalsIgnoringASCIICase("content-encoding") }
+                ? result.headers.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
                 : result.headers
         } else {
             var stripped = strippedFramingHeaders(result.headers, dropContentEncoding: codecRequiresDecompression)
@@ -1462,7 +1463,7 @@ final class MITMHTTP1Stream {
         guard startLine.hasPrefix("HTTP/") else { return nil }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
-        return parseHTTPStatusCode(parts[1])
+        return HTTPHeader.parseStatusCode(parts[1])
     }
 
     /// Strips the framing headers we re-emit ourselves.
@@ -1471,11 +1472,11 @@ final class MITMHTTP1Stream {
         dropContentEncoding: Bool
     ) -> [Header] {
         headers.filter { entry in
-            if entry.name.equalsIgnoringASCIICase("content-length")
-                || entry.name.equalsIgnoringASCIICase("transfer-encoding") {
+            if ASCII.equalsIgnoringCase(entry.name, "content-length")
+                || ASCII.equalsIgnoringCase(entry.name, "transfer-encoding") {
                 return false
             }
-            if dropContentEncoding, entry.name.equalsIgnoringASCIICase("content-encoding") {
+            if dropContentEncoding, ASCII.equalsIgnoringCase(entry.name, "content-encoding") {
                 return false
             }
             return true
@@ -1537,7 +1538,7 @@ final class MITMHTTP1Stream {
         // ISO-8859-1, not ASCII: HTTP/1 header octets are a byte string (RFC 9110 §5.5 obs-text), and
         // latin-1 maps every byte 1:1 so it never fails (ASCII would reject any byte > 0x7F, common in
         // real Set-Cookie / Content-Disposition / Server fields). `serializeHead` re-emits these via
-        // `appendHeaderFieldBytes`, so the original octets round-trip exactly.
+        // `HTTPHeader.appendFieldBytes`, so the original octets round-trip exactly.
         guard let raw = String(data: data, encoding: .isoLatin1) else { return .forward }
         let lines = raw.components(separatedBy: "\r\n")
         guard let startLine = lines.first, !startLine.isEmpty else { return .forward }
@@ -1584,15 +1585,15 @@ final class MITMHTTP1Stream {
             let value = String(line[line.index(after: colon)...])
                 .trimmingCharacters(in: CharacterSet.whitespaces)
             // RFC 9110 §5.6.2: SP/CTL in a field-name is the classic obfuscated-TE smuggle.
-            guard isValidHTTPHeaderName(name) else { return .smuggling }
+            guard HTTPHeader.isValidName(name) else { return .smuggling }
             // CR/LF in a field-value would split the line on re-emission (request/response splitting).
             // NUL / other control bytes are not a splitting vector here and pass through verbatim.
             if Self.containsCRorLF(value) { return .smuggling }
-            if name.equalsIgnoringASCIICase("content-length") {
+            if ASCII.equalsIgnoringCase(name, "content-length") {
                 contentLengthValues.append(
                     value.trimmingCharacters(in: CharacterSet.whitespaces)
                 )
-            } else if name.equalsIgnoringASCIICase("transfer-encoding") {
+            } else if ASCII.equalsIgnoringCase(name, "transfer-encoding") {
                 transferEncodingValues.append(value)
             }
             headers.append((name: name, value: value))
@@ -1661,7 +1662,7 @@ final class MITMHTTP1Stream {
             .split(separator: ",", omittingEmptySubsequences: false)
             .last?
             .trimmingCharacters(in: CharacterSet.whitespaces)
-        return last?.equalsIgnoringASCIICase("chunked") == true
+        return last.map { ASCII.equalsIgnoringCase($0, "chunked") } == true
     }
 
     /// Returns the normalized Transfer-Encoding (lowercased, whitespace around commas removed) iff it is
@@ -1742,7 +1743,7 @@ final class MITMHTTP1Stream {
     private func isInterimResponseStartLine(_ startLine: String) -> Bool {
         guard startLine.hasPrefix("HTTP/1.") else { return false }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count >= 2, let status = parseHTTPStatusCode(parts[1]) else { return false }
+        guard parts.count >= 2, let status = HTTPHeader.parseStatusCode(parts[1]) else { return false }
         return (100..<200).contains(status) && status != 101
     }
 
@@ -1778,7 +1779,7 @@ final class MITMHTTP1Stream {
         // Defense-in-depth: enforce the no-CR/LF invariant at the serialization boundary.
         let safeHeaders = headers.filter { entry in
             // CR/LF backstop: would split the field into a smuggled header on the wire (NUL is
-            // already screened upstream via `isValidHTTPHeaderValue`).
+            // already screened upstream via `HTTPHeader.isValidValue`).
             guard !Self.containsCRorLF(entry.name),
                   !Self.containsCRorLF(entry.value) else {
                 logger.warning("HTTP/1 \(host): dropping header with CR/LF from serialized head: \(entry.name)")
@@ -1794,12 +1795,12 @@ final class MITMHTTP1Stream {
         var out = Data(capacity: size)
         // Emit as ISO-8859-1 bytes so a latin-1 header octet round-trips exactly (plain `.utf8`
         // would re-encode a 0x80–0xFF octet as a 2-byte sequence, corrupting it).
-        out.appendHeaderFieldBytes(startLine)
+        HTTPHeader.appendFieldBytes(startLine, to: &out)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in safeHeaders {
-            out.appendHeaderFieldBytes(name)
+            HTTPHeader.appendFieldBytes(name, to: &out)
             out.append(0x3A); out.append(0x20) // ':'  ' '
-            out.appendHeaderFieldBytes(value)
+            HTTPHeader.appendFieldBytes(value, to: &out)
             out.append(0x0D); out.append(0x0A)
         }
         out.append(0x0D); out.append(0x0A)
@@ -1835,7 +1836,7 @@ final class MITMHTTP1Stream {
     /// RFC 9110 §9.1: method is a `token`; blocks a script-supplied value from
     /// smuggling a full request line.
     private static func isValidMethodToken(_ s: String) -> Bool {
-        return isValidHTTPHeaderName(s)
+        return HTTPHeader.isValidName(s)
     }
 
     /// RFC 9112 §3.2: rejects SP/CTL/DEL in script- or regex-produced request-targets.
@@ -1872,7 +1873,7 @@ final class MITMHTTP1Stream {
                 return .none
             }
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            if parts.count >= 2, let status = parseHTTPStatusCode(parts[1]) {
+            if parts.count >= 2, let status = HTTPHeader.parseStatusCode(parts[1]) {
                 responseStatus = status
                 // RFC 9110 §9.3.6: 2xx to CONNECT makes the connection an opaque
                 // tunnel; treat like 101.
@@ -1891,9 +1892,9 @@ final class MITMHTTP1Stream {
         var transferEncoding: String?
         var contentLength: String?
         for (name, value) in headers {
-            if name.equalsIgnoringASCIICase("transfer-encoding") {
+            if ASCII.equalsIgnoringCase(name, "transfer-encoding") {
                 transferEncoding = value
-            } else if name.equalsIgnoringASCIICase("content-length") {
+            } else if ASCII.equalsIgnoringCase(name, "content-length") {
                 contentLength = value
             }
         }
@@ -1922,7 +1923,7 @@ final class MITMHTTP1Stream {
 
     /// Warns when a buffered script de-streams a streaming response (SSE etc.). Advisory only.
     private func warnIfBufferedScriptDeStreams(_ headers: [Header]) {
-        let contentType = firstHeaderValue(headers, name: "content-type")
+        let contentType = HTTPHeader.firstValue(in: headers, named: "content-type")
         guard phase == .httpResponse,
               MITMScriptTransform.isStreamingMediaType(contentType) else { return }
         logger.warning("\(host): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
@@ -1932,7 +1933,7 @@ final class MITMHTTP1Stream {
     /// would let a second `Content-Encoding` slip past undecoded.
     private func combinedHeaderValue(_ headers: [Header], name: String) -> String? {
         var parts: [String] = []
-        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
+        for (n, v) in headers where ASCII.equalsIgnoringCase(n, name) {
             parts.append(v)
         }
         if parts.isEmpty { return nil }
@@ -1948,7 +1949,7 @@ final class MITMHTTP1Stream {
         guard phase == .httpRequest, let authority = effectiveAuthority else {
             return headers
         }
-        var result = headers.filter { !$0.name.equalsIgnoringASCIICase("host") }
+        var result = headers.filter { !ASCII.equalsIgnoringCase($0.name, "host") }
         result.append((name: "Host", value: authority))
         return result
     }
@@ -2033,10 +2034,10 @@ final class MITMHTTP1Stream {
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
-                current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
+                current.removeAll { ASCII.equalsIgnoringCase($0.name, nameLower) }
             case .headerReplace(let name, let value):
                 current = current.map { entry in
-                    entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
+                    ASCII.equalsIgnoringCase(entry.name, name) ? (name: name, value: value) : entry
                 }
             case .rewrite, .script, .streamScript, .bodyReplace, .bodyJSON:
                 continue
@@ -2081,7 +2082,7 @@ final class MITMHTTP1Stream {
             }
         case .httpResponse:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            if parts.count >= 2, let code = parseHTTPStatusCode(parts[1]) {
+            if parts.count >= 2, let code = HTTPHeader.parseStatusCode(parts[1]) {
                 status = code
             }
             method = originatingRequest?.method

@@ -729,8 +729,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // RFC 9113 §8.2.1/§8.1.1: a response field with an illegal name octet (uppercase / control /
         // SP / DEL), or CR/LF/NUL / edge-whitespace in its value, is malformed. Stream error (HPACK
         // table stayed in sync); never re-encode the bytes to the client.
-        guard http2HeaderOctetsValid(decoded) else {
-            logger.warning("h2-upstream \(host) stream \(clientID): response header with CR/LF/NUL or invalid field-name; resetting stream")
+        if let bad = HTTPHeader.firstInvalidOctet(decoded) {
+            logger.warning("h2-upstream \(host) stream \(clientID): response header rejected — \(bad.reason) on \"\(HTTPHeader.escapedForLog(bad.name))\"; resetting stream")
             sink?.deliverResponseReset(streamID: clientID)
             releaseStream(clientID: clientID, resetOrigin: true)
             return false
@@ -770,8 +770,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             return finishResponseStream(streamID: clientID, endStream: true, trailers: trailerFields)
         }
 
-        guard let rawStatus = firstHeaderValue(decoded, name: ":status"),
-              let status = parseHTTPStatusCode(rawStatus) else {
+        guard let rawStatus = HTTPHeader.firstValue(in: decoded, named: ":status"),
+              let status = HTTPHeader.parseStatusCode(rawStatus) else {
             fail("response missing :status")
             return false
         }
@@ -820,7 +820,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         }
 
         if rewriter.hasBufferedBodyRule(phase: .httpResponse, requestURL: responseURL) {
-            let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
+            let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
             responseStreams[clientID] = .buffering(BufferedResponse(
                 data: Data(), codec: codec, status: status,
                 headers: rewritten, originatingRequest: originatingRequest, neverIndexed: neverIndexed
@@ -1017,7 +1017,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             plaintext = buf.data
         }
         let scriptedHeaders = buf.codec.requiresDecompression
-            ? buf.headers.filter { !$0.name.equalsIgnoringASCIICase("content-encoding") }
+            ? buf.headers.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
             : buf.headers
         let message = HTTPMessage(
             phase: .httpResponse,

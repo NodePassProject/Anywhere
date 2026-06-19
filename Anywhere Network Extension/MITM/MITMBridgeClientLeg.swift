@@ -430,6 +430,12 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let decoded = result.fields
         let neverIndexed = result.neverIndexed
 
+        // RFC 9113 §5.1: a HEADERS frame moves an idle stream to "open". Record a brand-new (higher-
+        // numbered) stream as the highest opened stream *now*, before the validation guards below can
+        // RST it.
+        let isNewStream = streamID > highestStreamID
+        if isNewStream { highestStreamID = streamID }
+
         // RFC 9113 §8.3: a malformed pseudo-header section is a smuggling vector once re-serialized
         // to HTTP/1.1. RST the stream; the HPACK table already absorbed the block, so it stays in sync.
         guard MITMBridgeHeaders.pseudoHeadersValid(decoded, isRequest: true) else {
@@ -441,8 +447,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
         // RFC 9113 §8.2.1: an illegal field-name octet or CR/LF/NUL/edge-whitespace in a value is a
         // request-splitting vector once re-serialized to HTTP/1.1 (HPACK only checks UTF-8). RST.
-        guard http2HeaderOctetsValid(decoded) else {
-            logger.warning("bridge \(host) stream \(streamID): header with CR/LF/NUL or invalid field-name; RST")
+        if let bad = HTTPHeader.firstInvalidOctet(decoded) {
+            logger.warning("bridge \(host) stream \(streamID): header rejected — \(bad.reason) on \"\(HTTPHeader.escapedForLog(bad.name))\"; RST")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
                         abortUpstream: requestStreams[streamID] != nil)
             return false
@@ -460,7 +466,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
         // A HEADERS block with no :method is either a request trailer (on an open stream) or a
         // malformed request missing its required pseudo-header (on a stream not yet open).
-        if firstHeaderValue(decoded, name: ":method") == nil {
+        if HTTPHeader.firstValue(in: decoded, named: ":method") == nil {
             guard requestStreams[streamID] != nil else {
                 // Missing :method on a never-opened stream → malformed (RFC 9113 §8.3.1). RST rather
                 // than drop the HEADERS and strand the client.
@@ -486,11 +492,11 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             return endRequestBody(streamID, trailers: trailers)
         }
 
-        guard streamID > highestStreamID else { fail("non-increasing stream id \(streamID)"); return false }
-        highestStreamID = streamID
+        // RFC 9113 §5.1.1: a request HEADERS (carries :method) must open a *new* stream.
+        guard isNewStream else { fail("non-increasing stream id \(streamID)"); return false }
 
-        let method = firstHeaderValue(decoded, name: ":method") ?? "GET"
-        let path = firstHeaderValue(decoded, name: ":path")
+        let method = HTTPHeader.firstValue(in: decoded, named: ":method") ?? "GET"
+        let path = HTTPHeader.firstValue(in: decoded, named: ":path")
         let requestURL = path.map { "https://\(host)\($0)" }
         streamMethods[streamID] = method.uppercased()
 
@@ -531,7 +537,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         // withholding its body would stall.
         if !endStream, Self.expectsContinue(rewritten) {
             sendInterimContinue(streamID)
-            rewritten = rewritten.filter { !$0.name.equalsIgnoringASCIICase("expect") }
+            rewritten = rewritten.filter { !ASCII.equalsIgnoringCase($0.name, "expect") }
         }
 
         if rewriter.hasStreamScriptRule(phase: .httpRequest, requestURL: gateURL) {
@@ -540,7 +546,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
         let hasBufferedRule = rewriter.hasBufferedBodyRule(phase: .httpRequest, requestURL: gateURL)
         if hasBufferedRule, (endStream || shouldBuffer(headers: rewritten)) {
-            let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
+            let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
             requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: true, resolvedUpstream: resolvedUpstream))
             if endStream { return finishBufferedRequest(streamID) }
             return false
@@ -552,11 +558,11 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let framing: MITMBridgeBodyFraming
         if endStream {
             framing = .none
-        } else if let raw = firstHeaderValue(rewritten, name: "content-length"),
+        } else if let raw = HTTPHeader.firstValue(in: rewritten, named: "content-length"),
                   let n = Int(raw.trimmingCharacters(in: .whitespaces)), n >= 0 {
             framing = n == 0 ? .none : .contentLength(n)
         } else if bodylessMethod {
-            let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
+            let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
             requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: false, resolvedUpstream: resolvedUpstream))
             return false
         } else {
@@ -588,16 +594,16 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         neverIndexed: Set<String>,
         resolvedUpstream: (host: String, port: UInt16?)?
     ) -> MITMRequestHead? {
-        guard let method = firstHeaderValue(rewritten, name: ":method"),
-              let path = firstHeaderValue(rewritten, name: ":path"),
+        guard let method = HTTPHeader.firstValue(in: rewritten, named: ":method"),
+              let path = HTTPHeader.firstValue(in: rewritten, named: ":path"),
               !method.isEmpty, !path.isEmpty else { return nil }
-        let scheme = firstHeaderValue(rewritten, name: ":scheme") ?? "https"
-        let authority = firstHeaderValue(rewritten, name: ":authority") ?? host
+        let scheme = HTTPHeader.firstValue(in: rewritten, named: ":scheme") ?? "https"
+        let authority = HTTPHeader.firstValue(in: rewritten, named: ":authority") ?? host
         // RFC 9113 §10.3: a pseudo-header carrying CR/LF/NUL (or non-token method, or target with
         // whitespace) would split the HTTP/1.1 request line / Host header upstream. Refuse it.
-        guard isValidHTTPHeaderName(method),
-              isValidHTTPHeaderValue(path), !path.utf8.contains(0x20),
-              isValidHTTPHeaderValue(authority) else {
+        guard HTTPHeader.isValidName(method),
+              HTTPHeader.isValidValue(path), !path.utf8.contains(0x20),
+              HTTPHeader.isValidValue(authority) else {
             logger.warning("bridge \(host): refusing request with malformed pseudo-header")
             return nil
         }
@@ -615,9 +621,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     private func shouldBuffer(headers: [(name: String, value: String)]) -> Bool {
-        let codec = MITMBodyCodec.plan(for: firstHeaderValue(headers, name: "content-encoding"))
+        let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: headers, named: "content-encoding"))
         guard codec.supported else { return false }
-        if let raw = firstHeaderValue(headers, name: "content-length"),
+        if let raw = HTTPHeader.firstValue(in: headers, named: "content-length"),
            let length = Int(raw.trimmingCharacters(in: .whitespaces)) {
             return length <= MITMBodyCodec.maxBufferedBodyBytes
         }
@@ -725,7 +731,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
             return false
         }
-        let url = firstHeaderValue(buf.rewrittenHeaders, name: ":path").map { "https://\(host)\($0)" }
+        let url = HTTPHeader.firstValue(in: buf.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
         delegate?.clientLegSendRequestHead(head, url: url, endStream: false)
         if !buf.data.isEmpty { delegate?.clientLegSendRequestData(streamID: streamID, buf.data, endStream: false) }
         // Chunked framing self-delimits via END_STREAM, so no Content-Length to enforce.
@@ -770,12 +776,12 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             plaintext = buf.data
         }
         let scriptedHeaders = buf.codec.requiresDecompression
-            ? buf.rewrittenHeaders.filter { !$0.name.equalsIgnoringASCIICase("content-encoding") }
+            ? buf.rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
             : buf.rewrittenHeaders
-        let url = firstHeaderValue(buf.rewrittenHeaders, name: ":path").map { "https://\(host)\($0)" }
+        let url = HTTPHeader.firstValue(in: buf.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
         let message = HTTPMessage(
             phase: .httpRequest,
-            method: firstHeaderValue(scriptedHeaders, name: ":method"),
+            method: HTTPHeader.firstValue(in: scriptedHeaders, named: ":method"),
             url: url,
             status: nil,
             headers: scriptedHeaders.filter { !$0.name.hasPrefix(":") },
@@ -804,7 +810,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError, abortUpstream: true)
             return
         }
-        let url = firstHeaderValue(headers, name: ":path").map { "https://\(host)\($0)" }
+        let url = HTTPHeader.firstValue(in: headers, named: ":path").map { "https://\(host)\($0)" }
         delegate?.clientLegSendRequestHead(head, url: url, endStream: body.isEmpty)
         if !body.isEmpty { delegate?.clientLegSendRequestData(streamID: streamID, body, endStream: true) }
     }
@@ -829,10 +835,11 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     /// Expect: 100-continue — client asks the server to confirm before sending the body (RFC 9110 §10.1.1).
     private static func expectsContinue(_ headers: [(name: String, value: String)]) -> Bool {
         headers.contains { entry in
-            entry.name.equalsIgnoringASCIICase("expect")
-                && entry.value
-                    .trimmingCharacters(in: CharacterSet.whitespaces)
-                    .equalsIgnoringASCIICase("100-continue")
+            ASCII.equalsIgnoringCase(entry.name, "expect")
+                && ASCII.equalsIgnoringCase(
+                    entry.value.trimmingCharacters(in: CharacterSet.whitespaces),
+                    "100-continue"
+                )
         }
     }
 

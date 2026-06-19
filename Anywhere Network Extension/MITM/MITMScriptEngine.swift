@@ -553,11 +553,11 @@ final class MITMScriptEngine {
                 logger.warning("[MITM][JS] dropping ctx.headers entry with null/undefined/non-stringifiable component")
                 continue
             }
-            guard isValidHTTPHeaderName(name) else {
+            guard HTTPHeader.isValidName(name) else {
                 logger.warning("[MITM][JS] dropping header with invalid name: \(name)")
                 continue
             }
-            guard isValidHTTPHeaderValue(val) else {
+            guard HTTPHeader.isValidValue(val) else {
                 logger.warning("[MITM][JS] dropping header \(name) with CR/LF/NUL in value")
                 continue
             }
@@ -1479,7 +1479,7 @@ final class MITMScriptEngine {
             .flatMap { $0.isString ? $0.toString() : nil }?
             .uppercased() ?? defaultMethod
         // RFC 9110 token alphabet — reject CR/LF smuggling with a clear error.
-        guard isValidHTTPHeaderName(method) else {
+        guard HTTPHeader.isValidName(method) else {
             return Self.rejected("Anywhere.http: invalid method token", in: ctx)
         }
         request.httpMethod = method
@@ -1615,11 +1615,11 @@ final class MITMScriptEngine {
                   let valVal = value.objectForKeyedSubscript(name), !valVal.isUndefined, !valVal.isNull,
                   let val = valVal.toString()
             else { continue }
-            guard isValidHTTPHeaderName(name) else {
+            guard HTTPHeader.isValidName(name) else {
                 logger.warning("[MITM][JS] Anywhere.http: dropping request header with invalid name: \(name)")
                 continue
             }
-            guard isValidHTTPHeaderValue(val) else {
+            guard HTTPHeader.isValidValue(val) else {
                 logger.warning("[MITM][JS] Anywhere.http: dropping request header \(name) with CR/LF/NUL in value")
                 continue
             }

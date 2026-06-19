@@ -31,7 +31,7 @@ extension MITMScriptEngine.SynthesizedResponse {
             if Self.disallowedSynthHeaders.contains(name.lowercased()) {
                 continue
             }
-            guard isValidHTTPHeaderName(name), isValidHTTPHeaderValue(entry.value) else {
+            guard HTTPHeader.isValidName(name), HTTPHeader.isValidValue(entry.value) else {
                 onDrop(entry.name)
                 continue
             }
@@ -53,7 +53,7 @@ extension MITMScriptEngine.SynthesizedResponse {
     /// Appends a `Date` (RFC 9110 §6.6.1: origins generate one per response) unless the script
     /// already supplied one. `lowercaseName` matches HTTP/2's requirement (RFC 9113 §8.2.1).
     func withDateStamp(_ headers: [(name: String, value: String)], lowercaseName: Bool) -> [(name: String, value: String)] {
-        guard !headers.contains(where: { $0.name.equalsIgnoringASCIICase("date") }) else { return headers }
+        guard !headers.contains(where: { ASCII.equalsIgnoringCase($0.name, "date") }) else { return headers }
         return headers + [(name: lowercaseName ? "date" : "Date", value: Self.imfFixdateFormatter.string(from: Date()))]
     }
 
