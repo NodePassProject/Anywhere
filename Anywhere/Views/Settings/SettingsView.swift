@@ -8,12 +8,14 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @Environment(VoyagerStore.self) private var voyagerStore
     @Environment(AppSettings.self) private var settings
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
-    
-    @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
 
+    @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+    
+    @State private var showVoyager = false
     @State private var showICloudRestartAlert = false
     @State private var showInsecureAlert = false
 
@@ -21,6 +23,19 @@ struct SettingsView: View {
         @Bindable var settings = settings
         @Bindable var ruleSetStore = ruleSetStore
         Form {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { voyagerStore.isMember },
+                    set: { newValue in
+                        if newValue && !voyagerStore.isMember {
+                            showVoyager = true
+                        }
+                    }
+                )) {
+                    TextWithColorfulIcon(title: "Anywhere Voyager", comment: nil, systemName: "sparkles.2", foregroundColor: .white, backgroundColor: Color(hex: 0x05060F0))
+                }
+            }
+            
             Section("App") {
                 Toggle(isOn: $settings.iCloudSyncEnabled) {
                     TextWithColorfulIcon(title: "iCloud Sync", comment: nil, systemName: "icloud.fill", foregroundColor: .blue, backgroundColor: .white)
@@ -142,13 +157,17 @@ struct SettingsView: View {
         .onChange(of: settings.iCloudSyncEnabled) { _, newValue in
             showICloudRestartAlert = newValue != JSONBlobStore.shared.usesCloudKit
         }
+        .onAppear {
+            adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+        }
+        .fullScreenCover(isPresented: $showVoyager) {
+            AnywhereVoyagerView()
+                .environment(voyagerStore)
+        }
         .alert("Restart Required", isPresented: $showICloudRestartAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Restart Anywhere for the change to take effect.")
-        }
-        .onAppear {
-            adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {
