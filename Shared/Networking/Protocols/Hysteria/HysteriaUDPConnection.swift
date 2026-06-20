@@ -93,15 +93,15 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
 
     // MARK: - Incoming datagrams (from session)
 
-    func handleIncomingDatagram(_ msg: HysteriaProtocol.UDPMessage) {
+    func handleIncomingDatagram(_ message: HysteriaProtocol.UDPMessage) {
         // On session queue. `cancel()` defers `releaseUDPSession`; datagrams
         // in that window must not repopulate a dead connection.
         if state == .closed { return }
         let assembled: Data?
-        if msg.fragCount <= 1 {
-            assembled = msg.data
+        if message.fragCount <= 1 {
+            assembled = message.data
         } else {
-            assembled = assembleFragment(msg)
+            assembled = assembleFragment(message)
         }
         // Drop empty payloads: receiveLoop treats empty Data as EOF, so a
         // zero-byte datagram would close the flow.
@@ -119,21 +119,21 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         packetQueue.append(payload)
     }
 
-    private func assembleFragment(_ msg: HysteriaProtocol.UDPMessage) -> Data? {
-        guard msg.fragID < msg.fragCount, msg.fragCount > 0 else { return nil }
+    private func assembleFragment(_ message: HysteriaProtocol.UDPMessage) -> Data? {
+        guard message.fragID < message.fragCount, message.fragCount > 0 else { return nil }
 
         let now = DispatchTime.now()
         let nowNs = now.uptimeNanoseconds
 
         // Lazy TTL eviction: a full-dict scan per fragment is noticeable at the cap.
-        let existing = defragSlots[msg.packetID]
+        let existing = defragSlots[message.packetID]
         let existingIsExpired = existing.map {
             nowNs &- $0.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
         } ?? false
 
         var slot: DefragSlot
         if let existing, !existingIsExpired,
-           existing.fragmentCount == Int(msg.fragCount) {
+           existing.fragmentCount == Int(message.fragCount) {
             slot = existing
         } else {
             // New slot at cap: evict expired slots first, else the oldest.
@@ -154,24 +154,24 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
                 }
             }
             slot = DefragSlot(
-                fragments: Array(repeating: nil, count: Int(msg.fragCount)),
+                fragments: Array(repeating: nil, count: Int(message.fragCount)),
                 received: 0,
-                fragmentCount: Int(msg.fragCount),
+                fragmentCount: Int(message.fragCount),
                 createdAt: now
             )
         }
 
-        if slot.fragments[Int(msg.fragID)] == nil {
-            slot.fragments[Int(msg.fragID)] = msg.data
+        if slot.fragments[Int(message.fragID)] == nil {
+            slot.fragments[Int(message.fragID)] = message.data
             slot.received += 1
         }
 
         if slot.received < slot.fragmentCount {
-            defragSlots[msg.packetID] = slot
+            defragSlots[message.packetID] = slot
             return nil
         }
 
-        defragSlots.removeValue(forKey: msg.packetID)
+        defragSlots.removeValue(forKey: message.packetID)
         var full = Data()
         for part in slot.fragments {
             guard let part else { return nil }

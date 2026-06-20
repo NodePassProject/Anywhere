@@ -153,9 +153,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         defer { draining = false }
         while ourStreamID.count < maxConcurrentStreams, let clientID = queueOrder.first {
             queueOrder.removeFirst()
-            guard let q = queuedRequests.removeValue(forKey: clientID) else { continue }
-            openUpstreamStream(q.head, endStream: q.endStreamOnHead)
-            for chunk in q.body { sendRequestData(streamID: clientID, chunk.data, endStream: chunk.endStream) }
+            guard let queuedRequest = queuedRequests.removeValue(forKey: clientID) else { continue }
+            openUpstreamStream(queuedRequest.head, endStream: queuedRequest.endStreamOnHead)
+            for chunk in queuedRequest.body { sendRequestData(streamID: clientID, chunk.data, endStream: chunk.endStream) }
         }
     }
 
@@ -260,20 +260,20 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     private func ensurePrefaceSent() {
         guard !prefaceSent else { return }
         prefaceSent = true
-        var d = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
-        Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 18, into: &d)
-        d.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]) // SETTINGS_ENABLE_PUSH = 0
+        var preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
+        Codec.appendFrameHeader(typeCode: Codec.FrameType.settings, flags: 0, streamID: 0, payloadLength: 18, into: &preface)
+        preface.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]) // SETTINGS_ENABLE_PUSH = 0
         let w = UInt32(Self.receiveWindow)
-        d.append(contentsOf: [0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE (per-stream)
+        preface.append(contentsOf: [0x00, 0x04, // SETTINGS_INITIAL_WINDOW_SIZE (per-stream)
                               UInt8((w >> 24) & 0xFF), UInt8((w >> 16) & 0xFF),
                               UInt8((w >> 8) & 0xFF), UInt8(w & 0xFF)])
         // Bound the decoded response-header list so a conformant origin self-limits (also enforced
         // in the HPACK decoder — RFC 9113 §6.5.2).
         let maxHeaderList = UInt32(HPACKDecoder.maxDecodedHeaderListSize)
-        d.append(contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
+        preface.append(contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
                               UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
                               UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)])
-        onUpstreamBytes?(d)
+        onUpstreamBytes?(preface)
         // INITIAL_WINDOW_SIZE doesn't move the connection window (RFC 9113 §6.9.2); raise it
         // explicitly so the connection isn't the ~64 KiB bottleneck. Direct emit (not batched): must
         // reach the origin before any DATA pass, or it throttles the first response to 64 KiB.
@@ -527,7 +527,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // before it can stall on a depleted window, and never lingers across a script hop.
         flushBatchedCredits()
         if parked { return }
-        let c = parkedCompletion; parkedCompletion = nil; c?()
+        let completion = parkedCompletion; parkedCompletion = nil; completion?()
     }
 
     /// Emits the WINDOW_UPDATEs accumulated this pass — one per credited stream plus one for the
@@ -546,7 +546,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
 
     private func resumeAfterScript() {
-        guard !torn, !parseError else { let c = parkedCompletion; parkedCompletion = nil; c?(); return }
+        guard !torn, !parseError else { let completion = parkedCompletion; parkedCompletion = nil; completion?(); return }
         let parked = pump()
         finishPass(parked: parked)
     }
@@ -909,15 +909,15 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Credits the origin's connection (stream-0) receive window. Always eager: it keeps the
     /// aggregate window open while per-stream windows do the actual backpressure, and crediting
     /// every received byte exactly once keeps the connection window from leaking shut.
-    private func creditConnectionWindow(_ n: Int) {
-        guard n > 0 else { return }
+    private func creditConnectionWindow(_ byteCount: Int) {
+        guard byteCount > 0 else { return }
         // Accumulate; flushed at `finishPass`.
-        batchedConnCredit += n
+        batchedConnCredit += byteCount
     }
 
-    private func creditStreamWindow(_ upstreamStreamID: UInt32, _ n: Int) {
-        guard n > 0 else { return }
-        batchedStreamCredit[upstreamStreamID, default: 0] += n
+    private func creditStreamWindow(_ upstreamStreamID: UInt32, _ byteCount: Int) {
+        guard byteCount > 0 else { return }
+        batchedStreamCredit[upstreamStreamID, default: 0] += byteCount
     }
 
     /// Eager credit of both windows — used where the leg consumes the bytes itself (buffered/
@@ -1063,19 +1063,19 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// whole connection for each frame — a head-of-line block on siblings. Tolerated because such
     /// scripts are synchronous and per small frame (no `await`), so the stall is brief.
     private func handleStreamingData(streamID: UInt32, body: Data, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
-        guard case .streaming(let st)? = responseStreams[streamID] else { return false }
-        if st.cursor.bypass {
+        guard case .streaming(let streamingResponse)? = responseStreams[streamID] else { return false }
+        if streamingResponse.cursor.bypass {
             advanceStreaming(streamID)
             deliverStreamingFrame(streamID: streamID, body: body, endStream: endStream, trailers: trailers)
             return false
         }
         let context = MITMScriptEngine.FrameContext(
             phase: .httpResponse,
-            method: st.originatingRequest?.method,
-            url: st.originatingRequest?.url,
-            status: st.status,
-            headers: st.headers.filter { !$0.name.hasPrefix(":") },
-            frameIndex: st.frameIndex,
+            method: streamingResponse.originatingRequest?.method,
+            url: streamingResponse.originatingRequest?.url,
+            status: streamingResponse.status,
+            headers: streamingResponse.headers.filter { !$0.name.hasPrefix(":") },
+            frameIndex: streamingResponse.frameIndex,
             isLast: endStream,
             ruleSetID: rewriter.ruleSetID
         )
@@ -1083,7 +1083,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             body,
             rules: rewriter.rules(phase: .httpResponse),
             frameContext: context,
-            cursor: st.cursor,
+            cursor: streamingResponse.cursor,
             engineProvider: rewriter.scriptEngineProvider,
             resumeOn: lwipQueue
         ) { [weak self] result in
@@ -1096,10 +1096,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
 
     private func advanceStreaming(_ streamID: UInt32, growth: Int = 0) {
-        guard case .streaming(var st)? = responseStreams[streamID] else { return }
-        st.frameIndex += 1
+        guard case .streaming(var streamingResponse)? = responseStreams[streamID] else { return }
+        streamingResponse.frameIndex += 1
         // Per-frame growth cap (approximate); a large jump trips bypass for the rest of the stream.
-        if growth > Self.maxStreamingRewriteGrowthBytes { st.cursor.bypass = true }
-        responseStreams[streamID] = .streaming(st)
+        if growth > Self.maxStreamingRewriteGrowthBytes { streamingResponse.cursor.bypass = true }
+        responseStreams[streamID] = .streaming(streamingResponse)
     }
 }

@@ -1180,12 +1180,12 @@ struct ProxyEditorView: View {
         
         var vlessRealityConfiguration: RealityConfiguration?
         if isVLESSReality {
-            guard let pk = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
-            let sid = Data(hexString: vlessRealityShortId) ?? Data()
+            guard let publicKey = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
+            let shortId = Data(hexString: vlessRealityShortId) ?? Data()
             vlessRealityConfiguration = RealityConfiguration(
                 serverName: vlessRealitySNI,
-                publicKey: pk,
-                shortId: sid,
+                publicKey: publicKey,
+                shortId: shortId,
                 fingerprint: vlessFingerprint
             )
         }
@@ -1304,20 +1304,20 @@ struct ProxyEditorView: View {
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
             let alpn: [String]? = anytlsALPN.isEmpty ? nil : anytlsALPN.split(separator: ",").map { String($0) }
             // Pool-tuning knobs aren't UI-editable: preserve imported values, else sing-anytls defaults.
-            let ici: Int
-            let it: Int
-            let mis: Int
+            let idleCheckInterval: Int
+            let idleTimeout: Int
+            let minIdleSession: Int
             if let existing = self.configuration?.outbound, case .anytls(_, let c, let t, let m, _) = existing {
-                ici = c; it = t; mis = m
+                idleCheckInterval = c; idleTimeout = t; minIdleSession = m
             } else {
-                ici = 30; it = 30; mis = 0
+                idleCheckInterval = 30; idleTimeout = 30; minIdleSession = 0
             }
             let ech = anytlsECHConfig.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .anytls(
                 password: anytlsPassword,
-                idleCheckInterval: ici,
-                idleTimeout: it,
-                minIdleSession: mis,
+                idleCheckInterval: idleCheckInterval,
+                idleTimeout: idleTimeout,
+                minIdleSession: minIdleSession,
                 tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint)
             )
         case .shadowsocks:

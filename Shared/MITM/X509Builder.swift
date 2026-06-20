@@ -207,10 +207,10 @@ enum X509Builder {
     }
 
     private static func encodeBasicConstraintsCA(pathLen: Int) -> Data {
-        var bc = Data()
-        bc.append(ASN1.boolean(true))                 // cA = TRUE
-        bc.append(ASN1.integer(Int64(pathLen)))       // pathLenConstraint
-        let value = ASN1.sequence(bc)
+        var basicConstraints = Data()
+        basicConstraints.append(ASN1.boolean(true))                 // cA = TRUE
+        basicConstraints.append(ASN1.integer(Int64(pathLen)))       // pathLenConstraint
+        let value = ASN1.sequence(basicConstraints)
         return encodeExtension(oid: ASN1OID.basicConstraints, critical: true, value: value)
     }
 
@@ -258,15 +258,15 @@ enum X509Builder {
         return encodeExtension(oid: ASN1OID.subjectAltName, critical: false, value: value)
     }
 
-    /// Returns the 4- or 16-byte network-order address, or nil if `s` is not an
+    /// Returns the 4- or 16-byte network-order address, or nil if `hostname` is not an
     /// IP literal; zone identifiers (`%en0`) are invalid in certificates.
-    private static func parseIPAddress(_ s: String) -> Data? {
+    private static func parseIPAddress(_ hostname: String) -> Data? {
         // SNI wraps IPv6 literals in [brackets].
         let trimmed: String
-        if s.hasPrefix("["), s.hasSuffix("]") {
-            trimmed = String(s.dropFirst().dropLast())
+        if hostname.hasPrefix("["), hostname.hasSuffix("]") {
+            trimmed = String(hostname.dropFirst().dropLast())
         } else {
-            trimmed = s
+            trimmed = hostname
         }
         if trimmed.contains("%") { return nil }
         // `IPv4Address` accepts inet_aton shorthands ("1.2.3") that are valid DNS

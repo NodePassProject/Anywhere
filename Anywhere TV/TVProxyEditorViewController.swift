@@ -693,7 +693,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .vlessRealityPublicKey: vlessRealityPublicKey = value
         case .vlessRealityShortId: vlessRealityShortId = value
         case .vlessFingerprint:
-            if let fp = TLSFingerprint(rawValue: value) { vlessFingerprint = fp }
+            if let fingerprint = TLSFingerprint(rawValue: value) { vlessFingerprint = fingerprint }
         case .vlessXHTTPDownloadEnabled: vlessXHTTPDownloadEnabled = value == "true"
         case .vlessXHTTPDownloadAddress: vlessXHTTPDownloadAddress = value
         case .vlessXHTTPDownloadPort: vlessXHTTPDownloadPort = value
@@ -701,7 +701,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .vlessXHTTPDownloadTLSSNI: vlessXHTTPDownloadTLSSNI = value
         case .vlessXHTTPDownloadTLSALPN: vlessXHTTPDownloadTLSALPN = value
         case .vlessXHTTPDownloadFingerprint:
-            if let fp = TLSFingerprint(rawValue: value) { vlessXHTTPDownloadFingerprint = fp }
+            if let fingerprint = TLSFingerprint(rawValue: value) { vlessXHTTPDownloadFingerprint = fingerprint }
         case .vlessXHTTPDownloadRealitySNI: vlessXHTTPDownloadRealitySNI = value
         case .vlessXHTTPDownloadRealityPublicKey: vlessXHTTPDownloadRealityPublicKey = value
         case .vlessXHTTPDownloadRealityShortId: vlessXHTTPDownloadRealityShortId = value
@@ -709,7 +709,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .vlessXHTTPDownloadPath: vlessXHTTPDownloadPath = value
         case .hysteriaPassword: hysteriaPassword = value
         case .hysteriaCC:
-            if let cc = HysteriaCongestionControl(rawValue: value) { hysteriaCC = cc }
+            if let congestionControl = HysteriaCongestionControl(rawValue: value) { hysteriaCC = congestionControl }
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
         case .hysteriaPorts: hysteriaPortsSpec = value
@@ -725,14 +725,14 @@ class TVProxyEditorViewController: UITableViewController {
         case .trojanECHEnabled: trojanECHEnabled = value == "true"
         case .trojanECH: trojanECH = value
         case .trojanFingerprint:
-            if let fp = TLSFingerprint(rawValue: value) { trojanFingerprint = fp }
+            if let fingerprint = TLSFingerprint(rawValue: value) { trojanFingerprint = fingerprint }
         case .anytlsPassword: anytlsPassword = value
         case .anytlsSNI: anytlsSNI = value
         case .anytlsALPN: anytlsALPN = value
         case .anytlsECHEnabled: anytlsECHEnabled = value == "true"
         case .anytlsECH: anytlsECH = value
         case .anytlsFingerprint:
-            if let fp = TLSFingerprint(rawValue: value) { anytlsFingerprint = fp }
+            if let fingerprint = TLSFingerprint(rawValue: value) { anytlsFingerprint = fingerprint }
         case .ssPassword: ssPassword = value
         case .ssMethod: ssMethod = value
         case .socks5Username: socks5Username = value
@@ -962,9 +962,9 @@ class TVProxyEditorViewController: UITableViewController {
 
         var vlessRealityConfiguration: RealityConfiguration?
         if isVLESSReality {
-            guard let pk = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
-            let sid = Data(hexString: vlessRealityShortId) ?? Data()
-            vlessRealityConfiguration = RealityConfiguration(serverName: vlessRealitySNI, publicKey: pk, shortId: sid, fingerprint: vlessFingerprint)
+            guard let publicKey = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
+            let shortId = Data(hexString: vlessRealityShortId) ?? Data()
+            vlessRealityConfiguration = RealityConfiguration(serverName: vlessRealitySNI, publicKey: publicKey, shortId: shortId, fingerprint: vlessFingerprint)
         }
 
         var vlessWebSocketConfiguration: WebSocketConfiguration?
@@ -1037,8 +1037,8 @@ class TVProxyEditorViewController: UITableViewController {
                 xudpEnabled: vlessXUDPEnabled
             )
         case .hysteria:
-            let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
-            let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
+            let uploadMbps = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
+            let downloadMbps = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
             let portHopping = HysteriaPortHopping.make(
                 spec: hysteriaPortsSpec,
                 intervalSeconds: Int(hysteriaHopIntervalText)
@@ -1047,8 +1047,8 @@ class TVProxyEditorViewController: UITableViewController {
             outbound = .hysteria(
                 password: hysteriaPassword,
                 congestionControl: hysteriaCC,
-                uploadMbps: up,
-                downloadMbps: down,
+                uploadMbps: uploadMbps,
+                downloadMbps: downloadMbps,
                 portHopping: portHopping,
                 sni: sni
             )
@@ -1072,20 +1072,20 @@ class TVProxyEditorViewController: UITableViewController {
         case .anytls:
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
             let alpn: [String]? = anytlsALPN.isEmpty ? nil : anytlsALPN.split(separator: ",").map { String($0) }
-            let ici: Int
-            let it: Int
-            let mis: Int
+            let idleCheckInterval: Int
+            let idleTimeout: Int
+            let minIdleSession: Int
             if let existing = existingConfiguration, case .anytls(_, let c, let t, let m, _) = existing.outbound {
-                ici = c; it = t; mis = m
+                idleCheckInterval = c; idleTimeout = t; minIdleSession = m
             } else {
-                ici = 30; it = 30; mis = 0
+                idleCheckInterval = 30; idleTimeout = 30; minIdleSession = 0
             }
             let ech = anytlsECH.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .anytls(
                 password: anytlsPassword,
-                idleCheckInterval: ici,
-                idleTimeout: it,
-                minIdleSession: mis,
+                idleCheckInterval: idleCheckInterval,
+                idleTimeout: idleTimeout,
+                minIdleSession: minIdleSession,
                 tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint)
             )
         case .shadowsocks:

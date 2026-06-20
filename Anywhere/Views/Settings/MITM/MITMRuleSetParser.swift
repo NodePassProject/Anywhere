@@ -95,8 +95,8 @@ enum MITMRuleSetParser {
     private static func validRewriteURL(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
-              let comps = URLComponents(string: trimmed),
-              let host = comps.host, !host.isEmpty else { return nil }
+              let urlComponents = URLComponents(string: trimmed),
+              let host = urlComponents.host, !host.isEmpty else { return nil }
         return trimmed
     }
 
@@ -160,12 +160,12 @@ enum MITMRuleSetParser {
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
-            let b64 = args[1]
-            guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
+            let scriptBase64 = args[1]
+            guard !scriptBase64.isEmpty, isValidScriptBase64(scriptBase64) else { return nil }
             return MITMRule(
                 phase: phase,
                 urlPattern: urlPattern,
-                operation: .script(scriptBase64: b64)
+                operation: .script(scriptBase64: scriptBase64)
             )
 
         case 101:  // stream-script — fields: urlPattern, base64

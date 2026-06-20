@@ -19,27 +19,27 @@ extension TunnelStack {
     /// Published under ``reflectorLock`` on change, read once per inbound batch.
     struct Reflector {
         /// Packed `b0<<24 | b1<<16 | b2<<8 | b3`, matching the per-packet compare.
-        let v4: [UInt32]
-        let v6: [SIMD16<UInt8>]
+        let ipv4Addresses: [UInt32]
+        let ipv6Addresses: [SIMD16<UInt8>]
 
-        var isActive: Bool { !v4.isEmpty || !v6.isEmpty }
+        var isActive: Bool { !ipv4Addresses.isEmpty || !ipv6Addresses.isEmpty }
 
         static let inactive = Reflector(v4: [], v6: [])
 
         private init(v4: [UInt32], v6: [SIMD16<UInt8>]) {
-            self.v4 = v4
-            self.v6 = v6
+            self.ipv4Addresses = v4
+            self.ipv6Addresses = v6
         }
 
         init(addresses: [String]) {
             var v4: [UInt32] = []
             var v6: [SIMD16<UInt8>] = []
             for raw in addresses {
-                let s = raw.trimmingCharacters(in: .whitespaces)
-                guard !s.isEmpty else { continue }
-                if s.contains(":") {
+                let trimmedAddress = raw.trimmingCharacters(in: .whitespaces)
+                guard !trimmedAddress.isEmpty else { continue }
+                if trimmedAddress.contains(":") {
                     var a6 = in6_addr()
-                    if inet_pton(AF_INET6, s, &a6) == 1 {
+                    if inet_pton(AF_INET6, trimmedAddress, &a6) == 1 {
                         var bytes = SIMD16<UInt8>()
                         withUnsafeBytes(of: &a6) { buffer in
                             for i in 0..<16 { bytes[i] = buffer[i] }
@@ -48,7 +48,7 @@ extension TunnelStack {
                     }
                 } else {
                     var a4 = in_addr()
-                    if inet_pton(AF_INET, s, &a4) == 1 {
+                    if inet_pton(AF_INET, trimmedAddress, &a4) == 1 {
                         // in_addr is network byte order, matching the header.
                         let packed: UInt32 = withUnsafeBytes(of: &a4) { buffer in
                             UInt32(buffer[0]) << 24 | UInt32(buffer[1]) << 16 | UInt32(buffer[2]) << 8 | UInt32(buffer[3])
@@ -57,8 +57,8 @@ extension TunnelStack {
                     }
                 }
             }
-            self.v4 = v4
-            self.v6 = v6
+            self.ipv4Addresses = v4
+            self.ipv6Addresses = v6
         }
 
         /// Returns a src⇄dst-swapped copy if the destination matches; nil routes
@@ -71,12 +71,12 @@ extension TunnelStack {
                 case 4:
                     guard raw.count >= 20 else { return nil }
                     let destination = UInt32(p[16]) << 24 | UInt32(p[17]) << 16 | UInt32(p[18]) << 8 | UInt32(p[19])
-                    return v4.contains(destination) ? false : nil
+                    return ipv4Addresses.contains(destination) ? false : nil
                 case 6:
                     guard raw.count >= 40 else { return nil }
                     var destination = SIMD16<UInt8>()
                     for i in 0..<16 { destination[i] = p[24 + i] }
-                    return v6.contains(destination) ? true : nil
+                    return ipv6Addresses.contains(destination) ? true : nil
                 default:
                     return nil
                 }

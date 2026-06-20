@@ -209,7 +209,7 @@ nonisolated final class NowhereSession {
         udpSessions[message.flowID]?.handleIncomingDatagram(message.payload)
     }
 
-    func openTCPStream(for conn: NowhereConnection, completion: @escaping (Int64?, Error?) -> Void) {
+    func openTCPStream(for connection: NowhereConnection, completion: @escaping (Int64?, Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else { completion(nil, NowhereError.streamClosed); return }
             guard self.state == .ready else {
@@ -220,7 +220,7 @@ nonisolated final class NowhereSession {
                 completion(nil, NowhereError.connectionFailed("Failed to open TCP stream"))
                 return
             }
-            self.tcpStreams[sid] = conn
+            self.tcpStreams[sid] = connection
             self._poolLock.lock()
             self._poolTCPCount += 1
             self._poolLock.unlock()
@@ -253,7 +253,7 @@ nonisolated final class NowhereSession {
         }
     }
 
-    func registerUDPSession(_ conn: NowhereUDPConnection, completion: @escaping (Result<UInt64, Error>) -> Void) {
+    func registerUDPSession(_ connection: NowhereUDPConnection, completion: @escaping (Result<UInt64, Error>) -> Void) {
         let body = { [weak self] in
             guard let self else {
                 completion(.failure(NowhereError.streamClosed))
@@ -267,17 +267,17 @@ nonisolated final class NowhereSession {
                 completion(.failure(NowhereError.connectionFailed("UDP flow pool exhausted")))
                 return
             }
-            var fid = self.nextUDPFlowID
-            while fid == 0 || self.udpSessions[fid] != nil {
-                fid = fid == UInt64.max ? 1 : fid + 1
+            var flowID = self.nextUDPFlowID
+            while flowID == 0 || self.udpSessions[flowID] != nil {
+                flowID = flowID == UInt64.max ? 1 : flowID + 1
             }
-            self.nextUDPFlowID = fid == UInt64.max ? 1 : fid + 1
-            self.udpSessions[fid] = conn
+            self.nextUDPFlowID = flowID == UInt64.max ? 1 : flowID + 1
+            self.udpSessions[flowID] = connection
             self._poolLock.lock()
             self._poolUDPCount += 1
             self._poolLock.unlock()
             self.updateIdleCloseTimer()
-            completion(.success(fid))
+            completion(.success(flowID))
         }
         if isOnQueue { body() } else { queue.async(execute: body) }
     }

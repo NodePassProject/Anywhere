@@ -893,12 +893,12 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     func deliverResponseTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
         guard !torn, isLiveResponseStream(streamID) else { return }
-        var st = paceStates[streamID] ?? makePaceState(streamID)
-        st.sawEnd = true
+        var paceState = paceStates[streamID] ?? makePaceState(streamID)
+        paceState.sawEnd = true
         let normalized = MITMBridgeHeaders.responseHeadersToH2(trailers)
         // Empty after normalization → just end the stream like a trailerless body.
-        if !normalized.isEmpty { st.pendingTrailers = normalized }
-        paceStates[streamID] = st
+        if !normalized.isEmpty { paceState.pendingTrailers = normalized }
+        paceStates[streamID] = paceState
         flushResponse(streamID)
     }
 
@@ -917,10 +917,10 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     // MARK: Client-bound body pacing
 
     private func appendClientBody(streamID: UInt32, data: Data, endStream: Bool) {
-        var st = paceStates[streamID] ?? makePaceState(streamID)
-        st.pending.append(data)
-        if endStream { st.sawEnd = true }
-        paceStates[streamID] = st
+        var paceState = paceStates[streamID] ?? makePaceState(streamID)
+        paceState.pending.append(data)
+        if endStream { paceState.sawEnd = true }
+        paceStates[streamID] = paceState
         flushResponse(streamID)
         // The upstream is read eagerly, so a client that stops draining would grow the backlog
         // unbounded. Reset the stream (and drop its upstream) rather than buffer unboundedly.
@@ -935,19 +935,19 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     /// made progress, so the distributor knows to keep cycling.
     @discardableResult
     private func flushResponse(_ streamID: UInt32, cap: Int = .max) -> Bool {
-        guard var st = paceStates[streamID] else { return false }
+        guard var paceState = paceStates[streamID] else { return false }
         var progressed = false
-        let available = max(0, min(flowController.connectionWindow, st.streamWindow, st.pending.count, cap))
+        let available = max(0, min(flowController.connectionWindow, paceState.streamWindow, paceState.pending.count, cap))
         if available > 0 {
-            let chunk = st.pending.prefix(available)
+            let chunk = paceState.pending.prefix(available)
             // A pending trailer is the terminal frame, so body DATA must not carry END_STREAM.
-            let bodyDrained = st.sawEnd && available == st.pending.count
-            let endOnData = bodyDrained && st.pendingTrailers == nil
+            let bodyDrained = paceState.sawEnd && available == paceState.pending.count
+            let endOnData = bodyDrained && paceState.pendingTrailers == nil
             delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: chunk, endStream: endOnData))
             flowController.debitConnection(available)
-            st.streamWindow -= available
-            st.pending.removeFirst(available)
-            if endOnData { st.finished = true }
+            paceState.streamWindow -= available
+            paceState.pending.removeFirst(available)
+            if endOnData { paceState.finished = true }
             // These bytes have left for the client, so credit the upstream's receive window
             // (no-op unless an h2 upstream marked this stream drain-coupled).
             onResponseDrainedToClient?(streamID, available)
@@ -955,20 +955,20 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
         // Body drained and stream ended: emit the terminal frame. A trailer HEADERS block isn't
         // flow-controlled, so it follows the last body DATA directly.
-        if st.sawEnd, st.pending.isEmpty, !st.finished {
-            if let trailers = st.pendingTrailers {
+        if paceState.sawEnd, paceState.pending.isEmpty, !paceState.finished {
+            if let trailers = paceState.pendingTrailers {
                 let block = HPACKEncoder.encodeHeaderBlock(trailers)
                 delegate?.clientLegWriteToClient(Codec.emitHeaders(streamID: streamID, block: block, endStream: true))
-                st.pendingTrailers = nil
+                paceState.pendingTrailers = nil
             } else {
                 delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: Data(), endStream: true))
             }
-            st.finished = true
+            paceState.finished = true
             progressed = true
         }
         // Otherwise the client's flow-control window is exhausted; resume on its next WINDOW_UPDATE.
-        paceStates[streamID] = st
-        if st.finished {
+        paceStates[streamID] = paceState
+        if paceState.finished {
             paceStates.removeValue(forKey: streamID)
             finishClientStream(streamID, notifyUpstream: true)
         }

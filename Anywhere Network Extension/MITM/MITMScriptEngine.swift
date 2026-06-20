@@ -248,13 +248,13 @@ final class MITMScriptEngine {
             deliver(.modified(message), for: inv)
             return
         }
-        let ctxArg = makeContextValue(message)
-        inv.ctxValue = ctxArg
+        let contextValue = makeContextValue(message)
+        inv.ctxValue = contextValue
         currentInvocation = inv
-        let returned = runUserScript(source) { function.call(withArguments: [ctxArg]) }
+        let returned = runUserScript(source) { function.call(withArguments: [contextValue]) }
         guard let returned, isThenable(returned) else {
             currentInvocation = nil
-            let updated = readBack(message, from: ctxArg)
+            let updated = readBack(message, from: contextValue)
             deliver(finalize(original: message, updated: updated, directive: inv.directive), for: inv)
             return
         }
@@ -349,7 +349,7 @@ final class MITMScriptEngine {
         _ frame: Data,
         source: String,
         sourceKey: Int,
-        frameContext ctx: FrameContext,
+        frameContext: FrameContext,
         state: JSValue?
     ) -> FrameOutcome {
         invocationLock.lock()
@@ -360,10 +360,10 @@ final class MITMScriptEngine {
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
-        let inv = Invocation(scope: ctx.ruleSetID, allowsHTTP: false)
+        let inv = Invocation(scope: frameContext.ruleSetID, allowsHTTP: false)
         currentInvocation = inv
         defer { currentInvocation = nil }
-        let ctxArg = makeFrameContextValue(ctx, frame: frame, state: state)
+        let ctxArg = makeFrameContextValue(frameContext, frame: frame, state: state)
         _ = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         // Ignore mutations to method/url/status/headers — HEADERS are on the wire.
         let body: Data
@@ -879,19 +879,19 @@ final class MITMScriptEngine {
         // Capped at 64 KiB: a script typo can't pin the NE's RAM budget.
         let randomBytesBlock: @convention(block) (JSValue) -> JSValue = { lenVal in
             let context = JSContext.current()!
-            let d = lenVal.toDouble()
-            guard d.isFinite, d >= 0, d <= 65536, d == d.rounded() else {
+            let lengthDouble = lenVal.toDouble()
+            guard lengthDouble.isFinite, lengthDouble >= 0, lengthDouble <= 65536, lengthDouble == lengthDouble.rounded() else {
                 context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.crypto.randomBytes: length must be an integer in [0, 65536]",
                     in: context
                 )
                 return JSValue(undefinedIn: context)
             }
-            let n = Int(d)
-            if n == 0 { return Self.makeUint8Array(in: context, from: Data()) }
-            var bytes = [UInt8](repeating: 0, count: n)
+            let randomByteCount = Int(lengthDouble)
+            if randomByteCount == 0 { return Self.makeUint8Array(in: context, from: Data()) }
+            var bytes = [UInt8](repeating: 0, count: randomByteCount)
             let status = bytes.withUnsafeMutableBufferPointer { buffer in
-                SecRandomCopyBytes(kSecRandomDefault, n, buffer.baseAddress!)
+                SecRandomCopyBytes(kSecRandomDefault, randomByteCount, buffer.baseAddress!)
             }
             guard status == errSecSuccess else {
                 context.exception = JSValue(
@@ -1227,13 +1227,13 @@ final class MITMScriptEngine {
                 logger.warning("[MITM][JS] Anywhere.json.removeWhereFieldIn: malformed path \"\(path)\"; body unchanged")
                 return Self.jsonPassthrough(body, in: context)
             }
-            let needles = Self.jsonArrayValues(from: valuesVal, in: context)
+            let matchValues = Self.jsonArrayValues(from: valuesVal, in: context)
             return Self.runJSONOp(body, in: context) { root in
                 guard let array = MITMJSONPatch.resolveNode(root, segments: segments) as? NSMutableArray else { return }
                 let kept = array.filter { element in
                     guard let object = element as? NSDictionary,
                           let fieldValue = object.object(forKey: field) else { return true }
-                    return !needles.contains { MITMJSONPatch.valueEquals($0, fieldValue) }
+                    return !matchValues.contains { MITMJSONPatch.valueEquals($0, fieldValue) }
                 }
                 array.setArray(kept)
             }
@@ -1473,9 +1473,9 @@ final class MITMScriptEngine {
             return Self.rejected("Anywhere.http: global concurrent request cap (\(Self.httpMaxConcurrentGlobal)) reached", in: ctx)
         }
 
-        let opts: JSValue? = optsVal.isObject ? optsVal : nil
+        let options: JSValue? = optsVal.isObject ? optsVal : nil
         var request = URLRequest(url: url)
-        let method = (opts?.objectForKeyedSubscript("method"))
+        let method = (options?.objectForKeyedSubscript("method"))
             .flatMap { $0.isString ? $0.toString() : nil }?
             .uppercased() ?? defaultMethod
         // RFC 9110 token alphabet — reject CR/LF smuggling with a clear error.
@@ -1483,25 +1483,25 @@ final class MITMScriptEngine {
             return Self.rejected("Anywhere.http: invalid method token", in: ctx)
         }
         request.httpMethod = method
-        if let headersVal = opts?.objectForKeyedSubscript("headers"), !headersVal.isUndefined, !headersVal.isNull {
+        if let headersVal = options?.objectForKeyedSubscript("headers"), !headersVal.isUndefined, !headersVal.isNull {
             for header in Self.requestHeadersFromValue(headersVal, in: ctx) {
                 request.addValue(header.value, forHTTPHeaderField: header.name)
             }
         }
-        if let bodyVal = opts?.objectForKeyedSubscript("body"), !bodyVal.isUndefined, !bodyVal.isNull {
+        if let bodyVal = options?.objectForKeyedSubscript("body"), !bodyVal.isUndefined, !bodyVal.isNull {
             request.httpBody = Self.bytesFromValue(bodyVal, in: ctx) ?? Data()
         }
         var timeout = Self.httpDefaultTimeout
-        if let tVal = opts?.objectForKeyedSubscript("timeout"), tVal.isNumber {
-            let ms = tVal.toDouble()
-            if ms.isFinite, ms > 0 { timeout = min(ms / 1000.0, Self.httpMaxTimeout) }
+        if let timeoutVal = options?.objectForKeyedSubscript("timeout"), timeoutVal.isNumber {
+            let timeoutMilliseconds = timeoutVal.toDouble()
+            if timeoutMilliseconds.isFinite, timeoutMilliseconds > 0 { timeout = min(timeoutMilliseconds / 1000.0, Self.httpMaxTimeout) }
         }
         request.timeoutInterval = timeout
-        let followRedirects = (opts?.objectForKeyedSubscript("redirect"))
+        let followRedirects = (options?.objectForKeyedSubscript("redirect"))
             .flatMap { $0.isString ? $0.toString() : nil } != "manual"
         let insecure: Bool
-        if let iVal = opts?.objectForKeyedSubscript("insecure"), iVal.isBoolean {
-            insecure = iVal.toBool()
+        if let insecureVal = options?.objectForKeyedSubscript("insecure"), insecureVal.isBoolean {
+            insecure = insecureVal.toBool()
         } else {
             insecure = AWCore.getAllowInsecure()
         }

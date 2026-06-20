@@ -43,11 +43,11 @@ extension MITMScriptEngine.SynthesizedResponse {
     /// RFC 9110 §5.6.7 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`). Fixed POSIX locale + GMT so
     /// the device's locale/timezone can't corrupt the format.
     private static let imfFixdateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "GMT")
-        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
-        return f
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        return formatter
     }()
 
     /// Appends a `Date` (RFC 9110 §6.6.1: origins generate one per response) unless the script

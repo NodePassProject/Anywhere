@@ -468,9 +468,9 @@ class TVHomeViewController: UIViewController {
     // MARK: - Helpers
 
     private static let byteFormatter: ByteCountFormatter = {
-        let f = ByteCountFormatter()
-        f.countStyle = .binary
-        return f
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .binary
+        return formatter
     }()
 
     private static func formatBytes(_ bytes: Int64) -> String {

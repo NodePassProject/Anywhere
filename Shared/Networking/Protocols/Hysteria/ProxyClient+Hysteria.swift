@@ -22,7 +22,7 @@ extension ProxyClient {
             return
         }
 
-        let hyConfig = HysteriaConfiguration(
+        let hysteriaConfiguration = HysteriaConfiguration(
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
             password: password,
@@ -41,14 +41,14 @@ extension ProxyClient {
             // Chain link: wrap the inbound UDP-relay tunnel as a per-flow client.
             let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
             self.tunnel = nil
-            let client = HysteriaClient.chained(configuration: hyConfig, transport: transport)
+            let client = HysteriaClient.chained(configuration: hysteriaConfiguration, transport: transport)
             dispatchHysteria(client: client, command: command, destination: destination, completion: completion)
             return
         }
 
         if let chain = configuration.chain, !chain.isEmpty {
             connectPooledChainedHysteria(
-                hyConfig: hyConfig,
+                hysteriaConfiguration: hysteriaConfiguration,
                 chain: chain,
                 command: command,
                 destination: destination,
@@ -57,7 +57,7 @@ extension ProxyClient {
             return
         }
 
-        let client = HysteriaClient.shared(for: hyConfig)
+        let client = HysteriaClient.shared(for: hysteriaConfiguration)
         dispatchHysteria(client: client, command: command, destination: destination, completion: completion)
     }
 
@@ -78,7 +78,7 @@ extension ProxyClient {
     /// Acquires a pooled chained Hysteria client, building the chain on cache
     /// miss so that its hops outlive any single flow.
     private func connectPooledChainedHysteria(
-        hyConfig: HysteriaConfiguration,
+        hysteriaConfiguration: HysteriaConfiguration,
         chain: [ProxyConfiguration],
         command: ProxyCommand,
         destination: String,
@@ -105,7 +105,7 @@ extension ProxyClient {
         let useResolvedAddress = useResolvedAddressForDirectDial
 
         HysteriaClient.acquireChained(
-            configuration: hyConfig,
+            configuration: hysteriaConfiguration,
             chainSignature: chainSignature,
             // Builder must be self-free: one build is shared across concurrent
             // waiters and outlives any single caller's ProxyClient.

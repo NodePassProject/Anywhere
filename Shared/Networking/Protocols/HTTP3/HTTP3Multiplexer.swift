@@ -290,8 +290,8 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     }
 
     /// RFC 9114 §7.2.9 reserved stream type grease values.
-    private func isReservedStreamType(_ t: UInt8) -> Bool {
-        t >= 0x21 && (UInt64(t) - 0x21) % 0x1f == 0
+    private func isReservedStreamType(_ streamType: UInt8) -> Bool {
+        streamType >= 0x21 && (UInt64(streamType) - 0x21) % 0x1f == 0
     }
 
     /// Parses frames on the server's control stream. RFC 9114 §7.2.4: SETTINGS
@@ -378,8 +378,8 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
         let limit = peerMaxFieldSectionSize
         if limit == UInt64.max { return true }
         var total: UInt64 = 0
-        for h in headers {
-            total = total &+ UInt64(h.name.utf8.count) &+ UInt64(h.value.utf8.count) &+ 32
+        for header in headers {
+            total = total &+ UInt64(header.name.utf8.count) &+ UInt64(header.value.utf8.count) &+ 32
             if total > limit { return false }
         }
         return true

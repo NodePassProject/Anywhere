@@ -15,8 +15,8 @@ nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
 nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let passwordKey: Data
-    private let dstHost: String
-    private let dstPort: UInt16
+    private let destinationHost: String
+    private let destinationPort: UInt16
 
     private var headerSent = false
     /// Leftover TLS stream bytes carried across receives until a full packet is framed.
@@ -25,8 +25,8 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
     init(inner: ProxyConnection, password: String, destinationHost: String, destinationPort: UInt16) {
         self.inner = inner
         self.passwordKey = TrojanProtocol.passwordKey(password)
-        self.dstHost = destinationHost
-        self.dstPort = destinationPort
+        self.destinationHost = destinationHost
+        self.destinationPort = destinationPort
         super.init()
     }
 
@@ -59,13 +59,13 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
             out.append(TrojanProtocol.buildRequestHeader(
                 passwordKey: passwordKey,
                 command: TrojanProtocol.commandUDP,
-                host: dstHost,
-                port: dstPort
+                host: destinationHost,
+                port: destinationPort
             ))
             headerSent = true
         }
         lock.unlock()
-        out.append(TrojanProtocol.encodeUDPPacket(host: dstHost, port: dstPort, payload: payload))
+        out.append(TrojanProtocol.encodeUDPPacket(host: destinationHost, port: destinationPort, payload: payload))
         return out
     }
 

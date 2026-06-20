@@ -88,21 +88,21 @@ private final class VLESSEncryptionAEAD {
         advanceNonce()
         let nonceData = Data(nonce)
         if useAES {
-            let n = try AES.GCM.Nonce(data: nonceData)
+            let aeadNonce = try AES.GCM.Nonce(data: nonceData)
             let sealed: AES.GCM.SealedBox
             if let aad = additionalData {
-                sealed = try AES.GCM.seal(plaintext, using: key, nonce: n, authenticating: aad)
+                sealed = try AES.GCM.seal(plaintext, using: key, nonce: aeadNonce, authenticating: aad)
             } else {
-                sealed = try AES.GCM.seal(plaintext, using: key, nonce: n)
+                sealed = try AES.GCM.seal(plaintext, using: key, nonce: aeadNonce)
             }
             return sealed.ciphertext + sealed.tag
         } else {
-            let n = try ChaChaPoly.Nonce(data: nonceData)
+            let aeadNonce = try ChaChaPoly.Nonce(data: nonceData)
             let sealed: ChaChaPoly.SealedBox
             if let aad = additionalData {
-                sealed = try ChaChaPoly.seal(plaintext, using: key, nonce: n, authenticating: aad)
+                sealed = try ChaChaPoly.seal(plaintext, using: key, nonce: aeadNonce, authenticating: aad)
             } else {
-                sealed = try ChaChaPoly.seal(plaintext, using: key, nonce: n)
+                sealed = try ChaChaPoly.seal(plaintext, using: key, nonce: aeadNonce)
             }
             return sealed.ciphertext + sealed.tag
         }
@@ -120,11 +120,11 @@ private final class VLESSEncryptionAEAD {
         guard sealed.count >= VLESSWire.aeadTagLength else {
             throw VLESSEncryptionError.framingError("sealed buffer shorter than tag")
         }
-        let ct = sealed.prefix(sealed.count - VLESSWire.aeadTagLength)
+        let ciphertext = sealed.prefix(sealed.count - VLESSWire.aeadTagLength)
         let tag = sealed.suffix(VLESSWire.aeadTagLength)
         if useAES {
             let n = try AES.GCM.Nonce(data: nonce)
-            let box = try AES.GCM.SealedBox(nonce: n, ciphertext: ct, tag: tag)
+            let box = try AES.GCM.SealedBox(nonce: n, ciphertext: ciphertext, tag: tag)
             if let aad = additionalData {
                 return try AES.GCM.open(box, using: key, authenticating: aad)
             } else {
@@ -132,7 +132,7 @@ private final class VLESSEncryptionAEAD {
             }
         } else {
             let n = try ChaChaPoly.Nonce(data: nonce)
-            let box = try ChaChaPoly.SealedBox(nonce: n, ciphertext: ct, tag: tag)
+            let box = try ChaChaPoly.SealedBox(nonce: n, ciphertext: ciphertext, tag: tag)
             if let aad = additionalData {
                 return try ChaChaPoly.open(box, using: key, authenticating: aad)
             } else {
@@ -311,10 +311,10 @@ nonisolated final class VLESSEncryptionClient {
         var keys: [VLESSNfsPublicKey] = []
         var raw: [Data] = []
         var hashes: [Data] = []
-        for k in config.publicKeys {
-            keys.append(try VLESSNfsPublicKey.parse(k))
-            raw.append(k)
-            hashes.append(BLAKE3Hasher.hash(k))
+        for publicKeyBytes in config.publicKeys {
+            keys.append(try VLESSNfsPublicKey.parse(publicKeyBytes))
+            raw.append(publicKeyBytes)
+            hashes.append(BLAKE3Hasher.hash(publicKeyBytes))
         }
         self.nfsKeys = keys
         self.nfsKeysRaw = raw
@@ -378,32 +378,32 @@ nonisolated final class VLESSEncryptionClient {
         var nfsKey = Data()
         var lastCTR: VLESSEncryptionCTR? = nil
         for j in 0..<nfsKeys.count {
-            var pubOrCt = Data()
+            var publicKeyOrCiphertext = Data()
             switch nfsKeys[j] {
             case .x25519(let serverPub, _):
                 let priv = Curve25519.KeyAgreement.PrivateKey()
                 let shared = try priv.sharedSecretFromKeyAgreement(with: serverPub)
                 nfsKey = shared.withUnsafeBytes { Data($0) }
-                pubOrCt = priv.publicKey.rawRepresentation
+                publicKeyOrCiphertext = priv.publicKey.rawRepresentation
             case .mlkem768(let serverPub, _):
                 let result = try serverPub.encapsulate()
                 nfsKey = result.sharedSecret.withUnsafeBytes { Data($0) }
-                pubOrCt = result.encapsulated
+                publicKeyOrCiphertext = result.encapsulated
             }
             if xorMode != .native {
                 let ctr = try VLESSEncryptionCTR(key: nfsKeysRaw[j], iv: iv)
-                pubOrCt = ctr.process(pubOrCt)
+                publicKeyOrCiphertext = ctr.process(publicKeyOrCiphertext)
             }
             if let lastCTR {
                 // XOR only the leading 32 bytes with the previous relay's keystream;
                 // the chain-hash XOR continues that same stream.
-                let bytes = [UInt8](pubOrCt)
+                let bytes = [UInt8](publicKeyOrCiphertext)
                 let xoredHead = lastCTR.process(Data(bytes[0..<32]))
                 var combined = xoredHead
                 combined.append(contentsOf: bytes[32..<bytes.count])
-                pubOrCt = combined
+                publicKeyOrCiphertext = combined
             }
-            relayBlock.append(pubOrCt)
+            relayBlock.append(publicKeyOrCiphertext)
             if j < nfsKeys.count - 1 {
                 // Next relay's pubkey hash, XOR'd with a CTR keyed on this relay's
                 // nfsKey — binds the chain order so the server can verify it.
@@ -465,7 +465,7 @@ nonisolated final class VLESSEncryptionClient {
             pfsKey: cached.pfsKey,
             cacheKey: cacheKey
         )
-        let conn = VLESSEncryptedConnection(
+        let encryptedConnection = VLESSEncryptedConnection(
             inner: transport,
             writeAEAD: writeAEAD,
             readAEAD: nil,
@@ -477,7 +477,7 @@ nonisolated final class VLESSEncryptionClient {
             xorConnection: xorConnection,
             zeroRTTState: zeroRTT
         )
-        completion(.success(conn))
+        completion(.success(encryptedConnection))
     }
 
     // MARK: - 1-RTT client hello
@@ -752,7 +752,7 @@ nonisolated final class VLESSEncryptionClient {
                                 xorConnection = nil
                                 transport = connection
                             }
-                            let conn = VLESSEncryptedConnection(
+                            let encryptedConnection = VLESSEncryptedConnection(
                                 inner: transport,
                                 writeAEAD: writeAEAD,
                                 readAEAD: readAEAD,
@@ -764,7 +764,7 @@ nonisolated final class VLESSEncryptionClient {
                                 xorConnection: xorConnection,
                                 zeroRTTState: nil
                             )
-                            completion(.success(conn))
+                            completion(.success(encryptedConnection))
                         } catch {
                             completion(.failure(error))
                         }
@@ -1000,12 +1000,12 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             let needed = pendingServerPaddingLength
             recvLock.lock()
             if inboundBuffer.count >= needed {
-                let blob = Data(inboundBuffer.prefix(needed))
+                let sealedPadding = Data(inboundBuffer.prefix(needed))
                 inboundBuffer.removeFirst(needed)
                 let aead = readAEAD
                 recvLock.unlock()
                 do {
-                    _ = try aead!.open(blob, additionalData: nil)
+                    _ = try aead!.open(sealedPadding, additionalData: nil)
                     recvLock.withLock { self.pendingServerPaddingLength = 0 }
                     pumpRecord(completion: completion)
                 } catch {
@@ -1053,8 +1053,8 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             recvLock.unlock()
             // 0-RTT rejection: the server wrote noise instead of a valid record;
             // invalidate this ticket so a future dial re-handshakes.
-            if !firstRecordSeen, let z = zeroRTTState {
-                VLESSEncryption0RTTCache.shared.invalidate(key: z.cacheKey, matching: z.pfsKey)
+            if !firstRecordSeen, let zeroRTT = zeroRTTState {
+                VLESSEncryption0RTTCache.shared.invalidate(key: zeroRTT.cacheKey, matching: zeroRTT.pfsKey)
                 completion(nil, VLESSEncryptionError.handshakeFailed("new handshake needed"))
                 return
             }

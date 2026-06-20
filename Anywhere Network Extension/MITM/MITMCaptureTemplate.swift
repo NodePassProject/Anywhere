@@ -79,8 +79,8 @@ struct MITMCaptureTemplate: Equatable {
         self.referencesCaptures = refsCaptures
     }
 
-    /// Expands the template; a `nil` from `group` (out-of-range/non-participating) contributes "".
-    func expand(_ group: (Int) -> String?) -> String {
+    /// Expands the template; a `nil` from `captureLookup` (out-of-range/non-participating) contributes "".
+    func expand(_ captureLookup: (Int) -> String?) -> String {
         // Fast path: literal-only template, the common case.
         if tokens.count == 1, case .literal(let s) = tokens[0] { return s }
         var out = ""
@@ -89,7 +89,7 @@ struct MITMCaptureTemplate: Equatable {
             case .literal(let s):
                 out += s
             case .group(let index):
-                if let value = group(index) { out += value }
+                if let value = captureLookup(index) { out += value }
             }
         }
         return out

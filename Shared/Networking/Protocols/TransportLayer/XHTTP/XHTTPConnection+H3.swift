@@ -259,8 +259,8 @@ extension XHTTPConnection {
     private func h3CommonHeaders() -> [(name: String, value: String)] {
         var headers: [(name: String, value: String)] = []
 
-        let ua = configuration.headers["User-Agent"] ?? ProxyUserAgent.default
-        headers.append((name: "user-agent", value: ua))
+        let userAgent = configuration.headers["User-Agent"] ?? ProxyUserAgent.default
+        headers.append((name: "user-agent", value: userAgent))
 
         let padding = configuration.generatePadding()
         let paddingPath = configuration.normalizedPath
@@ -287,9 +287,9 @@ extension XHTTPConnection {
             "upgrade", "keep-alive", "content-length", "user-agent"
         ]
         for (key, value) in configuration.headers {
-            let lk = key.lowercased()
-            if forbidden.contains(lk) { continue }
-            headers.append((name: lk, value: value))
+            let lowercasedKey = key.lowercased()
+            if forbidden.contains(lowercasedKey) { continue }
+            headers.append((name: lowercasedKey, value: value))
         }
         return headers
     }

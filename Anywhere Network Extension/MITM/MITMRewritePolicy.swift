@@ -89,9 +89,9 @@ struct ReplacementURL: Equatable {
 
     /// RFC 9112 §3.2 authority: bare host (IPv6 re-bracketed), or `host:port` when a port was given.
     var authority: String {
-        let h = host.contains(":") ? "[\(host)]" : host
-        if let port { return "\(h):\(port)" }
-        return h
+        let bracketedHost = host.contains(":") ? "[\(host)]" : host
+        if let port { return "\(bracketedHost):\(port)" }
+        return bracketedHost
     }
 }
 
@@ -413,8 +413,8 @@ final class MITMRewritePolicy {
     static func parseReplacementURL(_ raw: String) -> ReplacementURL? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
-              let comps = URLComponents(string: trimmed),
-              let rawHost = comps.host, !rawHost.isEmpty else { return nil }
+              let components = URLComponents(string: trimmed),
+              let rawHost = components.host, !rawHost.isEmpty else { return nil }
         // Strip IPv6 URI brackets for the dial; `authority` re-adds them.
         var host = rawHost
         if host.hasPrefix("["), host.hasSuffix("]"), host.count >= 2 {
@@ -422,7 +422,7 @@ final class MITMRewritePolicy {
         }
         // An out-of-range port drops the rule rather than silently falling back to the scheme default.
         let port: UInt16?
-        if let rawPort = comps.port {
+        if let rawPort = components.port {
             guard let valid = UInt16(exactly: rawPort) else {
                 logger.warning("rewrite replacement URL dropped: port \(rawPort) out of range (0–65535)")
                 return nil
@@ -431,9 +431,9 @@ final class MITMRewritePolicy {
         } else {
             port = nil
         }
-        var target = comps.percentEncodedPath
+        var target = components.percentEncodedPath
         if target.isEmpty { target = "/" }
-        if let query = comps.percentEncodedQuery, !query.isEmpty {
+        if let query = components.percentEncodedQuery, !query.isEmpty {
             target += "?\(query)"
         }
         return ReplacementURL(host: host, port: port, requestTarget: target)
@@ -481,7 +481,7 @@ enum MITMBinaryReader {
 
     private struct Cursor {
         let bytes: UnsafeBufferPointer<UInt8>
-        private var i = 0
+        private var readOffset = 0
         private var count: Int { bytes.count }
 
         init(bytes: UnsafeBufferPointer<UInt8>) { self.bytes = bytes }
@@ -574,51 +574,51 @@ enum MITMBinaryReader {
 
         private mutating func expectMagic() throws {
             let magic = MITMBinaryFormat.magic
-            guard i + magic.count <= count else { throw ReadError.truncated }
-            for k in 0..<magic.count where bytes[i + k] != magic[k] { throw ReadError.badMagic }
-            i += magic.count
+            guard readOffset + magic.count <= count else { throw ReadError.truncated }
+            for k in 0..<magic.count where bytes[readOffset + k] != magic[k] { throw ReadError.badMagic }
+            readOffset += magic.count
         }
 
         private mutating func u8() throws -> UInt8 {
-            guard i < count else { throw ReadError.truncated }
-            defer { i += 1 }
-            return bytes[i]
+            guard readOffset < count else { throw ReadError.truncated }
+            defer { readOffset += 1 }
+            return bytes[readOffset]
         }
 
         private mutating func u16() throws -> UInt16 {
-            guard i + 2 <= count else { throw ReadError.truncated }
-            defer { i += 2 }
-            return UInt16(bytes[i]) | (UInt16(bytes[i + 1]) << 8)
+            guard readOffset + 2 <= count else { throw ReadError.truncated }
+            defer { readOffset += 2 }
+            return UInt16(bytes[readOffset]) | (UInt16(bytes[readOffset + 1]) << 8)
         }
 
         private mutating func u32() throws -> UInt32 {
-            guard i + 4 <= count else { throw ReadError.truncated }
-            defer { i += 4 }
-            return UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8)
-                 | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
+            guard readOffset + 4 <= count else { throw ReadError.truncated }
+            defer { readOffset += 4 }
+            return UInt32(bytes[readOffset]) | (UInt32(bytes[readOffset + 1]) << 8)
+                 | (UInt32(bytes[readOffset + 2]) << 16) | (UInt32(bytes[readOffset + 3]) << 24)
         }
 
         private mutating func str16() throws -> String {
             let n = Int(try u16())
-            guard i + n <= count else { throw ReadError.truncated }
-            defer { i += n }
-            return String(decoding: bytes[i..<i + n], as: UTF8.self)
+            guard readOffset + n <= count else { throw ReadError.truncated }
+            defer { readOffset += n }
+            return String(decoding: bytes[readOffset..<readOffset + n], as: UTF8.self)
         }
 
         private mutating func str32() throws -> String {
             let n = Int(try u32())
-            guard i + n <= count else { throw ReadError.truncated }
-            defer { i += n }
-            return String(decoding: bytes[i..<i + n], as: UTF8.self)
+            guard readOffset + n <= count else { throw ReadError.truncated }
+            defer { readOffset += n }
+            return String(decoding: bytes[readOffset..<readOffset + n], as: UTF8.self)
         }
 
         private mutating func readUUID() throws -> UUID {
-            guard i + 16 <= count else { throw ReadError.truncated }
-            let u = UUID(uuid: (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3],
-                                bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7],
-                                bytes[i + 8], bytes[i + 9], bytes[i + 10], bytes[i + 11],
-                                bytes[i + 12], bytes[i + 13], bytes[i + 14], bytes[i + 15]))
-            i += 16
+            guard readOffset + 16 <= count else { throw ReadError.truncated }
+            let u = UUID(uuid: (bytes[readOffset], bytes[readOffset + 1], bytes[readOffset + 2], bytes[readOffset + 3],
+                                bytes[readOffset + 4], bytes[readOffset + 5], bytes[readOffset + 6], bytes[readOffset + 7],
+                                bytes[readOffset + 8], bytes[readOffset + 9], bytes[readOffset + 10], bytes[readOffset + 11],
+                                bytes[readOffset + 12], bytes[readOffset + 13], bytes[readOffset + 14], bytes[readOffset + 15]))
+            readOffset += 16
             return u
         }
     }

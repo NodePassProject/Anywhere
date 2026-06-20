@@ -43,11 +43,11 @@ enum ShadowsocksProtocol {
         guard !data.isEmpty else { return nil }
         var offset = data.startIndex
 
-        let atyp = data[offset]
+        let addressType = data[offset]
         offset += 1
 
         let host: String
-        switch atyp {
+        switch addressType {
         case 0x01:
             guard data.endIndex - offset >= 4 + 2 else { return nil }
             host = "\(data[offset]).\(data[offset+1]).\(data[offset+2]).\(data[offset+3])"

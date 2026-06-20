@@ -194,15 +194,15 @@ private enum SudokuNativeCrypto {
 
     static func hkdfExpand(prk: Data, info: String, count: Int) -> Data {
         var produced = Data()
-        var t = Data()
+        var block = Data()
         var counter: UInt8 = 1
         while produced.count < count {
             var parts: [Data] = []
-            if !t.isEmpty { parts.append(t) }
+            if !block.isEmpty { parts.append(block) }
             parts.append(Data(info.utf8))
             parts.append(Data([counter]))
-            t = hmacSHA256(key: prk, parts: parts)
-            produced.append(t.prefix(count - produced.count))
+            block = hmacSHA256(key: prk, parts: parts)
+            produced.append(block.prefix(count - produced.count))
             counter &+= 1
         }
         return produced
@@ -941,9 +941,9 @@ private final class SudokuHTTPBodyReader {
     private func readLine() throws -> String {
         var data = Data()
         while true {
-            let b = try stream.readExact(1)[0]
-            if b == 0x0a { break }
-            if b != 0x0d { data.append(b) }
+            let byte = try stream.readExact(1)[0]
+            if byte == 0x0a { break }
+            if byte != 0x0d { data.append(byte) }
             if data.count > 8192 { throw SudokuNativeError.protocolError("HTTP line too long") }
         }
         return String(data: data, encoding: .utf8) ?? ""
@@ -1059,10 +1059,10 @@ nonisolated final class SudokuHTTPMaskTransport {
         let modeName = mode == .poll ? "poll" : "stream"
         let auth = authToken(mode: modeName, method: method, path: authPath)
         let path = appendAuth(requestPath, token: auth)
-        var req = "\(method) \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: \(ProxyUserAgent.chrome)\r\nAccept: */*\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nX-Sudoku-Tunnel: \(modeName)\r\nAuthorization: Bearer \(auth)\r\n"
-        if let contentType { req += "Content-Type: \(contentType)\r\n" }
-        req += "Content-Length: \(body.count)\r\n\r\n"
-        var data = Data(req.utf8)
+        var requestHead = "\(method) \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: \(ProxyUserAgent.chrome)\r\nAccept: */*\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nX-Sudoku-Tunnel: \(modeName)\r\nAuthorization: Bearer \(auth)\r\n"
+        if let contentType { requestHead += "Content-Type: \(contentType)\r\n" }
+        requestHead += "Content-Length: \(body.count)\r\n\r\n"
+        var data = Data(requestHead.utf8)
         data.append(body)
         try stream.sendAll(data)
         let reader = try readHeaders(stream: stream)
@@ -1202,7 +1202,7 @@ nonisolated final class SudokuHTTPMaskTransport {
     }
 
     private func pushLoop() {
-        let cap = mode == .poll ? 49_152 : 262_144
+        let maxBatchBytes = mode == .poll ? 49_152 : 262_144
         while true {
             let batch: Data
             condition.lock()
@@ -1211,7 +1211,7 @@ nonisolated final class SudokuHTTPMaskTransport {
                 if !txQueue.isEmpty || closed { break }
             }
             if txQueue.isEmpty && closed { condition.unlock(); return }
-            let n = min(cap, txQueue.count)
+            let n = min(maxBatchBytes, txQueue.count)
             batch = txQueue.read(max: n)
             if txQueue.isEmpty { txQueue.removeAll(keepingCapacity: false) }
             condition.signal()
@@ -1815,8 +1815,8 @@ nonisolated final class SudokuNativeClient {
         payload.append(SudokuNativeCrypto.sha256(hashSource).prefix(8))
         payload.append(nonce)
         payload.append(clientPub)
-        var feats = UInt32(0x1f).bigEndian
-        payload.append(Data(bytes: &feats, count: 4))
+        var featureFlags = UInt32(0x1f).bigEndian
+        payload.append(Data(bytes: &featureFlags, count: 4))
         if tables.sendsTableHint {
             var hint = tables.hint.bigEndian
             payload.append(Data(bytes: &hint, count: 4))
@@ -1952,10 +1952,10 @@ nonisolated final class SudokuMuxClient {
     func close() {
         condition.lock()
         closed = true
-        let all = Array(streams.values)
+        let streamsToClose = Array(streams.values)
         streams.removeAll()
         condition.unlock()
-        for stream in all { stream.markClosed(discardQueuedData: true) }
+        for stream in streamsToClose { stream.markClosed(discardQueuedData: true) }
         record.close()
     }
 

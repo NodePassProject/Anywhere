@@ -235,22 +235,22 @@ enum MITMBodyCodec {
     /// too-short body, which then mismatches and fails closed.
     private static func gzipTrailerISIZE(_ data: Data) -> UInt32 {
         guard data.count >= 4 else { return 0 }
-        let e = data.endIndex
-        return UInt32(data[data.index(e, offsetBy: -4)])
-            | (UInt32(data[data.index(e, offsetBy: -3)]) << 8)
-            | (UInt32(data[data.index(e, offsetBy: -2)]) << 16)
-            | (UInt32(data[data.index(e, offsetBy: -1)]) << 24)
+        let endIndex = data.endIndex
+        return UInt32(data[data.index(endIndex, offsetBy: -4)])
+            | (UInt32(data[data.index(endIndex, offsetBy: -3)]) << 8)
+            | (UInt32(data[data.index(endIndex, offsetBy: -2)]) << 16)
+            | (UInt32(data[data.index(endIndex, offsetBy: -1)]) << 24)
     }
 
     /// Little-endian CRC-32 (RFC 1952 §2.3.1): the 4 bytes preceding ISIZE;
     /// 0 for a too-short body, which then mismatches and fails closed.
     private static func gzipTrailerCRC32(_ data: Data) -> UInt32 {
         guard data.count >= 8 else { return 0 }
-        let e = data.endIndex
-        return UInt32(data[data.index(e, offsetBy: -8)])
-            | (UInt32(data[data.index(e, offsetBy: -7)]) << 8)
-            | (UInt32(data[data.index(e, offsetBy: -6)]) << 16)
-            | (UInt32(data[data.index(e, offsetBy: -5)]) << 24)
+        let endIndex = data.endIndex
+        return UInt32(data[data.index(endIndex, offsetBy: -8)])
+            | (UInt32(data[data.index(endIndex, offsetBy: -7)]) << 8)
+            | (UInt32(data[data.index(endIndex, offsetBy: -6)]) << 16)
+            | (UInt32(data[data.index(endIndex, offsetBy: -5)]) << 24)
     }
 
     private static func gunzipOneMember(
@@ -262,11 +262,11 @@ enum MITMBodyCodec {
         // Minimum: 10-byte fixed header + 8-byte trailer.
         let available = data.distance(from: offset, to: end)
         guard available >= 18 else { return .failure(.tooShort(available: available)) }
-        let b0 = data[offset]
+        let magicByte0 = data[offset]
         let b1 = data[data.index(offset, offsetBy: 1)]
         let b2 = data[data.index(offset, offsetBy: 2)]
-        guard b0 == 0x1F, b1 == 0x8B, b2 == 0x08 else {
-            return .failure(.badMagic(b0, b1, b2))
+        guard magicByte0 == 0x1F, b1 == 0x8B, b2 == 0x08 else {
+            return .failure(.badMagic(magicByte0, b1, b2))
         }
         let flags = data[data.index(offset, offsetBy: 3)]
         var index = data.index(offset, offsetBy: 10)

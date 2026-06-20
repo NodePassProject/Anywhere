@@ -59,78 +59,78 @@ extension TunnelStack {
         let packetLen = 56
         var packet = Data(count: packetLen)
         packet.withUnsafeMutableBytes { raw in
-            let p = raw.bindMemory(to: UInt8.self).baseAddress!
+            let packetBytes = raw.bindMemory(to: UInt8.self).baseAddress!
 
             // --- Outer IPv4 header (src=fake IP, dst=sender) ---
-            p[0] = 0x45                                     // Version 4, IHL 5
-            p[1] = 0x00                                     // TOS
-            p[2] = UInt8(packetLen >> 8)                    // Total length
-            p[3] = UInt8(packetLen & 0xFF)
-            p[4] = 0; p[5] = 0                              // Identification
-            p[6] = 0; p[7] = 0                              // Flags + Fragment offset
-            p[8] = 64                                       // TTL
-            p[9] = 1                                        // Protocol: ICMP
-            p[10] = 0; p[11] = 0                            // Checksum (below)
-            memcpy(p + 12, dstIP, 4)                        // Src = fake IP
-            memcpy(p + 16, srcIP, 4)                        // Dst = sender
+            packetBytes[0] = 0x45                                     // Version 4, IHL 5
+            packetBytes[1] = 0x00                                     // TOS
+            packetBytes[2] = UInt8(packetLen >> 8)                    // Total length
+            packetBytes[3] = UInt8(packetLen & 0xFF)
+            packetBytes[4] = 0; packetBytes[5] = 0                              // Identification
+            packetBytes[6] = 0; packetBytes[7] = 0                              // Flags + Fragment offset
+            packetBytes[8] = 64                                       // TTL
+            packetBytes[9] = 1                                        // Protocol: ICMP
+            packetBytes[10] = 0; packetBytes[11] = 0                            // Checksum (below)
+            memcpy(packetBytes + 12, dstIP, 4)                        // Src = fake IP
+            memcpy(packetBytes + 16, srcIP, 4)                        // Dst = sender
 
             // IPv4 header checksum
             var sum: UInt32 = 0
             for i in stride(from: 0, to: 20, by: 2) {
-                sum += UInt32(p[i]) << 8 | UInt32(p[i + 1])
+                sum += UInt32(packetBytes[i]) << 8 | UInt32(packetBytes[i + 1])
             }
             while sum > 0xFFFF { sum = (sum & 0xFFFF) + (sum >> 16) }
             let ipCksum = ~UInt16(sum)
-            p[10] = UInt8(ipCksum >> 8)
-            p[11] = UInt8(ipCksum & 0xFF)
+            packetBytes[10] = UInt8(ipCksum >> 8)
+            packetBytes[11] = UInt8(ipCksum & 0xFF)
 
             // --- ICMP header (Type 3 = Dest Unreachable, Code 3 = Port Unreachable) ---
-            p[20] = 3
-            p[21] = 3
-            p[22] = 0
-            p[23] = 0
-            p[24] = 0
-            p[25] = 0
-            p[26] = 0
-            p[27] = 0
+            packetBytes[20] = 3
+            packetBytes[21] = 3
+            packetBytes[22] = 0
+            packetBytes[23] = 0
+            packetBytes[24] = 0
+            packetBytes[25] = 0
+            packetBytes[26] = 0
+            packetBytes[27] = 0
 
             // --- Reconstructed original IPv4 header ---
             let udpTotalLen = 8 + udpPayloadLength
             let innerTotalLen = 20 + udpTotalLen
-            p[28] = 0x45
-            p[29] = 0x00
-            p[30] = UInt8((innerTotalLen >> 8) & 0xFF)
-            p[31] = UInt8(innerTotalLen & 0xFF)
-            p[32] = 0
-            p[33] = 0
-            p[34] = 0
-            p[35] = 0
-            p[36] = 64
-            p[37] = 17
-            p[38] = 0
-            p[39] = 0
-            memcpy(p + 40, srcIP, 4)
-            memcpy(p + 44, dstIP, 4)
+            packetBytes[28] = 0x45
+            packetBytes[29] = 0x00
+            packetBytes[30] = UInt8((innerTotalLen >> 8) & 0xFF)
+            packetBytes[31] = UInt8(innerTotalLen & 0xFF)
+            packetBytes[32] = 0
+            packetBytes[33] = 0
+            packetBytes[34] = 0
+            packetBytes[35] = 0
+            packetBytes[36] = 64
+            packetBytes[37] = 17
+            packetBytes[38] = 0
+            packetBytes[39] = 0
+            memcpy(packetBytes + 40, srcIP, 4)
+            memcpy(packetBytes + 44, dstIP, 4)
 
             // --- First 8 bytes of original UDP ---
-            p[48] = UInt8(srcPort >> 8)
-            p[49] = UInt8(srcPort & 0xFF)
-            p[50] = UInt8(dstPort >> 8)
-            p[51] = UInt8(dstPort & 0xFF)
-            p[52] = UInt8((udpTotalLen >> 8) & 0xFF)
-            p[53] = UInt8(udpTotalLen & 0xFF)
-            p[54] = 0
-            p[55] = 0
+            packetBytes[48] = UInt8(srcPort >> 8)
+            packetBytes[49] = UInt8(srcPort & 0xFF)
+            packetBytes[50] = UInt8(dstPort >> 8)
+            packetBytes[51] = UInt8(dstPort & 0xFF)
+            packetBytes[52] = UInt8((udpTotalLen >> 8) & 0xFF)
+            packetBytes[53] = UInt8(udpTotalLen & 0xFF)
+            packetBytes[54] = 0
+            packetBytes[55] = 0
 
             // ICMP checksum (over ICMP header + data, offset 20..55)
             sum = 0
             for i in stride(from: 20, to: packetLen, by: 2) {
-                sum += UInt32(p[i]) << 8 | UInt32(p[i + 1])
+                sum += UInt32(packetBytes[i]) << 8 | UInt32(packetBytes[i + 1])
             }
             while sum > 0xFFFF { sum = (sum & 0xFFFF) + (sum >> 16) }
             let icmpCksum = ~UInt16(sum)
-            p[22] = UInt8(icmpCksum >> 8)
-            p[23] = UInt8(icmpCksum & 0xFF)
+            packetBytes[22] = UInt8(icmpCksum >> 8)
+            packetBytes[23] = UInt8(icmpCksum & 0xFF)
         }
         return packet
     }

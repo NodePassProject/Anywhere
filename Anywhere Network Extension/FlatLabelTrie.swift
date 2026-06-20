@@ -151,7 +151,7 @@ struct FlatLabelTrie<Payload> {
 
             if found < 0 { return deepest }
             nodeID = Int(found)
-            if let p = nodePayload[nodeID] { deepest = p }
+            if let matchedPayload = nodePayload[nodeID] { deepest = matchedPayload }
 
             end = start - 1
         }
@@ -332,16 +332,16 @@ extension FlatLabelTrie {
             let a = nextLabel(base, &aEnd, aLow, dot)
             let b = nextLabel(base, &bEnd, bLow, dot)
             if a == nil && b == nil { return 0 }
-            guard let la = a else { return -1 }
+            guard let labelA = a else { return -1 }
             guard let lb = b else { return 1 }
-            let n = min(la.length, lb.length)
+            let n = min(labelA.length, lb.length)
             var k = 0
             while k < n {
-                let x = base[la.start + k], y = base[lb.start + k]
+                let x = base[labelA.start + k], y = base[lb.start + k]
                 if x != y { return x < y ? -1 : 1 }
                 k += 1
             }
-            if la.length != lb.length { return la.length < lb.length ? -1 : 1 }
+            if labelA.length != lb.length { return labelA.length < lb.length ? -1 : 1 }
         }
     }
 }

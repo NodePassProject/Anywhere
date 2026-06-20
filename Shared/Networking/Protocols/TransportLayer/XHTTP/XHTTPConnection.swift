@@ -477,11 +477,11 @@ nonisolated class XHTTPConnection {
         h2DataBuffer.removeAll()
         h2StreamClosed = true
         h3Closed = true
-        let h3Dl = h3Download
-        let h3Up = h3Upload
-        let h3Sess = h3Multiplexer
-        let sh2Dl = sharedH2Download
-        let sh2Up = sharedH2Upload
+        let h3DownloadStream = h3Download
+        let h3UploadStream = h3Upload
+        let h3Session = h3Multiplexer
+        let sharedH2DownloadStream = sharedH2Download
+        let sharedH2UploadStream = sharedH2Upload
         sharedH2Download = nil
         sharedH2Upload = nil
         let lease = xmuxLease
@@ -508,15 +508,15 @@ nonisolated class XHTTPConnection {
 
         downloadCancel()
         uploadCancelFn?()
-        h3Dl?.close()
-        h3Up?.close()
-        sh2Dl?.close()
-        sh2Up?.close()
+        h3DownloadStream?.close()
+        h3UploadStream?.close()
+        sharedH2DownloadStream?.close()
+        sharedH2UploadStream?.close()
         if let lease {
             // Pooled transport: keep it open for other/future sessions; just release our slot.
             lease.release()
         } else {
-            h3Sess?.close()
+            h3Session?.close()
         }
         uploadChannel?.cancel()
     }
@@ -817,8 +817,8 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
         return eligible.randomElement()
     }
 
-    private func makeLease(_ conn: XHTTPXMUXMultiplexerPoolable, _ client: XHTTPXMUXMultiplexerClient) -> XHTTPXMUXMultiplexerLease {
-        XHTTPXMUXMultiplexerLease(connection: conn, manager: self, client: client)
+    private func makeLease(_ connection: XHTTPXMUXMultiplexerPoolable, _ client: XHTTPXMUXMultiplexerClient) -> XHTTPXMUXMultiplexerLease {
+        XHTTPXMUXMultiplexerLease(connection: connection, manager: self, client: client)
     }
 
     func releaseSlot(_ client: XHTTPXMUXMultiplexerClient) {
@@ -1060,22 +1060,22 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         }
     }
 
-    private func routeFrame(_ f: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
-        switch f.type {
+    private func routeFrame(_ decodedFrame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
+        switch decodedFrame.type {
         case XHTTPConnection.h2FrameData:
-            handleData(streamId: f.streamId, flags: f.flags, payload: f.payload)
+            handleData(streamId: decodedFrame.streamId, flags: decodedFrame.flags, payload: decodedFrame.payload)
         case XHTTPConnection.h2FrameHeaders:
-            handleHeaders(streamId: f.streamId, flags: f.flags, payload: f.payload)
+            handleHeaders(streamId: decodedFrame.streamId, flags: decodedFrame.flags, payload: decodedFrame.payload)
         case XHTTPConnection.h2FrameWindowUpdate:
-            if f.streamId == 0 { handleConnWindowUpdate(f.payload) }
-            else { handleStreamWindowUpdate(streamId: f.streamId, payload: f.payload) }
-        case XHTTPConnection.h2FrameSettings where f.flags & XHTTPConnection.h2FlagAck == 0:
-            applySettings(f.payload)
+            if decodedFrame.streamId == 0 { handleConnWindowUpdate(decodedFrame.payload) }
+            else { handleStreamWindowUpdate(streamId: decodedFrame.streamId, payload: decodedFrame.payload) }
+        case XHTTPConnection.h2FrameSettings where decodedFrame.flags & XHTTPConnection.h2FlagAck == 0:
+            applySettings(decodedFrame.payload)
             transportSend(frame(type: XHTTPConnection.h2FrameSettings, flags: XHTTPConnection.h2FlagAck, streamId: 0, payload: Data())) { _ in }
-        case XHTTPConnection.h2FramePing where f.flags & XHTTPConnection.h2FlagAck == 0:
-            transportSend(frame(type: XHTTPConnection.h2FramePing, flags: XHTTPConnection.h2FlagAck, streamId: 0, payload: f.payload)) { _ in }
+        case XHTTPConnection.h2FramePing where decodedFrame.flags & XHTTPConnection.h2FlagAck == 0:
+            transportSend(frame(type: XHTTPConnection.h2FramePing, flags: XHTTPConnection.h2FlagAck, streamId: 0, payload: decodedFrame.payload)) { _ in }
         case XHTTPConnection.h2FrameRstStream:
-            handleEnd(streamId: f.streamId)
+            handleEnd(streamId: decodedFrame.streamId)
         case XHTTPConnection.h2FrameGoaway:
             failAll(XHTTPError.connectionClosed)
         default:
@@ -1089,9 +1089,9 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         guard let stream = streams[streamId] else {
             // Unknown/closed stream: still replenish the connection window so peers keep flowing.
             connReceiveConsumed += payload.count
-            let wu = connWindowUpdateLocked()
+            let windowUpdateFrame = connWindowUpdateLocked()
             lock.unlock()
-            if let wu { transportSend(wu) { _ in } }
+            if let windowUpdateFrame { transportSend(windowUpdateFrame) { _ in } }
             return
         }
         if stream.draining {
@@ -1100,7 +1100,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
             let updates = windowUpdatesLocked(stream)
             if endStream { streams.removeValue(forKey: streamId) }
             lock.unlock()
-            for u in updates { transportSend(u) { _ in } }
+            for windowUpdate in updates { transportSend(windowUpdate) { _ in } }
             return
         }
         if !payload.isEmpty { stream.receiveBuffer.append(payload) }
@@ -1141,9 +1141,9 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
 
     private func handleConnWindowUpdate(_ payload: Data) {
         guard payload.count >= 4 else { return }
-        let inc = Int(readUInt32(payload) & 0x7FFFFFFF)
+        let increment = Int(readUInt32(payload) & 0x7FFFFFFF)
         lock.lock()
-        peerConnWindow += inc
+        peerConnWindow += increment
         let resumptions = flowResumptions; flowResumptions.removeAll()
         lock.unlock()
         for r in resumptions { r() }
@@ -1318,11 +1318,11 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     }
 
     private func applySettings(_ payload: Data) {
-        var o = payload.startIndex
-        while o + 6 <= payload.endIndex {
-            let id = (UInt16(payload[o]) << 8) | UInt16(payload[o + 1])
-            let value = (UInt32(payload[o + 2]) << 24) | (UInt32(payload[o + 3]) << 16)
-                    | (UInt32(payload[o + 4]) << 8) | UInt32(payload[o + 5])
+        var index = payload.startIndex
+        while index + 6 <= payload.endIndex {
+            let id = (UInt16(payload[index]) << 8) | UInt16(payload[index + 1])
+            let value = (UInt32(payload[index + 2]) << 24) | (UInt32(payload[index + 3]) << 16)
+                    | (UInt32(payload[index + 4]) << 8) | UInt32(payload[index + 5])
             lock.lock()
             if id == 0x04 { // INITIAL_WINDOW_SIZE
                 let delta = Int(value) - peerInitialWindow
@@ -1332,7 +1332,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
                 maxFrameSize = Int(value)
             }
             lock.unlock()
-            o += 6
+            index += 6
         }
     }
 

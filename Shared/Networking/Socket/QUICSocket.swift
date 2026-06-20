@@ -18,7 +18,7 @@ nonisolated final class QUICSocket {
     private typealias QUICError = QUICConnection.QUICError
 
     private let queue: DispatchQueue
-    private var rxBuf: [UInt8]
+    private var receiveBuffer: [UInt8]
 
     /// Connected UDP socket. `-1` when not open.
     private var socketFD: Int32 = -1
@@ -34,7 +34,7 @@ nonisolated final class QUICSocket {
 
     init(queue: DispatchQueue, receiveBufferSize: Int) {
         self.queue = queue
-        self.rxBuf = [UInt8](repeating: 0, count: receiveBufferSize)
+        self.receiveBuffer = [UInt8](repeating: 0, count: receiveBufferSize)
     }
 
     // MARK: - Connect
@@ -151,23 +151,23 @@ nonisolated final class QUICSocket {
     private func drainReads() {
         guard socketFD >= 0 else { return }
         while true {
-            let n = rxBuf.withUnsafeMutableBufferPointer { buffer -> Int in
+            let bytesRead = receiveBuffer.withUnsafeMutableBufferPointer { buffer -> Int in
                 PerformanceMonitor.measure(.socketReceiveQUIC) {
                     Darwin.recv(socketFD, buffer.baseAddress, buffer.count, 0)
                 }
             }
-            if n < 0 {
+            if bytesRead < 0 {
                 let error = errno
                 if error == EAGAIN || error == EWOULDBLOCK || error == EINTR { return }
                 recvErrorHandler?(error)
                 return
             }
-            if n == 0 { return }
+            if bytesRead == 0 { return }
             // Zero-copy view; the handler copies out before returning.
-            rxBuf.withUnsafeBufferPointer { buffer in
+            receiveBuffer.withUnsafeBufferPointer { buffer in
                 let view = Data(
                     bytesNoCopy: UnsafeMutableRawPointer(mutating: buffer.baseAddress!),
-                    count: n, deallocator: .none
+                    count: bytesRead, deallocator: .none
                 )
                 packetHandler?(view)
             }

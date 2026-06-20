@@ -193,11 +193,11 @@ nonisolated class QUICTLSHandler {
         cryptoBuffer.append(data)
 
         while cryptoBuffer.count >= 4 {
-            let si = cryptoBuffer.startIndex
-            let msgType = cryptoBuffer[si]
-            let msgLen = (Int(cryptoBuffer[si + 1]) << 16)
-                       | (Int(cryptoBuffer[si + 2]) << 8)
-                       |  Int(cryptoBuffer[si + 3])
+            let startIndex = cryptoBuffer.startIndex
+            let msgType = cryptoBuffer[startIndex]
+            let msgLen = (Int(cryptoBuffer[startIndex + 1]) << 16)
+                       | (Int(cryptoBuffer[startIndex + 2]) << 8)
+                       |  Int(cryptoBuffer[startIndex + 3])
 
             // Length field is uint24; this cap is not RFC-specified but guards against
             // huge allocations from erroneous lengths.
@@ -210,7 +210,7 @@ nonisolated class QUICTLSHandler {
                 return .needMoreData
             }
 
-            let message = Data(cryptoBuffer[si..<(si + totalLen)])
+            let message = Data(cryptoBuffer[startIndex..<(startIndex + totalLen)])
             cryptoBuffer = Data(cryptoBuffer.dropFirst(totalLen))
 
             if msgType == TLSHandshakeType.certificateVerify {
@@ -552,7 +552,7 @@ nonisolated class QUICTLSHandler {
 
     private func installHandshakeKeys(conn: OpaquePointer, keys: TLS13HandshakeKeys) {
         let aead = ngtcp2_crypto_aead()
-        let md = ngtcp2_crypto_md()
+        let messageDigest = ngtcp2_crypto_md()
 
         var context = ngtcp2_crypto_ctx()
         ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))

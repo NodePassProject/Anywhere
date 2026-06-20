@@ -141,11 +141,11 @@ enum NowhereProtocol {
 
     static func makeAuthFrame(key: String, protocolSpec: EffectiveSpec) throws -> Data {
         var nonce = Data(count: 32)
-        let rv = nonce.withUnsafeMutableBytes { raw -> Int32 in
+        let randomStatus = nonce.withUnsafeMutableBytes { raw -> Int32 in
             guard let pointer = raw.baseAddress else { return errSecAllocate }
             return SecRandomCopyBytes(kSecRandomDefault, 32, pointer)
         }
-        guard rv == errSecSuccess else {
+        guard randomStatus == errSecSuccess else {
             throw NowhereError.connectionFailed("Failed to generate auth nonce")
         }
 

@@ -71,11 +71,11 @@ enum HTTPHeader {
     /// Renders a header field *name* for logs: printable ASCII verbatim, every other byte (and the
     /// escape char itself) as `\xHH`, bounded to `max` bytes so a hostile or corrupt peer can't flood
     /// the log.
-    static func escapedForLog(_ s: String, max: Int = 48) -> String {
+    static func escapedForLog(_ fieldName: String, max: Int = 48) -> String {
         var out = ""
-        var n = 0
-        for b in s.utf8 {
-            if n >= max { out += "…"; break }
+        var emittedByteCount = 0
+        for b in fieldName.utf8 {
+            if emittedByteCount >= max { out += "…"; break }
             if b >= 0x20, b < 0x7F, b != 0x5C {
                 out.append(Character(Unicode.Scalar(b)))
             } else {
@@ -83,7 +83,7 @@ enum HTTPHeader {
                 out.append(hexDigits[Int(b >> 4)])
                 out.append(hexDigits[Int(b & 0x0F)])
             }
-            n += 1
+            emittedByteCount += 1
         }
         return out
     }
@@ -134,8 +134,8 @@ enum HTTPHeader {
     private static let hexDigits = Array("0123456789abcdef")
 
     /// `0xHH` rendering of a byte for diagnostics.
-    private static func hexByte(_ b: UInt8) -> String {
-        "0x\(hexDigits[Int(b >> 4)])\(hexDigits[Int(b & 0x0F)])"
+    private static func hexByte(_ byte: UInt8) -> String {
+        "0x\(hexDigits[Int(byte >> 4)])\(hexDigits[Int(byte & 0x0F)])"
     }
 }
 
@@ -149,10 +149,10 @@ enum ASCII {
         var i = lhs.startIndex
         var j = rhs.startIndex
         while i < lhs.endIndex {
-            let l = lhs[i]
+            let leftByte = lhs[i]
             let r = rhs[j]
             // 0x20 is the ASCII case bit; non-letters skip the fold.
-            let foldedL = (l >= 0x41 && l <= 0x5A) ? l | 0x20 : l
+            let foldedL = (leftByte >= 0x41 && leftByte <= 0x5A) ? leftByte | 0x20 : leftByte
             let foldedR = (r >= 0x41 && r <= 0x5A) ? r | 0x20 : r
             if foldedL != foldedR { return false }
             i = lhs.index(after: i)

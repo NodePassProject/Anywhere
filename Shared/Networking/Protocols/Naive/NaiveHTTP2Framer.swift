@@ -87,29 +87,29 @@ enum NaiveHTTP2Framer {
     static func deserialize(from buffer: inout Data) -> NaiveHTTP2Frame? {
         guard buffer.count >= headerSize else { return nil }
 
-        let b = buffer
-        let s = b.startIndex
+        let bytes = buffer
+        let startIndex = bytes.startIndex
 
-        let length = Int(b[s]) << 16 | Int(b[s+1]) << 8 | Int(b[s+2])
+        let length = Int(bytes[startIndex]) << 16 | Int(bytes[startIndex+1]) << 8 | Int(bytes[startIndex+2])
         let totalSize = headerSize + length
 
         guard buffer.count >= totalSize else { return nil }
 
-        let rawType = b[s+3]
-        let flags = b[s+4]
-        let streamID = UInt32(b[s+5]) << 24 | UInt32(b[s+6]) << 16
-                     | UInt32(b[s+7]) << 8 | UInt32(b[s+8])
-        let sid = streamID & 0x7FFFFFFF
+        let rawType = bytes[startIndex+3]
+        let flags = bytes[startIndex+4]
+        let streamID = UInt32(bytes[startIndex+5]) << 24 | UInt32(bytes[startIndex+6]) << 16
+                     | UInt32(bytes[startIndex+7]) << 8 | UInt32(bytes[startIndex+8])
+        let maskedStreamID = streamID & 0x7FFFFFFF
 
-        let payload = Data(buffer[(s + headerSize)..<(s + totalSize)])
+        let payload = Data(buffer[(startIndex + headerSize)..<(startIndex + totalSize)])
         buffer.removeFirst(totalSize)
 
         guard let type = NaiveHTTP2FrameType(rawValue: rawType) else {
             // Unknown frame type — skip per RFC 7540 §4.1
-            return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.data, flags: 0, streamID: sid, payload: Data())
+            return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.data, flags: 0, streamID: maskedStreamID, payload: Data())
         }
 
-        return NaiveHTTP2Frame(type: type, flags: flags, streamID: sid, payload: payload)
+        return NaiveHTTP2Frame(type: type, flags: flags, streamID: maskedStreamID, payload: payload)
     }
 
     // MARK: - Convenience Builders

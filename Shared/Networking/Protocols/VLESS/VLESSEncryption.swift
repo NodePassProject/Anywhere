@@ -95,14 +95,14 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
         var paddingSegments: [String] = []
         var publicKeys: [Data] = []
         for raw in segments[3...] {
-            let s = String(raw)
-            if s.count < 20 {
-                paddingSegments.append(s)
+            let segment = String(raw)
+            if segment.count < 20 {
+                paddingSegments.append(segment)
                 continue
             }
-            guard let key = Data(base64URLEncoded: s),
+            guard let key = Data(base64URLEncoded: segment),
                   key.count == 32 || key.count == 1184 else {
-                throw ParseError.invalidPublicKey(s)
+                throw ParseError.invalidPublicKey(segment)
             }
             publicKeys.append(key)
         }

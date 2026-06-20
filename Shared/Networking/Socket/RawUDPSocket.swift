@@ -63,7 +63,7 @@ nonisolated final class RawUDPSocket {
     private var receiveHandler: ((Data) -> Void)?
     private var receiveErrorHandler: ((Error) -> Void)?
     private var receiveHandlerQueue: DispatchQueue?
-    private var rxBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
+    private var receiveBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
 
     /// Datagrams received before `startReceiving` arms the handler — real under
     /// chained QUIC, where the server's response races the lazy handler install.
@@ -202,12 +202,12 @@ nonisolated final class RawUDPSocket {
     private func drainReads() {
         guard socketFD >= 0 else { return }
         while true {
-            let n = rxBuffer.withUnsafeMutableBufferPointer { buf -> Int in
+            let bytesRead = receiveBuffer.withUnsafeMutableBufferPointer { buf -> Int in
                 PerformanceMonitor.measure(.socketReceiveUDP) {
                     Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
                 }
             }
-            if n < 0 {
+            if bytesRead < 0 {
                 let error = errno
                 if error == EAGAIN || error == EWOULDBLOCK || error == EINTR { return }
                 // Terminal recv failure: stop the read source and surface the error once.
@@ -226,13 +226,13 @@ nonisolated final class RawUDPSocket {
                 }
                 return
             }
-            if n == 0 { return }
-            let data = rxBuffer.withUnsafeBufferPointer { buf -> Data in
-                Data(bytes: buf.baseAddress!, count: n)
+            if bytesRead == 0 { return }
+            let data = receiveBuffer.withUnsafeBufferPointer { buf -> Data in
+                Data(bytes: buf.baseAddress!, count: bytesRead)
             }
             if let handler = receiveHandler {
-                if let hq = receiveHandlerQueue {
-                    hq.async { handler(data) }
+                if let handlerQueue = receiveHandlerQueue {
+                    handlerQueue.async { handler(data) }
                 } else {
                     handler(data)
                 }

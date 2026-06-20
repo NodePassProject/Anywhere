@@ -139,20 +139,20 @@ extension TLSServer {
         signedContent.append(serverRandom)
         signedContent.append(parameters)
         let signature = try leafSigningKeyP256.signature(for: signedContent)
-        let ske = TLSServerHelloBuilder.buildServerKeyExchange(
+        let serverKeyExchange = TLSServerHelloBuilder.buildServerKeyExchange(
             params: parameters,
             signatureAlgorithm: TLSSignatureScheme.ecdsa_secp256r1_sha256,
             signature: signature.derRepresentation
         )
-        handshake12.transcript.append(ske)
+        handshake12.transcript.append(serverKeyExchange)
 
-        let shd = TLSServerHelloBuilder.buildServerHelloDone()
-        handshake12.transcript.append(shd)
+        let serverHelloDone = TLSServerHelloBuilder.buildServerHelloDone()
+        handshake12.transcript.append(serverHelloDone)
 
         emitPlainHandshakeRecord(serverHello)
         emitPlainHandshakeRecord(cert)
-        emitPlainHandshakeRecord(ske)
-        emitPlainHandshakeRecord(shd)
+        emitPlainHandshakeRecord(serverKeyExchange)
+        emitPlainHandshakeRecord(serverHelloDone)
 
         state = .sentServerHelloDone12
     }
@@ -217,33 +217,33 @@ extension TLSServer {
             throw TLSError.handshakeFailed("invalid client ECDHE key share")
         }
 
-        let cke = recordBody.subdata(in: recordBody.startIndex..<(recordBody.startIndex + 4 + length))
-        handshake12.transcript.append(cke)
+        let clientKeyExchange = recordBody.subdata(in: recordBody.startIndex..<(recordBody.startIndex + 4 + length))
+        handshake12.transcript.append(clientKeyExchange)
 
         let useSHA384 = TLSCipherSuite.usesSHA384(chosenCipherSuite)
-        let ms: Data
+        let masterSecret: Data
         if handshake12.extendedMasterSecret {
             let sessionHash = TLS12KeyDerivation.transcriptHash(handshake12.transcript, useSHA384: useSHA384)
-            ms = TLS12KeyDerivation.extendedMasterSecret(
+            masterSecret = TLS12KeyDerivation.extendedMasterSecret(
                 preMasterSecret: preMaster,
                 sessionHash: sessionHash,
                 useSHA384: useSHA384
             )
         } else {
-            ms = TLS12KeyDerivation.masterSecret(
+            masterSecret = TLS12KeyDerivation.masterSecret(
                 preMasterSecret: preMaster,
                 clientRandom: handshake12.clientRandom!,
                 serverRandom: handshake12.serverRandom!,
                 useSHA384: useSHA384
             )
         }
-        handshake12.masterSecret = ms
+        handshake12.masterSecret = masterSecret
 
         let macLen = TLSCipherSuite.macLength(chosenCipherSuite)
         let keyLen = TLSCipherSuite.keyLength(chosenCipherSuite)
         let ivLen = TLSCipherSuite.ivLength(chosenCipherSuite)
         handshake12.keys = TLS12KeyDerivation.keysFromMasterSecret(
-            masterSecret: ms,
+            masterSecret: masterSecret,
             clientRandom: handshake12.clientRandom!,
             serverRandom: handshake12.serverRandom!,
             macLen: macLen,
@@ -289,8 +289,8 @@ extension TLSServer {
             throw TLSError.handshakeFailed("Client Finished verify failed")
         }
 
-        let cf = plaintext.subdata(in: plaintext.startIndex..<(plaintext.startIndex + 16))
-        handshake12.transcript.append(cf)
+        let clientFinished = plaintext.subdata(in: plaintext.startIndex..<(plaintext.startIndex + 16))
+        handshake12.transcript.append(clientFinished)
 
         let serverTranscriptHash = TLS12KeyDerivation.transcriptHash(handshake12.transcript, useSHA384: useSHA384)
         let serverVerify = TLS12KeyDerivation.finishedPayload(

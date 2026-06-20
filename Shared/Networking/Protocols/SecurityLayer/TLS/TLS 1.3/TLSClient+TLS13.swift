@@ -56,8 +56,8 @@ extension TLSClient {
             transcript.append(effectiveClientHello)
             transcript.append(serverHello)
 
-            let (hs, keys) = tls13.keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
-            tls13.handshakeSecret = hs
+            let (handshakeSecret, keys) = tls13.keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
+            tls13.handshakeSecret = handshakeSecret
             tls13.handshakeKeys = keys
             tls13.handshakeTranscript = transcript
             negotiatedVersion = 0x0304
@@ -452,7 +452,7 @@ extension TLSClient {
                 plaintext: finishedMsg,
                 key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
-                seqNum: 0,
+                sequenceNumber: 0,
                 cipherSuite: tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             ccsRecord.append(finishedRecord)

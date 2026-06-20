@@ -23,12 +23,12 @@ struct TrafficByteCounts {
     var totalBytesIn: Int64 { routes.values.reduce(0) { $0 + $1.bytesIn } }
     var totalBytesOut: Int64 { routes.values.reduce(0) { $0 + $1.bytesOut } }
 
-    mutating func add(bytesIn n: Int64, target: RouteTarget) {
-        routes[target, default: ByteCounts()].bytesIn += n
+    mutating func add(bytesIn byteCount: Int64, target: RouteTarget) {
+        routes[target, default: ByteCounts()].bytesIn += byteCount
     }
 
-    mutating func add(bytesOut n: Int64, target: RouteTarget) {
-        routes[target, default: ByteCounts()].bytesOut += n
+    mutating func add(bytesOut byteCount: Int64, target: RouteTarget) {
+        routes[target, default: ByteCounts()].bytesOut += byteCount
     }
 }
 

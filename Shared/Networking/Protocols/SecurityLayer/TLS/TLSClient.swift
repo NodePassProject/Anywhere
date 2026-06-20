@@ -424,11 +424,11 @@ nonisolated class TLSClient {
                 completion: completion
             )
 
-        case .tls12(let cipherSuite, let srvRandom, let version, let ems):
-            self.serverRandom = srvRandom
+        case .tls12(let cipherSuite, let serverRandom, let version, let extendedMasterSecret):
+            self.serverRandom = serverRandom
             self.tls12CipherSuite = cipherSuite
             self.negotiatedVersion = version
-            self.useExtendedMasterSecret = ems
+            self.useExtendedMasterSecret = extendedMasterSecret
             handleTLS12Handshake(
                 buffer: buffer,
                 clientHello: clientHello,
@@ -577,11 +577,11 @@ nonisolated class TLSClient {
                             if 3 + nameLen <= extDataLen {
                                 let nameStart = extOffset + 3
                                 let name = data.subdata(in: nameStart..<(nameStart + nameLen))
-                                if let s = String(data: name, encoding: .utf8) {
-                                    guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(s) else {
+                                if let alpnProtocol = String(data: name, encoding: .utf8) {
+                                    guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(alpnProtocol) else {
                                         return nil
                                     }
-                                    self.negotiatedALPN = s
+                                    self.negotiatedALPN = alpnProtocol
                                 }
                             }
                         }

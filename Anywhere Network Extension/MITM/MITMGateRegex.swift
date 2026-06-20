@@ -141,13 +141,13 @@ final class MITMGateRegex: @unchecked Sendable {
         lock.unlock()
         if isQuarantined { return nil }
 
-        let box = CaptureBox()
+        let captureBox = CaptureBox()
         let done = DispatchSemaphore(value: 0)
         // Strong regex, no self: a runaway can outlive a reload without pinning the cache.
         let regex = self.regex
         Self.matchQueue.async {
-            box.captures = Self.captureGroups(regex, in: normalizedURL)
-            box.hasValue = true
+            captureBox.captures = Self.captureGroups(regex, in: normalizedURL)
+            captureBox.hasValue = true
             done.signal()
         }
         // The semaphore establishes happens-before for the unsynchronized box.
@@ -156,7 +156,7 @@ final class MITMGateRegex: @unchecked Sendable {
             recordStrike()
             return nil
         }
-        return box.hasValue ? box.captures : nil
+        return captureBox.hasValue ? captureBox.captures : nil
     }
 
     /// Extracts the first match's groups (index 0 = whole match); a non-participating

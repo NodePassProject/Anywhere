@@ -455,8 +455,8 @@ final class MITMHTTP1Stream {
 
         let parsed: ParsedHead
         switch parseHead(headData) {
-        case .ok(let p):
-            parsed = p
+        case .ok(let parsedHead):
+            parsed = parsedHead
         case .forward:
             // Not HTTP/1.x, or a tolerable deviation: stop rewriting, forward verbatim.
             mode = .passthrough
@@ -1124,7 +1124,7 @@ final class MITMHTTP1Stream {
             }
             return false
         }
-        let frameCtx = MITMScriptEngine.FrameContext(
+        let frameContext = MITMScriptEngine.FrameContext(
             phase: phase,
             method: streamingMethod(streaming),
             url: streamingURL(streaming),
@@ -1140,7 +1140,7 @@ final class MITMHTTP1Stream {
         MITMScriptTransform.applyFrame(
             chunk,
             rules: rules,
-            frameContext: frameCtx,
+            frameContext: frameContext,
             cursor: streaming.cursor,
             engineProvider: scriptEngineProvider,
             resumeOn: lwipQueue
@@ -1682,10 +1682,10 @@ final class MITMHTTP1Stream {
     /// A valid HTTP version token `^HTTP/\d\.\d$`: the literal `HTTP/`, one ASCII digit, `.`, one
     /// ASCII digit — eight bytes exactly.
     static func isHTTPVersionToken(_ s: Substring) -> Bool {
-        let u = Array(s.utf8)
-        return u.count == 8
-            && u[0] == 0x48 && u[1] == 0x54 && u[2] == 0x54 && u[3] == 0x50 && u[4] == 0x2F
-            && (0x30...0x39).contains(u[5]) && u[6] == 0x2E && (0x30...0x39).contains(u[7])
+        let bytes = Array(s.utf8)
+        return bytes.count == 8
+            && bytes[0] == 0x48 && bytes[1] == 0x54 && bytes[2] == 0x54 && bytes[3] == 0x50 && bytes[4] == 0x2F
+            && (0x30...0x39).contains(bytes[5]) && bytes[6] == 0x2E && (0x30...0x39).contains(bytes[7])
     }
 
     /// Whether `startLine` parses as a valid HTTP/1 request- or status-line. The sole start-line
@@ -1904,8 +1904,8 @@ final class MITMHTTP1Stream {
                 return .chunked
             }
         }
-        if let cl = contentLength {
-            let trimmed = cl.trimmingCharacters(in: CharacterSet.whitespaces)
+        if let rawContentLength = contentLength {
+            let trimmed = rawContentLength.trimmingCharacters(in: CharacterSet.whitespaces)
             if Self.isCleanContentLength(trimmed) {
                 // A clean CL that overflows Int64 (only a pathological >9-exabyte value) clamps to
                 // Int.max: forward the head and stream the body until the declared count or EOF. The

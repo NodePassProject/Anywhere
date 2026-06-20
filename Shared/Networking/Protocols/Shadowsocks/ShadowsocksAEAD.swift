@@ -159,19 +159,19 @@ enum ShadowsocksAEADCrypto {
             throw ShadowsocksError.decryptionFailed
         }
 
-        let ct = ciphertext.prefix(ciphertext.count - tagSize)
+        let ciphertextWithoutTag = ciphertext.prefix(ciphertext.count - tagSize)
         let tag = ciphertext.suffix(tagSize)
 
         switch cipher {
         case .aes128gcm, .aes256gcm, .blake3aes128gcm, .blake3aes256gcm:
             let nonceObj = try AES.GCM.Nonce(data: nonce)
-            let box = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
-            return try AES.GCM.open(box, using: symmetricKey)
+            let sealedBox = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ciphertextWithoutTag, tag: tag)
+            return try AES.GCM.open(sealedBox, using: symmetricKey)
 
         case .chacha20poly1305, .blake3chacha20poly1305:
             let nonceObj = try ChaChaPoly.Nonce(data: nonce)
-            let box = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
-            return try ChaChaPoly.open(box, using: symmetricKey)
+            let sealedBox = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ciphertextWithoutTag, tag: tag)
+            return try ChaChaPoly.open(sealedBox, using: symmetricKey)
 
         case .none:
             return ciphertext
