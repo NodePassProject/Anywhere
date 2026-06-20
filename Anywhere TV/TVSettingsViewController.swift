@@ -24,6 +24,10 @@ class TVSettingsViewController: UIViewController {
     private let insecureLabel = UILabel()
     private let insecureValueLabel = UILabel()
 
+    private let iCloudSyncButton = UIButton(type: .custom)
+    private let iCloudSyncLabel = UILabel()
+    private let iCloudSyncValueLabel = UILabel()
+
     private var alwaysOnEnabled: Bool {
         get { AWCore.getAlwaysOnEnabled() }
         set {
@@ -38,6 +42,14 @@ class TVSettingsViewController: UIViewController {
         set {
             AWCore.setAllowInsecure(newValue)
             AWCore.notifyCertificatePolicyChanged()
+            updateAppearance()
+        }
+    }
+
+    private var iCloudSyncEnabled: Bool {
+        get { AWCore.getICloudSyncEnabled() }
+        set {
+            AWCore.setICloudSyncEnabled(newValue)
             updateAppearance()
         }
     }
@@ -86,6 +98,14 @@ class TVSettingsViewController: UIViewController {
             title: String(localized: "Allow Insecure"),
             action: #selector(insecureTapped)
         )
+
+        configureToggleButton(
+            button: iCloudSyncButton,
+            label: iCloudSyncLabel,
+            valueLabel: iCloudSyncValueLabel,
+            title: String(localized: "iCloud Sync"),
+            action: #selector(iCloudSyncTapped)
+        )
     }
 
     private func configureToggleButton(button: UIButton, label: UILabel, valueLabel: UILabel, title: String, action: Selector) {
@@ -129,7 +149,7 @@ class TVSettingsViewController: UIViewController {
         leftContainer.addSubview(descriptionLabel)
 
         // Right container
-        let rightStack = UIStackView(arrangedSubviews: [alwaysOnButton, insecureButton])
+        let rightStack = UIStackView(arrangedSubviews: [alwaysOnButton, insecureButton, iCloudSyncButton])
         rightStack.axis = .vertical
         rightStack.spacing = 20
         rightStack.translatesAutoresizingMaskIntoConstraints = false
@@ -181,6 +201,10 @@ class TVSettingsViewController: UIViewController {
         let insecureOn = allowInsecure
         insecureValueLabel.text = insecureOn ? String(localized: "On") : String(localized: "Off")
         insecureValueLabel.textColor = insecureOn ? .systemRed : .secondaryLabel
+
+        let syncOn = iCloudSyncEnabled
+        iCloudSyncValueLabel.text = syncOn ? String(localized: "On") : String(localized: "Off")
+        iCloudSyncValueLabel.textColor = syncOn ? .systemGreen : .secondaryLabel
     }
 
     // MARK: - Actions
@@ -206,6 +230,19 @@ class TVSettingsViewController: UIViewController {
         }
     }
 
+    @objc private func iCloudSyncTapped() {
+        iCloudSyncEnabled.toggle()
+        if iCloudSyncEnabled != JSONBlobStore.shared.usesCloudKit {
+            let alert = UIAlertController(
+                title: String(localized: "Restart Required"),
+                message: String(localized: "Restart Anywhere for the change to take effect."),
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
+            present(alert, animated: true)
+        }
+    }
+
     // MARK: - Focus
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
@@ -216,7 +253,7 @@ class TVSettingsViewController: UIViewController {
         super.didUpdateFocus(in: context, with: coordinator)
 
         coordinator.addCoordinatedAnimations {
-            for button in [self.alwaysOnButton, self.insecureButton] {
+            for button in [self.alwaysOnButton, self.insecureButton, self.iCloudSyncButton] {
                 let isFocused = context.nextFocusedView === button
                 let wasUnfocused = context.previouslyFocusedView === button
 
@@ -239,6 +276,8 @@ class TVSettingsViewController: UIViewController {
                 newText = String(localized: "Automatically reconnect VPN when it is disconnected.")
             } else if context.nextFocusedView === self.insecureButton {
                 newText = String(localized: "This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
+            } else if context.nextFocusedView === self.iCloudSyncButton {
+                newText = String(localized: "Sync your data across your devices with iCloud.")
             } else {
                 newText = nil
             }

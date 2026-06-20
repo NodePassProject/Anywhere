@@ -2476,6 +2476,12 @@
             "value" : "أيقونة التطبيق"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App Icon"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2520,6 +2526,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "المظهر"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Appearance"
           }
         },
         "es" : {
@@ -2783,6 +2795,12 @@
             "value" : "الخلفية (متصل)"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Background (Connected)"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2827,6 +2845,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "الخلفية (غير متصل)"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Background (Disconnected)"
           }
         },
         "es" : {
@@ -3196,6 +3220,12 @@
             "value" : "أسفل"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bottom"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3402,6 +3432,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "كلاسيكي"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Classic"
           }
         },
         "es" : {
@@ -3815,6 +3851,12 @@
             "value" : "مركز التحكم متاح لأعضاء Anywhere Voyager."
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Control Center is available to Anywhere Voyager members."
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4121,6 +4163,12 @@
             "value" : "أيقونات التطبيق المخصّصة متاحة لأعضاء Anywhere Voyager."
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Custom app icons are available to Anywhere Voyager members."
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4171,6 +4219,12 @@
             "value" : "السمات المخصّصة متاحة لأعضاء Anywhere Voyager."
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Custom themes are available to Anywhere Voyager members."
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4215,6 +4269,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "داكن"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dark"
           }
         },
         "es" : {
@@ -8590,6 +8650,12 @@
             "value" : "فاتح"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Light"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9272,6 +9338,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "هادئ"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muted"
           }
         },
         "es" : {
@@ -11055,6 +11127,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "معاينة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preview"
           }
         },
         "es" : {
@@ -14829,6 +14907,58 @@
         }
       }
     },
+    "Sync your data across your devices with iCloud." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "زامِن بياناتك عبر أجهزتك باستخدام iCloud."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sync your data across your devices with iCloud."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sincroniza tus datos entre tus dispositivos con iCloud."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "داده‌های خود را با iCloud بین دستگاه‌های خود همگام‌سازی کنید."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Синхронизируйте данные на всех ваших устройствах с помощью iCloud."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verilerinizi iCloud ile cihazlarınız arasında eşitleyin."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đồng bộ dữ liệu trên các thiết bị của bạn bằng iCloud."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用 iCloud 在你的设备间同步数据。"
+          }
+        }
+      }
+    },
     "Target" : {
       "localizations" : {
         "ar" : {
@@ -15150,6 +15280,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "السمة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Theme"
           }
         },
         "es" : {
@@ -15511,6 +15647,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "أعلى"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Top"
           }
         },
         "es" : {
@@ -16832,6 +16974,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "حصري لـ Voyager"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voyager Only"
           }
         },
         "es" : {
