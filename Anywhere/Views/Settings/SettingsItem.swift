@@ -9,6 +9,7 @@ import SwiftUI
 
 enum SettingsItem: String, CaseIterable, Identifiable {
     case iCloudSync
+    case personalization
     case alwaysOn
     case globalMode
     case adBlocking
@@ -25,6 +26,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
     private var title: String.LocalizationValue {
         switch self {
         case .iCloudSync: "iCloud Sync"
+        case .personalization: "Personalization"
         case .alwaysOn: "Always On"
         case .globalMode: "Global Mode"
         case .adBlocking: "AD Blocking"
@@ -41,6 +43,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
     private var systemName: String {
         switch self {
         case .iCloudSync: "icloud.fill"
+        case .personalization: "paintpalette.fill"
         case .alwaysOn: "poweron"
         case .globalMode: "arrow.merge"
         case .adBlocking: "shield.checkered"
@@ -64,6 +67,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
     private var backgroundColor: Color {
         switch self {
         case .iCloudSync: .white
+        case .personalization: .pink
         case .alwaysOn: .green
         case .globalMode: .orange
         case .adBlocking: .red

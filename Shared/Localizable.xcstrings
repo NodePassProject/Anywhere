@@ -2468,6 +2468,52 @@
         }
       }
     },
+    "App Icon" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "أيقونة التطبيق"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Icono de la app"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نماد برنامه"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Значок приложения"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uygulama Simgesi"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Biểu tượng ứng dụng"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App 图标"
+          }
+        }
+      }
+    },
     "ASCII" : {
       "shouldTranslate" : false
     },
@@ -3166,6 +3212,52 @@
         }
       }
     },
+    "Classic" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "كلاسيكي"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Clásico"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "کلاسیک"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Классический"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Klasik"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cổ điển"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "经典"
+          }
+        }
+      }
+    },
     "Close" : {
       "localizations" : {
         "ar" : {
@@ -3833,6 +3925,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "自定"
+          }
+        }
+      }
+    },
+    "Custom app icons are available to Anywhere Voyager members." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "أيقونات التطبيق المخصّصة متاحة لأعضاء Anywhere Voyager."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Los iconos de app personalizados están disponibles para los miembros de Anywhere Voyager."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نمادهای سفارشی برنامه برای اعضای Anywhere Voyager در دسترس است."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пользовательские значки приложения доступны участникам Anywhere Voyager."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Özel uygulama simgeleri, Anywhere Voyager üyelerine açıktır."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Biểu tượng ứng dụng tùy chỉnh dành cho thành viên Anywhere Voyager."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自定义 app 图标对 Anywhere Voyager 成员开放。"
           }
         }
       }
@@ -8805,6 +8943,52 @@
     "Multiplex" : {
       "comment" : "Multiplex for Sudoku protocol HTTP Mask feature",
       "shouldTranslate" : false
+    },
+    "Muted" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "هادئ"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Suave"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ملایم"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Приглушённый"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sade"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trang nhã"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "柔和"
+          }
+        }
+      }
     },
     "Mux" : {
       "comment" : "Mux for VLESS protocol TCP transport",

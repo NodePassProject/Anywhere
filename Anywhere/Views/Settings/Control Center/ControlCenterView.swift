@@ -14,11 +14,12 @@ struct ControlCenterView: View {
     var body: some View {
         Form {
             if !voyagerStore.isMember {
-                voyagerNotice
+                VoyagerNotice("Control Center is available to Anywhere Voyager members.")
             }
 
             Section("App") {
                 row(.iCloudSync)
+                row(.personalization)
             }
 
             Section("VPN") {
@@ -46,27 +47,6 @@ struct ControlCenterView: View {
             }
         }
         .navigationTitle("Control Center")
-    }
-
-    @ViewBuilder
-    private var voyagerNotice: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles.2")
-                        .foregroundStyle(Color(hex: 0x5060F0))
-                    Text("Voyager Only")
-                        .font(.headline)
-                }
-                Text("Control Center is available to Anywhere Voyager members.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                JoinVoyagerButton {
-                    voyagerStore.isPresentingVoyager = true
-                }
-            }
-            .padding(.vertical, 4)
-        }
     }
 
     private func row(_ item: SettingsItem) -> some View {
