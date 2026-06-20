@@ -289,7 +289,7 @@ struct SettingsView: View {
                         .foregroundStyle(Color(hex: 0x5060F0))
                 } else {
                     JoinVoyagerButton {
-                        voyagerStore.isPresentingVoyager = true
+                        voyagerStore.isPresentingVoyagerView = true
                     }
                 }
             }

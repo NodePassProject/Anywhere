@@ -29,7 +29,7 @@ struct VoyagerNotice: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 JoinVoyagerButton {
-                    voyagerStore.isPresentingVoyager = true
+                    voyagerStore.isPresentingVoyagerView = true
                 }
             }
             .padding(.vertical, 4)

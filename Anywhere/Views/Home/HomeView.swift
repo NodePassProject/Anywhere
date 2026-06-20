@@ -112,24 +112,37 @@ struct HomeView: View {
 // MARK: - Background
 
 private struct BackgroundGradient: View {
+    @Environment(AppSettings.self) private var settings
+
     let isConnected: Bool
 
     var body: some View {
         if isConnected {
             LinearGradient(
-                colors: [Color.connectedBackgroundStart, Color.connectedBackgroundEnd],
+                colors: [
+                    color(settings.connectedBackgroundStartData, default: .connectedBackgroundStart),
+                    color(settings.connectedBackgroundEndData, default: .connectedBackgroundEnd),
+                ],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .transition(.blurReplace)
         } else {
             LinearGradient(
-                colors: [Color.disconnectedBackgroundStart, Color.disconnectedBackgroundEnd],
+                colors: [
+                    color(settings.disconnectedBackgroundStartData, default: .disconnectedBackgroundStart),
+                    color(settings.disconnectedBackgroundEndData, default: .disconnectedBackgroundEnd),
+                ],
                 startPoint: .top,
                 endPoint: .bottom
             )
             .transition(.blurReplace)
         }
+    }
+
+    /// Resolves a stored archived color override, falling back to the asset-catalog color.
+    private func color(_ data: Data?, default fallback: Color) -> Color {
+        data.flatMap(Color.init(archivedData:)) ?? fallback
     }
 }
 

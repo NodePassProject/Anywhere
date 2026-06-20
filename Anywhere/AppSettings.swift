@@ -27,6 +27,26 @@ final class AppSettings {
         didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
     }
 
+    var homeColorScheme: HomeColorScheme {
+        didSet { AWCore.setHomeColorScheme(homeColorScheme.rawValue) }
+    }
+
+    var connectedBackgroundStartData: Data? {
+        didSet { AWCore.setThemeColorData(.connectedBackgroundStart, connectedBackgroundStartData) }
+    }
+
+    var connectedBackgroundEndData: Data? {
+        didSet { AWCore.setThemeColorData(.connectedBackgroundEnd, connectedBackgroundEndData) }
+    }
+
+    var disconnectedBackgroundStartData: Data? {
+        didSet { AWCore.setThemeColorData(.disconnectedBackgroundStart, disconnectedBackgroundStartData) }
+    }
+
+    var disconnectedBackgroundEndData: Data? {
+        didSet { AWCore.setThemeColorData(.disconnectedBackgroundEnd, disconnectedBackgroundEndData) }
+    }
+
     var remnawaveHWIDEnabled: Bool {
         didSet { AWCore.setRemnawaveHWIDEnabled(remnawaveHWIDEnabled) }
     }
@@ -176,6 +196,11 @@ final class AppSettings {
         experimentalEnabled = AWCore.getExperimentalEnabled()
         hiddenSettingsItems = Set(AWCore.getHiddenSettingsItems())
         iCloudSyncEnabled = AWCore.getICloudSyncEnabled()
+        homeColorScheme = AWCore.getHomeColorScheme().flatMap(HomeColorScheme.init(rawValue:)) ?? .dark
+        connectedBackgroundStartData = AWCore.getThemeColorData(.connectedBackgroundStart)
+        connectedBackgroundEndData = AWCore.getThemeColorData(.connectedBackgroundEnd)
+        disconnectedBackgroundStartData = AWCore.getThemeColorData(.disconnectedBackgroundStart)
+        disconnectedBackgroundEndData = AWCore.getThemeColorData(.disconnectedBackgroundEnd)
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
 
         advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()

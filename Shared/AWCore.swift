@@ -99,6 +99,7 @@ nonisolated final class AWCore {
         static let experimentalEnabled = "experimentalEnabled"
         static let hiddenSettingsItems = "hiddenSettingsItems"
         static let hideVPNIcon = "hideVPNIcon"
+        static let homeColorScheme = "homeColorScheme"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
         static let lastConfigurationData = "lastConfigurationData"
@@ -153,6 +154,34 @@ nonisolated final class AWCore {
 
     static func setICloudSyncEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.iCloudSyncEnabled)
+    }
+    
+    enum ThemeColorSlot: String {
+        case connectedBackgroundStart
+        case connectedBackgroundEnd
+        case disconnectedBackgroundStart
+        case disconnectedBackgroundEnd
+    }
+    
+    static func getHomeColorScheme() -> String? {
+        userDefaults.string(forKey: UserDefaultsKey.homeColorScheme)
+    }
+
+    static func setHomeColorScheme(_ rawValue: String) {
+        userDefaults.set(rawValue, forKey: UserDefaultsKey.homeColorScheme)
+    }
+    
+    static func getThemeColorData(_ slot: ThemeColorSlot) -> Data? {
+        userDefaults.data(forKey: "themeColor.\(slot.rawValue)")
+    }
+
+    static func setThemeColorData(_ slot: ThemeColorSlot, _ data: Data?) {
+        let key = "themeColor.\(slot.rawValue)"
+        if let data {
+            userDefaults.set(data, forKey: key)
+        } else {
+            userDefaults.removeObject(forKey: key)
+        }
     }
 
     // Tunnel
@@ -260,7 +289,7 @@ nonisolated final class AWCore {
     static func setHideVPNIcon(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
     }
-    
+
     static func getReflectionEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.reflectionEnabled)
     }

@@ -9,6 +9,7 @@ import SwiftUI
 
 struct MainTabView: View {
     @Environment(VoyagerStore.self) private var voyagerStore
+    @Environment(AppSettings.self) private var settings
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
@@ -66,8 +67,8 @@ struct MainTabView: View {
                 Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
             }
             .fullScreenCover(isPresented: Binding(
-                get: { voyagerStore.isPresentingVoyager },
-                set: { voyagerStore.isPresentingVoyager = $0 }
+                get: { voyagerStore.isPresentingVoyagerView },
+                set: { voyagerStore.isPresentingVoyagerView = $0 }
             )) {
                 AnywhereVoyagerView()
                     .environment(voyagerStore)
@@ -82,7 +83,7 @@ struct MainTabView: View {
                     NavigationStack {
                         HomeView()
                     }
-                    .colorScheme(.dark)
+                    .colorScheme(settings.homeColorScheme == .light ? .light : .dark)
                 } label: {
                     Image("anywhere")
                 }
@@ -108,6 +109,7 @@ struct MainTabView: View {
                 NavigationStack {
                     HomeView()
                 }
+                .colorScheme(settings.homeColorScheme == .light ? .light : .dark)
                 .tabItem { Label("Home", image: "anywhere") }
                 .tag(AppTab.home)
 

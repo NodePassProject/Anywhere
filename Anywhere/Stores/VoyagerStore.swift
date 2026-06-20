@@ -15,18 +15,20 @@ final class VoyagerStore {
     static let shared = VoyagerStore()
     
     static let productID = "nonconsumable.voyager"
-
+    
     private(set) var product: Product?
+#if DEBUG
+    private(set) var isMember = true
+#else
     private(set) var isMember = false
+#endif
     private(set) var isLoadingProduct = false
     private(set) var purchaseInFlight = false
     
     var displayPrice: String? { product?.displayPrice }
     var productName: String? { product?.displayName }
 
-    /// Drives the full-screen Voyager paywall, presented once at the tab-view root
-    /// so any screen can request it by flipping this flag.
-    var isPresentingVoyager = false
+    var isPresentingVoyagerView = false
 
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
 
