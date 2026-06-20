@@ -228,13 +228,13 @@ enum HysteriaHTTP3Codec {
 
         var value = UInt64(mask)
         var shift: UInt64 = 0
-        var pos = offset + 1
-        while pos < data.count {
-            let byte = data[base + pos]
+        var position = offset + 1
+        while position < data.count {
+            let byte = data[base + position]
             value += UInt64(byte & 0x7F) << shift
-            pos += 1
+            position += 1
             if byte & 0x80 == 0 {
-                return (value, pos - offset)
+                return (value, position - offset)
             }
             shift += 7
             if shift > 63 { return nil } // overflow guard
@@ -255,14 +255,14 @@ enum HysteriaHTTP3Codec {
         let dataStart = base + strStart
         let dataEnd = dataStart + Int(length)
         let bytes = Data(data[dataStart..<dataEnd])
-        let str: String?
+        let string: String?
         if isHuffman {
-            str = HPACKHuffman.decode(bytes).flatMap { String(bytes: $0, encoding: .utf8) }
+            string = HPACKHuffman.decode(bytes).flatMap { String(bytes: $0, encoding: .utf8) }
         } else {
-            str = String(data: bytes, encoding: .utf8)
+            string = String(data: bytes, encoding: .utf8)
         }
-        guard let str else { return nil }
-        return (str, lenBytes + Int(length))
+        guard let string else { return nil }
+        return (string, lenBytes + Int(length))
     }
 
     // MARK: - QUIC varint

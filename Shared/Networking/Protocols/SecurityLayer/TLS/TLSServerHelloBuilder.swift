@@ -17,8 +17,8 @@ enum TLSServerHelloBuilder {
         x25519PublicKey: Data
     ) -> Data {
         var random = Data(count: 32)
-        random.withUnsafeMutableBytes { ptr in
-            _ = SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
+        random.withUnsafeMutableBytes { pointer in
+            _ = SecRandomCopyBytes(kSecRandomDefault, 32, pointer.baseAddress!)
         }
 
         var body = Data()
@@ -137,13 +137,13 @@ enum TLSServerHelloBuilder {
     // MARK: - TLS 1.2 ServerKeyExchange
 
     static func serverECDHEParams(namedCurve: UInt16, publicKey: Data) -> Data {
-        var params = Data()
-        params.append(0x03)
-        params.append(UInt8((namedCurve >> 8) & 0xFF))
-        params.append(UInt8(namedCurve & 0xFF))
-        params.append(UInt8(publicKey.count))
-        params.append(publicKey)
-        return params
+        var parameters = Data()
+        parameters.append(0x03)
+        parameters.append(UInt8((namedCurve >> 8) & 0xFF))
+        parameters.append(UInt8(namedCurve & 0xFF))
+        parameters.append(UInt8(publicKey.count))
+        parameters.append(publicKey)
+        return parameters
     }
 
     static func buildServerKeyExchange(
@@ -231,11 +231,11 @@ enum TLSServerHelloBuilder {
     // MARK: - CertificateVerify Signing Helpers
 
     static func certificateVerifyContext(transcriptHash: Data) -> Data {
-        var ctx = Data(repeating: 0x20, count: 64)
-        ctx.append(Data("TLS 1.3, server CertificateVerify".utf8))
-        ctx.append(0x00)
-        ctx.append(transcriptHash)
-        return ctx
+        var context = Data(repeating: 0x20, count: 64)
+        context.append(Data("TLS 1.3, server CertificateVerify".utf8))
+        context.append(0x00)
+        context.append(transcriptHash)
+        return context
     }
 
     // MARK: - Alerts
@@ -295,10 +295,10 @@ enum TLSServerHelloBuilder {
     private static func wrapHandshake(type: UInt8, body: Data) -> Data {
         var out = Data()
         out.append(type)
-        let len = body.count
-        out.append(UInt8((len >> 16) & 0xFF))
-        out.append(UInt8((len >> 8) & 0xFF))
-        out.append(UInt8(len & 0xFF))
+        let length = body.count
+        out.append(UInt8((length >> 16) & 0xFF))
+        out.append(UInt8((length >> 8) & 0xFF))
+        out.append(UInt8(length & 0xFF))
         out.append(body)
         return out
     }

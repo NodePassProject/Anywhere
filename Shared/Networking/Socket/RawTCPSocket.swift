@@ -50,12 +50,12 @@ enum SocketError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .resolutionFailed(let msg): return "DNS resolution failed: \(msg)"
-        case .socketCreationFailed(let msg): return "Socket creation failed: \(msg)"
-        case .connectionFailed(let msg): return "Connection failed: \(msg)"
+        case .resolutionFailed(let message): return "DNS resolution failed: \(message)"
+        case .socketCreationFailed(let message): return "Socket creation failed: \(message)"
+        case .connectionFailed(let message): return "Connection failed: \(message)"
         case .notConnected: return "Not connected"
-        case .sendFailed(let msg): return "Send failed: \(msg)"
-        case .receiveFailed(let msg): return "Receive failed: \(msg)"
+        case .sendFailed(let message): return "Send failed: \(message)"
+        case .receiveFailed(let message): return "Receive failed: \(message)"
         case .posixError(let op, let errno):
             return "\(op.failurePrefix): \(String(cString: strerror(errno)))"
         }
@@ -84,27 +84,27 @@ struct IPEndpoint {
         let length: socklen_t
 
         if ip.contains(":") {
-            var addr = sockaddr_in6()
-            addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
-            addr.sin6_family = sa_family_t(AF_INET6)
-            addr.sin6_port = port.bigEndian
-            guard ip.withCString({ inet_pton(AF_INET6, $0, &addr.sin6_addr) }) == 1 else {
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = port.bigEndian
+            guard ip.withCString({ inet_pton(AF_INET6, $0, &address.sin6_addr) }) == 1 else {
                 return nil
             }
             family = AF_INET6
             length = socklen_t(MemoryLayout<sockaddr_in6>.size)
-            _ = memcpy(&storage, &addr, Int(length))
+            _ = memcpy(&storage, &address, Int(length))
         } else {
-            var addr = sockaddr_in()
-            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = port.bigEndian
-            guard ip.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else {
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = port.bigEndian
+            guard ip.withCString({ inet_pton(AF_INET, $0, &address.sin_addr) }) == 1 else {
                 return nil
             }
             family = AF_INET
             length = socklen_t(MemoryLayout<sockaddr_in>.size)
-            _ = memcpy(&storage, &addr, Int(length))
+            _ = memcpy(&storage, &address, Int(length))
         }
 
         self.family = family
@@ -245,11 +245,11 @@ nonisolated class RawTCPSocket: RawTransport {
 
             let ips = DNSResolver.shared.resolveAll(host)
             guard !ips.isEmpty else {
-                let err = SocketError.resolutionFailed("DNS resolution failed for \(host)")
+                let error = SocketError.resolutionFailed("DNS resolution failed for \(host)")
                 stateLock.withLock {
-                    if case .setup = _state { _state = .failed(err) }
+                    if case .setup = _state { _state = .failed(error) }
                 }
-                completion(err)
+                completion(error)
                 return
             }
 
@@ -271,8 +271,8 @@ nonisolated class RawTCPSocket: RawTransport {
             case .ready:
                 sendQueue.append(PendingSend(data: data, offset: 0, completion: completion))
                 drainSendQueue()
-            case .failed(let err):
-                completion(err)
+            case .failed(let error):
+                completion(error)
             default:
                 completion(SocketError.notConnected)
             }
@@ -299,8 +299,8 @@ nonisolated class RawTCPSocket: RawTransport {
             switch state {
             case .ready:
                 break
-            case .failed(let err):
-                completion(nil, true, err)
+            case .failed(let error):
+                completion(nil, true, error)
                 return
             case .cancelled, .setup:
                 completion(nil, true, SocketError.notConnected)
@@ -425,8 +425,8 @@ nonisolated class RawTCPSocket: RawTransport {
         socketFD = fd
         armConnectTimer()
 
-        let rc = endpoint.withSockAddr { sa, len in
-            Darwin.connect(fd, sa, len)
+        let rc = endpoint.withSockAddr { sa, length in
+            Darwin.connect(fd, sa, length)
         }
 
         if rc == 0 {
@@ -435,13 +435,13 @@ nonisolated class RawTCPSocket: RawTransport {
             return
         }
 
-        let err = errno
-        if err == EINPROGRESS {
+        let error = errno
+        if error == EINPROGRESS {
             armWriteSourceForConnect()
             return
         }
 
-        logger.debug("[TCP] connect(\(ip):\(port)) failed: \(String(cString: strerror(err)))")
+        logger.debug("[TCP] connect(\(ip):\(port)) failed: \(String(cString: strerror(error)))")
         tearDownSocket()
         tryConnectNext()
     }
@@ -492,8 +492,8 @@ nonisolated class RawTCPSocket: RawTransport {
     private func handleConnectWritable() {
         guard socketFD >= 0 else { return }
         var soerr: Int32 = 0
-        var len = socklen_t(MemoryLayout<Int32>.size)
-        let gsr = getsockopt(socketFD, SOL_SOCKET, SO_ERROR, &soerr, &len)
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        let gsr = getsockopt(socketFD, SOL_SOCKET, SO_ERROR, &soerr, &length)
         if gsr != 0 {
             let e = errno
             logger.debug("[TCP] getsockopt(SO_ERROR) failed: \(String(cString: strerror(e)))")
@@ -598,16 +598,16 @@ nonisolated class RawTCPSocket: RawTransport {
                 return
             }
 
-            let err = SocketError.posixError(.send, errno: e)
-            failPendingSends(with: err)
+            let error = SocketError.posixError(.send, errno: e)
+            failPendingSends(with: error)
             // Move state to failed so subsequent sends/receives fail fast.
             stateLock.withLock {
-                if case .ready = _state { _state = .failed(err) }
+                if case .ready = _state { _state = .failed(error) }
             }
             if let completion = pendingReceiveCompletion {
                 pendingReceiveCompletion = nil
                 disarmReadSource()
-                completion(nil, true, err)
+                completion(nil, true, error)
             }
             return
         }
@@ -660,10 +660,10 @@ nonisolated class RawTCPSocket: RawTransport {
                 Darwin.recv(fd, base, Self.recvScratchSize, 0)
             }
             if n > 0 {
-                let buf = Data(bytes: base, count: n)
+                let buffer = Data(bytes: base, count: n)
                 pendingReceiveCompletion = nil
                 disarmReadSource()
-                completion(buf, false, nil)
+                completion(buffer, false, nil)
             } else if n == 0 {
                 receivedEOF = true
                 pendingReceiveCompletion = nil

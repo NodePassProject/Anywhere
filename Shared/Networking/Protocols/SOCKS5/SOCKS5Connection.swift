@@ -374,18 +374,18 @@ enum SOCKS5Handshake {
     }
 
     private static func parseIPv6(_ string: String) -> Data? {
-        var buf = Data(count: 16)
+        var buffer = Data(count: 16)
         let host = string.hasPrefix("[") && string.hasSuffix("]")
             ? String(string.dropFirst().dropLast()) : string
         guard host.contains(":") else { return nil }
         var result = in6_addr()
         guard inet_pton(AF_INET6, host, &result) == 1 else { return nil }
-        buf.withUnsafeMutableBytes { ptr in
-            withUnsafeBytes(of: &result) { src in
-                ptr.copyBytes(from: src)
+        buffer.withUnsafeMutableBytes { pointer in
+            withUnsafeBytes(of: &result) { source in
+                pointer.copyBytes(from: source)
             }
         }
-        return buf
+        return buffer
     }
 }
 

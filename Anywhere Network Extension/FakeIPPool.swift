@@ -158,10 +158,10 @@ class FakeIPPool {
     }
 
     private func ipv6ToOffset(_ ip: String) -> Int? {
-        var addr = in6_addr()
-        guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
+        var address = in6_addr()
+        guard inet_pton(AF_INET6, ip, &address) == 1 else { return nil }
 
-        return withUnsafeBytes(of: &addr) { raw -> Int? in
+        return withUnsafeBytes(of: &address) { raw -> Int? in
             let bytes = raw.bindMemory(to: UInt8.self)
             guard bytes.count == 16 else { return nil }
 

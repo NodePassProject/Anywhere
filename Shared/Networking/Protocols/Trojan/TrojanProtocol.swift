@@ -76,9 +76,9 @@ enum TrojanProtocol {
     }
 
     static func encodeUDPPacket(host: String, port: UInt16, payload: Data) -> Data {
-        let addr = encodeAddressPort(host: host, port: port)
-        var out = Data(capacity: addr.count + 4 + payload.count)
-        out.append(addr)
+        let address = encodeAddressPort(host: host, port: port)
+        var out = Data(capacity: address.count + 4 + payload.count)
+        out.append(address)
         let length = UInt16(min(payload.count, maxUDPPayloadLength))
         out.append(UInt8(length >> 8))
         out.append(UInt8(length & 0xFF))

@@ -356,11 +356,11 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         guard !table.isEmpty, length > 0 else {
             return UUID().uuidString.lowercased()
         }
-        let chars = Array(table)
+        let characters = Array(table)
         var id = ""
         id.reserveCapacity(length)
         for _ in 0..<length {
-            id.append(chars[Int.random(in: 0..<chars.count)])
+            id.append(characters[Int.random(in: 0..<characters.count)])
         }
         return id
     }
@@ -379,21 +379,21 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
     private func generateTokenishPadding(targetBytes: Int) -> String {
         let charset = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
         let n = max(1, Int(ceil(Double(targetBytes) / 0.8)))
-        var chars = (0..<n).map { _ in charset[Int.random(in: 0..<charset.count)] }
+        var characters = (0..<n).map { _ in charset[Int.random(in: 0..<charset.count)] }
         var adjust: Character = "X"
         for _ in 0..<150 {
-            let diff = HPACKHuffman.encodedByteLength(String(chars)) - targetBytes
+            let diff = HPACKHuffman.encodedByteLength(String(characters)) - targetBytes
             if abs(diff) <= 2 { break }
             if diff < 0 {
-                chars.append(adjust)
+                characters.append(adjust)
                 adjust = (adjust == "X") ? "Z" : "X"
-            } else if chars.count > 1 {
-                chars.removeLast()
+            } else if characters.count > 1 {
+                characters.removeLast()
             } else {
                 break
             }
         }
-        return String(chars)
+        return String(characters)
     }
 
     /// Parses XHTTP parameters from VLESS URL query parameters. Host fallback order:
@@ -513,16 +513,16 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         var scMaxEachPostBytes = 1_000_000
         if let range = extra["scMaxEachPostBytes"] as? [String: Any] {
             scMaxEachPostBytes = range["to"] as? Int ?? 1_000_000
-        } else if let val = extra["scMaxEachPostBytes"] as? Int {
-            scMaxEachPostBytes = val
+        } else if let value = extra["scMaxEachPostBytes"] as? Int {
+            scMaxEachPostBytes = value
         }
 
         // scMinPostsIntervalMs likewise.
         var scMinPostsIntervalMs = 30
         if let range = extra["scMinPostsIntervalMs"] as? [String: Any] {
             scMinPostsIntervalMs = range["to"] as? Int ?? 30
-        } else if let val = extra["scMinPostsIntervalMs"] as? Int {
-            scMinPostsIntervalMs = val
+        } else if let value = extra["scMinPostsIntervalMs"] as? Int {
+            scMinPostsIntervalMs = value
         }
 
         // xPaddingBytes may be an int, {"from":a,"to":b}, or an "a-b" string (the form used in
@@ -556,9 +556,9 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         if let range = extra["sessionIDLength"] as? [String: Any] {
             sessionIDLengthFrom = range["from"] as? Int ?? 0
             sessionIDLengthTo = range["to"] as? Int ?? 0
-        } else if let val = extra["sessionIDLength"] as? Int {
-            sessionIDLengthFrom = val
-            sessionIDLengthTo = val
+        } else if let value = extra["sessionIDLength"] as? Int {
+            sessionIDLengthFrom = value
+            sessionIDLengthTo = value
         }
 
         let uplinkDataPlacement = XHTTPPlacement(rawValue: extra["uplinkDataPlacement"] as? String ?? "body") ?? .body
@@ -620,26 +620,26 @@ extension XHTTPConfiguration {
     /// Encodes the non-default "extra" fields back to the JSON string the proxy editor's
     /// advanced-settings field displays. Empty when every field is at its default.
     var encodedExtra: String {
-        var dict: [String: Any] = [:]
+        var dictionary: [String: Any] = [:]
 
-        if !headers.isEmpty { dict["headers"] = headers }
-        if noGRPCHeader { dict["noGRPCHeader"] = true }
-        if scMaxEachPostBytes != 1_000_000 { dict["scMaxEachPostBytes"] = scMaxEachPostBytes }
-        if scMinPostsIntervalMs != 30 { dict["scMinPostsIntervalMs"] = scMinPostsIntervalMs }
+        if !headers.isEmpty { dictionary["headers"] = headers }
+        if noGRPCHeader { dictionary["noGRPCHeader"] = true }
+        if scMaxEachPostBytes != 1_000_000 { dictionary["scMaxEachPostBytes"] = scMaxEachPostBytes }
+        if scMinPostsIntervalMs != 30 { dictionary["scMinPostsIntervalMs"] = scMinPostsIntervalMs }
         if xPaddingBytesFrom != 100 || xPaddingBytesTo != 1000 {
-            dict["xPaddingBytes"] = ["from": xPaddingBytesFrom, "to": xPaddingBytesTo]
+            dictionary["xPaddingBytes"] = ["from": xPaddingBytesFrom, "to": xPaddingBytesTo]
         }
-        if xPaddingObfsMode { dict["xPaddingObfsMode"] = true }
-        if xPaddingKey != "x_padding" { dict["xPaddingKey"] = xPaddingKey }
-        if xPaddingHeader != "X-Padding" { dict["xPaddingHeader"] = xPaddingHeader }
-        if xPaddingPlacement != .queryInHeader { dict["xPaddingPlacement"] = xPaddingPlacement.rawValue }
-        if xPaddingMethod != .repeatX { dict["xPaddingMethod"] = xPaddingMethod.rawValue }
-        if uplinkHTTPMethod != "POST" { dict["uplinkHTTPMethod"] = uplinkHTTPMethod }
-        if sessionPlacement != .path { dict["sessionPlacement"] = sessionPlacement.rawValue }
-        if !sessionKey.isEmpty { dict["sessionKey"] = sessionKey }
-        if seqPlacement != .path { dict["seqPlacement"] = seqPlacement.rawValue }
-        if !seqKey.isEmpty { dict["seqKey"] = seqKey }
-        if uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = uplinkDataPlacement.rawValue }
+        if xPaddingObfsMode { dictionary["xPaddingObfsMode"] = true }
+        if xPaddingKey != "x_padding" { dictionary["xPaddingKey"] = xPaddingKey }
+        if xPaddingHeader != "X-Padding" { dictionary["xPaddingHeader"] = xPaddingHeader }
+        if xPaddingPlacement != .queryInHeader { dictionary["xPaddingPlacement"] = xPaddingPlacement.rawValue }
+        if xPaddingMethod != .repeatX { dictionary["xPaddingMethod"] = xPaddingMethod.rawValue }
+        if uplinkHTTPMethod != "POST" { dictionary["uplinkHTTPMethod"] = uplinkHTTPMethod }
+        if sessionPlacement != .path { dictionary["sessionPlacement"] = sessionPlacement.rawValue }
+        if !sessionKey.isEmpty { dictionary["sessionKey"] = sessionKey }
+        if seqPlacement != .path { dictionary["seqPlacement"] = seqPlacement.rawValue }
+        if !seqKey.isEmpty { dictionary["seqKey"] = seqKey }
+        if uplinkDataPlacement != .body { dictionary["uplinkDataPlacement"] = uplinkDataPlacement.rawValue }
         let defaultDataKey: String
         let defaultChunkSize: Int
         switch uplinkDataPlacement {
@@ -647,16 +647,16 @@ extension XHTTPConfiguration {
         case .cookie: defaultDataKey = "x_data"; defaultChunkSize = 3072
         default: defaultDataKey = ""; defaultChunkSize = 0
         }
-        if uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = uplinkDataKey }
-        if uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = uplinkChunkSize }
-        if let xmux, xmux.isEnabled { dict["xmux"] = xmux.jsonObject }
+        if uplinkDataKey != defaultDataKey { dictionary["uplinkDataKey"] = uplinkDataKey }
+        if uplinkChunkSize != defaultChunkSize { dictionary["uplinkChunkSize"] = uplinkChunkSize }
+        if let xmux, xmux.isEnabled { dictionary["xmux"] = xmux.jsonObject }
 
-        guard !dict.isEmpty,
-              let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .prettyPrinted]),
-              let str = String(data: data, encoding: .utf8) else {
+        guard !dictionary.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys, .prettyPrinted]),
+              let string = String(data: data, encoding: .utf8) else {
             return ""
         }
-        return str
+        return string
     }
 }
 

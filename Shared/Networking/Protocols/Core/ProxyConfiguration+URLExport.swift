@@ -49,56 +49,56 @@ extension ProxyConfiguration {
         guard case .vless(let uuid, let encryption, let flow, let transport, let security, _, _) = outbound else {
             return ""
         }
-        var params: [String] = []
+        var parameters: [String] = []
 
         if encryption != "none" {
-            params.append("encryption=\(encryption)")
+            parameters.append("encryption=\(encryption)")
         }
         if let flow, !flow.isEmpty {
-            params.append("flow=\(flow)")
+            parameters.append("flow=\(flow)")
         }
-        params.append("security=\(security.tag)")
+        parameters.append("security=\(security.tag)")
         if transport.tag != "tcp" {
-            params.append("type=\(transport.tag)")
+            parameters.append("type=\(transport.tag)")
         }
         
         if case .tls(let tls) = security {
             if tls.serverName != serverAddress {
-                params.append("sni=\(tls.serverName)")
+                parameters.append("sni=\(tls.serverName)")
             }
             if let alpn = tls.alpn, !alpn.isEmpty {
-                params.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
+                parameters.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
             }
             if tls.fingerprint != .chrome120 {
-                params.append("fp=\(tls.fingerprint.rawValue)")
+                parameters.append("fp=\(tls.fingerprint.rawValue)")
             }
             if let ech = tls.echQueryValue {
-                params.append("ech=\(ech)")
+                parameters.append("ech=\(ech)")
             }
         }
 
         if case .reality(let reality) = security {
-            params.append("sni=\(reality.serverName)")
-            params.append("pbk=\(reality.publicKey.base64URLEncodedString())")
+            parameters.append("sni=\(reality.serverName)")
+            parameters.append("pbk=\(reality.publicKey.base64URLEncodedString())")
             if !reality.shortId.isEmpty {
-                params.append("sid=\(reality.shortId.hexEncodedString())")
+                parameters.append("sid=\(reality.shortId.hexEncodedString())")
             }
             if reality.fingerprint != .chrome120 {
-                params.append("fp=\(reality.fingerprint.rawValue)")
+                parameters.append("fp=\(reality.fingerprint.rawValue)")
             }
         }
         
-        appendTransportParams(to: &params)
+        appendTransportParams(to: &parameters)
         
         if !muxEnabled {
-            params.append("mux=false")
+            parameters.append("mux=false")
         }
         
         if !xudpEnabled {
-            params.append("xudp=false")
+            parameters.append("xudp=false")
         }
         
-        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "vless://\(uuid.uuidString.lowercased())@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
@@ -109,21 +109,21 @@ extension ProxyConfiguration {
         }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var params: [String] = []
+        var parameters: [String] = []
         if congestionControl == .brutal {
-            params.append("upmbps=\(uploadMbps)")
-            params.append("downmbps=\(downloadMbps)")
+            parameters.append("upmbps=\(uploadMbps)")
+            parameters.append("downmbps=\(downloadMbps)")
         }
         if let portHopping {
-            params.append("mport=\(portHopping.portsSpec)")
+            parameters.append("mport=\(portHopping.portsSpec)")
             if portHopping.intervalSeconds != HysteriaPortHopping.defaultIntervalSeconds {
-                params.append("hop-interval=\(portHopping.intervalSeconds)")
+                parameters.append("hop-interval=\(portHopping.intervalSeconds)")
             }
         }
         if sni != serverAddress {
-            params.append("sni=\(sni)")
+            parameters.append("sni=\(sni)")
         }
-        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "hysteria2://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
 
@@ -133,20 +133,20 @@ extension ProxyConfiguration {
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var params: [String] = []
+        var parameters: [String] = []
         if let spec, !spec.isEmpty {
-            params.append("spec=\(encodedQueryValue(spec))")
+            parameters.append("spec=\(encodedQueryValue(spec))")
         }
         if tls.serverName != serverAddress {
-            params.append("sni=\(encodedQueryValue(tls.serverName))")
+            parameters.append("sni=\(encodedQueryValue(tls.serverName))")
         }
         if let alpn = tls.alpn?.first, !alpn.isEmpty {
-            params.append("alpn=\(encodedQueryValue(alpn))")
+            parameters.append("alpn=\(encodedQueryValue(alpn))")
         }
         if let ech = tls.echQueryValue {
-            params.append("ech=\(ech)")
+            parameters.append("ech=\(ech)")
         }
-        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
@@ -154,21 +154,21 @@ extension ProxyConfiguration {
         guard case .trojan(let password, let tls) = outbound else { return "" }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var params: [String] = []
+        var parameters: [String] = []
         if tls.serverName != serverAddress {
-            params.append("sni=\(tls.serverName)")
+            parameters.append("sni=\(tls.serverName)")
         }
         if let alpn = tls.alpn, !alpn.isEmpty {
             let joined = alpn.joined(separator: ",")
-            params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
+            parameters.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
         }
         if tls.fingerprint != .chrome120 {
-            params.append("fp=\(tls.fingerprint.rawValue)")
+            parameters.append("fp=\(tls.fingerprint.rawValue)")
         }
         if let ech = tls.echQueryValue {
-            params.append("ech=\(ech)")
+            parameters.append("ech=\(ech)")
         }
-        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "trojan://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
@@ -176,25 +176,25 @@ extension ProxyConfiguration {
         guard case .anytls(let password, let ici, let it, let mis, let tls) = outbound else { return "" }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var params: [String] = []
+        var parameters: [String] = []
         if tls.serverName != serverAddress {
-            params.append("sni=\(tls.serverName)")
+            parameters.append("sni=\(tls.serverName)")
         }
         if let alpn = tls.alpn, !alpn.isEmpty {
             let joined = alpn.joined(separator: ",")
-            params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
+            parameters.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
         }
         if tls.fingerprint != .chrome120 {
-            params.append("fp=\(tls.fingerprint.rawValue)")
+            parameters.append("fp=\(tls.fingerprint.rawValue)")
         }
         if let ech = tls.echQueryValue {
-            params.append("ech=\(ech)")
+            parameters.append("ech=\(ech)")
         }
         // Emit pool tuners only when they differ from the sing-anytls defaults (30/30/0).
-        if ici != 30 { params.append("ici=\(ici)") }
-        if it != 30 { params.append("it=\(it)") }
-        if mis != 0 { params.append("mis=\(mis)") }
-        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        if ici != 30 { parameters.append("ici=\(ici)") }
+        if it != 30 { parameters.append("it=\(it)") }
+        if mis != 0 { parameters.append("mis=\(mis)") }
+        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "anytls://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 

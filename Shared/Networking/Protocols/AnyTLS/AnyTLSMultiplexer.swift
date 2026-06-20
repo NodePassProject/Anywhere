@@ -235,18 +235,18 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         }
 
         pktCounter &+= 1
-        let pkt = pktCounter
+        let packet = pktCounter
         let scheme = padding
-        if pkt >= scheme.stop {
+        if packet >= scheme.stop {
             sendPadding = false
             lock.unlock()
-            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(pkt) ≥ stop=\(scheme.stop) — sending raw, padding off")
+            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) ≥ stop=\(scheme.stop) — sending raw, padding off")
             inner.send(data: pending, completion: completion)
             return
         }
-        let schedule = scheme.generateRecordPayloadSizes(packet: pkt)
+        let schedule = scheme.generateRecordPayloadSizes(packet: packet)
         lock.unlock()
-        logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(pkt) bytes=\(pending.count) (was buffered=\(prependedBufferSize)) schedule=\(schedule)")
+        logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) bytes=\(pending.count) (was buffered=\(prependedBufferSize)) schedule=\(schedule)")
 
         if schedule.isEmpty {
             inner.send(data: pending, completion: completion)
@@ -359,9 +359,9 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             let stream = streams[sid]
             lock.unlock()
             if !payload.isEmpty {
-                let msg = String(data: payload, encoding: .utf8) ?? "<binary>"
-                logger.debug("[AnyTLSMultiplexer] cmdSYNACK error sid=\(sid): \(msg)")
-                stream?.deliverClose(error: ProxyError.protocolError("AnyTLS remote: \(msg)"))
+                let message = String(data: payload, encoding: .utf8) ?? "<binary>"
+                logger.debug("[AnyTLSMultiplexer] cmdSYNACK error sid=\(sid): \(message)")
+                stream?.deliverClose(error: ProxyError.protocolError("AnyTLS remote: \(message)"))
                 lock.withLock { streams[sid] = nil }
             } else {
                 logger.debug("[AnyTLSMultiplexer] cmdSYNACK ok sid=\(sid)")
@@ -387,9 +387,9 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             }
 
         case AnyTLSProtocol.cmdAlert:
-            let msg = String(data: payload, encoding: .utf8) ?? "<binary>"
-            logger.debug("[AnyTLSMultiplexer] cmdAlert from server: \(msg)")
-            close(error: ProxyError.protocolError("AnyTLS alert: \(msg)"))
+            let message = String(data: payload, encoding: .utf8) ?? "<binary>"
+            logger.debug("[AnyTLSMultiplexer] cmdAlert from server: \(message)")
+            close(error: ProxyError.protocolError("AnyTLS alert: \(message)"))
 
         case AnyTLSProtocol.cmdUpdatePaddingScheme:
             if let new = AnyTLSPaddingScheme.parse(payload) {

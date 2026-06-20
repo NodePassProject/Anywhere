@@ -69,7 +69,7 @@ enum HTTP3Error: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notReady: return "HTTP/3 connection not ready"
-        case .connectionFailed(let msg): return "HTTP/3 connection failed: \(msg)"
+        case .connectionFailed(let message): return "HTTP/3 connection failed: \(message)"
         case .tunnelFailed(let code): return "HTTP/3 CONNECT tunnel failed with status \(code)"
         case .authenticationRequired: return "HTTP/3 proxy authentication required (407)"
         case .streamClosed: return "HTTP/3 stream closed"
@@ -135,19 +135,19 @@ enum HTTP3Framer {
     /// Returns (Frame, bytesConsumed) or nil. `payload` is a zero-copy slice with
     /// non-zero startIndex; downstream parsers must index relative to startIndex.
     static func parseFrame(from data: Data, offset: Int = 0) -> (Frame, Int)? {
-        var pos = offset
+        var position = offset
 
-        guard let (frameType, typeLen) = QUICVarInt.decode(from: data, offset: pos) else { return nil }
-        pos += typeLen
+        guard let (frameType, typeLen) = QUICVarInt.decode(from: data, offset: position) else { return nil }
+        position += typeLen
 
-        guard let (payloadLen, lenBytes) = QUICVarInt.decode(from: data, offset: pos) else { return nil }
-        pos += lenBytes
+        guard let (payloadLen, lenBytes) = QUICVarInt.decode(from: data, offset: position) else { return nil }
+        position += lenBytes
 
-        let totalLen = pos - offset + Int(payloadLen)
+        let totalLen = position - offset + Int(payloadLen)
         guard offset + totalLen <= data.count else { return nil }
 
         let base = data.startIndex
-        let payload = data[(base + pos)..<(base + pos + Int(payloadLen))]
+        let payload = data[(base + position)..<(base + position + Int(payloadLen))]
         return (Frame(type: frameType, payload: payload), totalLen)
     }
 }

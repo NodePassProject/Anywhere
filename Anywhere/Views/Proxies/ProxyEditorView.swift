@@ -1206,7 +1206,7 @@ struct ProxyEditorView: View {
         if vlessTransport == "xhttp" {
             let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
             let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
-            var params: [String: String] = [
+            var parameters: [String: String] = [
                 "host": host,
                 "path": vlessXHTTPPath,
                 "mode": mode.rawValue
@@ -1223,9 +1223,9 @@ struct ProxyEditorView: View {
             if !extra.isEmpty,
                let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
                let json = String(data: data, encoding: .utf8) {
-                params["extra"] = json
+                parameters["extra"] = json
             }
-            vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
+            vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: parameters, serverAddress: serverAddress)
         }
 
         var vlessGRPCConfiguration: GRPCConfiguration?

@@ -19,10 +19,10 @@ enum H2Framing {
     /// Serializes a frame: 24-bit length, 8-bit type, 8-bit flags, 31-bit stream id, payload.
     static func frame(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) -> Data {
         var f = Data(capacity: headerSize + payload.count)
-        let len = UInt32(payload.count)
-        f.append(UInt8((len >> 16) & 0xFF))
-        f.append(UInt8((len >> 8) & 0xFF))
-        f.append(UInt8(len & 0xFF))
+        let length = UInt32(payload.count)
+        f.append(UInt8((length >> 16) & 0xFF))
+        f.append(UInt8((length >> 8) & 0xFF))
+        f.append(UInt8(length & 0xFF))
         f.append(type)
         f.append(flags)
         let sid = streamId & 0x7FFFFFFF

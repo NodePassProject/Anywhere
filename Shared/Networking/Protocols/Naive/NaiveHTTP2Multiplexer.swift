@@ -482,8 +482,8 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
     private func completeReadyCallbacks(_ error: Error?) {
         let callbacks = readyCallbacks
         readyCallbacks.removeAll()
-        for cb in callbacks {
-            cb(error)
+        for callback in callbacks {
+            callback(error)
         }
     }
 

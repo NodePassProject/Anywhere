@@ -756,7 +756,7 @@ nonisolated final class SudokuConnectionFactory {
             tls.connect(host: directDialHost, port: port) { result in
                 self.releaseTLSClient(tls)
                 switch result {
-                case .success(let conn): completion(.success(TLSProxyConnection(tlsConnection: conn)))
+                case .success(let connection): completion(.success(TLSProxyConnection(tlsConnection: connection)))
                 case .failure(let error): completion(.failure(error))
                 }
             }
@@ -897,15 +897,15 @@ private final class SudokuHTTPBodyReader {
             while chunkRemaining == 0 {
                 let line = try readLine()
                 let lenText = line.split(separator: ";", maxSplits: 1).first.map(String.init) ?? line
-                guard let len = Int(lenText.trimmingCharacters(in: .whitespacesAndNewlines), radix: 16) else {
+                guard let length = Int(lenText.trimmingCharacters(in: .whitespacesAndNewlines), radix: 16) else {
                     throw SudokuNativeError.protocolError("bad chunk length")
                 }
-                if len == 0 {
+                if length == 0 {
                     repeat { if try readLine().isEmpty { break } } while true
                     done = true
                     return Data()
                 }
-                chunkRemaining = len
+                chunkRemaining = length
             }
             let n = min(max, chunkRemaining)
             let data = try stream.readExact(n)
@@ -1011,8 +1011,8 @@ nonisolated final class SudokuHTTPMaskTransport {
             condition.signal()
             deliver = { completion(out, nil) }
         } else if closed {
-            let err: Error = fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed
-            deliver = { completion(nil, err) }
+            let error: Error = fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed
+            deliver = { completion(nil, error) }
         } else if pendingReceive != nil {
             deliver = { completion(nil, SudokuNativeError.protocolError("concurrent httpMask receive")) }
         } else {
@@ -1128,8 +1128,8 @@ nonisolated final class SudokuHTTPMaskTransport {
         closed = true
         if let pending = pendingReceive {
             pendingReceive = nil
-            let err: Error = self.fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed
-            deliver = { pending(nil, err) }
+            let error: Error = self.fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed
+            deliver = { pending(nil, error) }
         }
         condition.broadcast()
         condition.unlock()
@@ -1669,8 +1669,8 @@ nonisolated final class SudokuNativeClient {
             if !config.httpMask.disable && config.httpMask.mode == .legacy {
                 let path = SudokuHTTPMaskPathRoot.apply(config.httpMask.pathRoot, to: "/api")
                 let host = config.httpMask.host.isEmpty ? config.serverHost : config.httpMask.host
-                let req = "POST \(path) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: keep-alive\r\nContent-Type: application/octet-stream\r\nContent-Length: 1048576\r\n\r\n"
-                try stream.sendAll(Data(req.utf8))
+                let request = "POST \(path) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: keep-alive\r\nContent-Type: application/octet-stream\r\nContent-Length: 1048576\r\n\r\n"
+                try stream.sendAll(Data(request.utf8))
             }
             wire = .stream(stream)
         }
@@ -1693,9 +1693,9 @@ nonisolated final class SudokuNativeClient {
     private func completeEarlyHandshake(state: SudokuKIPClientState, response: Data) throws -> (c2s: Data, s2c: Data) {
         let recordData = try decodeEarlyObfs(response)
         let plain = try decodeEarlyRecord(recordData, base: SudokuNativeCrypto.pskBases(config.key).s2c)
-        let msg = try parseKIP(plain)
-        guard msg.type == 0x02 else { throw SudokuNativeError.protocolError("bad early KIP server hello") }
-        return try finishKIP(state: state, message: msg)
+        let message = try parseKIP(plain)
+        guard message.type == 0x02 else { throw SudokuNativeError.protocolError("bad early KIP server hello") }
+        return try finishKIP(state: state, message: message)
     }
 
     private func encodeEarlyObfs(_ data: Data) throws -> Data {
@@ -1799,8 +1799,8 @@ nonisolated final class SudokuNativeClient {
     private func performKIP(record: SudokuRecordStream) throws {
         let (state, payload) = try makeKIPClientHelloPayload()
         try writeKIP(record: record, type: 0x01, payload: payload)
-        let msg = try readKIP(record: record)
-        let session = try finishKIP(state: state, message: msg)
+        let message = try readKIP(record: record)
+        let session = try finishKIP(state: state, message: message)
         try record.rekey(send: session.c2s, recv: session.s2c)
     }
 
@@ -1934,9 +1934,9 @@ nonisolated final class SudokuMuxClient {
         guard payload.count <= 256 * 1024 else { throw SudokuNativeError.protocolError("mux frame too large") }
         var frame = Data([type])
         var sid = streamID.bigEndian
-        var len = UInt32(payload.count).bigEndian
+        var length = UInt32(payload.count).bigEndian
         frame.append(Data(bytes: &sid, count: 4))
-        frame.append(Data(bytes: &len, count: 4))
+        frame.append(Data(bytes: &length, count: 4))
         frame.append(payload)
         try record.send(frame)
     }
@@ -1968,10 +1968,10 @@ nonisolated final class SudokuMuxClient {
     private func readerLoop() {
         while true {
             do {
-                let hdr = try record.readExact(9)
-                let type = hdr[0]
-                let streamID = hdr.uint32BE(at: 1)
-                let length = Int(hdr.uint32BE(at: 5))
+                let header = try record.readExact(9)
+                let type = header[0]
+                let streamID = header.uint32BE(at: 1)
+                let length = Int(header.uint32BE(at: 5))
                 guard length <= 256 * 1024 else { throw SudokuNativeError.protocolError("mux frame too large") }
                 let payload = try record.readExact(length)
                 condition.lock(); let stream = streams[streamID]; if type == 0x03 || type == 0x04 { streams.removeValue(forKey: streamID) }; condition.unlock()
@@ -2245,11 +2245,11 @@ nonisolated final class SudokuUDPProxyConnection: ProxyConnection {
         writeQueue.async {
             do {
                 if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
-                let addr = try SudokuAddress.encode(host: self.destinationHost, port: self.destinationPort)
-                guard addr.count <= UInt16.max else { throw SudokuNativeError.protocolError("UoT address too large") }
+                let address = try SudokuAddress.encode(host: self.destinationHost, port: self.destinationPort)
+                guard address.count <= UInt16.max else { throw SudokuNativeError.protocolError("UoT address too large") }
                 guard data.count <= UInt16.max else { throw SudokuNativeError.protocolError("UoT payload too large") }
-                var frame = Data([UInt8(addr.count >> 8), UInt8(addr.count & 0xff), UInt8(data.count >> 8), UInt8(data.count & 0xff)])
-                frame.append(addr)
+                var frame = Data([UInt8(address.count >> 8), UInt8(address.count & 0xff), UInt8(data.count >> 8), UInt8(data.count & 0xff)])
+                frame.append(address)
                 frame.append(data)
                 try self.stream.send(frame)
                 completion(nil)
@@ -2267,12 +2267,12 @@ nonisolated final class SudokuUDPProxyConnection: ProxyConnection {
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         if lock.withLock({ closed }) { completion(nil, nil); return }
-        stream.readExactAsync(4) { [weak self] hdr, error in
+        stream.readExactAsync(4) { [weak self] header, error in
             guard let self else { completion(nil, nil); return }
             if let error { self.deliverUDP(nil, error, to: completion); return }
-            guard let hdr else { self.deliverUDP(nil, SudokuNativeError.closed, to: completion); return }
-            let addrLen = Int(UInt16(hdr[0]) << 8 | UInt16(hdr[1]))
-            let payloadLen = Int(UInt16(hdr[2]) << 8 | UInt16(hdr[3]))
+            guard let header else { self.deliverUDP(nil, SudokuNativeError.closed, to: completion); return }
+            let addrLen = Int(UInt16(header[0]) << 8 | UInt16(header[1]))
+            let payloadLen = Int(UInt16(header[2]) << 8 | UInt16(header[3]))
             guard addrLen > 0 && addrLen <= 64 * 1024 else { self.deliverUDP(nil, SudokuNativeError.protocolError("bad UoT address length"), to: completion); return }
             guard payloadLen <= 64 * 1024 else { self.deliverUDP(nil, SudokuNativeError.protocolError("bad UoT payload length"), to: completion); return }
             self.stream.readExactAsync(addrLen) { _, error in

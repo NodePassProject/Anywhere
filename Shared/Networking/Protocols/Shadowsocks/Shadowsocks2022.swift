@@ -285,8 +285,8 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
         }
 
         var epochBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &epochBE) { ptr in
-            fixedHeader[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &epochBE) { pointer in
+            fixedHeader[offset..<offset+8].copyBytes(to: pointer)
         }
         let epoch = Int64(UInt64(bigEndian: epochBE))
         let now = Int64(Date().timeIntervalSince1970)
@@ -425,8 +425,8 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         self.pskHashes = hashes
 
         var sid: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &sid) { ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 8, ptr.baseAddress!)
+        _ = withUnsafeMutableBytes(of: &sid) { pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 8, pointer.baseAddress!)
         }
         self.sessionID = sid
 
@@ -544,8 +544,8 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         let header = try aesECBDecrypt(key: psk, block: data.prefix(16))
 
         var sidBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &sidBE) { ptr in
-            header[0..<8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &sidBE) { pointer in
+            header[0..<8].copyBytes(to: pointer)
         }
         let remoteSession = UInt64(bigEndian: sidBE)
 
@@ -581,8 +581,8 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         }
 
         var epochBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &epochBE) { ptr in
-            body[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &epochBE) { pointer in
+            body[offset..<offset+8].copyBytes(to: pointer)
         }
         let epoch = Int64(UInt64(bigEndian: epochBE))
         let now = Int64(Date().timeIntervalSince1970)
@@ -592,8 +592,8 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         offset += 8
 
         var clientSidBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &clientSidBE) { ptr in
-            body[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &clientSidBE) { pointer in
+            body[offset..<offset+8].copyBytes(to: pointer)
         }
         let clientSid = UInt64(bigEndian: clientSidBE)
         guard clientSid == sessionID else {
@@ -633,8 +633,8 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
         self.dstPort = dstPort
 
         var sid: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &sid) { ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 8, ptr.baseAddress!)
+        _ = withUnsafeMutableBytes(of: &sid) { pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 8, pointer.baseAddress!)
         }
         self.sessionID = sid
         super.init()
@@ -746,8 +746,8 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
         }
 
         var epochBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &epochBE) { ptr in
-            body[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &epochBE) { pointer in
+            body[offset..<offset+8].copyBytes(to: pointer)
         }
         let epoch = Int64(UInt64(bigEndian: epochBE))
         let now = Int64(Date().timeIntervalSince1970)
@@ -757,8 +757,8 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
         offset += 8
 
         var clientSidBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &clientSidBE) { ptr in
-            body[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &clientSidBE) { pointer in
+            body[offset..<offset+8].copyBytes(to: pointer)
         }
         let clientSid = UInt64(bigEndian: clientSidBE)
         guard clientSid == sessionID else {
@@ -879,15 +879,15 @@ enum XChaCha20Poly1305 {
         state[2] = 0x79622d32
         state[3] = 0x6b206574
 
-        key.withUnsafeBytes { ptr in
+        key.withUnsafeBytes { pointer in
             for i in 0..<8 {
-                state[4 + i] = ptr.load(fromByteOffset: i * 4, as: UInt32.self).littleEndian
+                state[4 + i] = pointer.load(fromByteOffset: i * 4, as: UInt32.self).littleEndian
             }
         }
 
-        nonce.withUnsafeBytes { ptr in
+        nonce.withUnsafeBytes { pointer in
             for i in 0..<4 {
-                state[12 + i] = ptr.load(fromByteOffset: i * 4, as: UInt32.self).littleEndian
+                state[12 + i] = pointer.load(fromByteOffset: i * 4, as: UInt32.self).littleEndian
             }
         }
 
@@ -907,8 +907,8 @@ enum XChaCha20Poly1305 {
 
         // Output: words 0..3 and 12..15 (8 words = 32 bytes)
         var output = Data(count: 32)
-        output.withUnsafeMutableBytes { ptr in
-            let p = ptr.bindMemory(to: UInt32.self)
+        output.withUnsafeMutableBytes { pointer in
+            let p = pointer.bindMemory(to: UInt32.self)
             p[0] = state[0].littleEndian
             p[1] = state[1].littleEndian
             p[2] = state[2].littleEndian

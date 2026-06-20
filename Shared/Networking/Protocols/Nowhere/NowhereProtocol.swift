@@ -142,8 +142,8 @@ enum NowhereProtocol {
     static func makeAuthFrame(key: String, protocolSpec: EffectiveSpec) throws -> Data {
         var nonce = Data(count: 32)
         let rv = nonce.withUnsafeMutableBytes { raw -> Int32 in
-            guard let ptr = raw.baseAddress else { return errSecAllocate }
-            return SecRandomCopyBytes(kSecRandomDefault, 32, ptr)
+            guard let pointer = raw.baseAddress else { return errSecAllocate }
+            return SecRandomCopyBytes(kSecRandomDefault, 32, pointer)
         }
         guard rv == errSecSuccess else {
             throw NowhereError.connectionFailed("Failed to generate auth nonce")
@@ -392,10 +392,10 @@ enum NowhereProtocol {
 
     private static func decodeTarget(_ data: Data, offset: Int) -> (target: String, nextOffset: Data.Index)? {
         guard offset + 2 <= data.count else { return nil }
-        let len = (Int(byte(data, at: offset)) << 8) | Int(byte(data, at: offset + 1))
-        guard len > 0, len <= maxTargetLength, offset + 2 + len <= data.count else { return nil }
+        let length = (Int(byte(data, at: offset)) << 8) | Int(byte(data, at: offset + 1))
+        guard length > 0, length <= maxTargetLength, offset + 2 + length <= data.count else { return nil }
         let start = data.index(data.startIndex, offsetBy: offset + 2)
-        let end = data.index(start, offsetBy: len)
+        let end = data.index(start, offsetBy: length)
         guard let target = String(data: data[start..<end], encoding: .utf8) else { return nil }
         return (target, end)
     }

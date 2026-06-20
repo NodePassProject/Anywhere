@@ -130,8 +130,8 @@ nonisolated class QUICTLSHandler {
         privateKeyP256 = P256.KeyAgreement.PrivateKey()
         privateKeyX25519 = Curve25519.KeyAgreement.PrivateKey()
 
-        _ = clientRandom.withUnsafeMutableBytes { buf in
-            SecRandomCopyBytes(kSecRandomDefault, 32, buf.baseAddress!)
+        _ = clientRandom.withUnsafeMutableBytes { buffer in
+            SecRandomCopyBytes(kSecRandomDefault, 32, buffer.baseAddress!)
         }
     }
 
@@ -432,15 +432,15 @@ nonisolated class QUICTLSHandler {
             }
 
             if extType == TLSExtensionType.quicTransportParameters {
-                let params = Data(body[offset..<(offset + extDataLen)])
-                peerQUICTransportParameters = params
+                let parameters = Data(body[offset..<(offset + extDataLen)])
+                peerQUICTransportParameters = parameters
 
-                _ = params.withUnsafeBytes { buf -> Int32 in
-                    guard let ptr = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                _ = parameters.withUnsafeBytes { buffer -> Int32 in
+                    guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                         return -1
                     }
                     return ngtcp2_conn_decode_and_set_remote_transport_params(
-                        conn, ptr, params.count
+                        conn, pointer, parameters.count
                     )
                 }
             } else if extType == TLSExtensionType.applicationLayerProtocolNegotiation {
@@ -519,12 +519,12 @@ nonisolated class QUICTLSHandler {
         )
         let finishedMessage = buildFinishedMessage(verifyData: verifyData)
 
-        let rv = finishedMessage.withUnsafeBytes { buf -> Int32 in
-            guard let ptr = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+        let rv = finishedMessage.withUnsafeBytes { buffer -> Int32 in
+            guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return NGTCP2_ERR_CALLBACK_FAILURE
             }
             return ngtcp2_conn_submit_crypto_data(
-                conn, NGTCP2_ENCRYPTION_LEVEL_HANDSHAKE, ptr, finishedMessage.count
+                conn, NGTCP2_ENCRYPTION_LEVEL_HANDSHAKE, pointer, finishedMessage.count
             )
         }
 
@@ -554,9 +554,9 @@ nonisolated class QUICTLSHandler {
         let aead = ngtcp2_crypto_aead()
         let md = ngtcp2_crypto_md()
 
-        var ctx = ngtcp2_crypto_ctx()
-        ngtcp2_crypto_ctx_tls(&ctx, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
-        ngtcp2_conn_set_crypto_ctx(conn, &ctx)
+        var context = ngtcp2_crypto_ctx()
+        ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
+        ngtcp2_conn_set_crypto_ctx(conn, &context)
 
         let kd = keyDerivation!
         let clientKey = kd.expandLabel(
@@ -585,19 +585,19 @@ nonisolated class QUICTLSHandler {
         var txHPCtx = ngtcp2_crypto_cipher_ctx()
 
         serverKey.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &ctx.aead,
+            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
         clientKey.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &ctx.aead,
+            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
         serverHP.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &ctx.hp,
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
         clientHP.withUnsafeBytes { keyBuf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &ctx.hp,
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
 
@@ -613,8 +613,8 @@ nonisolated class QUICTLSHandler {
 
     private func installApplicationKeys(conn: OpaquePointer, keys: TLS13ApplicationKeys) {
         let kd = keyDerivation!
-        var ctx = ngtcp2_crypto_ctx()
-        ngtcp2_crypto_ctx_tls(&ctx, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
+        var context = ngtcp2_crypto_ctx()
+        ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
 
         let hsKey = SymmetricKey(data: handshakeSecret!)
         let derivedHS = kd.deriveSecret(secret: hsKey, label: "derived", messages: Data())
@@ -638,21 +638,21 @@ nonisolated class QUICTLSHandler {
         var txAeadCtx = ngtcp2_crypto_aead_ctx()
         var txHPCtx = ngtcp2_crypto_cipher_ctx()
 
-        rxKey.withUnsafeBytes { buf in
-            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &ctx.aead,
-                buf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
+        rxKey.withUnsafeBytes { buffer in
+            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
+                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
-        rxHP.withUnsafeBytes { buf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &ctx.hp,
-                buf.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        rxHP.withUnsafeBytes { buffer in
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
+                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
-        txKey.withUnsafeBytes { buf in
-            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &ctx.aead,
-                buf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
+        txKey.withUnsafeBytes { buffer in
+            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
+                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
-        txHP.withUnsafeBytes { buf in
-            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &ctx.hp,
-                buf.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        txHP.withUnsafeBytes { buffer in
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
+                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
 
         serverATS.withUnsafeBytes { secretBuf in
@@ -932,13 +932,13 @@ nonisolated class QUICTLSHandler {
     // MARK: - Helpers
 
     private func buildFinishedMessage(verifyData: Data) -> Data {
-        var msg = Data()
-        msg.append(TLSHandshakeType.finished)
-        let len = verifyData.count
-        msg.append(UInt8((len >> 16) & 0xFF))
-        msg.append(UInt8((len >> 8) & 0xFF))
-        msg.append(UInt8(len & 0xFF))
-        msg.append(verifyData)
-        return msg
+        var message = Data()
+        message.append(TLSHandshakeType.finished)
+        let length = verifyData.count
+        message.append(UInt8((length >> 16) & 0xFF))
+        message.append(UInt8((length >> 8) & 0xFF))
+        message.append(UInt8(length & 0xFF))
+        message.append(verifyData)
+        return message
     }
 }

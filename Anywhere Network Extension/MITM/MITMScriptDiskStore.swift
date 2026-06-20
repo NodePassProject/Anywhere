@@ -139,12 +139,12 @@ final class MITMScriptDiskStore {
         guard let url = fileURL(scope),
               let data = coordinatedRead(url),
               let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-              let dict = object as? [String: Data]
+              let dictionary = object as? [String: Data]
         else {
             cache[scope] = [:]
             return
         }
-        cache[scope] = dict
+        cache[scope] = dictionary
     }
 
     /// Coordinated read so a concurrent writer in another App Group process can't be observed

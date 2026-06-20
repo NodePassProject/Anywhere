@@ -98,10 +98,10 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
     /// Delivers a payload chunk from a cmdPSH frame addressed to this stream.
     func deliverData(_ data: Data) {
         receiveLock.lock()
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
             receiveLock.unlock()
-            cb(data, nil)
+            callback(data, nil)
         } else {
             incoming.append(data)
             receiveLock.unlock()
@@ -117,12 +117,12 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         }
         receiveError = error
         eof = true
-        let cb = pendingReceive
+        let callback = pendingReceive
         pendingReceive = nil
         receiveLock.unlock()
         let kind = error.map { "error=\($0.localizedDescription)" } ?? "EOF"
-        logger.debug("[AnyTLSStream] deliverClose sid=\(sid) \(kind) (pendingRead=\(cb != nil))")
-        cb?(nil, error)
+        logger.debug("[AnyTLSStream] deliverClose sid=\(sid) \(kind) (pendingRead=\(callback != nil))")
+        callback?(nil, error)
         fireOnEndOnce()
     }
 

@@ -57,10 +57,10 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
             return
         }
 
-        if let err = receiveError {
+        if let error = receiveError {
             receiveError = nil
             recvLock.unlock()
-            completion(nil, err)
+            completion(nil, error)
             return
         }
 
@@ -97,10 +97,10 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
             recvLock.unlock()
             return
         }
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
             recvLock.unlock()
-            cb(data, nil)
+            callback(data, nil)
             return
         }
         // Drop-oldest when the consumer isn't keeping up — UDP is lossy.
@@ -117,12 +117,12 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
             recvLock.unlock()
             return
         }
-        let cb = pendingReceive
+        let callback = pendingReceive
         pendingReceive = nil
-        if cb == nil {
+        if callback == nil {
             receiveError = error
         }
         recvLock.unlock()
-        cb?(nil, error)
+        callback?(nil, error)
     }
 }

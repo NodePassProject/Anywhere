@@ -52,8 +52,8 @@ enum AnyTLSProtocol {
     static func passwordHash(_ password: String) -> Data {
         let bytes = Array(password.utf8)
         var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        bytes.withUnsafeBytes { ptr in
-            if let base = ptr.baseAddress {
+        bytes.withUnsafeBytes { pointer in
+            if let base = pointer.baseAddress {
                 CC_SHA256(base, CC_LONG(bytes.count), &digest)
             }
         }

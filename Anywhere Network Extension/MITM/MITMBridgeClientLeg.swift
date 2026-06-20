@@ -662,13 +662,13 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             if endStream { requestStreams.removeValue(forKey: id) }
             return false
 
-        case .buffering(var buf):
+        case .buffering(var buffer):
             creditClientUpload(streamID: id, length: onWireLength)
-            buf.data.append(body)
-            if !endStream, buf.data.count > MITMBodyCodec.maxBufferedBodyBytes {
-                return abandonBufferedToChunked(streamID: id, buf: buf)
+            buffer.data.append(body)
+            if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
+                return abandonBufferedToChunked(streamID: id, buf: buffer)
             }
-            requestStreams[id] = .buffering(buf)
+            requestStreams[id] = .buffering(buffer)
             if endStream { return finishBufferedRequest(id) }
             return false
 
@@ -745,34 +745,34 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     /// Buffered request body complete. Runs body scripts when buffering for a script rule; otherwise
     /// emits the body verbatim with an explicit Content-Length (no script, no decompression).
     private func finishBufferedRequest(_ streamID: UInt32) -> Bool {
-        guard case .buffering(let buf)? = requestStreams[streamID] else { return false }
-        guard buf.scripted else {
+        guard case .buffering(let buffer)? = requestStreams[streamID] else { return false }
+        guard buffer.scripted else {
             requestStreams.removeValue(forKey: streamID)
-            emitBufferedRequest(streamID: streamID, headers: buf.rewrittenHeaders, body: buf.data, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream)
+            emitBufferedRequest(streamID: streamID, headers: buffer.rewrittenHeaders, body: buffer.data, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream)
             return false
         }
         return runRequestScripts(streamID)
     }
 
     private func runRequestScripts(_ streamID: UInt32) -> Bool {
-        guard case .buffering(let buf)? = requestStreams[streamID] else { return false }
+        guard case .buffering(let buffer)? = requestStreams[streamID] else { return false }
         requestStreams.removeValue(forKey: streamID)
 
         let plaintext: Data
-        if buf.codec.requiresDecompression {
-            guard let decoded = MITMBodyCodec.decompress(buf.data, plan: buf.codec, host: host) else {
+        if buffer.codec.requiresDecompression {
+            guard let decoded = MITMBodyCodec.decompress(buffer.data, plan: buffer.codec, host: host) else {
                 // Decompression failed: forward verbatim (content-encoding intact).
-                emitBufferedRequest(streamID: streamID, headers: buf.rewrittenHeaders, body: buf.data, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream)
+                emitBufferedRequest(streamID: streamID, headers: buffer.rewrittenHeaders, body: buffer.data, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream)
                 return false
             }
             plaintext = decoded
         } else {
-            plaintext = buf.data
+            plaintext = buffer.data
         }
-        let scriptedHeaders = buf.codec.requiresDecompression
-            ? buf.rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
-            : buf.rewrittenHeaders
-        let url = HTTPHeader.firstValue(in: buf.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
+        let scriptedHeaders = buffer.codec.requiresDecompression
+            ? buffer.rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
+            : buffer.rewrittenHeaders
+        let url = HTTPHeader.firstValue(in: buffer.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
         let message = HTTPMessage(
             phase: .httpRequest,
             method: HTTPHeader.firstValue(in: scriptedHeaders, named: ":method"),
@@ -786,7 +786,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             guard let self, !self.torn else { return }
             switch outcome {
             case .message(let updated):
-                self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buf.neverIndexed, resolvedUpstream: buf.resolvedUpstream)
+                self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream)
             case .synthesizedResponse(let response):
                 self.answerSynth(streamID: streamID, response: response)
             }

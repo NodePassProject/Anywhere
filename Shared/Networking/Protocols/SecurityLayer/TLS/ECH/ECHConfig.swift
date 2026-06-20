@@ -100,23 +100,23 @@ enum ECHConfigParser {
         guard listLength == bytes.count - 2 else { throw ECHConfigError.malformedConfigList }
 
         var configs: [ECHConfig] = []
-        var pos = 2
-        while pos < bytes.count {
+        var position = 2
+        while position < bytes.count {
             // Record header: version(2) + length(2).
-            guard pos + 4 <= bytes.count else { throw ECHConfigError.malformedConfig }
-            let version = UInt16(bytes[pos]) << 8 | UInt16(bytes[pos + 1])
-            let bodyLength = Int(bytes[pos + 2]) << 8 | Int(bytes[pos + 3])
-            let recordEnd = pos + 4 + bodyLength
+            guard position + 4 <= bytes.count else { throw ECHConfigError.malformedConfig }
+            let version = UInt16(bytes[position]) << 8 | UInt16(bytes[position + 1])
+            let bodyLength = Int(bytes[position + 2]) << 8 | Int(bytes[position + 3])
+            let recordEnd = position + 4 + bodyLength
             guard recordEnd <= bytes.count else { throw ECHConfigError.malformedConfig }
 
-            let raw = Data(bytes[pos..<recordEnd])
+            let raw = Data(bytes[position..<recordEnd])
             if version == echExtensionCodepoint {
-                let body = Data(bytes[(pos + 4)..<recordEnd])
+                let body = Data(bytes[(position + 4)..<recordEnd])
                 if let config = try parseConfigBody(body, version: version, raw: raw) {
                     configs.append(config)
                 }
             }
-            pos = recordEnd
+            position = recordEnd
         }
         return configs
     }
@@ -201,9 +201,9 @@ extension ECHConfig {
         guard labels.count > 1 else { return false }
         for label in labels {
             guard !label.isEmpty else { return false }
-            let chars = Array(label)
-            for (i, c) in chars.enumerated() {
-                if c == "-" && (i == 0 || i == chars.count - 1) { return false }
+            let characters = Array(label)
+            for (i, c) in characters.enumerated() {
+                if c == "-" && (i == 0 || i == characters.count - 1) { return false }
                 let isDigit = c >= "0" && c <= "9"
                 let isLower = c >= "a" && c <= "z"
                 let isUpper = c >= "A" && c <= "Z"

@@ -192,9 +192,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
                 multiplexer.shutdownStream(sid, code: code)
             }
 
-            if let cb = connectCompletion {
+            if let callback = connectCompletion {
                 connectCompletion = nil
-                cb(HTTP3Error.streamClosed)
+                callback(HTTP3Error.streamClosed)
             }
             if let pending = pendingReceive {
                 pendingReceive = nil
@@ -301,9 +301,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         headersReceived = true
         state = .open
 
-        let cb = connectCompletion
+        let callback = connectCompletion
         connectCompletion = nil
-        cb?(nil)
+        callback?(nil)
     }
 
     private func deliverData(_ data: Data, quicBytes: Int) {
@@ -340,9 +340,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         }
         closeAndShutdown(code: code)
 
-        if let cb = connectCompletion {
+        if let callback = connectCompletion {
             connectCompletion = nil
-            cb(error)
+            callback(error)
         }
         if let pending = pendingReceive {
             pendingReceive = nil

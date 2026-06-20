@@ -170,9 +170,9 @@ nonisolated class QUICConnection {
         var endOffset: UInt64 = 0
 
         init(copying data: Data) {
-            let buf = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: data.count)
-            _ = data.copyBytes(to: buf)
-            storage = buf
+            let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: data.count)
+            _ = data.copyBytes(to: buffer)
+            storage = buffer
         }
 
         deinit { storage.deallocate() }
@@ -241,10 +241,10 @@ nonisolated class QUICConnection {
     // MARK: Streams
 
     func openBidiStream() -> Int64? {
-        guard state == .connected, let conn else { return nil }
+        guard state == .connected, let connection = conn else { return nil }
         var streamId: Int64 = -1
         let streamData: UnsafeMutableRawPointer? = nil
-        let rv = ngtcp2_conn_open_bidi_stream(conn, &streamId, streamData)
+        let rv = ngtcp2_conn_open_bidi_stream(connection, &streamId, streamData)
         if rv != 0 {
             return nil
         }
@@ -252,10 +252,10 @@ nonisolated class QUICConnection {
     }
 
     func openUniStream() -> Int64? {
-        guard state == .connected, let conn else { return nil }
+        guard state == .connected, let connection = conn else { return nil }
         var streamId: Int64 = -1
         let streamData: UnsafeMutableRawPointer? = nil
-        let rv = ngtcp2_conn_open_uni_stream(conn, &streamId, streamData)
+        let rv = ngtcp2_conn_open_uni_stream(connection, &streamId, streamData)
         if rv != 0 {
             return nil
         }
@@ -275,9 +275,9 @@ nonisolated class QUICConnection {
     }
 
     private func extendStreamOffsetOnQueue(_ streamId: Int64, count: Int) {
-        guard let conn else { return }
-        ngtcp2_conn_extend_max_stream_offset(conn, streamId, UInt64(count))
-        ngtcp2_conn_extend_max_offset(conn, UInt64(count))
+        guard let connection = conn else { return }
+        ngtcp2_conn_extend_max_stream_offset(connection, streamId, UInt64(count))
+        ngtcp2_conn_extend_max_offset(connection, UInt64(count))
         // Inside read_pkt the post-read scheduleFlush() covers it.
         if inReadPkt { return }
         scheduleFlush()
@@ -299,8 +299,8 @@ nonisolated class QUICConnection {
     /// application error code; each app protocol (HTTP/3, Hysteria, Nowhere) defines its own.
     func shutdownStream(_ streamId: Int64, appErrorCode: UInt64) {
         queue.async { [weak self] in
-            guard let self, let conn = self.conn else { return }
-            ngtcp2_conn_shutdown_stream(conn, 0, streamId, appErrorCode)
+            guard let self, let connection = self.conn else { return }
+            ngtcp2_conn_shutdown_stream(connection, 0, streamId, appErrorCode)
             self.writeToUDP()
         }
     }
@@ -310,11 +310,11 @@ nonisolated class QUICConnection {
         queue.async { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
-            guard let conn = self.conn, self.state == .connected else {
+            guard let connection = self.conn, self.state == .connected else {
                 completion(QUICError.closed)
                 return
             }
-            self.writeStreamImpl(conn: conn, streamId: streamId,
+            self.writeStreamImpl(conn: connection, streamId: streamId,
                                  data: data, fin: fin, completion: completion)
         }
     }
@@ -352,8 +352,8 @@ nonisolated class QUICConnection {
             // All completions fire on `queue`, so the unsynchronised counters are safe.
             var remaining = datagrams.count
             var firstError: Error?
-            let onEach: ((Error?) -> Void) = { err in
-                if let err, firstError == nil { firstError = err }
+            let onEach: ((Error?) -> Void) = { error in
+                if let error, firstError == nil { firstError = error }
                 remaining -= 1
                 if remaining == 0 { completion(firstError) }
             }
@@ -385,12 +385,12 @@ nonisolated class QUICConnection {
     /// `write_datagram` returning `nwrite=0, accepted=0` forever and wedging the queue. On `queue`.
     var maxDatagramPayloadSize: Int {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard let conn else { return 0 }
-        guard let params = ngtcp2_swift_conn_get_remote_transport_params(conn) else { return 0 }
-        let maxFrame = Int(params.pointee.max_datagram_frame_size)
+        guard let connection = conn else { return 0 }
+        guard let parameters = ngtcp2_swift_conn_get_remote_transport_params(connection) else { return 0 }
+        let maxFrame = Int(parameters.pointee.max_datagram_frame_size)
         guard maxFrame > 0 else { return 0 }
         let frameLimit = max(0, maxFrame - 3)
-        let pathBytes = ngtcp2_conn_get_path_max_tx_udp_payload_size(conn)
+        let pathBytes = ngtcp2_conn_get_path_max_tx_udp_payload_size(connection)
         let pathLimit = max(0, Int(pathBytes) - 44)
         return min(frameLimit, pathLimit)
     }
@@ -445,9 +445,9 @@ nonisolated class QUICConnection {
 
             var vec = ngtcp2_vec(base: stableBase.advanced(by: offset),
                                  len: remaining)
-            let nwrite: ngtcp2_ssize = txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
+            let nwrite: ngtcp2_ssize = txBuf.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                 ngtcp2_swift_conn_writev_stream(
-                    conn, nil, &pi, dest.baseAddress, dest.count,
+                    conn, nil, &pi, destination.baseAddress, destination.count,
                     &pdatalen, flags,
                     streamId, &vec, 1, ts
                 )
@@ -519,12 +519,12 @@ nonisolated class QUICConnection {
             }
         }
         pendingWrites = remaining
-        for cb in failed { cb(error) }
+        for callback in failed { callback(error) }
     }
 
     /// Retries flow-control-blocked writes after packets that may carry MAX_STREAM_DATA.
     private func flushPendingWrites() {
-        guard !pendingWrites.isEmpty, let conn else { return }
+        guard !pendingWrites.isEmpty, let connection = conn else { return }
         // A completion may call close(); ngtcp2Busy defers teardown so `conn`
         // isn't freed mid-loop.
         let prevBusy = ngtcp2Busy
@@ -539,7 +539,7 @@ nonisolated class QUICConnection {
 
         var remaining: [PendingWrite] = []
         for pw in pendingWrites {
-            let sent = writeStreamSync(conn: conn, streamId: pw.streamId,
+            let sent = writeStreamSync(conn: connection, streamId: pw.streamId,
                                         data: pw.data, fin: pw.fin)
             if sent >= pw.data.count {
                 pw.completion(nil)
@@ -581,8 +581,8 @@ nonisolated class QUICConnection {
                 self.brutalCCKey = nil
                 self.brutalCC = nil
             }
-            if let conn = self.conn {
-                ngtcp2_conn_del(conn)
+            if let connection = self.conn {
+                ngtcp2_conn_del(connection)
                 self.conn = nil
             }
             self.transport?.cancel()
@@ -597,9 +597,9 @@ nonisolated class QUICConnection {
             let closeError = error ?? QUICError.closed
             // Fire any still-pending connect callback — the socket's non-EAGAIN
             // recv error path calls close() directly.
-            if let cb = self.connectCompletion {
+            if let callback = self.connectCompletion {
                 self.connectCompletion = nil
-                cb(closeError)
+                callback(closeError)
             }
             for pw in writes { pw.completion(closeError) }
             for d in dgrams { d.completion?(closeError) }
@@ -632,19 +632,19 @@ nonisolated class QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
-            let sock = QUICSocket(queue: queue, receiveBufferSize: Self.maxUDPPayload)
+            let socket = QUICSocket(queue: queue, receiveBufferSize: Self.maxUDPPayload)
             // ngtcp2's path stays pinned to `remoteAddr` (the canonical host:port); only the
             // socket's real destination rotates. The first dial already uses a hop port so the
             // handshake itself rides the hopped range.
             let initialPeer = initialHopAddr() ?? remoteAddr
-            try sock.connect(remoteAddr: initialPeer, localAddr: &localAddr, addrLen: addrLen)
-            quicSocket = sock
+            try socket.connect(remoteAddr: initialPeer, localAddr: &localAddr, addrLen: addrLen)
+            quicSocket = socket
             try initializeNgtcp2()
             state = .handshaking
-            sock.startReceiving(
+            socket.startReceiving(
                 onPacket: { [weak self] data in self?.handleReceivedPacket(data) },
-                onError: { [weak self] err in
-                    self?.close(error: QUICError.connectionFailed("recv errno=\(err)"))
+                onError: { [weak self] error in
+                    self?.close(error: QUICError.connectionFailed("recv errno=\(error)"))
                 }
             )
             startHopTimer()
@@ -677,9 +677,9 @@ nonisolated class QUICConnection {
                 self?.queue.async {
                     guard let self else { return }
                     let err = error ?? QUICError.closed
-                    if let cb = self.connectCompletion {
+                    if let callback = self.connectCompletion {
                         self.connectCompletion = nil
-                        cb(err)
+                        callback(err)
                     }
                     self.close(error: err)
                 }
@@ -751,8 +751,8 @@ nonisolated class QUICConnection {
     /// same fixed path, and the kernel redirects those bytes to the new peer.
     private func performHop() {
         guard state != .closed, let portHopping,
-              let sock = quicSocket, let port = portHopping.randomPort() else { return }
-        sock.reconnect(remoteAddr: hopAddr(port: port), addrLen: addrLen)
+              let socket = quicSocket, let port = portHopping.randomPort() else { return }
+        socket.reconnect(remoteAddr: hopAddr(port: port), addrLen: addrLen)
         // Flush any pending frames onto the new port so the server's reverse-NAT mapping
         // re-points immediately; an idle connection just falls back to the keep-alive PING.
         writeToUDP()
@@ -760,21 +760,21 @@ nonisolated class QUICConnection {
 
     /// Copies `remoteAddr`, overriding only the port. Preserves the resolved IP and family.
     private func hopAddr(port: UInt16) -> sockaddr_storage {
-        var addr = remoteAddr
-        if addr.ss_family == sa_family_t(AF_INET) {
-            withUnsafeMutablePointer(to: &addr) { storage in
+        var address = remoteAddr
+        if address.ss_family == sa_family_t(AF_INET) {
+            withUnsafeMutablePointer(to: &address) { storage in
                 storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
                     sin.pointee.sin_port = port.bigEndian
                 }
             }
-        } else if addr.ss_family == sa_family_t(AF_INET6) {
-            withUnsafeMutablePointer(to: &addr) { storage in
+        } else if address.ss_family == sa_family_t(AF_INET6) {
+            withUnsafeMutablePointer(to: &address) { storage in
                 storage.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
                     sin6.pointee.sin6_port = port.bigEndian
                 }
             }
         }
-        return addr
+        return address
     }
 
     private func populateRemoteAddr() {
@@ -863,15 +863,15 @@ nonisolated class QUICConnection {
         guard length > 0 else { return }
         if let transport {
             // Copy out before the next ngtcp2 write reuses txBuf.
-            let datagram = txBuf.withUnsafeBufferPointer { buf -> Data in
-                Data(bytes: buf.baseAddress!, count: length)
+            let datagram = txBuf.withUnsafeBufferPointer { buffer -> Data in
+                Data(bytes: buffer.baseAddress!, count: length)
             }
             transport.sendDatagram(datagram)
             return
         }
         guard let quicSocket else { return }
-        txBuf.withUnsafeBufferPointer { buf in
-            guard let base = buf.baseAddress else { return }
+        txBuf.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
             quicSocket.send(base, length: length)
         }
     }
@@ -916,18 +916,18 @@ nonisolated class QUICConnection {
         settings.max_stream_window = tuning.maxStreamWindow
         settings.max_window = tuning.maxWindow
         settings.handshake_timeout = tuning.handshakeTimeout
-        var params = ngtcp2_transport_params()
-        ngtcp2_swift_transport_params_default(&params)
-        params.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
-        params.initial_max_streams_uni = tuning.initialMaxStreamsUni
-        params.initial_max_data = tuning.initialMaxData
-        params.initial_max_stream_data_bidi_local = tuning.initialMaxStreamDataBidiLocal
-        params.initial_max_stream_data_bidi_remote = tuning.initialMaxStreamDataBidiRemote
-        params.initial_max_stream_data_uni = tuning.initialMaxStreamDataUni
-        params.max_idle_timeout = tuning.maxIdleTimeout
-        params.disable_active_migration = tuning.disableActiveMigration ? 1 : 0
+        var parameters = ngtcp2_transport_params()
+        ngtcp2_swift_transport_params_default(&parameters)
+        parameters.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
+        parameters.initial_max_streams_uni = tuning.initialMaxStreamsUni
+        parameters.initial_max_data = tuning.initialMaxData
+        parameters.initial_max_stream_data_bidi_local = tuning.initialMaxStreamDataBidiLocal
+        parameters.initial_max_stream_data_bidi_remote = tuning.initialMaxStreamDataBidiRemote
+        parameters.initial_max_stream_data_uni = tuning.initialMaxStreamDataUni
+        parameters.max_idle_timeout = tuning.maxIdleTimeout
+        parameters.disable_active_migration = tuning.disableActiveMigration ? 1 : 0
         if datagramsEnabled {
-            params.max_datagram_frame_size = Self.maxDatagramFrameSize
+            parameters.max_datagram_frame_size = Self.maxDatagramFrameSize
         }
 
         var path = ngtcp2_path()
@@ -959,7 +959,7 @@ nonisolated class QUICConnection {
             }
             return ngtcp2_swift_conn_client_new(
                 &connPtr, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
-                &callbacks, &settings, &params, nil, &connRefStorage
+                &callbacks, &settings, &parameters, nil, &connRefStorage
             )
         }
         guard rv == 0, let connPtr else {
@@ -996,13 +996,13 @@ nonisolated class QUICConnection {
     /// the CC table so a racing trampoline no-ops rather than touching a half-initialized CUBIC struct.
     func uninstallBrutalCC() {
         queue.async { [weak self] in
-            guard let self, let conn = self.conn else { return }
+            guard let self, let connection = self.conn else { return }
             if let key = self.brutalCCKey {
                 BrutalCongestionControl.unregister(cc: key)
                 self.brutalCCKey = nil
                 self.brutalCC = nil
             }
-            ngtcp2_swift_uninstall_brutal(conn)
+            ngtcp2_swift_uninstall_brutal(connection)
         }
     }
 
@@ -1021,7 +1021,7 @@ nonisolated class QUICConnection {
     }
 
     fileprivate func handleReceivedPacket(_ data: Data) {
-        guard let conn else { return }
+        guard let connection = conn else { return }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
 
@@ -1032,7 +1032,7 @@ nonisolated class QUICConnection {
         let prevBusy = ngtcp2Busy
         ngtcp2Busy = true
         let rv: Int32 = data.withUnsafeBytes { raw in
-            guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+            guard let pointer = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
             var path = ngtcp2_path()
             withUnsafeMutablePointer(to: &localAddr) { local in
                 withUnsafeMutablePointer(to: &remoteAddr) { remote in
@@ -1044,7 +1044,7 @@ nonisolated class QUICConnection {
                         addrlen: ngtcp2_socklen(addrLen))
                 }
             }
-            return ngtcp2_swift_conn_read_pkt(conn, &path, &pi, ptr, data.count, ts)
+            return ngtcp2_swift_conn_read_pkt(connection, &path, &pi, pointer, data.count, ts)
         }
         ngtcp2Busy = prevBusy
 
@@ -1056,7 +1056,7 @@ nonisolated class QUICConnection {
             case NGTCP2_ERR_DRAINING:
                 // Peer sent CONNECTION_CLOSE. A benign code (NO_ERROR / H3_NO_ERROR 0x100)
                 // is a graceful end-of-connection.
-                if let ccerr = ngtcp2_conn_get_ccerr(conn), isBenignConnectionClose(ccerr.pointee) {
+                if let ccerr = ngtcp2_conn_get_ccerr(connection), isBenignConnectionClose(ccerr.pointee) {
                     error = QUICError.closedOK
                 } else {
                     error = QUICError.closed
@@ -1068,9 +1068,9 @@ nonisolated class QUICConnection {
             default:
                 error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv)")
             }
-            if let cb = connectCompletion {
+            if let callback = connectCompletion {
                 connectCompletion = nil
-                cb(error)
+                callback(error)
             }
             close(error: error)
             return
@@ -1079,7 +1079,7 @@ nonisolated class QUICConnection {
     }
 
     fileprivate func writeToUDP() {
-        guard let conn else { return }
+        guard let connection = conn else { return }
         // Defer close() until we return; tail completions may re-enter ngtcp2.
         let prevBusy = ngtcp2Busy
         ngtcp2Busy = true
@@ -1104,9 +1104,9 @@ nonisolated class QUICConnection {
                 guard let srcPtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                     return 0
                 }
-                return txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
+                return txBuf.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                     ngtcp2_swift_conn_write_datagram(
-                        conn, nil, &pi, dest.baseAddress, dest.count,
+                        connection, nil, &pi, destination.baseAddress, destination.count,
                         &accepted, flags, 0, srcPtr, dgram.count, ts
                     )
                 }
@@ -1151,20 +1151,20 @@ nonisolated class QUICConnection {
         }
 
         while true {
-            let nwrite = txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
-                ngtcp2_swift_conn_write_pkt(conn, nil, &pi, dest.baseAddress, dest.count, ts)
+            let nwrite = txBuf.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
+                ngtcp2_swift_conn_write_pkt(connection, nil, &pi, destination.baseAddress, destination.count, ts)
             }
             if nwrite <= 0 { break }
             sendTxBuf(length: Int(nwrite))
         }
 
         // Updates conn->tx.pacing.next_ts; without it the pacer is disabled and sends burst cwnd-wide.
-        ngtcp2_conn_update_pkt_tx_time(conn, ts)
+        ngtcp2_conn_update_pkt_tx_time(connection, ts)
 
         rescheduleTimer()
 
         // Fire completions after all ngtcp2 work; safe to re-enter ngtcp2 here.
-        for (cb, err) in pendingCompletions { cb?(err) }
+        for (callback, error) in pendingCompletions { callback?(error) }
     }
 
     // MARK: Timer
@@ -1173,8 +1173,8 @@ nonisolated class QUICConnection {
     private var lastScheduledExpiry: UInt64 = 0
 
     private func rescheduleTimer() {
-        guard let conn else { return }
-        let expiry = ngtcp2_conn_get_expiry(conn)
+        guard let connection = conn else { return }
+        let expiry = ngtcp2_conn_get_expiry(connection)
 
         if expiry == lastScheduledExpiry && retransmitTimer != nil { return }
         lastScheduledExpiry = expiry
@@ -1182,19 +1182,19 @@ nonisolated class QUICConnection {
         if retransmitTimer == nil {
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.setEventHandler { [weak self] in
-                guard let self, let conn = self.conn else { return }
+                guard let self, let connection = self.conn else { return }
                 self.lastScheduledExpiry = 0
                 let ts = self.currentTimestamp()
                 // handle_expiry may fire CC callbacks; bracket so a close inside is deferred.
                 let prevBusy = self.ngtcp2Busy
                 self.ngtcp2Busy = true
-                let rv = ngtcp2_conn_handle_expiry(conn, ts)
+                let rv = ngtcp2_conn_handle_expiry(connection, ts)
                 self.ngtcp2Busy = prevBusy
                 if rv != 0 {
                     let error = QUICError.connectionFailed("expiry error: \(rv)")
-                    if let cb = self.connectCompletion {
+                    if let callback = self.connectCompletion {
                         self.connectCompletion = nil
-                        cb(error)
+                        callback(error)
                     }
                     self.close(error: error)
                     return
@@ -1228,10 +1228,10 @@ nonisolated class QUICConnection {
         var data = [UInt8](repeating: 0, count: length)
         _ = SecRandomCopyBytes(kSecRandomDefault, length, &data)
         cid.datalen = length
-        withUnsafeMutableBytes(of: &cid.data) { buf in
-            data.withUnsafeBytes { src in
-                buf.copyMemory(from: UnsafeRawBufferPointer(
-                    start: src.baseAddress, count: min(length, buf.count)))
+        withUnsafeMutableBytes(of: &cid.data) { buffer in
+            data.withUnsafeBytes { source in
+                buffer.copyMemory(from: UnsafeRawBufferPointer(
+                    start: source.baseAddress, count: min(length, buffer.count)))
             }
         }
     }
@@ -1267,8 +1267,8 @@ private let quicClientInitialCB: @convention(c) (
     guard let ch = tls.buildClientHello(transportParams: Data(pb.prefix(Int(pLen)))) else {
         return NGTCP2_ERR_CALLBACK_FAILURE
     }
-    return ch.withUnsafeBytes { buf -> Int32 in
-        guard let p = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+    return ch.withUnsafeBytes { buffer -> Int32 in
+        guard let p = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
             return NGTCP2_ERR_CALLBACK_FAILURE
         }
         return ngtcp2_conn_submit_crypto_data(conn, NGTCP2_ENCRYPTION_LEVEL_INITIAL, p, ch.count)
@@ -1371,9 +1371,9 @@ private let quicStreamResetCB: @convention(c) (
 
 private let quicRandCB: @convention(c) (
     UnsafeMutablePointer<UInt8>?, Int, UnsafePointer<ngtcp2_rand_ctx>?
-) -> Void = { dest, len, _ in
-    guard let dest else { return }
-    _ = SecRandomCopyBytes(kSecRandomDefault, len, dest)
+) -> Void = { destination, length, _ in
+    guard let destination else { return }
+    _ = SecRandomCopyBytes(kSecRandomDefault, length, destination)
 }
 
 private let quicGetNewCIDCB: @convention(c) (
@@ -1387,14 +1387,14 @@ private let quicGetNewCIDCB: @convention(c) (
         return NGTCP2_ERR_CALLBACK_FAILURE
     }
     cid.pointee.datalen = cidlen
-    withUnsafeMutableBytes(of: &cid.pointee.data) { buf in
-        d.withUnsafeBytes { src in
-            buf.copyMemory(from: UnsafeRawBufferPointer(start: src.baseAddress,
-                                                         count: min(cidlen, buf.count)))
+    withUnsafeMutableBytes(of: &cid.pointee.data) { buffer in
+        d.withUnsafeBytes { source in
+            buffer.copyMemory(from: UnsafeRawBufferPointer(start: source.baseAddress,
+                                                         count: min(cidlen, buffer.count)))
         }
     }
-    withUnsafeMutableBytes(of: &token.pointee) { buf in
-        _ = SecRandomCopyBytes(kSecRandomDefault, buf.count, buf.baseAddress!)
+    withUnsafeMutableBytes(of: &token.pointee) { buffer in
+        _ = SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
     }
     return 0
 }

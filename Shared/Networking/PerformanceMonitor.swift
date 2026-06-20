@@ -308,16 +308,16 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     private func recordSpan(_ component: Component, elapsedTicks: UInt64) {
         let nanos = PerfClock.nanos(elapsedTicks)
-        let idx = component.rawValue
+        let index = component.rawValue
         var shouldWarn = false
 
         lock.lock()
-        spanStats[idx].record(nanos: nanos)
-        spanBuckets[idx * Self.bucketCount + Self.bucketIndex(forNanos: nanos)] += 1
+        spanStats[index].record(nanos: nanos)
+        spanBuckets[index * Self.bucketCount + Self.bucketIndex(forNanos: nanos)] += 1
         if nanos > component.slowThresholdNanos {
             let now = PerfClock.nowTicks
-            if now &- lastSlowWarnTicks[idx] >= slowWarnIntervalTicks {
-                lastSlowWarnTicks[idx] = now
+            if now &- lastSlowWarnTicks[index] >= slowWarnIntervalTicks {
+                lastSlowWarnTicks[index] = now
                 shouldWarn = true
             }
         }
@@ -329,20 +329,20 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
     }
 
     private func recordGauge(_ gauge: Gauge, value: Int, highWater: Int) {
-        let idx = gauge.rawValue
+        let index = gauge.rawValue
         var shouldWarn = false
 
         lock.lock()
-        gaugeStats[idx].record(value)
+        gaugeStats[index].record(value)
         if highWater > 0 {
             if value >= highWater {
-                if !gaugeStats[idx].highWaterLatched {
-                    gaugeStats[idx].highWaterLatched = true
+                if !gaugeStats[index].highWaterLatched {
+                    gaugeStats[index].highWaterLatched = true
                     shouldWarn = true
                 }
-            } else if gaugeStats[idx].highWaterLatched {
+            } else if gaugeStats[index].highWaterLatched {
                 // Fell back below the mark — re-arm so a later spike warns again.
-                gaugeStats[idx].highWaterLatched = false
+                gaugeStats[index].highWaterLatched = false
             }
         }
         lock.unlock()

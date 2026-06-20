@@ -92,8 +92,8 @@ extension TLSServer {
         }
 
         var serverRandom = Data(count: 32)
-        _ = serverRandom.withUnsafeMutableBytes { ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
+        _ = serverRandom.withUnsafeMutableBytes { pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 32, pointer.baseAddress!)
         }
         let preferredGroups: [UInt16] = [TLSNamedGroup.x25519, TLSNamedGroup.secp256, TLSNamedGroup.secp384]
         let candidateGroups = parsed.supportedGroups.isEmpty
@@ -113,8 +113,8 @@ extension TLSServer {
         handshake12.transcript = parsed.handshakeMessage
 
         var newSessionID = Data(count: 32)
-        _ = newSessionID.withUnsafeMutableBytes { ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
+        _ = newSessionID.withUnsafeMutableBytes { pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 32, pointer.baseAddress!)
         }
 
         let serverHello = TLSServerHelloBuilder.buildServerHello12(
@@ -130,17 +130,17 @@ extension TLSServer {
         let cert = TLSServerHelloBuilder.buildCertificate12(leafCertDER: leafCertDER)
         handshake12.transcript.append(cert)
 
-        let params = TLSServerHelloBuilder.serverECDHEParams(
+        let parameters = TLSServerHelloBuilder.serverECDHEParams(
             namedCurve: serverPriv.namedCurve,
             publicKey: serverPriv.publicKey
         )
         var signedContent = Data()
         signedContent.append(parsed.random)
         signedContent.append(serverRandom)
-        signedContent.append(params)
+        signedContent.append(parameters)
         let signature = try leafSigningKeyP256.signature(for: signedContent)
         let ske = TLSServerHelloBuilder.buildServerKeyExchange(
-            params: params,
+            params: parameters,
             signatureAlgorithm: TLSSignatureScheme.ecdsa_secp256r1_sha256,
             signature: signature.derRepresentation
         )
@@ -174,8 +174,8 @@ extension TLSServer {
                 handshake12.receivedCCS = true
             case TLSContentType.alert:
                 let level = payload.count > 0 ? payload[payload.startIndex] : 0
-                let desc = payload.count > 1 ? payload[payload.startIndex + 1] : 0
-                throw TLSError.handshakeFailed("client TLS 1.2 alert level=\(level) desc=\(desc) (\(TLSRecordError.alertName(desc)))")
+                let description = payload.count > 1 ? payload[payload.startIndex + 1] : 0
+                throw TLSError.handshakeFailed("client TLS 1.2 alert level=\(level) desc=\(description) (\(TLSRecordError.alertName(description)))")
             default:
                 throw TLSError.handshakeFailed("unexpected content type \(contentType) during TLS 1.2 handshake")
             }
@@ -190,14 +190,14 @@ extension TLSServer {
         guard msgType == TLSHandshakeType.clientKeyExchange else {
             throw TLSError.handshakeFailed("expected ClientKeyExchange, got \(msgType)")
         }
-        let len = (Int(recordBody[recordBody.startIndex + 1]) << 16)
+        let length = (Int(recordBody[recordBody.startIndex + 1]) << 16)
                 | (Int(recordBody[recordBody.startIndex + 2]) << 8)
                 | Int(recordBody[recordBody.startIndex + 3])
-        guard recordBody.count >= 4 + len else {
+        guard recordBody.count >= 4 + length else {
             throw TLSError.handshakeFailed("ClientKeyExchange truncated")
         }
 
-        let body = recordBody.subdata(in: (recordBody.startIndex + 4)..<(recordBody.startIndex + 4 + len))
+        let body = recordBody.subdata(in: (recordBody.startIndex + 4)..<(recordBody.startIndex + 4 + length))
         guard body.count >= 1 else {
             throw TLSError.handshakeFailed("ClientKeyExchange empty")
         }
@@ -217,7 +217,7 @@ extension TLSServer {
             throw TLSError.handshakeFailed("invalid client ECDHE key share")
         }
 
-        let cke = recordBody.subdata(in: recordBody.startIndex..<(recordBody.startIndex + 4 + len))
+        let cke = recordBody.subdata(in: recordBody.startIndex..<(recordBody.startIndex + 4 + length))
         handshake12.transcript.append(cke)
 
         let useSHA384 = TLSCipherSuite.usesSHA384(chosenCipherSuite)
@@ -360,8 +360,8 @@ extension TLSServer {
         let explicitNonce: Data
         if isChaCha {
             var n = keys.serverIV
-            n.withUnsafeMutableBytes { ptr in
-                let p = ptr.bindMemory(to: UInt8.self)
+            n.withUnsafeMutableBytes { pointer in
+                let p = pointer.bindMemory(to: UInt8.self)
                 let base = p.count - 8
                 for i in 0..<8 { p[base + i] ^= UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
             }
@@ -432,8 +432,8 @@ extension TLSServer {
         let nonce: Data
         if isChaCha {
             var n = keys.clientIV
-            n.withUnsafeMutableBytes { ptr in
-                let p = ptr.bindMemory(to: UInt8.self)
+            n.withUnsafeMutableBytes { pointer in
+                let p = pointer.bindMemory(to: UInt8.self)
                 let base = p.count - 8
                 for i in 0..<8 { p[base + i] ^= UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
             }

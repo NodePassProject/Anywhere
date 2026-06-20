@@ -26,17 +26,17 @@ extension TunnelStack {
     ) {
         let packet: Data = srcIP.withUnsafeBytes { srcRaw in
             dstIP.withUnsafeBytes { dstRaw in
-                guard let src = srcRaw.baseAddress, let dst = dstRaw.baseAddress else {
+                guard let source = srcRaw.baseAddress, let destination = dstRaw.baseAddress else {
                     return Data()
                 }
                 if isIPv6 {
                     return buildICMPv6PortUnreachable(
-                        srcIP: src, srcPort: srcPort, dstIP: dst, dstPort: dstPort,
+                        srcIP: source, srcPort: srcPort, dstIP: destination, dstPort: dstPort,
                         udpPayloadLength: udpPayloadLength
                     )
                 } else {
                     return buildICMPv4PortUnreachable(
-                        srcIP: src, srcPort: srcPort, dstIP: dst, dstPort: dstPort,
+                        srcIP: source, srcPort: srcPort, dstIP: destination, dstPort: dstPort,
                         udpPayloadLength: udpPayloadLength
                     )
                 }

@@ -266,18 +266,18 @@ enum QPACKEncoder {
 
         var value = UInt64(mask)
         var shift: UInt64 = 0
-        var pos = offset + 1
-        while pos < data.count {
-            let byte = data[base + pos]
+        var position = offset + 1
+        while position < data.count {
+            let byte = data[base + position]
             let add = UInt64(byte & 0x7F)
             // Check before shifting — Swift traps on overflow.
             if shift > 62 || (qpackIntMax >> shift) < add { return nil }
             let shifted = add << shift
             if qpackIntMax - shifted < value { return nil }
             value += shifted
-            pos += 1
+            position += 1
             if byte & 0x80 == 0 {
-                return (value, pos - offset)
+                return (value, position - offset)
             }
             shift += 7
         }
@@ -298,18 +298,18 @@ enum QPACKEncoder {
         let absStart = base + strStart
         let absEnd = absStart + Int(length)
         let strData = Data(data[absStart..<absEnd])
-        let str: String?
+        let string: String?
         if isHuffman {
             if let decoded = HPACKHuffman.decode(strData) {
-                str = String(bytes: decoded, encoding: .utf8)
+                string = String(bytes: decoded, encoding: .utf8)
             } else {
-                str = nil
+                string = nil
             }
         } else {
-            str = String(data: strData, encoding: .utf8)
+            string = String(data: strData, encoding: .utf8)
         }
-        guard let str else { return nil }
-        return (str, lenBytes + Int(length))
+        guard let string else { return nil }
+        return (string, lenBytes + Int(length))
     }
 
     /// `offset` is relative to `data.startIndex`; slice-safe.
@@ -323,8 +323,8 @@ enum QPACKEncoder {
         let absStart = base + strStart
         let absEnd = absStart + Int(nameLen)
         let strData = Data(data[absStart..<absEnd])
-        guard let str = String(data: strData, encoding: .utf8) else { return nil }
-        return (str, nLenBytes + Int(nameLen))
+        guard let string = String(data: strData, encoding: .utf8) else { return nil }
+        return (string, nLenBytes + Int(nameLen))
     }
 
     // MARK: - Static Table

@@ -13,21 +13,21 @@ extension UUID {
     /// length 32–36 is hex-decoded; length 1–30 is derived as
     /// `SHA1(zero_uuid || input)[0..<16]` with RFC 4122 v5 + variant bits stamped.
     init?(vlessString str: String) {
-        let len = str.utf8.count
+        let length = str.utf8.count
 
-        if len >= 32, len <= 36 {
+        if length >= 32, length <= 36 {
             if let u = UUID(uuidString: str) {
                 self = u
                 return
             }
-            if len == 32, let data = Data(hexString: str), data.count == 16 {
+            if length == 32, let data = Data(hexString: str), data.count == 16 {
                 self = UUID.from(bytes: data)
                 return
             }
             return nil
         }
 
-        guard len >= 1, len <= 30 else { return nil }
+        guard length >= 1, length <= 30 else { return nil }
 
         var hasher = Insecure.SHA1()
         hasher.update(data: Data(count: 16))

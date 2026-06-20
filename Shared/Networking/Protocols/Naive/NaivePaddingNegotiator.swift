@@ -41,18 +41,18 @@ enum NaivePaddingNegotiator {
     static func generatePaddingValue() -> String {
         let length = Int.random(in: 16...32)
         var uniqueBits = UInt64.random(in: 0...UInt64.max)
-        var chars = [UInt8](repeating: 0, count: length)
+        var characters = [UInt8](repeating: 0, count: length)
 
         let first = min(length, 16)
         for i in 0..<first {
-            chars[i] = nonIndexCodes[Int(uniqueBits & 0b1111)]
+            characters[i] = nonIndexCodes[Int(uniqueBits & 0b1111)]
             uniqueBits >>= 4
         }
         for i in first..<length {
-            chars[i] = nonIndexCodes[16]
+            characters[i] = nonIndexCodes[16]
         }
 
-        return String(bytes: chars, encoding: .ascii)!
+        return String(bytes: characters, encoding: .ascii)!
     }
 
     // MARK: - Request Headers

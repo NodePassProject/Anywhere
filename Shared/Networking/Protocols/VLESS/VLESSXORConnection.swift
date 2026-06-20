@@ -78,9 +78,9 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
             let needed = 5 - outHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
-            bytes.withUnsafeMutableBufferPointer { ptr in
+            bytes.withUnsafeMutableBufferPointer { pointer in
                 let region = UnsafeMutableRawBufferPointer(
-                    rebasing: UnsafeMutableRawBufferPointer(ptr)[offset..<(offset + chunk)]
+                    rebasing: UnsafeMutableRawBufferPointer(pointer)[offset..<(offset + chunk)]
                 )
                 outCTR.processInPlace(region)
             }
@@ -149,9 +149,9 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
             let needed = 5 - inHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
-            bytes.withUnsafeMutableBufferPointer { ptr in
+            bytes.withUnsafeMutableBufferPointer { pointer in
                 let region = UnsafeMutableRawBufferPointer(
-                    rebasing: UnsafeMutableRawBufferPointer(ptr)[offset..<(offset + chunk)]
+                    rebasing: UnsafeMutableRawBufferPointer(pointer)[offset..<(offset + chunk)]
                 )
                 inCTR.processInPlace(region)
             }

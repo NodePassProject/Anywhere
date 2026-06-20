@@ -45,14 +45,14 @@ nonisolated final class BrutalCongestionControl {
     // MARK: - Callbacks (invoked from the ngtcp2 CC trampolines)
 
     func onPacketAcked(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        let idx = slotIndex(for: ts)
-        slots[idx].ackCount &+= 1
+        let index = slotIndex(for: ts)
+        slots[index].ackCount &+= 1
         updateCwnd(cstat: cstat, ts: ts)
     }
 
     func onPacketLost(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        let idx = slotIndex(for: ts)
-        slots[idx].lossCount &+= 1
+        let index = slotIndex(for: ts)
+        slots[index].lossCount &+= 1
         updateCwnd(cstat: cstat, ts: ts)
     }
 
@@ -75,12 +75,12 @@ nonisolated final class BrutalCongestionControl {
 
     private func slotIndex(for ts: UInt64) -> Int {
         let second = ts / 1_000_000_000
-        let idx = Int(second % UInt64(slots.count))
-        if slots[idx].secondMark != second {
-            slots[idx] = Slot()
-            slots[idx].secondMark = second
+        let index = Int(second % UInt64(slots.count))
+        if slots[index].secondMark != second {
+            slots[index] = Slot()
+            slots[index].secondMark = second
         }
-        return idx
+        return index
     }
 
     /// Loss rate over the last `slotCount` seconds including the in-progress one;
@@ -91,8 +91,8 @@ nonisolated final class BrutalCongestionControl {
         var totalLoss: UInt64 = 0
         for i in 0..<Self.slotCount {
             let targetSecond = now &- UInt64(i)
-            let idx = Int(targetSecond % UInt64(Self.slotCount))
-            let slot = slots[idx]
+            let index = Int(targetSecond % UInt64(Self.slotCount))
+            let slot = slots[index]
             guard slot.secondMark == targetSecond else { continue }
             totalAck &+= slot.ackCount
             totalLoss &+= slot.lossCount

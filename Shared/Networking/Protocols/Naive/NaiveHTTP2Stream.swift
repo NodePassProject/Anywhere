@@ -85,10 +85,10 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
                     multiplexer.queue.async {
                         if let error {
                             self.state = .closed
-                            let cb = self.connectCompletion
+                            let callback = self.connectCompletion
                             self.connectCompletion = nil
                             multiplexer.removeStream(self)
-                            cb?(error)
+                            callback?(error)
                         }
                     }
                 }
@@ -158,9 +158,9 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
                 )
             }
 
-            if let cb = connectCompletion {
+            if let callback = connectCompletion {
                 connectCompletion = nil
-                cb(NaiveHTTP2Error.connectionFailed("Stream closed"))
+                callback(NaiveHTTP2Error.connectionFailed("Stream closed"))
             }
             if let pending = pendingReceive {
                 pendingReceive = nil
@@ -190,9 +190,9 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
             if status == "200" {
                 responseHeaders = headers
                 state = .open
-                let cb = connectCompletion
+                let callback = connectCompletion
                 connectCompletion = nil
-                cb?(nil)
+                callback?(nil)
             } else if status == "407" {
                 handleStreamError(NaiveHTTP2Error.authenticationRequired)
             } else {
@@ -249,9 +249,9 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
         streamError = error
         multiplexer?.removeStream(self)
 
-        if let cb = connectCompletion {
+        if let callback = connectCompletion {
             connectCompletion = nil
-            cb(error)
+            callback(error)
         }
         if let pending = pendingReceive {
             pendingReceive = nil

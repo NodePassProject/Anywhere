@@ -285,8 +285,8 @@ extension FlatLabelTrie {
         for e in 0..<edgeCount {
             let node = Int(targets[e])
             let off = Int(nodeLabelOffset[node])
-            let len = Int(nodeLabelLength[node])
-            for k in 0..<len { labelBytes.append(base[off + k]) }
+            let length = Int(nodeLabelLength[node])
+            for k in 0..<length { labelBytes.append(base[off + k]) }
             labelOffsets[e + 1] = Int32(labelBytes.count)
         }
 
