@@ -10,7 +10,7 @@ import CryptoKit
 
 enum QUICCrypto {
 
-    /// Registers CryptoKit AEAD callbacks with the ngtcp2 C crypto backend; call before any connection is created.
+    /// Call before any connection is created.
     static func registerCallbacks() {
         ngtcp2_crypto_apple_set_aead_callbacks(aeadEncrypt, aeadDecrypt)
     }
@@ -18,9 +18,8 @@ enum QUICCrypto {
 
 // MARK: - AEAD Encrypt Callback
 
-/// CryptoKit AEAD encrypt for the C backend; writes ciphertext + 16-byte tag to `dest`.
-/// Inputs are non-owning `bytesNoCopy` views into ngtcp2's memory — safe because the
-/// callback is synchronous, and it avoids a per-packet memcpy + `Data` alloc.
+/// Writes ciphertext + 16-byte tag to `dest`. Inputs are non-owning `bytesNoCopy` views
+/// into ngtcp2's memory — safe because the callback is synchronous.
 private let aeadEncrypt: @convention(c) (
     UnsafeMutablePointer<UInt8>?,    // dest
     UnsafePointer<UInt8>?,           // key
@@ -95,8 +94,7 @@ private let aeadEncrypt: @convention(c) (
 
 // MARK: - AEAD Decrypt Callback
 
-/// CryptoKit AEAD decrypt; expects ciphertext + 16-byte tag, writes plaintext to `dest`.
-/// Same zero-copy buffer strategy as the encrypt callback.
+/// Expects ciphertext + 16-byte tag, writes plaintext to `dest`.
 private let aeadDecrypt: @convention(c) (
     UnsafeMutablePointer<UInt8>?,    // dest
     UnsafePointer<UInt8>?,           // key

@@ -16,7 +16,7 @@ nonisolated enum CertificatePolicy {
 
     private static var observerRegistered = false
 
-    /// Registers the Darwin notification observer; idempotent.
+    /// Idempotent.
     static func startObserving() {
         lock.lock()
         defer { lock.unlock() }
@@ -35,7 +35,6 @@ nonisolated enum CertificatePolicy {
         )
     }
 
-    /// Re-reads policy values from UserDefaults.
     static func reload() {
         lock.lock()
         defer { lock.unlock() }
@@ -43,14 +42,13 @@ nonisolated enum CertificatePolicy {
         _trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
     }
 
-    /// Whether the user has opted into accepting all certificates.
     static var allowInsecure: Bool {
         lock.lock()
         defer { lock.unlock() }
         return _allowInsecure
     }
 
-    /// SHA-256 fingerprints the user has explicitly trusted.
+    /// SHA-256 fingerprints.
     private static var trustedFingerprints: [String] {
         lock.lock()
         defer { lock.unlock() }
@@ -64,16 +62,9 @@ nonisolated enum CertificatePolicy {
         case rejected(reason: String)
     }
 
-    /// Evaluates a server certificate `chain` (leaf first) presented for `serverName`
-    /// against the active policy.
-    ///
-    /// Order of precedence:
-    /// 1. `allowInsecure` — accept everything.
-    /// 2. A user-pinned leaf SHA-256 match — **verification is complete**: an explicit pin
-    ///    is the user's full trust decision, so no chain-of-trust, hostname/SAN, or
-    ///    validity-period checks are performed.
-    /// 3. Standard system trust evaluation under the SSL policy for `serverName`
-    ///    (enforces chain of trust, hostname/SAN match, and validity period).
+    /// `chain` is leaf-first. A user-pinned leaf SHA-256 match short-circuits all other
+    /// checks: the pin is the user's full trust decision, so chain-of-trust, hostname/SAN,
+    /// and validity-period are not verified. Otherwise standard system SSL trust evaluation.
     static func verify(chain: [SecCertificate], serverName: String) -> Verification {
         if allowInsecure {
             return .trusted
@@ -83,7 +74,6 @@ nonisolated enum CertificatePolicy {
             return .rejected(reason: "No server certificates received")
         }
 
-        // A matching user-pinned fingerprint short-circuits every other check.
         if isPinned(leaf) {
             return .trusted
         }
@@ -104,7 +94,6 @@ nonisolated enum CertificatePolicy {
         return .rejected(reason: message)
     }
 
-    /// Whether `leaf`'s SHA-256 fingerprint is one the user has explicitly pinned.
     private static func isPinned(_ leaf: SecCertificate) -> Bool {
         let trusted = trustedFingerprints
         guard !trusted.isEmpty else { return false }

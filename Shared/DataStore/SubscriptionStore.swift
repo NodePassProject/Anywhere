@@ -137,7 +137,6 @@ extension SubscriptionStore {
         update(updated)
     }
 
-    /// Adds a subscription and its configurations, tagging each config with the subscription's id.
     func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration]) {
         // Persist subscription first so an interrupted import never leaves orphan proxies.
         add(subscription)

@@ -7,10 +7,8 @@
 
 import Foundation
 
-/// Reverse-label trie for domain-suffix matching: lookup walks the host's labels
-/// right-to-left and returns the payload at the deepest visited node. freeze()
-/// flattens the scratch tree into CSR arrays so lookup never allocates; insert
-/// after freeze traps, and the frozen state is safe for concurrent reads.
+/// freeze() flattens the scratch tree into CSR arrays so lookup never allocates;
+/// insert after freeze traps, and the frozen state is safe for concurrent reads.
 struct FlatLabelTrie<Payload> {
 
     // MARK: - Build state (dropped on freeze)
@@ -132,7 +130,7 @@ struct FlatLabelTrie<Payload> {
             while start > 0 && host[start - 1] != dot { start -= 1 }
             let labelLen = end - start
             if labelLen == 0 {
-                end = start - 1   // skip the separator before this empty label
+                end = start - 1
                 continue
             }
 
@@ -155,7 +153,7 @@ struct FlatLabelTrie<Payload> {
             nodeID = Int(found)
             if let p = nodePayload[nodeID] { deepest = p }
 
-            end = start - 1   // advance past this label and its separator
+            end = start - 1
         }
 
         return deepest
@@ -164,25 +162,18 @@ struct FlatLabelTrie<Payload> {
 
 // MARK: - Bulk construction
 //
-// `insert`/`freeze` build a scratch tree of `BuildNode` objects, each carrying a
-// `[String: BuildNode]` children dictionary. For a rule set with hundreds of
-// thousands of sibling suffixes that dictionary alone runs to tens of MB —
-// transient scaffolding many times larger than the compiled output, which is
-// what overflowed the Network Extension's memory limit.
-//
-// `buildBulk` skips the tree entirely. Given suffix entries as byte ranges into a
-// shared buffer, it sorts them into reversed-label order, lays out a compact node
-// arena (parallel `Int32` arrays, no per-node dictionary, labels referenced by
-// offset into the buffer rather than copied), and flattens that to the same CSR
-// arrays `freeze` produces. Peak memory tracks the output, not the input, and
-// there are no power-of-two dictionary jumps. `insert`/`freeze` stay for the
-// small users (MITM); a given trie uses one path or the other.
+// `buildBulk` avoids the `insert`/`freeze` `BuildNode` scratch tree, whose
+// `[String: BuildNode]` dictionaries run to tens of MB for hundreds of thousands
+// of sibling suffixes — transient scaffolding that overflowed the Network
+// Extension memory limit. It sorts entries into reversed-label order, builds a
+// compact parallel-array node arena (labels referenced by offset, not copied),
+// and flattens to the same CSR arrays. Peak memory tracks output, not input. A
+// given trie uses one path or the other; `insert`/`freeze` stay for MITM.
 
 extension FlatLabelTrie {
-    /// A suffix to bulk-insert: `offset`/`length` delimit its UTF-8 bytes (already
-    /// lowercased) in the buffer passed to ``buildBulk(base:entries:)``; `order`
-    /// is the collection index, used only to break ties between identical
-    /// suffixes so the last-collected one wins (matching `insert`'s overwrite).
+    /// `offset`/`length` delimit the suffix's lowercased UTF-8 bytes in the
+    /// `buildBulk` buffer; `order` (collection index) breaks ties between identical
+    /// suffixes so the last-collected one wins, matching `insert`'s overwrite.
     struct BulkEntry {
         var offset: Int32
         var length: Int32
@@ -202,7 +193,7 @@ extension FlatLabelTrie {
         let dot = UInt8(ascii: ".")
 
         // Reversed-label order (TLD first), ties broken by collection order so a
-        // repeated suffix's last occurrence overwrites — same as `insert`.
+        // repeated suffix's last occurrence overwrites.
         entries.sort { a, b in
             let c = Self.compareReversedLabels(base, a.offset, a.length, b.offset, b.length, dot: dot)
             return c != 0 ? c < 0 : a.order < b.order

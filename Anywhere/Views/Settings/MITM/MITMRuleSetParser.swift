@@ -8,7 +8,6 @@
 import Foundation
 import JavaScriptCore
 
-/// The full import-format and scripting reference lives in `Documentations/MITM.md`.
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
@@ -49,8 +48,7 @@ enum MITMRuleSetParser {
         "hostname",
     ]
 
-    /// Splits a `<key> = <value>` line on its first `=`. An unrecognized
-    /// key returns nil so the caller falls through and tries the line as a rule.
+    /// Splits a `<key> = <value>` line on its first `=`. An unrecognized key returns nil so the caller retries the line as a rule.
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }
         let key = line[line.startIndex..<equal]
@@ -93,8 +91,7 @@ enum MITMRuleSetParser {
         }
     }
 
-    /// Validates that `raw` is an absolute URL with a host. Partial validation
-    /// only — the runtime re-validates in `MITMRewritePolicy`.
+    /// Partial check only (absolute URL with a host); the runtime re-validates in `MITMRewritePolicy`.
     private static func validRewriteURL(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
@@ -113,8 +110,7 @@ enum MITMRuleSetParser {
         guard let opInt = Int(fields[1]) else { return nil }
         let args = Array(fields.dropFirst(2))
 
-        // Every rule leads with a URL pattern (a regex over the whole
-        // request URL) that gates whether the operation fires.
+        // Every rule leads with a urlPattern regex (matched against the whole request URL) gating the operation.
         switch opInt {
         case 0:  // rewrite — fields: urlPattern, subMode (0–4), <sub-mode args>
             guard args.count >= 2 else { return nil }
@@ -159,8 +155,7 @@ enum MITMRuleSetParser {
             guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyJSON(operation))
 
-        // Scripting operations live in a separate 100+ id range, set apart from
-        // the native edits above.
+        // Scripting operations use a separate 100+ id range.
         case 100:  // script — fields: urlPattern, base64
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
@@ -295,9 +290,8 @@ enum MITMRuleSetParser {
         (try? Regex(search)) != nil
     }
 
-    /// Validates a `script` field: base64 → UTF-8 → JavaScript syntax check.
-    /// Wraps source in the same IIFE the runtime uses. Parse-only — never
-    /// evaluates, so user code with side effects is not run at import time.
+    /// base64 → UTF-8 → JS syntax check, wrapped in the same IIFE the runtime uses.
+    /// Parse-only: never evaluates, so user code with side effects is not run at import time.
     private static func isValidScriptBase64(_ b64: String) -> Bool {
         guard let raw = Data(base64Encoded: b64),
               let source = String(data: raw, encoding: .utf8)

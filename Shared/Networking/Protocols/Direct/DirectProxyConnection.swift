@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over a direct transport (``RawTCPSocket`` or ``TunneledTransport``).
 nonisolated class DirectProxyConnection: ProxyConnection {
     let connection: any RawTransport
 

@@ -11,8 +11,7 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection
 
 // MARK: - ShadowsocksConnection
 
-/// Wraps a transport-layer ProxyConnection with Shadowsocks AEAD encryption.
-/// The address header is prepended to the first send, encrypted as part of the stream.
+/// Address header is prepended to the first send, encrypted as part of the AEAD stream.
 nonisolated class ShadowsocksConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let writer: ShadowsocksAEADWriter
@@ -88,7 +87,6 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
 
 // MARK: - ShadowsocksUDPConnection
 
-/// Wraps a transport-layer ProxyConnection with Shadowsocks per-packet UDP encryption.
 nonisolated class ShadowsocksUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher

@@ -29,7 +29,6 @@ struct ChainRowView: View {
                     }
 
                     if item.isValid {
-                        // Route preview
                         HStack(spacing: 4) {
                             ForEach(Array(item.proxyNames.enumerated()), id: \.offset) { index, proxyName in
                                 if index > 0 {

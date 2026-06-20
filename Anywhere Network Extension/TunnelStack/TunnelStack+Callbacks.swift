@@ -203,7 +203,6 @@ extension TunnelStack {
             return Unmanaged.passRetained(connection).toOpaque()
         }
 
-        // TCP recv: deliver data to the connection
         lwip_bridge_set_tcp_recv_fn { connection, data, len in
             guard let connection else {
                 logger.debug("[TunnelStack] tcp_recv: connection is nil")
@@ -217,14 +216,13 @@ extension TunnelStack {
             }
         }
 
-        // TCP sent: notify the connection of acknowledged bytes
         lwip_bridge_set_tcp_sent_fn { connection, len in
             guard let connection else { return }
             let tcpConnection = Unmanaged<TCPConnection>.fromOpaque(connection).takeUnretainedValue()
             tcpConnection.handleSent(len: len)
         }
 
-        // TCP error: PCB is already freed by lwIP — release our reference
+        // PCB already freed by lwIP — release our reference (takeRetainedValue).
         lwip_bridge_set_tcp_err_fn { connection, err in
             guard let connection else {
                 logger.debug("[TunnelStack] tcp_err: connection is nil, err=\(err)")
@@ -237,7 +235,6 @@ extension TunnelStack {
 
     // MARK: - Fake-IP Resolution
 
-    /// Result of resolving a fake IP to its domain and routing configuration.
     enum FakeIPResolution {
         /// IP is not a fake IP — use original IP as host and the default route.
         case passthrough

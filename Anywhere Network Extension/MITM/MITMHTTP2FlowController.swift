@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// Tracks peer connection-level receive windows so MITM-emitted DATA (synth and
-/// buffered-rewrite bodies) is paced instead of overflowing into a FLOW_CONTROL_ERROR.
 /// No internal sync — confined to the serial lwIP queue. Windows are signed (RFC 9113
 /// §6.9.2 allows negative); negative gates synth emission until credited positive.
 final class MITMHTTP2FlowController {

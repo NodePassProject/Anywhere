@@ -298,7 +298,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastPathSnapshot = nil
     }
 
-    /// What changed between two satisfied paths and whether it strands existing outbound sockets.
     private enum SatisfiedChange {
         /// Nothing connection-relevant changed.
         case unchanged

@@ -8,7 +8,6 @@
 import Foundation
 
 extension ProxyClient {
-    /// Connects through a Trojan server: TCP → TLS → Trojan header → payload.
     /// Trojan requires TLS; on password (SHA224) mismatch the server silently serves its decoy site.
     func connectWithTrojan(
         command: ProxyCommand,

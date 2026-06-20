@@ -9,8 +9,7 @@ import Foundation
 
 // MARK: - TransportPool
 
-/// Process-wide cache of warm upstream transports; the kernel tears down their
-/// sockets across sleep/path changes, and reusing a dead session stalls the dial.
+/// Kernel tears down warm sockets across sleep/path changes; reusing a dead session stalls the dial.
 /// `reclaim()` must be internally synchronized and idempotent; close sessions outside the lock.
 protocol TransportPool: AnyObject {
     func reclaim()
@@ -18,8 +17,7 @@ protocol TransportPool: AnyObject {
 
 // MARK: - TransportReclaim
 
-/// Single audit point for tearing down every protocol's process-wide warm transports.
-/// The switch is exhaustive with no `default` so a new protocol cannot be silently omitted.
+/// Switch is exhaustive with no `default` so a new protocol cannot be silently omitted.
 enum TransportReclaim {
 
     /// Called from `lwipQueue` on device wake, network-path change, and tunnel stop.

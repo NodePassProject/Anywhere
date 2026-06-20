@@ -18,7 +18,7 @@ extension XHTTPConnection {
         let path = configuration.normalizedPath
         var request = ""
 
-        // stream-one carries no session ID in the path (sessionId is empty for stream-one).
+        // stream-one carries no session ID in the path.
         let metaQuery = queryParamsForMeta()
         request += buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
@@ -176,7 +176,6 @@ extension XHTTPConnection {
 
     // MARK: Detached leg Setup (up/download detach)
 
-    /// Download leg of a detached session: sends the GET and reads response headers.
     func performDownloadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
         let request = buildDownloadGETRequest()
         guard let requestData = request.data(using: .utf8) else {
@@ -192,9 +191,8 @@ extension XHTTPConnection {
         }
     }
 
-    /// Upload leg of a detached session: its own transport *is* the upload connection,
-    /// so `uploadSend`/`uploadReceive` alias it. `uploadCancel` stays nil —
-    /// `downloadCancel` already tears down this transport, avoiding a double cancel.
+    /// Its own transport *is* the upload connection, so `uploadSend`/`uploadReceive` alias it.
+    /// `uploadCancel` stays nil — `downloadCancel` already tears down this transport, avoiding a double cancel.
     func performUploadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
         lock.lock()
         uploadSend = downloadSend
@@ -223,7 +221,6 @@ extension XHTTPConnection {
 
     // MARK: - Request Builders
 
-    /// Builds the GET request for the download stream; session ID placed per config.
     func buildDownloadGETRequest() -> String {
         var path = configuration.normalizedPath
         var request = ""
@@ -240,7 +237,6 @@ extension XHTTPConnection {
         return request
     }
 
-    /// Builds the streaming stream-up POST: session ID per config, no seq, chunked transfer.
     func buildStreamUpPOSTRequest() -> String {
         let method = configuration.uplinkHTTPMethod
         var path = configuration.normalizedPath
@@ -264,7 +260,6 @@ extension XHTTPConnection {
 
     // MARK: - HTTP Response Header Parsing
 
-    /// Reads until `\r\n\r\n` and validates the status line contains "200".
     func receiveResponseHeaders(completion: @escaping (Error?) -> Void) {
         downloadReceive { [weak self] data, _, error in
             guard let self else {
@@ -319,13 +314,11 @@ extension XHTTPConnection {
 
     // MARK: - HTTP/1.1 Send
 
-    /// Sends data as a chunked-encoded chunk on the stream-one POST.
     func sendStreamOne(data: Data, completion: @escaping (Error?) -> Void) {
         let chunk = ChunkedTransferEncoder.encode(data)
         downloadSend(chunk, completion)
     }
 
-    /// Sends data as a chunked-encoded chunk on the stream-up upload POST.
     func sendStreamUp(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         guard let uploadSend = self.uploadSend else {
@@ -339,7 +332,6 @@ extension XHTTPConnection {
         uploadSend(chunk, completion)
     }
 
-    /// Sends data as a POST request with sequence number on the upload connection.
     func sendPacketUp(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         guard let uploadSend = self.uploadSend else {
@@ -352,7 +344,6 @@ extension XHTTPConnection {
         nextSeq += 1
         lock.unlock()
 
-        // Split into POSTs of at most scMaxEachPostBytes, one seq each.
         let maxSize = configuration.scMaxEachPostBytes
         if data.count <= maxSize {
             sendSinglePost(data: data, seq: seq, uploadSend: uploadSend, completion: completion)
@@ -369,7 +360,6 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends a single POST request on the upload connection.
     private func sendSinglePost(
         data: Data,
         seq: Int64,

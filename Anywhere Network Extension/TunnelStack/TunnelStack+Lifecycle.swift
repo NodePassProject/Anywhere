@@ -14,7 +14,6 @@ extension TunnelStack {
 
     // MARK: - Lifecycle
 
-    /// Starts the lwIP stack and begins reading packets from the tunnel.
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
         TunnelStack.shared = self
         AnywhereLogger.logSink = { [weak self] message, level in
@@ -48,7 +47,6 @@ extension TunnelStack {
         CertificatePolicy.startObserving()
     }
 
-    /// Stops the lwIP stack and closes all active flows.
     func stop() {
         stopObservingSettings()
         clearFDPressureReliefHandler()
@@ -69,7 +67,7 @@ extension TunnelStack {
         TunnelStack.shared = nil
     }
 
-    /// Restarts the lwIP stack on the existing packet flow under the new configuration.
+    /// Restarts the stack on the existing packet flow under the new configuration.
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         lwipQueue.async { [self] in
             logger.info("[VPN] Configuration switched; reconnecting active connections")
@@ -264,7 +262,6 @@ extension TunnelStack {
     // decisions bind when a connection opens, so already-open connections
     // deliberately keep their old rules until they close.
 
-    /// Registers Darwin notification observers for cross-process settings changes.
     private func startObservingSettings() {
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),

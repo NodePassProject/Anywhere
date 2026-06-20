@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Per-protocol tuning knobs for `QUICConnection`.
 struct QUICTuning {
 
     // MARK: Congestion control
@@ -36,9 +35,9 @@ struct QUICTuning {
 
     // MARK: Flow-control windows (receive side)
 
-    /// Per-stream receive window ceiling (auto-tuning upper bound).
+    /// Per-stream auto-tuning upper bound.
     var maxStreamWindow: UInt64
-    /// Connection-level receive window ceiling (auto-tuning upper bound).
+    /// Connection-level auto-tuning upper bound.
     var maxWindow: UInt64
 
     // MARK: Initial transport parameters (what we advertise)

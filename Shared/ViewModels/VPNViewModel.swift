@@ -22,21 +22,17 @@ class VPNViewModel {
     var selectedConfiguration: ProxyConfiguration? {
         didSet {
             if !_suppressSelectionPersistence {
-                // Direct proxy selection — clear any chain selection
                 selectedChainId = nil
                 AWCore.setSelectedChainId(nil)
                 AWCore.setSelectedConfigurationId(selectedConfiguration?.id)
             }
-            // Only the default outbound changed, not the routing rules — the NE
-            // picks up the new default via the setConfiguration IPC below while
-            // connected, or via configureRuntime on the next connect. The routing
-            // matchers are selection-independent, so no routingChanged is posted.
+            // Routing matchers are selection-independent, so no routingChanged is
+            // posted; the NE picks up the new default outbound via setConfiguration IPC.
             if vpnStatus == .connected, let selectedConfiguration {
                 sendConfigurationToTunnel(selectedConfiguration)
             }
         }
     }
-    /// Non-nil when a chain is the active selection.
     private(set) var selectedChainId: UUID?
     var latencyResults: [UUID: LatencyResult] = [:]
     var chainLatencyResults: [UUID: LatencyResult] = [:]
@@ -49,7 +45,7 @@ class VPNViewModel {
     /// Set only via `withoutSelectionPersistence` so the flag always resets.
     @ObservationIgnored private var _suppressSelectionPersistence = false
 
-    /// Assigns to `selectedConfiguration` without triggering the chain-clearing branch of its didSet.
+    /// Assigns `selectedConfiguration` without triggering the chain-clearing didSet branch.
     private func withoutSelectionPersistence(_ block: () -> Void) {
         _suppressSelectionPersistence = true
         defer { _suppressSelectionPersistence = false }
@@ -63,7 +59,6 @@ class VPNViewModel {
 
     // MARK: - Selection
 
-    /// Restores the persisted selection (chain takes priority) against the current data.
     private func restoreSelection(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
         guard selectedConfiguration == nil, selectedChainId == nil else { return }
         if let savedChainId = AWCore.getSelectedChainId(),
@@ -79,8 +74,6 @@ class VPNViewModel {
         }
     }
 
-    /// Re-validates the active selection against current data: restores the persisted
-    /// selection at launch, re-resolves a selected chain, or refreshes/falls back the selected proxy.
     func revalidateSelection(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
         if selectedConfiguration == nil, selectedChainId == nil {
             restoreSelection(configurations: configurations, chains: chains)
@@ -91,7 +84,6 @@ class VPNViewModel {
                let resolved = chain.resolveComposite(from: configurations) {
                 withoutSelectionPersistence { selectedConfiguration = resolved }
             } else {
-                // Chain (or its proxies) gone — fall back to the first proxy.
                 selectedChainId = nil
                 AWCore.setSelectedChainId(nil)
                 selectedConfiguration = configurations.first
@@ -161,8 +153,7 @@ class VPNViewModel {
         selectedChainId = chain.id
         AWCore.setSelectedChainId(chain.id)
         AWCore.setSelectedConfigurationId(nil)
-        // didSet's connected branch delivers `resolved` to the NE via IPC; the
-        // routing matchers are unaffected by the default selection, so no routingChanged.
+        // Routing matchers are unaffected by the default selection, so no routingChanged.
         withoutSelectionPersistence { selectedConfiguration = resolved }
     }
 
@@ -392,7 +383,6 @@ class VPNViewModel {
               let configuration = selectedConfiguration else { return }
 
         Task {
-            // Pre-resolve the main proxy address off main actor.
             let resolvedIP = await Task.detached {
                 VPNViewModel.resolveServerAddress(configuration.serverAddress)
             }.value
@@ -487,7 +477,6 @@ class VPNViewModel {
     private func sendConfigurationToTunnel(_ configuration: ProxyConfiguration) {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
 
-        // Resolve DNS and send off main actor.
         Task.detached {
             let resolved = Self.withResolvedIP(configuration)
 

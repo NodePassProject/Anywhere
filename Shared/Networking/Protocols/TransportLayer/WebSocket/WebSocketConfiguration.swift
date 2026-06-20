@@ -7,17 +7,14 @@
 
 import Foundation
 
-/// WebSocket transport configuration.
 struct WebSocketConfiguration: Codable, Equatable, Hashable {
-    /// Host header value (defaults to server address).
     let host: String
     let path: String
-    /// Custom HTTP headers to send during the upgrade handshake.
     let headers: [String: String]
-    /// Maximum early data bytes to embed in the upgrade request (0 = disabled).
+    /// 0 = disabled.
     let maxEarlyData: Int
     let earlyDataHeaderName: String
-    /// Heartbeat (ping) interval in seconds. 0 = disabled.
+    /// Seconds; 0 = disabled.
     let heartbeatPeriod: UInt32
 
     init(
@@ -36,13 +33,11 @@ struct WebSocketConfiguration: Codable, Equatable, Hashable {
         self.heartbeatPeriod = heartbeatPeriod
     }
 
-    /// Path with a guaranteed leading "/".
     var normalizedPath: String {
         if path.isEmpty { return "/" }
         return path.hasPrefix("/") ? path : "/" + path
     }
 
-    /// Parse WebSocket parameters from VLESS URL query parameters.
     static func parse(from params: [String: String], serverAddress: String) -> WebSocketConfiguration? {
         let host = params["host"] ?? serverAddress
         let path = (params["path"] ?? "/").removingPercentEncoding ?? "/"

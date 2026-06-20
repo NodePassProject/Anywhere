@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// A fast, unfair lock wrapper around os_unfair_lock.
-/// Prefer this over NSLock for short critical sections.
+/// Prefer over NSLock for short critical sections.
 nonisolated final class UnfairLock {
     private var _lock = os_unfair_lock()
 
@@ -30,7 +29,6 @@ nonisolated final class UnfairLock {
     }
 }
 
-/// A pthread_rwlock wrapper: multiple concurrent readers or one exclusive writer.
 nonisolated final class ReadWriteLock {
     private var _lock = pthread_rwlock_t()
 

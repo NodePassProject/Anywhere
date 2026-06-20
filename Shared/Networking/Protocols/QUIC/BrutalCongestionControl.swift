@@ -157,7 +157,7 @@ private let brutalRegistryLock = UnfairLock()
 private var brutalRegistry: [OpaquePointer: BrutalCongestionControl] = [:]
 
 extension BrutalCongestionControl {
-    /// Associates `cc` with its Swift Brutal instance. Call once per connection.
+    /// Call once per connection.
     static func register(_ brutal: BrutalCongestionControl, for cc: OpaquePointer) {
         brutalRegistryLock.lock()
         brutalRegistry[cc] = brutal

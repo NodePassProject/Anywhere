@@ -9,8 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP3MultiplexerPool")
 
-/// Pools HTTP3Multiplexer QUIC connections for reuse across CONNECT streams,
-/// with idle eviction and soft/hard caps.
 nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiplexer> {
 
     static let shared = NaiveHTTP3MultiplexerPool()
@@ -57,8 +55,7 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
             lastActivity[ObjectIdentifier(overflow)] = CFAbsoluteTimeGetCurrent()
             multiplexer = overflow
         } else {
-            // Never close a multiplexer with live streams; evict an idle one if
-            // possible, otherwise grow past the soft cap up to the hard cap.
+            // Never close a multiplexer with live streams; evict an idle one if possible, else grow up to the hard cap.
             let currentCount = multiplexers[key]?.count ?? 0
             if currentCount >= Self.maxSessionsPerKey {
                 if let victim = multiplexers[key]?.first(where: { !$0.hasActiveStreams }) {
@@ -129,7 +126,6 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         }
     }
 
-    /// Also clears the activity record for the removed multiplexer.
     override func removeMultiplexer(_ multiplexer: HTTP3Multiplexer, key: String) {
         super.removeMultiplexer(multiplexer, key: key)
         lock.lock()
@@ -161,7 +157,6 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
                     lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
                     return true
                 }
-                // Never evict multiplexers that still have active streams.
                 if !multiplexer.hasActiveStreams,
                    let activity = lastActivity[ObjectIdentifier(multiplexer)],
                    now - activity > Self.idleTimeout {

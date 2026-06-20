@@ -14,11 +14,9 @@ enum DNSPacket {
         // DNS header is 12 bytes
         guard data.count >= 12 else { return nil }
 
-        // Check QDCOUNT >= 1
         let qdcount = UInt16(data[4]) << 8 | UInt16(data[5])
         guard qdcount > 0 else { return nil }
 
-        // Parse QNAME starting at byte 12 — collect raw bytes, convert to String once
         var offset = 12
         var domainBytes = [UInt8]()
         domainBytes.reserveCapacity(64)
@@ -56,7 +54,6 @@ enum DNSPacket {
                                  fakeIP: [UInt8]?, qtype: UInt16) -> Data? {
         guard queryData.count >= 12 else { return nil }
 
-        // Find the end of the question section
         var offset = 12
         while offset < queryData.count {
             let labelLen = Int(queryData[offset])
@@ -84,7 +81,6 @@ enum DNSPacket {
         }
 
         if rdLength > 0, let ipBytes = fakeIP {
-            // Answer response
             let answerRecLen = 12 + Int(rdLength)
             let responseLen = questionEnd + answerRecLen
 
@@ -93,7 +89,6 @@ enum DNSPacket {
                 guard let p = ptr.bindMemory(to: UInt8.self).baseAddress,
                       let src = queryData.baseAddress else { return }
 
-                // Copy header + question section
                 memcpy(p, src, questionEnd)
 
                 // Response flags: QR=1, AA=1, RD=1, RA=1
@@ -103,7 +98,6 @@ enum DNSPacket {
                 // NSCOUNT = 0, ARCOUNT = 0
                 p[8] = 0x00; p[9] = 0x00; p[10] = 0x00; p[11] = 0x00
 
-                // Answer section
                 let ans = questionEnd
                 p[ans + 0] = 0xC0                              // Name pointer
                 p[ans + 1] = 0x0C                              // to offset 12

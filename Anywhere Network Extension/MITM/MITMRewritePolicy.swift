@@ -9,7 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
-/// Runtime form: regexes pre-compiled, header names case-folded.
 struct CompiledMITMRule {
     let phase: MITMPhase
     /// Regex over the whole request URL; bounded so a ReDoS pattern can't stall the tunnel.
@@ -81,7 +80,6 @@ extension CompiledMITMRule {
     }
 }
 
-/// Replacement URL parsed once at compile time: host/port for the dial, requestTarget for the start line.
 struct ReplacementURL: Equatable {
     /// IPv6 URI brackets stripped, matching the form the resolver expects.
     let host: String
@@ -97,20 +95,17 @@ struct ReplacementURL: Equatable {
     }
 }
 
-/// Transparent rewrite target: parsed at compile time, or a per-request capture template.
 enum TransparentTarget {
     case resolved(ReplacementURL)
     case templated(MITMCaptureTemplate)
 }
 
-/// 302 `Location` target: validated literal, or a per-request capture template.
 enum RedirectTarget {
     case location(String)
     case templated(MITMCaptureTemplate)
 }
 
-/// `transparent` drives the request rewrite + deferred dial; the rest synthesize an
-/// inner-leg response. transparent/302 targets may carry a `$1`-style capture template.
+/// `transparent` drives the request rewrite + deferred dial; the rest synthesize an inner-leg response.
 enum CompiledRewriteAction {
     case transparent(TransparentTarget)
     case redirect302(RedirectTarget)
@@ -119,7 +114,6 @@ enum CompiledRewriteAction {
     case reject200Data(base64: String)
 }
 
-/// Rewrite action with every capture template expanded for one specific request.
 enum ResolvedRewriteAction {
     case transparent(ReplacementURL)
     case redirect302(location: String)
@@ -144,8 +138,7 @@ enum CompiledMITMOperation {
     case bodyJSON(MITMJSONPatch.CompiledOp)
 }
 
-/// Compiled rule set at one trie terminal (one per suffix). `id` is the source set's,
-/// used as the stable script-store scope key.
+/// `id` is the source set's, reused as the stable script-store scope key.
 struct CompiledMITMRuleSet {
     let id: UUID
     let domainSuffix: String
@@ -469,7 +462,7 @@ final class MITMRewritePolicy {
 
 // MARK: - Binary deserialization
 
-/// Decodes the `AMR1` MITM blob the host exports back into `MITMRuleSet` models.
+/// Decodes the `AMR1` binary blob into `MITMRuleSet` models.
 enum MITMBinaryReader {
     private enum ReadError: Error { case badMagic, badVersion, truncated, malformed }
 

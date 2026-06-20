@@ -7,12 +7,8 @@
 
 import Foundation
 
-/// Shadowsocks wire format utilities.
-///
-/// Address format: ATYP(1) + Address(var) + Port(2, big-endian)
-/// - ATYP 0x01: IPv4 (4 bytes)
-/// - ATYP 0x03: Domain (1-byte length + string)
-/// - ATYP 0x04: IPv6 (16 bytes)
+/// Address format: ATYP(1) + Address(var) + Port(2, big-endian).
+/// ATYP 0x01: IPv4 (4B), 0x03: Domain (1B length + string), 0x04: IPv6 (16B).
 enum ShadowsocksProtocol {
 
     static func buildAddressHeader(host: String, port: UInt16) -> Data {
@@ -37,7 +33,6 @@ enum ShadowsocksProtocol {
         return data
     }
 
-    /// Encodes a UDP packet: address header + raw payload.
     static func encodeUDPPacket(host: String, port: UInt16, payload: Data) -> Data {
         var data = buildAddressHeader(host: host, port: port)
         data.append(payload)
@@ -53,12 +48,12 @@ enum ShadowsocksProtocol {
 
         let host: String
         switch atyp {
-        case 0x01: // IPv4
+        case 0x01:
             guard data.endIndex - offset >= 4 + 2 else { return nil }
             host = "\(data[offset]).\(data[offset+1]).\(data[offset+2]).\(data[offset+3])"
             offset += 4
 
-        case 0x03: // Domain
+        case 0x03:
             guard data.endIndex - offset >= 1 else { return nil }
             let domainLen = Int(data[offset])
             offset += 1
@@ -67,7 +62,7 @@ enum ShadowsocksProtocol {
             host = domain
             offset += domainLen
 
-        case 0x04: // IPv6
+        case 0x04:
             guard data.endIndex - offset >= 16 + 2 else { return nil }
             let bytes = Array(data[offset..<(offset + 16)])
             var parts: [String] = []

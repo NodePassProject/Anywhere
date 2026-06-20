@@ -58,8 +58,7 @@ final class ChainRowCoordinator {
             updated[chain.id] = resolved
         }
         byID = updated
-        // Publish a new array only on structural change — content updates flow through the
-        // models' own observation.
+        // Publish a new array only on structural change; content updates flow through each model's own observation.
         if models.map(\.id) != ordered.map(\.id) {
             models = ordered
         }

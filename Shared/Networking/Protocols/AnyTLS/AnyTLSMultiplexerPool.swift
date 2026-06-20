@@ -9,22 +9,20 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
 
-/// Per-server AnyTLS multiplexer pool.
 nonisolated final class AnyTLSMultiplexerPool {
 
-    /// Creates a fresh TLS-backed `ProxyConnection` for a new multiplexer.
     typealias DialOut = (@escaping (Result<ProxyConnection, Error>) -> Void) -> Void
 
     private let dialOut: DialOut
     private let passwordHash: Data
 
-    /// Clamped to ≥30s/≥30s/≥0 to match sing-anytls's `NewClient`.
+    /// Clamped to ≥30s/≥30s/≥0 in `init`.
     let idleSessionCheckInterval: TimeInterval
     let idleSessionTimeout: TimeInterval
     let minIdleSession: Int
 
     private let lock = UnfairLock()
-    private var idleMultiplexers: [AnyTLSMultiplexer] = []     // newest seq last (we pop from the end)
+    private var idleMultiplexers: [AnyTLSMultiplexer] = []     // newest seq last; popped from the end
     private var activeMultiplexers: [ObjectIdentifier: AnyTLSMultiplexer] = [:]
     private var sessionCounter: UInt64 = 0
     private var closed: Bool = false
@@ -51,8 +49,7 @@ nonisolated final class AnyTLSMultiplexerPool {
         idleTimer?.cancel()
     }
 
-    /// Acquires a multiplexer (idle or freshly dialed) and opens a stream on it;
-    /// the stream expects a destination address as its first cmdPSH payload.
+    /// The opened stream expects a destination address as its first cmdPSH payload.
     func acquireStream(completion: @escaping (Result<AnyTLSStream, Error>) -> Void) {
         lock.lock()
         if closed {
@@ -112,7 +109,6 @@ nonisolated final class AnyTLSMultiplexerPool {
         }
     }
 
-    /// Closes all multiplexers (active and idle) and shuts down the pool.
     func closeAll() {
         lock.lock()
         closed = true
@@ -135,7 +131,7 @@ nonisolated final class AnyTLSMultiplexerPool {
             completion(.failure(ProxyError.connectionFailed("Failed to open AnyTLS stream")))
             return
         }
-        // Per sing-anytls's `dieHook`: return the multiplexer to the idle pool when the stream closes.
+        // Return the multiplexer to the idle pool when the stream closes.
         stream.onEnd = { [weak self, weak multiplexer] in
             guard let self, let multiplexer else { return }
             self.returnToPool(multiplexer: multiplexer)
@@ -151,7 +147,6 @@ nonisolated final class AnyTLSMultiplexerPool {
         lock.unlock()
     }
 
-    /// Returns the multiplexer to the idle pool after its last stream closes.
     fileprivate func returnToPool(multiplexer: AnyTLSMultiplexer) {
         guard multiplexer.isAlive else {
             logger.debug("[AnyTLSMultiplexerPool] returnToPool seq=\(multiplexer.seq): multiplexer already dead, dropping")
@@ -204,7 +199,6 @@ nonisolated final class AnyTLSMultiplexerPool {
             lock.unlock()
             return
         }
-        // Walk oldest-first; anything past cutoff is killed unless below the minimum warm count.
         var survivors: [AnyTLSMultiplexer] = []
         var keptCount = 0
         for multiplexer in idleMultiplexers {
@@ -214,7 +208,6 @@ nonisolated final class AnyTLSMultiplexerPool {
                 continue
             }
             if keptCount < minIdleSession {
-                // Refresh and keep — matches `idleCleanupExpTime`.
                 multiplexer.idleSince = CFAbsoluteTimeGetCurrent()
                 survivors.append(multiplexer)
                 keptCount += 1

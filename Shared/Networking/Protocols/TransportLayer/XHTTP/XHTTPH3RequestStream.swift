@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// A general-purpose HTTP/3 request/response stream multiplexed over an ``HTTP3Multiplexer``.
-///
 /// The QUIC stream window is extended only as the app drains received DATA, so a
 /// slow reader backpressures the server. Every public method hops to the multiplexer
 /// queue, so all mutable state is touched on one serial queue.
@@ -96,7 +94,6 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         }
     }
 
-    /// Sends a chunk of request body as an HTTP/3 DATA frame, optionally with FIN.
     func sendBody(_ data: Data, fin: Bool, completion: @escaping (Error?) -> Void) {
         guard let multiplexer else { completion(HTTP3Error.streamClosed); return }
         let block: () -> Void = { [self] in
@@ -115,7 +112,6 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         if multiplexer.isOnQueue { block() } else { multiplexer.queue.async(execute: block) }
     }
 
-    /// Returns the next chunk of response body, `nil` on EOF, or an error.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         guard let multiplexer else { completion(nil, HTTP3Error.streamClosed); return }
         let block: () -> Void = { [self] in

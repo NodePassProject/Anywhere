@@ -30,8 +30,8 @@ final class MITMLeafCertCache {
     private let leafPrivateKeySecKey: SecKey
 
     private static let maxEntries = 256
-    private static let validity: TimeInterval = 7 * 24 * 60 * 60         // 7 days
-    private static let refreshThreshold: TimeInterval = 24 * 60 * 60     // refresh within 1 day of expiry
+    private static let validity: TimeInterval = 7 * 24 * 60 * 60
+    private static let refreshThreshold: TimeInterval = 24 * 60 * 60
 
     private let lock = NSLock()
     private var entries: [String: CacheEntry] = [:]
@@ -108,7 +108,7 @@ final class MITMLeafCertCache {
     }
 
     private func evictIfNeededUnlocked() {
-        // O(n) LRU eviction; only runs on a cache miss past the cap.
+        // O(n) scan tolerated: only runs on a cache miss past the cap.
         while entries.count > Self.maxEntries {
             guard let oldest = entries.min(by: {
                 $0.value.lastAccess < $1.value.lastAccess

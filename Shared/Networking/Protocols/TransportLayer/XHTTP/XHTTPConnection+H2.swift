@@ -16,7 +16,6 @@ extension XHTTPConnection {
     /// HTTP/2 connection preface (RFC 7540 §3.5).
     static let h2Preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
 
-    // Frame types
     static let h2FrameData: UInt8 = 0x00
     static let h2FrameHeaders: UInt8 = 0x01
     static let h2FrameSettings: UInt8 = 0x04
@@ -25,16 +24,13 @@ extension XHTTPConnection {
     static let h2FrameWindowUpdate: UInt8 = 0x08
     static let h2FrameRstStream: UInt8 = 0x03
 
-    // Flags
     static let h2FlagEndStream: UInt8 = 0x01
     static let h2FlagEndHeaders: UInt8 = 0x04
     static let h2FlagAck: UInt8 = 0x01
 
-    // Settings IDs
     static let h2SettingsEnablePush: UInt16 = 0x02
     static let h2SettingsInitialWindowSize: UInt16 = 0x04
 
-    // Go http2 transport defaults
     static let h2StreamWindowSize: UInt32 = 4_194_304  // 4MB
     static let h2ConnectionWindowSize: UInt32 = 1_073_741_824  // 1GB
 
@@ -76,7 +72,7 @@ extension XHTTPConnection {
     func encodeH2RequestHeaders(method: String = "POST", includeMeta: Bool = false) -> Data {
         var block = Data()
 
-        // Pseudo-header order matches Go's http2.Transport: :authority, :method, :path, :scheme
+        // Pseudo-header order: :authority, :method, :path, :scheme
 
         // :authority — literal without indexing, name index 1
         var authBytes = Self.hpackEncodeInteger(1, prefixBits: 6)
@@ -90,7 +86,7 @@ extension XHTTPConnection {
             block.append(0x83) // POST = index 3
         }
 
-        // :path — matches Go http2.Transport req.URL.RequestURI() (path + query)
+        // :path — RequestURI form (path + query)
         var path = configuration.normalizedPath
         if includeMeta && !sessionId.isEmpty && configuration.sessionPlacement == .path {
             path = appendToPath(path, sessionId)
@@ -121,9 +117,8 @@ extension XHTTPConnection {
         // :scheme https — static table index 7
         block.append(0x87)
 
-        // content-type: application/grpc (POST only, if enabled)
         if method != "GET" && !configuration.noGRPCHeader {
-            // name index 31
+            // content-type name index 31
             var ctBytes = Self.hpackEncodeInteger(31, prefixBits: 6)
             ctBytes[0] |= 0x40
             block.append(contentsOf: ctBytes)
@@ -157,29 +152,26 @@ extension XHTTPConnection {
     func encodeH2UploadHeaders(seq: Int64?, contentLength: Int? = nil, uplinkData: [UplinkDataField] = []) -> Data {
         var block = Data()
 
-        // Pseudo-header order matches Go's http2.Transport: :authority, :method, :path, :scheme
+        // Pseudo-header order: :authority, :method, :path, :scheme
 
-        // :authority
+        // :authority — literal without indexing, name index 1
         var authBytes = Self.hpackEncodeInteger(1, prefixBits: 6)
         authBytes[0] |= 0x40
         block.append(contentsOf: authBytes)
         block.append(contentsOf: Self.hpackEncodeString(configuration.host))
 
-        // :method POST (or configured method)
         let method = configuration.uplinkHTTPMethod
         if method == "POST" {
             block.append(0x83) // POST = index 3
         } else if method == "GET" {
             block.append(0x82) // GET = index 2
         } else {
-            // Literal :method
             var methodBytes = Self.hpackEncodeInteger(2, prefixBits: 6)
             methodBytes[0] |= 0x40
             block.append(contentsOf: methodBytes)
             block.append(contentsOf: Self.hpackEncodeString(method))
         }
 
-        // :path
         var path = configuration.normalizedPath
         if !sessionId.isEmpty && configuration.sessionPlacement == .path {
             path = appendToPath(path, sessionId)
@@ -288,7 +280,6 @@ extension XHTTPConnection {
         block.append(contentsOf: uaBytes)
         block.append(contentsOf: Self.hpackEncodeString(ua))
 
-        // X-Padding — applied based on configuration
         let padding = configuration.generatePadding()
         let paddingPath = configuration.normalizedPath
         if !configuration.xPaddingObfsMode {
@@ -319,7 +310,7 @@ extension XHTTPConnection {
         }
 
         // Custom headers (literal, new names), skipping hop-by-hop headers
-        // forbidden in HTTP/2 (matches Go http2.Transport encodeHeaders).
+        // forbidden in HTTP/2.
         let h2ForbiddenHeaders: Set<String> = [
             "host", "connection", "proxy-connection", "transfer-encoding",
             "upgrade", "keep-alive", "content-length", "user-agent"

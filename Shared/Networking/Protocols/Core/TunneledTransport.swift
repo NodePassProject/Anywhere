@@ -7,10 +7,8 @@
 
 import Foundation
 
-/// Adapts a ``ProxyConnection`` (from a previous chain link) to the ``RawTransport`` interface.
-///
-/// Used for proxy chaining: the output of one proxy connection becomes the "socket" for the next.
-/// Sends and receives bypass the tunnel's traffic statistics (each chain link tracks its own stats).
+/// Adapts a ``ProxyConnection`` to ``RawTransport`` for proxy chaining: one link's output becomes the next link's socket.
+/// Sends/receives bypass the tunnel's traffic stats (each link tracks its own).
 nonisolated class TunneledTransport: RawTransport {
     private let tunnel: ProxyConnection
 

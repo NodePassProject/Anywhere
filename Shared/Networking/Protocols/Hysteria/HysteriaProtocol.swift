@@ -239,7 +239,7 @@ enum HysteriaProtocol {
             )]
         }
         let chunks = Int((data.count + maxPayload - 1) / maxPayload)
-        guard chunks <= Int(UInt8.max) else { return [] } // too large to fragment
+        guard chunks <= Int(UInt8.max) else { return [] } // fragCount is UInt8; >255 chunks can't be framed
         var out: [UDPMessage] = []
         out.reserveCapacity(chunks)
         for i in 0..<chunks {

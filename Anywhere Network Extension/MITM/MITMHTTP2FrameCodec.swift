@@ -7,9 +7,7 @@
 
 import Foundation
 
-/// Self-contained HTTP/2 frame primitives for the bridge's two legs (RFC 9113), not a full
-/// HTTP/2 stack. Keeps its own frame structs, decode loops, flow control, and state machines,
-/// so a stateful protocol fix (e.g. GOAWAY draining) must be applied here too.
+/// Self-contained HTTP/2 frame primitives (RFC 9113), not a full HTTP/2 stack.
 enum MITMHTTP2FrameCodec {
 
     // MARK: Frame type codes
@@ -47,8 +45,8 @@ enum MITMHTTP2FrameCodec {
     static let maxFramePayloadSize = 16_384
 
     /// Hard cap on an accepted frame payload, above the advertised 16 KiB so a peer can't force an
-    /// unbounded allocation. Frames between 16 KiB and this cap are accepted rather than
-    /// FRAME_SIZE_ERROR'd (safe: flow control accounts the true on-wire length); past it, dropped.
+    /// unbounded allocation. Frames up to this cap are accepted (flow control accounts the true
+    /// on-wire length); past it, the buffer is dropped.
     static let maxReceivedFramePayloadSize = 1 * 1024 * 1024
 
     /// The h2 connection preface octets a client sends first (RFC 9113 §3.4).
@@ -93,7 +91,6 @@ enum MITMHTTP2FrameCodec {
 
     // MARK: Header writing
 
-    /// Writes a 9-byte frame header into `out`.
     static func appendFrameHeader(
         typeCode: UInt8,
         flags: UInt8,

@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// Process-wide cache of VLESS-encryption 0-RTT resumption tickets, keyed by
+/// Process-wide cache of 0-RTT resumption tickets, keyed by
 /// `(host, port, encryption config)` so differing configs don't collide.
 final class VLESSEncryption0RTTCache {
 
@@ -31,7 +31,6 @@ final class VLESSEncryption0RTTCache {
         "\(host.lowercased()):\(port)|\(config.encoded())"
     }
 
-    /// Returns the cached entry if unexpired, evicting it eagerly on expiry.
     func lookup(key: String) -> Entry? {
         lock.withLock {
             guard let entry = entries[key] else { return nil }

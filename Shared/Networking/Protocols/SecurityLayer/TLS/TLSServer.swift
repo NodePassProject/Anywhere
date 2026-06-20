@@ -9,9 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-/// Lifecycle callbacks for ``TLSServer``.
 protocol TLSServerDelegate: AnyObject {
-    /// One or more bytes of handshake-layer output are ready to be flushed to the client.
     func tlsServer(_ server: TLSServer, didProduceOutput data: Data)
 
     /// Handshake completed; `clientFinishedHandshakeTrailer` holds application bytes that arrived
@@ -33,25 +31,12 @@ nonisolated final class TLSServer {
     // MARK: - State
 
     enum State {
-        /// Ready, but the handshake has not yet started.
         case waitingClientHello
-
-        /// A HelloRetryRequest has been sent to the client.
         case waitingClientHelloAfterHRR
-
-        /// The TLS 1.3 ServerHello has been sent to the client.
         case sentServerHello
-
-        /// The server's encrypted flight has been sent to the client.
         case waitingClientFinished
-
-        /// The TLS 1.2 ServerHello, Certificate, ServerKeyExchange, and
-        /// ServerHelloDone have been sent to the client.
         case sentServerHelloDone12
-
-        /// The handshake is now complete.
         case established
-
         case failed
     }
 
@@ -65,7 +50,6 @@ nonisolated final class TLSServer {
     let preferredCipherSuites12: [UInt16]
     private let acceptableTLSVersions: Set<UInt16>
 
-    /// ALPN protocols willing to negotiate, in preference order.
     private let acceptableALPNs: [String]
 
     /// Negotiated ALPN — locked in on the first ClientHello; HRR cannot change it.
@@ -156,15 +140,12 @@ nonisolated final class TLSServer {
     }
 
     private func processClientHello() throws {
-        // A client may legally split the ClientHello across several TLS records (RFC 8446 §5.1);
-        // peeking only the first record would strand TLS-fragmenting / anti-censorship clients, so
+        // A ClientHello may legally be split across several TLS records (RFC 8446 §5.1), so
         // reassemble the whole handshake message before parsing.
         guard let handshakeMessage = try peekReassembledClientHello() else { return }
 
         let parsed = try TLSClientHelloParser.parseHandshakeBody(handshakeMessage)
 
-        // If the client and server have no application protocols in common the
-        // server responds with a fatal "no_application_protocol" alert.
         if !parsed.alpnProtocols.isEmpty {
             guard let alpn = acceptableALPNs.first(where: { parsed.alpnProtocols.contains($0) }) else {
                 sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.noApplicationProtocol, message: "no overlapping ALPN")
@@ -195,14 +176,7 @@ nonisolated final class TLSServer {
     private func processClientHelloTLS13(parsed: TLSClientHelloParsed) throws {
         negotiatedTLSVersion = 0x0304
 
-        // ClientHello validation. Properties enforced:
-        //
-        // - legacy_version MUST be set to 0x0303 (TLSv1.2)
-        // - legacy_compression_methods must contain one byte set to zero
-        // - signature_algorithms contains ecdsa_secp256r1_sha256
-        // - cipherSuites contains supported values
-        // - supported_groups contains x25519
-        // - key_shares contains a key share for the negotiated group (else HRR)
+        // TLS 1.3 requires legacy_version == 0x0303 and legacy_compression_methods == {0}.
         guard parsed.legacyVersion == 0x0303, parsed.compressionMethods == [0] else {
             sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.illegalParameter, message: "bad legacy version/compression")
             return
@@ -402,8 +376,7 @@ nonisolated final class TLSServer {
             let len = (Int(buf[offset + 1]) << 16)
                     | (Int(buf[offset + 2]) << 8)
                     | Int(buf[offset + 3])
-            // NOTE: this length limit is not RFC specified. The length field is a uint24, so can be larger.
-            // Guard against erroneous handshake length values causing large memory allocations.
+            // Length field is uint24; cap below 0xFFFF (not RFC-mandated) to bound allocations.
             guard len <= 0xFFFF else {
                 throw TLSError.handshakeFailed("handshake message too large")
             }
@@ -568,7 +541,6 @@ nonisolated final class TLSServer {
 
     // MARK: - Record Framing
 
-    /// Returns the next complete TLS record from `rxBuffer`, or `nil` if more bytes are needed.
     func peekTLSRecord() throws -> Data? {
         guard rxBuffer.count >= 5 else { return nil }
         let len = (Int(rxBuffer[rxBuffer.startIndex + 3]) << 8)
@@ -581,15 +553,12 @@ nonisolated final class TLSServer {
         return rxBuffer.subdata(in: rxBuffer.startIndex..<(rxBuffer.startIndex + total))
     }
 
-    /// Upper bound on a reassembled ClientHello; anything larger is treated as bogus rather than
-    /// buffered unboundedly across records.
+    /// Upper bound on a reassembled ClientHello; larger is treated as bogus rather than buffered.
     private static let maxClientHelloBytes = 64 * 1024
 
-    /// Reassembles a (possibly record-fragmented) ClientHello handshake message from the head of
-    /// `rxBuffer`. Returns the bare handshake-message bytes (msg-type + 3-byte length + body) once
-    /// complete, consuming exactly the records it used; returns nil when more records are still
-    /// needed (leaving `rxBuffer` intact so the caller can retry after more bytes arrive). Throws on
-    /// a non-handshake record, an out-of-bounds record length, or an over-large message.
+    /// Reassembles a (possibly record-fragmented) ClientHello from the head of `rxBuffer`, returning
+    /// the bare handshake-message bytes (msg-type + 3-byte length + body). Consumes only the records
+    /// it uses; returns nil (leaving `rxBuffer` intact) when more records are needed.
     private func peekReassembledClientHello() throws -> Data? {
         var payload = Data()
         var offset = 0                  // bytes scanned from rxBuffer.startIndex
@@ -604,9 +573,8 @@ nonisolated final class TLSServer {
             }
             let len = (Int(rxBuffer[rxBuffer.index(h, offsetBy: 3)]) << 8)
                     | Int(rxBuffer[rxBuffer.index(h, offsetBy: 4)])
-            // Reject zero-length records: they never advance `messageLength` (payload stays empty), so
-            // the per-message cap below never fires and a flood of them would grow rxBuffer without
-            // bound. Matches the sniffer's `fragLen > 0` guard.
+            // Reject zero-length records: they never advance `messageLength`, so the per-message cap
+            // never fires and a flood of them would grow rxBuffer without bound.
             guard len > 0, len <= 16384 + 256 else {
                 throw TLSError.handshakeFailed("record length \(len) out of bounds")
             }

@@ -11,7 +11,7 @@ extension ProxyClient {
 
     // MARK: - Vision flow
 
-    /// The base Vision flow string sent on the wire (suffix stripped).
+    /// Base Vision flow on the wire (suffix stripped).
     fileprivate static let visionFlow = "xtls-rprx-vision"
 
     var isVisionFlow: Bool {
@@ -19,7 +19,6 @@ extension ProxyClient {
         return flow == Self.visionFlow
     }
 
-    /// Whether the `mlkem768x25519plus` encryption scheme is configured.
     var hasVLESSEncryption: Bool {
         guard case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound else { return false }
         return !encryption.isEmpty && encryption != "none"
@@ -113,7 +112,6 @@ extension ProxyClient {
         )
     }
 
-    /// Per-command VLESS handshake; the encryption path chains into it.
     fileprivate func continueVLESSHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,

@@ -9,8 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMRequestLog")
 
-/// Per-session cache of in-flight request method+URL for response-phase script context;
-/// HTTP/1 uses a FIFO, HTTP/2 a stream-ID map. Not thread-safe — serialized on the lwIP queue.
+/// Not thread-safe — serialized on the lwIP queue.
 final class MITMRequestLog {
 
     struct Record {
@@ -58,9 +57,7 @@ final class MITMRequestLog {
         http1Queue.isEmpty
     }
 
-    /// HTTP/1 requests emitted upstream but not yet matched to a response head. Read to decide
-    /// whether an h1 upstream leg has outstanding responses before closing it to reconnect to a
-    /// different transparent-rewrite target.
+    /// Outstanding h1 responses; checked before closing an upstream leg to reconnect to a different rewrite target.
     var http1InFlightCount: Int {
         http1Queue.count
     }

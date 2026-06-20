@@ -13,9 +13,6 @@ nonisolated private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
 // MARK: - Session Ticket Cache
 
-/// A TLS session ticket.
-///
-/// This structure encodes all the information needed to resume a session.
 struct QUICSessionTicket {
     let ticket: Data
     let nonce: Data
@@ -91,43 +88,37 @@ nonisolated class QUICTLSHandler {
     private let alpn: [String]
     private var state: HandshakeState = .initial
 
-    // Key derivation
     private var keyDerivation: TLS13KeyDerivation?
     private var handshakeSecret: Data?
     private var clientHandshakeTrafficSecret: Data?
     private var serverHandshakeTrafficSecret: Data?
 
-    // ECDHE
     private var privateKeyP256: P256.KeyAgreement.PrivateKey?
     private var privateKeyX25519: Curve25519.KeyAgreement.PrivateKey?
     private var clientRandom = Data(count: 32)
 
-    // Transcript (concatenation of all handshake messages)
+    // Concatenation of all handshake messages.
     private var transcript = Data()
 
     private(set) var cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256
 
-    // Accumulator for partial TLS messages
+    // Accumulates partial TLS messages across CRYPTO frames.
     private var cryptoBuffer = Data()
 
-    // Certificate validation state
     private var serverCertificates: [SecCertificate] = []
     private var transcriptBeforeCertVerify: Data?
     private var transcriptBeforeServerFinished: Data?
     private var certificateVerifyAlgorithm: UInt16 = 0
     private var certificateVerifySignature: Data?
 
-    // Session resumption
     private var resumptionMasterSecret: Data?
     private var activePSK: Data?
     private var offeredPSKCipherSuite: UInt16?
     private var pskAccepted = false
     private var pskBinderLength: Int = 0
 
-    /// The value of the QUIC transport parameters set by the peer, if any.
     private(set) var peerQUICTransportParameters: Data?
 
-    /// The value of the ALPN sent by the peer, if any.
     private(set) var negotiatedALPN: String?
 
     // MARK: - Initialization
@@ -196,8 +187,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - Process Crypto Data
 
-    /// Processes TLS handshake data received in a QUIC CRYPTO frame. Any bytes
-    /// that don't form a complete message remain buffered for the next call.
+    /// Bytes that don't form a complete message remain buffered for the next call.
     func processCryptoData(_ data: Data, level: ngtcp2_encryption_level,
                            conn: OpaquePointer) -> QUICTLSResult {
         cryptoBuffer.append(data)
@@ -209,8 +199,8 @@ nonisolated class QUICTLSHandler {
                        | (Int(cryptoBuffer[si + 2]) << 8)
                        |  Int(cryptoBuffer[si + 3])
 
-            // NOTE: this length limit is not RFC specified. The length field is a uint24, so can be larger.
-            // Guard against erroneous handshake length values causing large memory allocations.
+            // Length field is uint24; this cap is not RFC-specified but guards against
+            // huge allocations from erroneous lengths.
             guard msgLen <= 0xFFFF else {
                 return .error(NGTCP2_ERR_CALLBACK_FAILURE)
             }
@@ -269,13 +259,8 @@ nonisolated class QUICTLSHandler {
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
-        // Let's validate this ServerHello. The rules:
-        //
-        // - helloRetryRequest is forbidden
-        // - the server must have echoed our (empty) legacy session ID
-        // - the legacy version number must be TLSv1.2
-        // - the chosen compression option must be zero
-        // - the supported version must be TLSV1.3
+        // ServerHello rules: HRR forbidden; echoed empty legacy session ID;
+        // legacy version TLS 1.2; compression zero; negotiated version TLS 1.3.
         let legacyVersion = (UInt16(body[0]) << 8) | UInt16(body[1])
         guard legacyVersion == 0x0303 else {
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
@@ -490,8 +475,8 @@ nonisolated class QUICTLSHandler {
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
-        // If we're resuming we jump straight to Finished: a resumed handshake carries no
-        // Certificate/CertificateVerify, the server is authenticated by the PSK.
+        // A resumed handshake carries no Certificate/CertificateVerify; the server
+        // is authenticated by the PSK.
         if !pskAccepted {
             if let error = validateCertificate() {
                 logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
@@ -738,9 +723,8 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - PSK Extension Building
 
-    /// Builds a pre_shared_key extension with a fake binder value that is all zeros.
+    /// Binder is left zero-filled here; patched in later by patchPSKBinder.
     private func buildPSKExtension(ticket: QUICSessionTicket) -> (extensionData: Data, binderLen: Int) {
-        // We need to get the age in milliseconds, and add the obfuscation value modulo 2^32.
         let ticketAgeMs = UInt32((CFAbsoluteTimeGetCurrent() - ticket.issued) * 1000)
         let obfuscatedAge = ticketAgeMs &+ ticket.ticketAgeAdd
 
@@ -778,7 +762,7 @@ nonisolated class QUICTLSHandler {
         return (ext, binderLen)
     }
 
-    /// Computes and patches the PSK binder into a ClientHello that has a zero-filled placeholder.
+    /// Replaces the zero-filled binder placeholder with the computed PSK binder.
     private func patchPSKBinder(clientHello: inout Data, binderLen: Int, psk: Data, cipherSuite ticketCipherSuite: UInt16) {
         let kd = TLS13KeyDerivation(cipherSuite: ticketCipherSuite)
 
@@ -791,14 +775,12 @@ nonisolated class QUICTLSHandler {
             length: kd.hashLength
         )
 
-        // We now need to strip trailing data. We know the binder list contains only one binder,
-        // which is binderLen in length, plus the 1 byte length of the binder and the
-        // 2 byte length of the binder entry field it's a part of. Drop those.
+        // Strip the single binder (binderLen) plus its 1-byte length and the
+        // 2-byte binder-list length before hashing the truncated ClientHello.
         let truncatedSuffix = binderLen + 3
         guard clientHello.count >= truncatedSuffix else { return }
         let partial = Data(clientHello[0..<(clientHello.count - truncatedSuffix)])
 
-        // Now we can generate the new binder and replace the zero binder with it.
         let transcriptHash = kd.transcriptHash(partial)
 
         let symKey = SymmetricKey(data: finishedKey)

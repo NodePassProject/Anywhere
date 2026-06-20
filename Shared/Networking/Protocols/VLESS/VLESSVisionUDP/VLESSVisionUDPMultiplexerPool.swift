@@ -17,7 +17,6 @@ nonisolated class VLESSVisionUDPMultiplexerPool {
         self.flowQueue = flowQueue
     }
 
-    /// Dispatches a new stream to a non-full VLESSVisionUDPMultiplexer, creating one if needed.
     func acquireStream(
         network: VLESSVisionUDPNetwork,
         host: String,
@@ -38,7 +37,6 @@ nonisolated class VLESSVisionUDPMultiplexerPool {
         multiplexer.openStream(network: network, host: host, port: port, globalID: globalID, completion: completion)
     }
 
-    /// Closes all multiplexers and their streams.
     func closeAll() {
         for multiplexer in multiplexers {
             multiplexer.close()

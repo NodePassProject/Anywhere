@@ -155,7 +155,6 @@ private struct BackgroundGradient: View {
         }
     }
 
-    /// Resolves a stored archived color override, falling back to the asset-catalog color.
     private func color(_ data: Data?, default fallback: Color) -> Color {
         data.flatMap(Color.init(archivedData:)) ?? fallback
     }

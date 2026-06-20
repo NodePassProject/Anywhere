@@ -16,9 +16,8 @@ class FakeIPPool {
     }
 
     // IPv4: 198.18.0.0/15, offsets 1...fakeIPPoolSize (LRU-capped).
-    // IPv6: 2001:db8::/96 (RFC 3849), offset in the low 32 bits. The prefix must
-    // not fall inside any route excluded from the tunnel (bypassIPv6Routes) or
-    // fake packets black-hole; that rules out ULA (fc00::/7).
+    // IPv6: 2001:db8::/96 (RFC 3849), offset in low 32 bits. Prefix must stay inside
+    // the tunnel's routes (not bypassIPv6Routes) or fakes black-hole; rules out ULA.
 
     /// Protects all mutable state.
     private let lock = UnfairLock()
@@ -26,7 +25,6 @@ class FakeIPPool {
     private var domainToOffset: [String: Int] = [:]
     private var offsetToEntry: [Int: Entry] = [:]
 
-    // LRU doubly-linked list — O(1) touch/evict
     private class LRUNode {
         let offset: Int
         var prev: LRUNode?
@@ -58,7 +56,6 @@ class FakeIPPool {
     }
 
     static func ipv6Bytes(offset: Int) -> [UInt8] {
-        // 2001:0db8:0000:0000:0000:0000:XXXX:XXXX
         return [
             0x20, 0x01,
             0x0D, 0xB8,
@@ -75,7 +72,6 @@ class FakeIPPool {
 
     // MARK: - Pool Operations
 
-    /// Allocates (or reuses) the offset for a domain.
     func allocate(domain: String) -> Int {
         lock.withLock {
             if let offset = domainToOffset[domain] {
@@ -169,7 +165,6 @@ class FakeIPPool {
             let bytes = raw.bindMemory(to: UInt8.self)
             guard bytes.count == 16 else { return nil }
 
-            // Verify 2001:db8:: prefix (bytes 0-3 = 0x2001:0db8, bytes 4-11 = 0)
             guard bytes[0] == 0x20, bytes[1] == 0x01,
                   bytes[2] == 0x0D, bytes[3] == 0xB8 else { return nil }
             for i in 4...11 {

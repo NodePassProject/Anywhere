@@ -14,7 +14,6 @@ struct BLAKE3Hasher {
         blake3_hasher_init(&state)
     }
 
-    /// Initialize for keyed hashing with a 32-byte key.
     init(key: [UInt8]) {
         precondition(key.count == 32, "BLAKE3 keyed hashing requires a 32-byte key")
         blake3_hasher_init_keyed(&state, key)

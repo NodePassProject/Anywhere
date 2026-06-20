@@ -715,7 +715,6 @@ struct CIDRv4Trie {
             let lcp = Self.lcp(b, childBits, cap: min(remaining, childBitLen))
 
             if lcp == childBitLen {
-                // Existing edge fully matched; descend.
                 b = Self.shiftLeft(b, lcp)
                 remaining -= lcp
                 nodeID = childID

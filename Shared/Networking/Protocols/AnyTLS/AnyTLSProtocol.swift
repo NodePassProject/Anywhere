@@ -17,8 +17,6 @@ import CommonCrypto
 /// followed by length-prefixed frames:
 ///
 ///     [cmd (1 B)] [sid (BE u32)] [length (BE u16)] [length B payload]
-///
-/// Ref: github.com/anytls/sing-anytls@0.0.11
 enum AnyTLSProtocol {
 
     // MARK: - Frame commands
@@ -40,12 +38,12 @@ enum AnyTLSProtocol {
 
     // MARK: - Client identity
 
-    /// Mirrors `util.Verison` in sing-anytls — sent verbatim in cmdSettings.
+    /// Sent verbatim in cmdSettings.
     static let clientVersion: String = "sing-anytls/0.0.11"
 
     // MARK: - UoT
 
-    /// UDP-over-TCP magic destination for v2 (sing's `uot.MagicAddress`).
+    /// UDP-over-TCP magic destination for v2.
     static let uotMagicAddress: String = "sp.v2.udp-over-tcp.arpa"
 
     // MARK: - Password
@@ -64,7 +62,7 @@ enum AnyTLSProtocol {
 
     // MARK: - Address (SocksaddrSerializer: 0x01 IPv4, 0x03 FQDN, 0x04 IPv6)
 
-    /// Encodes `atyp(1) + addr + port(BE u16)` per sing's SocksaddrSerializer format.
+    /// Encodes `atyp(1) + addr + port(BE u16)`.
     static func encodeAddrPort(host: String, port: UInt16) -> Data {
         var data = Data()
         if let ipv4 = parseIPv4(host) {
@@ -86,7 +84,7 @@ enum AnyTLSProtocol {
 
     // MARK: - Frame header
 
-    /// Builds a 7-byte frame header. Big-endian per sing-anytls.
+    /// Builds a 7-byte frame header, big-endian.
     static func encodeFrameHeader(cmd: UInt8, sid: UInt32, length: UInt16) -> Data {
         var data = Data(count: headerSize)
         data[0] = cmd
@@ -99,7 +97,6 @@ enum AnyTLSProtocol {
         return data
     }
 
-    /// Parses a 7-byte header from `bytes` at `offset`; returns `nil` if the buffer is too short.
     static func decodeFrameHeader(_ bytes: Data, at offset: Int = 0) -> (cmd: UInt8, sid: UInt32, length: UInt16)? {
         guard bytes.count - offset >= headerSize else { return nil }
         let i = bytes.startIndex + offset
@@ -121,7 +118,7 @@ enum AnyTLSProtocol {
 
     // MARK: - StringMap (cmdSettings / cmdServerSettings payload)
 
-    /// Encodes `key=value\n...` per sing-anytls's StringMap; keys sorted for determinism.
+    /// Encodes `key=value\n...`; keys sorted for determinism.
     static func encodeStringMap(_ map: [String: String]) -> Data {
         let lines = map
             .sorted { $0.key < $1.key }

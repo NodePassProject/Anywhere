@@ -9,8 +9,6 @@ import Foundation
 
 // MARK: - GRPCConnection
 
-/// gRPC transport over HTTP/2: a single bidirectional RPC to `/<serviceName>/Tun` (or
-/// `/TunMulti`) carrying raw bytes as length-prefixed `Hunk` protobuf messages.
 nonisolated class GRPCConnection {
 
     // MARK: Transport closures
@@ -287,7 +285,6 @@ nonisolated class GRPCConnection {
     }
 
     deinit {
-        // Reclaim the keepalive timer if dropped without cancel().
         keepaliveTimer?.cancel()
     }
 }
@@ -400,8 +397,7 @@ extension GRPCConnection {
                 return
             }
             guard let data, !data.isEmpty else {
-                // Clean transport FIN at a frame boundary (no transport error) is a graceful
-                // end of stream, not a failure — surfaced as EOF in readAndDecode.
+                // Clean transport FIN at a frame boundary is a graceful end of stream, not a failure.
                 completion(.failure(GRPCError.streamEnded))
                 return
             }
@@ -669,7 +665,7 @@ extension GRPCConnection {
     /// Wraps a protobuf message in the 5-byte gRPC prefix: `[compressed=0][u32be length][message]`.
     fileprivate static func wrapGRPCMessage(_ message: Data) -> Data {
         var out = Data(capacity: 5 + message.count)
-        out.append(0x00) // No compression.
+        out.append(0x00)
         let len = UInt32(message.count)
         out.append(UInt8((len >> 24) & 0xFF))
         out.append(UInt8((len >> 16) & 0xFF))
@@ -1263,7 +1259,7 @@ extension GRPCConnection {
                 continue
             }
 
-            // 001xxxxx — dynamic table size update (just skip)
+            // 001xxxxx — dynamic table size update
             if b & 0xE0 == 0x20 {
                 let (_, consumed) = decodeHPACKInteger(payload, at: offset, prefixBits: 5)
                 offset += consumed
@@ -1288,7 +1284,6 @@ extension GRPCConnection {
                 continue
             }
 
-            // Unknown representation; bail out.
             return headers
         }
         return headers

@@ -21,7 +21,7 @@ final class StatsRecorder {
     /// Non-nil while the device is asleep (between `noteSleep` and `noteWake`).
     private var sleepBeganAt: TimeInterval?
 
-    /// Begins serving snapshots from `source`. Called once at tunnel start.
+    /// Called once at tunnel start.
     func start(source: @escaping () -> RawValues) {
         self.source = source
         startedAt = MonotonicClock.now
@@ -29,8 +29,7 @@ final class StatsRecorder {
         sleepBeganAt = nil
     }
 
-    /// Stops serving snapshots and clears the live connection timings so the
-    /// next session starts blank.
+    /// Clears live connection timings so the next session starts blank.
     func stop() {
         source = nil
         startedAt = nil
@@ -52,7 +51,6 @@ final class StatsRecorder {
         self.sleepBeganAt = nil
     }
 
-    /// Builds a `StatsResponse` for the IPC reply from the current live values.
     func snapshot() -> StatsResponse {
         let live = source?()
         let counts = live?.byteCounts ?? TrafficByteCounts()

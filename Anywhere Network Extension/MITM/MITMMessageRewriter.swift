@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// A per-direction MITM message rewriter; HTTP/1.1 and HTTP/2 both conform so the
-/// session pumps plaintext without branching on the negotiated protocol.
+/// HTTP/1.1 and HTTP/2 both conform so the session pumps plaintext without branching on protocol.
 protocol MITMMessageRewriter: AnyObject {
 
     /// Feeds decrypted plaintext. `completion` is invoked exactly once — inline when

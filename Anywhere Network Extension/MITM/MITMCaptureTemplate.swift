@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// Replacement template with Surge-style capture refs: `$0` whole match, `$1`…`$9`
-/// single-digit groups, `${10}` braced for any index, `$$` a literal `$`. Any other
-/// `$` stays literal, so a `$`-free template is verbatim (`referencesCaptures` false).
+/// Capture refs: `$0` whole match, `$1`…`$9` single-digit groups, `${10}` braced for
+/// any index, `$$` a literal `$`; any other `$` stays literal.
 struct MITMCaptureTemplate: Equatable {
     private enum Token: Equatable {
         case literal(String)
@@ -82,7 +81,7 @@ struct MITMCaptureTemplate: Equatable {
 
     /// Expands the template; a `nil` from `group` (out-of-range/non-participating) contributes "".
     func expand(_ group: (Int) -> String?) -> String {
-        // Fast path for a literal-only template (the common case).
+        // Fast path: literal-only template, the common case.
         if tokens.count == 1, case .literal(let s) = tokens[0] { return s }
         var out = ""
         for token in tokens {
@@ -109,8 +108,8 @@ struct MITMCaptureTemplate: Equatable {
         }
     }
 
-    /// The verbatim replacement when no captures are referenced (`$$` already reduced to
-    /// `$`), else `nil`. Lets the hot path use `String.replacing(_:with:)` with a constant.
+    /// Verbatim replacement when no captures are referenced (`$$` already reduced to `$`),
+    /// else `nil`; lets the hot path use a constant with `String.replacing(_:with:)`.
     var staticReplacement: String? {
         referencesCaptures ? nil : expand { _ in nil }
     }

@@ -34,10 +34,8 @@ final class MITMRuleSetStore {
         let split = Tombstone.split(snapshot.ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
-        // Mirror routing: keep the NE-facing binary current so it exists on
-        // first launch (and after an app update migrates onto this path), even
-        // before the user makes an edit. Diff-guarded, so it's a no-op when
-        // already current.
+        // Ensure the NE-facing binary exists on first launch and post-migration,
+        // before any edit. Diff-guarded, so a no-op when already current.
         MITMSnapshot(enabled: snapshot.enabled, ruleSets: split.live).exportBinaryToAppGroup()
     }
     
@@ -74,8 +72,8 @@ final class MITMRuleSetStore {
         save()
     }
 
-    /// Flips one set's enabled flag and persists immediately — covers read-only
-    /// subscribed sets, which never go through the draft-based editor.
+    /// Persists immediately — covers read-only subscribed sets, which never go
+    /// through the draft-based editor.
     func setRuleSet(_ id: UUID, enabled: Bool) {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }) else { return }
         guard ruleSets[index].enabled != enabled else { return }
@@ -144,9 +142,8 @@ final class MITMRuleSetStore {
 
     // MARK: - Subscription
 
-    /// Fetches and parses the subscription as `.amrs`, replacing the set's
-    /// suffixes and rules in place; `id` and `name` are preserved so the
-    /// script-store scope and any rename stick. Returns the updated set.
+    /// Replaces the set's suffixes and rules in place; `id` and `name` are
+    /// preserved so the script-store scope and any rename stick.
     @discardableResult
     func refreshRuleSet(id: UUID) async throws -> MITMRuleSet {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }),

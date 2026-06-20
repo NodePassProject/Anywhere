@@ -8,14 +8,13 @@
 import Foundation
 
 enum RoutingRuleType: Int, Codable {
-    case ipCIDR = 0     // IPv4 CIDR match
-    case ipCIDR6 = 1    // IPv6 CIDR match
-    case domainSuffix = 2   // Domain suffix match
-    case domainKeyword = 3  // Domain substring match
+    case ipCIDR = 0
+    case ipCIDR6 = 1
+    case domainSuffix = 2
+    case domainKeyword = 3
 }
 
 extension RoutingRuleType {
-    /// Localized human-readable name.
     var displayLabel: String {
         switch self {
         case .domainSuffix: return String(localized: "Domain Suffix")

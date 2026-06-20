@@ -22,7 +22,6 @@ final class CertificateStore {
         fingerprints = AWCore.getTrustedCertificateFingerprints()
     }
 
-    /// Adds a SHA-256 fingerprint (hex, case-insensitive); false if invalid or already present.
     @discardableResult
     func add(_ fingerprint: String) -> Bool {
         let normalized = Self.normalize(fingerprint)

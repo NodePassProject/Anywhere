@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// Connection-scoped HPACK decoder: the dynamic table persists across all HEADERS
-/// frames on one HTTP/2 connection (RFC 7541 §2.2) and is bounded per §4 eviction
-/// so a peer cannot grow it unbounded.
+/// Connection-scoped: the dynamic table persists across all HEADERS frames on one connection
+/// (RFC 7541 §2.2) and is bounded by §4 eviction so a peer cannot grow it unbounded.
 nonisolated class HPACKDecoder {
 
     /// SETTINGS_HEADER_TABLE_SIZE we advertise (RFC 9113 §6.5.2). We send no custom value in our
@@ -145,7 +144,6 @@ nonisolated class HPACKDecoder {
     }
 }
 
-/// Minimal HPACK encoder and stateless decoder for the NaiveProxy CONNECT tunnel.
 enum HPACKEncoder {
 
     // MARK: - CONNECT Request Encoding
@@ -516,7 +514,6 @@ enum HPACKEncoder {
 
 // MARK: - HPACK Huffman Decoder
 
-/// Huffman decoder for HPACK string literals (RFC 7541 Appendix B).
 enum HPACKHuffman {
 
     /// Trie node for Huffman decoding. Children are array indices; -1 = no child.
@@ -683,13 +680,8 @@ enum HPACKHuffman {
 
 // MARK: - HTTP/2 frame wire format (shared by the MITM bridge and the CONNECT-tunnel multiplexer)
 
-/// Shared HTTP/2 frame wire-format primitives (RFC 9113 §4.1), used by both hand-rolled HTTP/2
-/// implementations in the codebase — the CONNECT-tunnel multiplexer (`NaiveHTTP2Framer`) and the
-/// MITM bridge (`MITMHTTP2FrameCodec`). It centralizes the byte-level frame header, the big-endian
-/// 4-byte field layout, and the stateless payload parsers so a wire-format fix lands once instead
-/// of drifting between the two. The two stacks intentionally keep their own frame structs, decode
-/// loops (they read from different buffer types), and state machines (relay vs. request/response
-/// rewrite) — only the byte-format layer is shared here.
+/// Byte-format-only layer (RFC 9113 §4.1) shared by both hand-rolled HTTP/2 stacks so a wire-format
+/// fix lands once; each stack keeps its own frame structs, decode loops, and state machines.
 enum HTTP2FrameWire {
 
     /// Frame header length (RFC 9113 §4.1): 24-bit length + 8-bit type + 8-bit flags + 31-bit stream id.

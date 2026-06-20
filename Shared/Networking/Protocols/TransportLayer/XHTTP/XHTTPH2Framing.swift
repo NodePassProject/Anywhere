@@ -9,15 +9,11 @@ import Foundation
 
 // MARK: - HTTP/2 Frame Codec (RFC 7540 §4)
 //
-// Low-level frame I/O shared by the 1:1 H2 path (XHTTPConnection+H2*.swift) and the xmux
-// shared-multiplexing path (XHTTPH2Multiplexer). One copy of the byte layout means the
-// two paths can't drift.
+// One copy of the byte layout shared by the 1:1 and shared-multiplexing H2 paths so they can't drift.
 
 enum H2Framing {
-    /// Decoded frame header + payload (RFC 7540 §4.1).
     typealias Frame = (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)
 
-    /// Fixed frame-header length.
     static let headerSize = 9
 
     /// Serializes a frame: 24-bit length, 8-bit type, 8-bit flags, 31-bit stream id, payload.
@@ -38,8 +34,7 @@ enum H2Framing {
         return f
     }
 
-    /// Parses one complete frame from the front of `buffer`, consuming it; nil until a full
-    /// frame is buffered.
+    /// Consumes one complete frame from the front of `buffer`; nil until a full frame is buffered.
     static func parseFrame(from buffer: inout Data) -> Frame? {
         guard buffer.count >= headerSize else { return nil }
         let b = buffer
@@ -72,9 +67,8 @@ enum H2Framing {
     }
 }
 
-/// Demultiplexes a byte transport into HTTP/2 frames, yielding one complete frame per
-/// `readFrame` call. Its read buffer is independent of any connection state and guarded by
-/// its own lock, so both the 1:1 and shared-multiplexing H2 paths drive one.
+/// Read buffer is independent of connection state and guarded by its own lock, so both the
+/// 1:1 and shared-multiplexing H2 paths can drive one.
 nonisolated final class H2FrameReader {
     private let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     private let maxBufferSize: Int
@@ -88,8 +82,7 @@ nonisolated final class H2FrameReader {
         self.receive = receive
     }
 
-    /// Yields the next complete frame, reading from the transport as needed. A backlog of
-    /// already-buffered frames trampolines every 16th call so it can't overflow the stack.
+    /// Yields the next complete frame, reading from the transport as needed.
     func readFrame(completion: @escaping (Result<H2Framing.Frame, Error>) -> Void) {
         lock.lock()
         if let frame = H2Framing.parseFrame(from: &buffer) {
@@ -117,8 +110,8 @@ nonisolated final class H2FrameReader {
                 return
             }
             guard let data, !data.isEmpty else {
-                // Clean transport FIN at a frame boundary (no transport error) is a graceful
-                // end of stream, not a failure — consumers convert this to EOF.
+                // Clean transport FIN at a frame boundary is graceful end of stream, not a
+                // failure — consumers convert this to EOF.
                 completion(.failure(XHTTPError.streamEnded))
                 return
             }
@@ -135,7 +128,6 @@ nonisolated final class H2FrameReader {
         }
     }
 
-    /// Discards buffered bytes (teardown).
     func reset() {
         lock.lock()
         buffer = Data()

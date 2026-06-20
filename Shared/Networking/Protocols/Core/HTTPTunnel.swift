@@ -9,7 +9,6 @@ import Foundation
 
 // MARK: - HTTPTunnel
 
-/// Generic contract for an HTTP CONNECT tunnel (HTTP/1.1, HTTP/2, …).
 protocol HTTPTunnel: AnyObject {
 
     var isConnected: Bool { get }

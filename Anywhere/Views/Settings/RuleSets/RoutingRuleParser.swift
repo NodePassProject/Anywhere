@@ -22,38 +22,11 @@ enum RuleSetImportRoute: Int {
     }
 }
 
-/// Import-only parser that turns the text representation of a
-/// ``CustomRoutingRuleSet`` into a value the rule-set importer can
-/// install. There is no serializer; the text comes from a user paste,
-/// an imported `.arrs` file, or a downloaded subscription URL. A file
-/// supplies a name, a list of match rules, and — optionally — an initial
-/// route via the `routing` header (see ``RuleSetImportRoute``).
-///
-/// The text is a flat sequence of lines, in any order:
-///
-///     name = My Rule Set
-///     routing = 1
-///     2, example.com
-///     3, example
-///     0, 10.0.0.0/8
-///     1, 2001:db8::/32
-///
-/// - **Header lines** (`<key> = <value>`, case-insensitive key) supply
-///   set metadata: `name` sets the display name and `routing` sets the
-///   initial route (`0` Default · `1` Direct · `2` Reject).
-/// - **Rule lines** (`<type>, <value>`) each describe one match rule.
-///   Type is a ``RoutingRuleType`` raw value (`0`–`3`); the value is a
-///   CIDR or domain, normalized in ``RoutingRuleType/normalized(_:)`` (a bare IP gains a
-///   `/32` or `/128`).
-/// - **Comments** start with `#` or `//`.
-///
-/// Parsing never fails: a line that is neither a recognized header nor a
-/// valid rule (unrecognized key, unknown type, empty or out-of-range value)
-/// is dropped silently, so a partially-valid file still imports what it can.
-///
-/// The full import-format and matching reference — every rule type, the
-/// suffix-vs-keyword and CIDR semantics, and the source-tier priority
-/// model — lives in `Documentations/Routing.md`.
+/// Format: flat lines in any order — header lines (`<key> = <value>`,
+/// case-insensitive key) and rule lines (`<type>, <value>`); `#` or `//`
+/// start comments. Parsing never fails: an unrecognized header or invalid
+/// rule line is dropped silently, so a partially-valid file still imports.
+/// Full format reference: `Documentations/Routing.md`.
 enum RoutingRuleSetParser {
     struct ParseResult {
         var name: String

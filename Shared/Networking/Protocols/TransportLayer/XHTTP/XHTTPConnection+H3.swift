@@ -137,7 +137,6 @@ extension XHTTPConnection {
         let stream = XHTTPH3RequestStream(multiplexer: multiplexer)
         let headers = h3UploadHeaderBlock(seq: seq, contentLength: bodyLength, uplinkData: dataFields)
 
-        // Finish the request with no body when the payload is in headers/cookies (or empty).
         guard !bodyInHeaders, !data.isEmpty else {
             stream.sendRequest(headerBlock: headers, endStream: true) { error in
                 if let error {
@@ -163,7 +162,6 @@ extension XHTTPConnection {
                     completion(sendErr)
                     return
                 }
-                // Request delivered; discard the response and let the stream close on EOF.
                 stream.drainResponse()
                 completion(nil)
             }
@@ -174,7 +172,7 @@ extension XHTTPConnection {
 
     func receiveH3Data(completion: @escaping (Data?, Error?) -> Void) {
         guard let stream = h3Download else {
-            completion(nil, nil) // No download stream → EOF.
+            completion(nil, nil)
             return
         }
         stream.receive(completion: completion)
@@ -245,7 +243,6 @@ extension XHTTPConnection {
         h3AppendSessionMeta(to: &headers)
         if let seq { h3AppendSeqMeta(to: &headers, seq: seq) }
 
-        // Uplink data placement — packet-up payload carried in headers or cookies.
         for field in uplinkData {
             switch field {
             case .header(let name, let value): headers.append((name: name.lowercased(), value: value))

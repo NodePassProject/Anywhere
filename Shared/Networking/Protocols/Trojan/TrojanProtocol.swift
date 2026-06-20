@@ -8,8 +8,6 @@
 import Foundation
 import CommonCrypto
 
-/// Trojan wire format utilities.
-///
 /// TCP request header: `hex(sha224(password))` (56 ASCII bytes) + CRLF
 ///                   + cmd(1) + ATYP(1) + address(var) + port(2 BE) + CRLF
 /// UDP packet format: ATYP(1) + address(var) + port(2 BE) + length(2 BE) + CRLF + payload

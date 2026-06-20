@@ -30,7 +30,6 @@ enum TunnelMessage: Codable, Sendable {
 
 // MARK: - Responses
 
-/// Per-route payload tally shipped inside `StatsResponse`.
 struct RouteTrafficEntry: Codable, Sendable, Identifiable, Hashable {
     var target: RouteTarget
     var bytesIn: Int64
@@ -149,7 +148,6 @@ extension LatencyTestResponse {
 
 // MARK: - Shared Types
 
-/// Wire-format log entry.
 struct TunnelLogEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
     /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).
@@ -164,7 +162,6 @@ enum TunnelLogLevel: String, Codable, Sendable, Hashable {
     case error
 }
 
-/// Wire-format record of one routing decision.
 struct TunnelRequestEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
     /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).

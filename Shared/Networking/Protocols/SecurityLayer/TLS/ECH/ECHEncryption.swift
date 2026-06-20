@@ -8,9 +8,7 @@
 import Foundation
 import CryptoKit
 
-/// Per-connection ECH state: the HPKE sender plus the inner-hello material the
-/// handshake needs to detect acceptance. One context corresponds to one
-/// ClientHelloOuter.
+/// One context corresponds to one ClientHelloOuter.
 final class ECHClientContext {
     let config: ECHConfig
     let cipherSuite: ECHCipherSuite
@@ -20,15 +18,12 @@ final class ECHClientContext {
     /// number, so it lives in a `var`.
     private var sender: HPKE.Sender
 
-    /// The reconstructed inner ClientHello handshake message (with the outer's
-    /// session_id spliced in) — what feeds the inner transcript when accepted.
+    /// Inner ClientHello with the outer's session_id spliced in; feeds the inner transcript when accepted.
     var innerTranscriptMessage = Data()
 
-    /// The inner ClientHello's 32-byte random, used as the IKM for the ECH
-    /// accept-confirmation derivation.
+    /// 32-byte inner ClientHello random, used as IKM for the ECH accept-confirmation derivation.
     var innerRandom = Data()
 
-    /// Set during the handshake if the server rejected ECH.
     var rejected = false
 
     /// Retry configs the server may offer in EncryptedExtensions on rejection.

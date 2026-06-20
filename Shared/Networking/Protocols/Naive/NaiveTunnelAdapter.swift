@@ -9,7 +9,6 @@ import Foundation
 
 // MARK: - NaiveProxyHeaders
 
-/// Builds NaiveProxy's CONNECT request headers for each HTTP version.
 enum NaiveProxyHeaders {
 
     /// Browser-like User-Agent; probe-resistant proxy servers may reject requests without one.
@@ -40,8 +39,7 @@ enum NaiveProxyHeaders {
 
 // MARK: - NaiveTunnelAdapter
 
-/// Adapts a generic HTTPTunnel (HTTP/1.1 or HTTP/2) to NaiveTunnel, deriving
-/// the negotiated padding type from CONNECT response headers.
+/// Derives the negotiated padding type from CONNECT response headers.
 nonisolated final class NaiveTunnelAdapter: NaiveTunnel {
 
     private let tunnel: HTTPTunnel

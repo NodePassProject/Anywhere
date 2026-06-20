@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Fans in `remaining` async-teardown callbacks into a single `completion`.
 private final class TeardownCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var remaining: Int
@@ -29,7 +28,6 @@ private final class TeardownCounter: @unchecked Sendable {
 
 // MARK: - ProxyClient
 
-/// Establishes proxy connections over the supported transports and security layers.
 nonisolated class ProxyClient {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
@@ -693,7 +691,6 @@ nonisolated class ProxyClient {
         }
 
         if case .tls(let baseTLSConfig) = configuration.securityLayer {
-            // Force ALPN to http/1.1.
             let wsTlsConfig = TLSConfiguration(
                 serverName: baseTLSConfig.serverName,
                 alpn: ["http/1.1"],
@@ -1049,7 +1046,6 @@ nonisolated class ProxyClient {
 
     // MARK: - XHTTP Connection
 
-    /// HTTP version selected for an XHTTP leg.
     private enum XHTTPHTTPVersion {
         case http11
         case http2
@@ -1130,7 +1126,6 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// Resolves the XHTTP mode and HTTP version for the connection.
     private func connectWithXHTTP(
         command: ProxyCommand,
         destinationHost: String,
@@ -1309,7 +1304,6 @@ nonisolated class ProxyClient {
 
     // MARK: XHTTP leg factory (shared by combined & detach)
 
-    /// Where one XHTTP leg's server lives and how the connection to it is secured.
     private struct XHTTPEndpoint {
         /// Host for a direct kernel dial (a pre-resolved IP when latency testing).
         let directHost: String
@@ -1321,14 +1315,12 @@ nonisolated class ProxyClient {
         let security: SecurityLayer
     }
 
-    /// How an XHTTP leg reaches its server.
     private enum XHTTPLegRoute {
         case direct
         case overTunnel(ProxyConnection)
         case buildChain([ProxyConfiguration])
     }
 
-    /// The dialed transport for one XHTTP leg: a byte stream or an HTTP/3 QUIC session.
     private enum XHTTPDialedTransport {
         case byteStream(TransportClosures)
         case http3(HTTP3Multiplexer)

@@ -14,7 +14,6 @@ nonisolated class TLSProxyConnection: ProxyConnection {
         self.tlsConnection = tlsConnection
     }
 
-    /// The negotiated TLS version from the handshake.
     override var outerTLSVersion: TLSVersion? { TLSVersion(rawValue: tlsConnection.tlsVersion) }
 
     override var isConnected: Bool {

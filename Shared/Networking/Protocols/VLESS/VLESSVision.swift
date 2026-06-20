@@ -34,7 +34,6 @@ private let tls13CipherSuites: Set<UInt16> = [
 
 // MARK: - Traffic State
 
-/// Tracks TLS detection and padding state for Vision.
 nonisolated class VisionTrafficState {
     let userUUID: Data
 
@@ -72,7 +71,7 @@ private let visionPaddingSeed: [UInt32] = [900, 500, 900, 256]
 private let visionBufSize: Int32 = 8192
 
 /// Buffers >= this are split to leave room for the 21-byte padding header.
-private let reshapeThreshold: Int = 8192 - 21  // 8171
+private let reshapeThreshold: Int = 8192 - 21
 
 /// Splits data too large for one Vision-padded frame at the last TLS application-data
 /// boundary (midpoint fallback), recursing until every chunk is below reshapeThreshold.
@@ -335,7 +334,6 @@ private func isCompleteTLSRecord(data: Data) -> Bool {
 
 // MARK: - Vision Connection Wrapper
 
-/// VLESS connection with Vision flow control.
 nonisolated class VLESSVisionConnection: ProxyConnection {
     private let innerConnection: ProxyConnection
     private let trafficState: VisionTrafficState

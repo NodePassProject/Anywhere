@@ -19,28 +19,23 @@ class TVHomeViewController: UIViewController {
 
     private let contentStack = UIStackView()
 
-    // Power button
     private let powerButton = UIButton(type: .custom)
     private let powerIcon = UIImageView()
     private let activityIndicator = UIActivityIndicatorView(style: .large)
 
-    // Status
     private let statusLabel = UILabel()
 
-    // Traffic stats
     private let statsButton = UIButton(type: .custom)
     private let uploadIcon = UIImageView()
     private let uploadLabel = UILabel()
     private let downloadIcon = UIImageView()
     private let downloadLabel = UILabel()
 
-    // Configuration card
     private let configButton = UIButton(type: .custom)
     private let configIcon = UIImageView()
     private let configNameLabel = UILabel()
     private let configChevron = UIImageView()
 
-    // Empty state card
     private let emptyButton = UIButton(type: .custom)
 
     private var isConnected: Bool { viewModel.vpnStatus == .connected }
@@ -110,14 +105,12 @@ class TVHomeViewController: UIViewController {
         powerButton.clipsToBounds = false
         powerButton.addTarget(self, action: #selector(powerButtonTapped), for: .primaryActionTriggered)
 
-        // Power icon
         let iconConfig = UIImage.SymbolConfiguration(pointSize: 90, weight: .light)
         powerIcon.image = UIImage(systemName: "power", withConfiguration: iconConfig)
         powerIcon.contentMode = .scaleAspectFit
         powerIcon.translatesAutoresizingMaskIntoConstraints = false
         powerButton.addSubview(powerIcon)
 
-        // Activity indicator
         activityIndicator.hidesWhenStopped = true
         activityIndicator.translatesAutoresizingMaskIntoConstraints = false
         powerButton.addSubview(activityIndicator)
@@ -284,7 +277,6 @@ class TVHomeViewController: UIViewController {
     // MARK: - Layout
 
     private func setupLayout() {
-        // Left side: power button + status label
         let leftStack = UIStackView(arrangedSubviews: [powerButton, statusLabel])
         leftStack.axis = .vertical
         leftStack.alignment = .center
@@ -295,7 +287,6 @@ class TVHomeViewController: UIViewController {
         leftContainer.translatesAutoresizingMaskIntoConstraints = false
         leftContainer.addSubview(leftStack)
 
-        // Right side: stats card, config/empty card
         let rightStack = UIStackView(arrangedSubviews: [statsButton, configButton, emptyButton])
         rightStack.axis = .vertical
         rightStack.alignment = .center
@@ -310,7 +301,6 @@ class TVHomeViewController: UIViewController {
         view.addSubview(rightContainer)
 
         NSLayoutConstraint.activate([
-            // Left container: left half of the screen, vertically centered
             leftContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             leftContainer.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.5),
             leftContainer.topAnchor.constraint(equalTo: view.topAnchor),
@@ -319,7 +309,6 @@ class TVHomeViewController: UIViewController {
             leftStack.centerXAnchor.constraint(equalTo: leftContainer.centerXAnchor),
             leftStack.centerYAnchor.constraint(equalTo: leftContainer.centerYAnchor),
 
-            // Right container: right half of the screen, vertically centered
             rightContainer.leadingAnchor.constraint(equalTo: leftContainer.trailingAnchor),
             rightContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             rightContainer.topAnchor.constraint(equalTo: view.topAnchor),
@@ -336,13 +325,12 @@ class TVHomeViewController: UIViewController {
 
     // MARK: - Bindings
 
-    /// Applies all view-model– and stats-driven state to the views.
     override func updateProperties() {
         super.updateProperties()
-        updatePowerButton()    // isManagerReady, hasConfigurations, vpnStatus
-        updateStatusLabel()    // vpnStatus
-        updateConfigCard()     // selectedConfiguration
-        updateTrafficStats()   // ConnectionStatsModel.bytesIn/bytesOut + vpnStatus
+        updatePowerButton()
+        updateStatusLabel()
+        updateConfigCard()
+        updateTrafficStats()
 
         // Animate the gradient only when the connected state actually flips, so the
         // once-per-second traffic-stats updates don't restart its 0.6s color animation.

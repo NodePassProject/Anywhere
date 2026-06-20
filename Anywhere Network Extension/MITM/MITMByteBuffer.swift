@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Cursor-style byte buffer: Data plus a read offset so prefix removal is O(1)
-/// (not the O(n²) memmove of `Data.removeFirst`). The visible region is always 0-indexed.
+/// Read offset makes prefix removal O(1) (not the O(n²) memmove of `Data.removeFirst`); the visible region is always 0-indexed.
 struct MITMByteBuffer {
 
     /// Compact once the consumed prefix exceeds this; 64 KiB = 4× the upstream TLS plaintext record size.
@@ -77,7 +76,6 @@ struct MITMByteBuffer {
         storage.append(other)
     }
 
-    /// Drops ``n`` bytes from the front in O(1) by advancing the read offset.
     mutating func removeFirst(_ n: Int) {
         // Overshoot past count is tolerated — the reset below clamps to empty.
         offset += n

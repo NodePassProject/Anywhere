@@ -7,12 +7,10 @@
 
 import Foundation
 
-/// HTTP upgrade transport configuration.
 struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
     /// Host header value (defaults to server address).
     let host: String
     let path: String
-    /// Custom HTTP headers to send during the upgrade handshake.
     let headers: [String: String]
 
     init(
@@ -25,13 +23,11 @@ struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
         self.headers = headers
     }
 
-    /// Path with a guaranteed leading "/".
     var normalizedPath: String {
         if path.isEmpty { return "/" }
         return path.hasPrefix("/") ? path : "/" + path
     }
 
-    /// Parse HTTP upgrade parameters from VLESS URL query parameters.
     static func parse(from params: [String: String], serverAddress: String) -> HTTPUpgradeConfiguration? {
         let host = params["host"] ?? serverAddress
         var path = (params["path"] ?? "/").removingPercentEncoding ?? "/"

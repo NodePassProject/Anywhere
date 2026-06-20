@@ -23,8 +23,7 @@ protocol NaiveTunnel: AnyObject {
 
 // MARK: - NaiveProxyConnection
 
-/// ProxyConnection that wraps a NaiveTunnel with NaiveProxy padding framing,
-/// applied to the first 8 reads/writes when the server negotiates variant 1.
+/// Padding framing applies only to the first 8 reads/writes, and only when the server negotiates variant 1.
 nonisolated class NaiveProxyConnection: ProxyConnection {
     private let tunnel: NaiveTunnel
     private var paddingFramer = NaivePaddingFramer()
@@ -50,7 +49,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
                 sendFragmented(data: data, offset: 0, completion: completion)
                 return
             }
-            // Truncate to the 2-byte length cap, matching the reference NaivePaddingFramer::Write().
+            // Truncate to the 2-byte length cap; spill the remainder into a follow-up frame.
             let payload = data.count > Self.maxPaddingPayload
                 ? Data(data.prefix(Self.maxPaddingPayload)) : data
             let paddingSize = Self.generateSendPaddingSize(payloadSize: payload.count)

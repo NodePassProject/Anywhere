@@ -20,7 +20,6 @@ struct TLS13HandshakeState {
     /// Derived after the server Finished is verified.
     var applicationKeys: TLS13ApplicationKeys?
 
-    /// Running handshake transcript, updated as each message is consumed.
     var handshakeTranscript: Data?
 
     var serverHandshakeSeqNum: UInt64 = 0

@@ -26,9 +26,8 @@ class ChainStore {
         let split = Self.decodeSplit(from: data)
         chains = split.live
         tombstones = split.tombstones
-        // Must stay deferred: coordinate() reads ConfigurationStore.shared, and the two stores
-        // reference each other, so calling it synchronously here re-enters this type's
-        // `static let shared` dispatch_once and deadlocks. Running it after init lets it finish first.
+        // Must stay deferred: coordinate() reads ConfigurationStore.shared, which references
+        // back here; calling it synchronously re-enters this type's `shared` init and deadlocks.
         Task { @MainActor in self.coordinate() }
     }
 
@@ -65,9 +64,8 @@ class ChainStore {
 
     /// Keeps the VPN selection and routing-rule state consistent after any change to the chain list.
     private func coordinate() {
-        // Configurations load asynchronously; running against the not-yet-loaded (empty)
-        // list would let clearOrphans() strip every config-assigned rule set as "orphaned".
-        // ConfigurationStore.loadInitial() performs the full pass once its load completes.
+        // Configs load asynchronously; running against the empty list would let clearOrphans()
+        // strip every config-assigned rule set as orphaned. loadInitial() does the full pass later.
         guard ConfigurationStore.shared.isLoaded else { return }
         let configurations = ConfigurationStore.shared.configurations
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)

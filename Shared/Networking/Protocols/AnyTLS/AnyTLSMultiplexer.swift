@@ -9,7 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexer")
 
-/// Owns one TLS connection and multiplexes logical streams over it via AnyTLS framing.
 nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     // MARK: - Properties
@@ -31,7 +30,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private var sendPadding: Bool = true
 
     /// While true, writes accumulate in `outboundBuffer` so cmdSettings+cmdSYN+SocksAddr
-    /// land in one TLS record (matches sing-anytls).
+    /// land in one TLS record.
     private var buffering: Bool = true
     private var outboundBuffer: Data = Data()
 
@@ -46,7 +45,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     private var closed: Bool = false
 
-    /// Invoked once when the multiplexer transitions to closed.
     var onClose: (() -> Void)?
 
     // MARK: - Init
@@ -66,7 +64,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     // MARK: - Lifecycle
 
-    /// Sends the prologue + buffered cmdSettings, then starts the recv loop.
     /// pktCounter intentionally stays 0 here so the padding schedule aligns with the server.
     func start() {
         var prologue = Data()
@@ -159,7 +156,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         return stream
     }
 
-    /// Removes the stream and emits cmdFIN.
     func removeStream(sid: UInt32) {
         lock.lock()
         guard !closed, let stream = streams.removeValue(forKey: sid) else {
@@ -204,8 +200,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         writeConnLocked(frame, completion: completion)
     }
 
-    /// Padding-aware writer (replicates sing-anytls's `Session.writeConn`): buffers while
-    /// `buffering`, otherwise slices output per the padding schedule, topping up with cmdWaste.
+    /// Padding-aware writer: buffers while `buffering`, otherwise slices output per the
+    /// padding schedule, topping up with cmdWaste.
     private func writeConnLocked(_ bytes: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if closed {
@@ -409,7 +405,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             writeConnLocked(pong, completion: { _ in })
 
         case AnyTLSProtocol.cmdHeartResponse:
-            // Active polling not implemented; drop.
             break
 
         default:

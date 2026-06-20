@@ -194,8 +194,6 @@ final class ImportRuleSetsModel {
         items.contains { $0.status == .loading }
     }
 
-    /// True when at least one selected, non-failed item is a MITM rule set —
-    /// drives the "MITM is disabled" warning.
     var willImportMITM: Bool {
         items.contains { item in
             guard item.kind == .mitm, item.isSelected else { return false }
@@ -213,8 +211,7 @@ final class ImportRuleSetsModel {
             } else if path.hasSuffix(".amrs") {
                 return Item(url: url, kind: .mitm, displayName: fallback)
             } else {
-                // Unknown extension: surface it as failed so the reason is visible
-                // rather than silently omitting the link.
+                // Surface as failed rather than silently dropping the link.
                 var item = Item(url: url, kind: .routing, displayName: fallback)
                 item.status = .failed(String(localized: "Unsupported link."))
                 item.isSelected = false

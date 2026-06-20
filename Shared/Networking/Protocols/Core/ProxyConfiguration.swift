@@ -20,7 +20,7 @@ enum OutboundProtocol: String, Codable, CaseIterable {
     case http2
     case http3
 
-    /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
+    /// Whether this protocol uses a CONNECT tunnel.
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
 
     /// Whether the handshake has a payload slot for the caller's first bytes; when `false`
@@ -36,7 +36,7 @@ enum OutboundProtocol: String, Codable, CaseIterable {
         }
     }
 
-    /// Whether the protocol supports mux.cool multiplexing (VLESS only).
+    /// Whether the protocol supports mux.cool multiplexing.
     var supportsMux: Bool {
         self == .vless
     }
@@ -90,7 +90,6 @@ enum OutboundProtocol: String, Codable, CaseIterable {
 
 // MARK: - Outbound Protocol Configuration
 
-/// Type-safe outbound protocol with associated credentials and settings.
 enum Outbound: Hashable {
     /// The only outbound with a user-selectable transport and TLS/Reality security layer.
     case vless(
@@ -142,7 +141,6 @@ enum Outbound: Hashable {
 
 // MARK: - Transport Layer Configuration
 
-/// Type-safe transport layer (mutually exclusive).
 enum TransportLayer: Hashable {
     case tcp
     case ws(WebSocketConfiguration)
@@ -164,7 +162,6 @@ enum TransportLayer: Hashable {
 
 // MARK: - Security Layer Configuration
 
-/// Type-safe security layer (mutually exclusive).
 enum SecurityLayer: Hashable {
     case none
     case tls(TLSConfiguration)
@@ -191,7 +188,6 @@ enum SecurityLayer: Hashable {
 
 // MARK: - ProxyConfiguration
 
-/// Proxy configuration for all supported outbound protocols.
 struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
@@ -206,10 +202,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let chain: [ProxyConfiguration]?
     var deletedAt: Date? = nil
 
-    /// The pre-resolved IP if available, otherwise `serverAddress`.
     var connectAddress: String { resolvedIP ?? serverAddress }
 
-    /// Protocol discriminator. Use for type checks; pattern-match on `outbound` for payload.
     var outboundProtocol: OutboundProtocol {
         switch outbound {
         case .vless:        .vless
@@ -228,47 +222,42 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
     // MARK: - VLESS-specific computed accessors
 
-    /// Transport layer. Always `.tcp` for non-VLESS outbounds.
     var transportLayer: TransportLayer {
         if case .vless(_, _, _, let t, _, _, _) = outbound { return t }
         return .tcp
     }
-    /// Security layer. Always `.none` for non-VLESS outbounds.
     var securityLayer: SecurityLayer {
         if case .vless(_, _, _, _, let s, _, _) = outbound { return s }
         return .none
     }
-    /// Whether Mux is enabled. Only meaningful for VLESS+TCP with Vision flow.
+    /// Only meaningful for VLESS+TCP with Vision flow.
     var muxEnabled: Bool {
         if case .vless(_, _, _, _, _, let m, _) = outbound { return m }
         return false
     }
-    /// Whether VLESSVisionUDPGlobalID (GlobalID-based flow identification) is enabled for muxed UDP.
+    /// GlobalID-based flow identification for muxed UDP.
     var xudpEnabled: Bool {
         if case .vless(_, _, _, _, _, _, let x) = outbound { return x }
         return false
     }
 
-    /// Whether Vision-flow mux applies: VLESS with `xtls-rprx-vision` flow and Mux enabled.
     var usesVisionMux: Bool {
         guard case .vless(_, _, let flow, _, _, let muxEnabled, _) = outbound else { return false }
         return muxEnabled && flow == "xtls-rprx-vision"
     }
 
-    /// Uppercased transport tag for display (VLESS only); `nil` when not VLESS or the tag is empty.
     var displayTransportTag: String? {
         guard outboundProtocol == .vless else { return nil }
         let tag = transportLayer.tag
         return tag.isEmpty ? nil : tag.uppercased()
     }
 
-    /// Uppercased security tag for display; `nil` when there is no security layer.
     var displaySecurityTag: String? {
         let tag = securityLayer.tag.uppercased()
         return tag == "NONE" ? nil : tag
     }
 
-    /// Whether the VLESS flow is an XTLS Vision variant (loose match, e.g. `xtls-rprx-vision-udp443`).
+    /// Loose substring match, so variants like `xtls-rprx-vision-udp443` also count.
     var hasVisionFlow: Bool {
         if case .vless(_, _, let flow?, _, _, _, _) = outbound {
             return flow.uppercased().contains("VISION")
@@ -276,7 +265,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         return false
     }
 
-    /// Whether this configuration is VLESS-over-XHTTP negotiating HTTP/3.
     var isXHTTPOverHTTP3: Bool {
         guard case .xhttp = transportLayer else { return false }
         guard case .tls(let tls) = securityLayer else { return false }

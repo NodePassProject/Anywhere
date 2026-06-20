@@ -11,9 +11,8 @@ import Dispatch
 
 // MARK: - QUICSocket
 
-/// Connected non-blocking UDP socket for QUICConnection's direct-dial path. Kept separate
-/// from RawUDPSocket: all I/O runs inline on the connection's queue (ngtcp2 is single-threaded
-/// there), receive/send are zero-copy, and ECN reporting is enabled for ngtcp2.
+/// All I/O runs inline on the connection's queue (ngtcp2 is single-threaded there);
+/// receive/send are zero-copy and ECN reporting is enabled for ngtcp2.
 nonisolated final class QUICSocket {
 
     private typealias QUICError = QUICConnection.QUICError
@@ -117,11 +116,10 @@ nonisolated final class QUICSocket {
         socketFD = fd
     }
 
-    /// Re-points the connected socket at a new peer, keeping the same FD (and thus the same
-    /// local source port and armed read source). Used for Hysteria port hopping: only the
-    /// destination port rotates, so the server's post-DNAT 4-tuple — and ngtcp2's fixed path —
-    /// stay put. Best-effort; a failed re-connect leaves the prior peer in place and the next
-    /// hop retries. Must run on `queue`.
+    /// Re-points the connected socket at a new peer, keeping the same FD (same local source
+    /// port and armed read source). For Hysteria port hopping: only the destination port
+    /// rotates, so the server's post-DNAT 4-tuple — and ngtcp2's fixed path — stay put.
+    /// Best-effort; a failed re-connect leaves the prior peer in place. Must run on `queue`.
     func reconnect(remoteAddr: sockaddr_storage, addrLen: Int) {
         guard socketFD >= 0 else { return }
         var remote = remoteAddr

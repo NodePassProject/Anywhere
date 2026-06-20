@@ -66,7 +66,6 @@ nonisolated class VLESSVisionUDPStream: MultiplexerStreamSink {
             option: .data,
             globalID: (isFirstFrame && network == .udp) ? globalID : nil
         )
-        // For UDP Keep frames, include address
         if network == .udp {
             metadata.network = network
             metadata.targetHost = targetHost
@@ -85,7 +84,6 @@ nonisolated class VLESSVisionUDPStream: MultiplexerStreamSink {
         }
     }
 
-    /// Closes this stream by sending an End frame.
     func close() {
         guard !closed else { return }
         closed = true

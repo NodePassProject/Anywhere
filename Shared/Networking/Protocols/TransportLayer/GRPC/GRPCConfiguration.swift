@@ -56,7 +56,6 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
         self.permitWithoutStream = permitWithoutStream
     }
 
-    /// Parse gRPC parameters from VLESS URL query parameters.
     static func parse(from params: [String: String]) -> GRPCConfiguration? {
         let serviceName = params["serviceName"] ?? ""
         let authority = params["authority"] ?? ""

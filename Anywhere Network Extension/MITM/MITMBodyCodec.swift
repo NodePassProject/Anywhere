@@ -27,7 +27,6 @@ enum MITMBodyCodec {
         case brotli
     }
 
-    /// Parsed `Content-Encoding` with a flag for full decodability.
     struct Plan: Equatable {
         let codecs: [Codec]
         let supported: Bool

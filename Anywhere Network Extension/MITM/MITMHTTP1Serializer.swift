@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// h2→h1 request translation: serializes a neutral `MITMRequestHead` into an
-/// HTTP/1.1 head plus body chunk framing.
 enum MITMHTTP1Serializer {
 
     /// Builds the request line + headers + framing header + blank line. Derives `Host`

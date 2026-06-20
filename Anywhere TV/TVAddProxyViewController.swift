@@ -67,7 +67,7 @@ class TVAddProxyViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch section {
         case 0: return Method.allCases.count
-        case 1: return 1 // Link text field
+        case 1: return 1
         default: return 0
         }
     }
@@ -150,7 +150,6 @@ class TVAddProxyViewController: UITableViewController {
                     }
                     let nav = UINavigationController(rootViewController: editor)
                     nav.modalPresentationStyle = .fullScreen
-                    // Present from the tab bar controller
                     if let windowScene = UIApplication.shared.connectedScenes
                         .compactMap({ $0 as? UIWindowScene })
                         .first(where: { $0.activationState == .foregroundActive }),
@@ -212,8 +211,8 @@ class TVAddProxyViewController: UITableViewController {
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // `https://` is no longer a single proxy — only schemes the parser knows
-        // take the proxy-link path; everything else is a subscription URL.
+        // Only schemes the parser knows take the proxy-link path;
+        // everything else is treated as a subscription URL.
         if ProxyConfiguration.canParseURL(trimmed) {
             do {
                 let config = try ProxyConfiguration.parse(url: trimmed)

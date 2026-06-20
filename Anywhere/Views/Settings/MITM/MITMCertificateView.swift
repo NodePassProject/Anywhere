@@ -223,8 +223,7 @@ struct MITMCertificateView: View {
         exportingCertificate = true
     }
 
-    /// Hosts the .mobileconfig over a one-shot HTTP server bound to
-    /// 127.0.0.1 and opens the URL.
+    /// Profile install requires a URL; serve the .mobileconfig over a one-shot 127.0.0.1 HTTP server.
     private func installProfile() {
         guard let plist = controller.mobileConfigData() else {
             errorMessage = String(localized: "Failed to export profile.")

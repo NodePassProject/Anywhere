@@ -79,9 +79,8 @@ extension TLSRecordConnection {
             throw TLSRecordError.noContentTypeFound
         }
 
-        // Post-handshake handshake messages (NewSessionTicket, KeyUpdate). They carry no
-        // application data, but a KeyUpdate must rekey the read side here or every subsequent
-        // record fails AEAD authentication (RFC 8446 §7.2).
+        // A KeyUpdate must rekey the read side here or every subsequent record fails AEAD
+        // authentication (RFC 8446 §7.2).
         if innerContentType == TLSContentType.handshake {
             handlePostHandshakeTLS13(Data(decrypted.prefix(Int(contentLen))))
             return Data()
@@ -103,8 +102,7 @@ extension TLSRecordConnection {
 
     // MARK: - TLS 1.3 KeyUpdate (RFC 8446 §7.2)
 
-    /// Parse post-handshake handshake messages from a decrypted TLS 1.3 record and act on any
-    /// KeyUpdate. Runs on the receive path with `receiveLock` held (and never `seqLock`).
+    /// Runs on the receive path with `receiveLock` held (and never `seqLock`).
     private func handlePostHandshakeTLS13(_ messages: Data) {
         var i = messages.startIndex
         let end = messages.endIndex
@@ -116,7 +114,7 @@ extension TLSRecordConnection {
             guard bodyEnd <= end else { break }
 
             if type == TLSHandshakeType.keyUpdate {
-                // The peer has switched its sending keys, so advance ours for reading now.
+                // Peer switched its sending keys; advance ours for reading.
                 rekeyIngress()
                 // request_update == 1 ("update_requested") obliges us to KeyUpdate back.
                 let requestUpdate = len >= 1 ? messages[bodyStart] : 0
@@ -124,15 +122,12 @@ extension TLSRecordConnection {
                     keyUpdateResponsePending = true
                 }
             }
-            // NewSessionTicket and any other post-handshake messages need no record-layer
-            // change and are intentionally ignored.
             i = bodyEnd
         }
     }
 
-    /// Advance the *read* (ingress) traffic secret, key and IV, and reset the read sequence
-    /// number, after the peer sent a KeyUpdate. Ingress is the server keys for a client and the
-    /// client keys for a server. No-op when the traffic secret is unavailable (e.g. TLS 1.2).
+    /// Ingress is the server keys for a client and the client keys for a server. No-op when the
+    /// traffic secret is unavailable (e.g. TLS 1.2).
     private func rekeyIngress() {
         let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
         if direction == .server {
@@ -158,10 +153,9 @@ extension TLSRecordConnection {
         }
     }
 
-    /// Reply to a KeyUpdate(update_requested): send our own KeyUpdate(update_not_requested) using
-    /// the *current* write keys, then advance the write (egress) traffic secret, key and IV and
-    /// reset the write sequence number. Held under `sendLock` so the key switch is atomic with
-    /// respect to application sends; called only after `receiveLock` has been released.
+    /// Sends our KeyUpdate using the *current* write keys, then advances egress. Held under
+    /// `sendLock` so the key switch is atomic with respect to application sends; called only after
+    /// `receiveLock` has been released.
     func sendKeyUpdateResponseAndRekeyEgress() {
         sendLock.lock()
         defer { sendLock.unlock() }

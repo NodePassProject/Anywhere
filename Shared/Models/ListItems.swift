@@ -8,13 +8,12 @@
 import Foundation
 import Observation
 
-/// Observable row model for a proxy: a stable instance mutated in place so a
-/// single-field change re-renders just the affected row.
+/// Mutated in place so a single-field change re-renders just the affected row.
 @MainActor
 @Observable
 final class ProxyListItem: Identifiable {
     nonisolated let id: UUID
-    nonisolated let subscriptionId: UUID?   // grouping key; never changes for a proxy
+    nonisolated let subscriptionId: UUID?
     var name: String
     var protocolName: String
     var transportTag: String?   // uppercased; nil unless VLESS with a non-empty transport
@@ -55,8 +54,7 @@ final class ProxyListItem: Identifiable {
     }
 }
 
-/// Observable row model for a chain: a stable instance mutated in place so a
-/// single-field change re-renders just the affected row.
+/// Mutated in place so a single-field change re-renders just the affected row.
 @MainActor
 @Observable
 final class ChainListItem: Identifiable {

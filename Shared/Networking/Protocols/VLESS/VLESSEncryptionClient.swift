@@ -30,46 +30,43 @@ enum VLESSEncryptionError: Error, LocalizedError {
 
 // MARK: - Wire constants
 
-/// AEAD framing constants for the VLESS encryption wire format.
 private enum VLESSWire {
     /// TLS 1.3 record header byte 0 (`application_data`).
     static let recordTypeApplicationData: UInt8 = 23
     /// TLS 1.3 record header bytes 1-2 (legacy version `0x0303`).
     static let recordVersionMajor: UInt8 = 3
     static let recordVersionMinor: UInt8 = 3
-    /// Header length in bytes: 1 type + 2 version + 2 length.
+    /// 1 type + 2 version + 2 length.
     static let headerLength = 5
-    /// Plaintext chunk size used by the writer (matches Go's 8192 cap).
     static let maxChunkPlaintext = 8192
-    /// AEAD authentication tag length (both AES-GCM and ChaCha20-Poly1305).
+    /// AEAD tag length (both AES-GCM and ChaCha20-Poly1305).
     static let aeadTagLength = 16
     /// Largest valid TLS 1.3 record payload (16384 + 256 per RFC 8446 §5.2).
     static let maxRecordPayload = 16640
-    /// Smallest valid TLS 1.3 record payload (must contain at least the AEAD tag).
+    /// Smallest valid payload must contain at least the AEAD tag.
     static let minRecordPayload = 17
-    /// Length in bytes of a sealed 2-byte length prefix (2 plaintext + 16 tag).
+    /// Sealed 2-byte length prefix (2 plaintext + 16 tag).
     static let sealedLengthFrame = 18
-    /// Length in bytes of the PFS server hello: ML-KEM ciphertext + X25519 pub + AEAD tag.
+    /// ML-KEM ciphertext + X25519 pub + AEAD tag.
     static let pfsServerHelloLength = 1088 + 32 + 16
-    /// Length in bytes of the encrypted ticket reply (16 plaintext + 16 tag).
+    /// Encrypted ticket reply (16 plaintext + 16 tag).
     static let encryptedTicketLength = 32
-    /// Length in bytes of the unsealed PFS client hello payload.
     static let pfsClientHelloPayloadLength = 1184 + 32
-    /// Length in bytes of the sealed PFS client hello (length frame + payload + tag).
+    /// Sealed PFS client hello: length frame + payload + tag.
     static let pfsClientHelloLength = 18 + pfsClientHelloPayloadLength + 16
 }
 
 // MARK: - AEAD wrapper
 
-/// CryptoKit AEAD with a 12-byte big-endian-incrementing nonce; each seal/open
-/// without an explicit nonce advances the counter by one (matches Go's AEAD struct).
+/// 12-byte big-endian-incrementing nonce; each seal/open without an explicit nonce
+/// advances the counter by one.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 private final class VLESSEncryptionAEAD {
     let key: SymmetricKey
     let useAES: Bool
     private var nonce: [UInt8] = Array(repeating: 0, count: 12)
 
-    /// BLAKE3 key derivation from `(ctx, key)`; context is hashed as raw bytes to match Go's `NewAEAD`.
+    /// BLAKE3 key derivation from `(ctx, key)`; context is hashed as raw bytes.
     init(context: Data, key: Data, useAES: Bool) {
         let derived = BLAKE3Hasher.deriveKey(
             contextBytes: context,
@@ -87,7 +84,7 @@ private final class VLESSEncryptionAEAD {
     }
 
     func seal(_ plaintext: Data, additionalData: Data?) throws -> Data {
-        // Go's `IncreaseNonce` semantics: increment before use, so nonce 0 is never used.
+        // Increment before use, so nonce 0 is never used.
         advanceNonce()
         let nonceData = Data(nonce)
         if useAES {
@@ -144,7 +141,7 @@ private final class VLESSEncryptionAEAD {
         }
     }
 
-    /// Big-endian increment, matching Go's `IncreaseNonce`.
+    /// Big-endian increment.
     private func advanceNonce() {
         for i in stride(from: 11, through: 0, by: -1) {
             nonce[i] &+= 1
@@ -155,7 +152,6 @@ private final class VLESSEncryptionAEAD {
 
 // MARK: - Header codec
 
-/// Encodes/decodes the 5-byte TLS-record-style framing header.
 private enum VLESSHeader {
     static func encode(into buffer: inout Data, payloadLength: Int) {
         buffer.append(VLESSWire.recordTypeApplicationData)
@@ -182,7 +178,7 @@ private enum VLESSHeader {
     }
 }
 
-/// Two-byte big-endian length helpers (Go's `EncodeLength`/`DecodeLength`).
+/// Two-byte big-endian length helpers.
 private enum VLESSLength {
     static func encode(_ value: Int) -> Data {
         Data([UInt8(value >> 8), UInt8(value & 0xFF)])
@@ -194,14 +190,13 @@ private enum VLESSLength {
 
 // MARK: - Padding scheduler
 
-/// Padding length/gap spec parser; each segment is `prob-min-max` (matches Go's `ParsePadding`).
+/// Padding length/gap spec parser; each segment is `prob-min-max`.
 struct VLESSEncryptionPadding {
-    /// Length specs (probability, min, max).
+    /// (probability, min, max).
     let lengths: [(Int, Int, Int)]
-    /// Gap specs (probability, min ms, max ms). Sleeps between fragments.
+    /// (probability, min ms, max ms). Sleeps between fragments.
     let gaps: [(Int, Int, Int)]
 
-    /// Default schedule when no spec is supplied (matches Go's `CreatPadding` fallback).
     static let `default` = VLESSEncryptionPadding(
         lengths: [(100, 111, 1111), (50, 0, 3333)],
         gaps: [(75, 0, 111)]
@@ -298,7 +293,6 @@ private enum VLESSNfsPublicKey {
 
 // MARK: - VLESSEncryptionClient (matches Go's ClientInstance)
 
-/// Per-dial state for VLESS encryption; produces a `VLESSEncryptedConnection` per dial.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 nonisolated final class VLESSEncryptionClient {
     private let nfsKeys: [VLESSNfsPublicKey]
@@ -309,7 +303,6 @@ nonisolated final class VLESSEncryptionClient {
     private let padding: VLESSEncryptionPadding
     private let xorMode: VLESSEncryptionConfig.XORMode
     private let seconds: UInt32
-    /// 0-RTT cache key for this `(host, port, config)`.
     private let cacheKey: String
     /// Always true on Apple platforms — every iOS 26 device has hardware AES-GCM.
     private let useAES = true
@@ -489,7 +482,6 @@ nonisolated final class VLESSEncryptionClient {
 
     // MARK: - 1-RTT client hello
 
-    /// Mid-handshake state passed from `sendClientHello1RTT` to `readServerHello`.
     private struct InFlightHandshake {
         let iv: Data
         let nfsKey: Data
@@ -665,8 +657,7 @@ nonisolated final class VLESSEncryptionClient {
                     var unitedKey = pfsKey
                     unitedKey.append(state.nfsKey)
 
-                    // Both AEADs are keyed on *plaintext* PFS public bytes (Go's
-                    // `encryptedPfsPublicKey` is already decrypted in place when used).
+                    // Both AEADs are keyed on *plaintext* PFS public bytes.
                     let writeAEAD = VLESSEncryptionAEAD(
                         context: state.pfsClientPublicKey, key: unitedKey, useAES: useAES
                     )
@@ -786,7 +777,6 @@ nonisolated final class VLESSEncryptionClient {
 
 // MARK: - Byte reader (buffered fixed-size receive helper)
 
-/// Buffers a ProxyConnection's chunked `receiveRaw` behind a fixed-size `readExact(N)` API.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 private final class VLESSEncryptionByteReader {
     let connection: ProxyConnection
@@ -835,9 +825,8 @@ private final class VLESSEncryptionByteReader {
 
 // MARK: - VLESSEncryptedConnection (matches Go's CommonConn)
 
-/// AEAD-framed wrapper around an inner ProxyConnection: application bytes travel
-/// as TLS-1.3-style records (5-byte header + sealed payload), with a BLAKE3 rekey
-/// when the nonce wraps.
+/// AEAD-framed wrapper: application bytes travel as TLS-1.3-style records
+/// (5-byte header + sealed payload), with a BLAKE3 rekey when the nonce wraps.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     /// Snapshot of the cache entry behind a 0-RTT attempt, so first-record decode
@@ -861,7 +850,6 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     /// Server handshake-tail padding to drain before app data (1-RTT only).
     private var pendingServerPaddingLength: Int
 
-    /// nil for 1-RTT.
     private let zeroRTTState: ZeroRTTState?
     /// The 0-RTT-rejection signal only counts on the *first* record; once any
     /// record opens cleanly, the ticket was accepted.

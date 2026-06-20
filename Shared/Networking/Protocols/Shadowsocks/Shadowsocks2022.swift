@@ -22,7 +22,6 @@ private let tagSize = 16
 
 // MARK: - Shadowsocks2022Connection (TCP)
 
-/// Wraps a transport-layer ProxyConnection with Shadowsocks 2022 AEAD encryption.
 /// Wire format: salt + seal(fixedHeader) + seal(variableHeader+payload) [+ AEAD chunks].
 nonisolated class Shadowsocks2022Connection: ProxyConnection {
     private let inner: ProxyConnection
@@ -31,19 +30,17 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
     private let pskList: [Data]       // all PSKs (for multi-user identity headers)
     private let pskHashes: [Data]     // BLAKE3 hash of pskList[1..], first 16 bytes each
 
-    // Write state
     private var requestSalt: Data?
     private var writeNonce: ShadowsocksNonce
     private var writeSubkey: Data?
     private var handshakeSent = false
 
-    // Read state
     private var readNonce: ShadowsocksNonce
     private var readSubkey: Data?
     private var readBuffer = Data()
     private var responseHeaderParsed = false
-    private var pendingVarHeaderLen: Int? = nil    // set when fixed header parsed but variable header not yet available
-    private var pendingPayloadLength: Int? = nil   // set when length chunk decoded but payload not yet available
+    private var pendingVarHeaderLen: Int? = nil    // fixed header parsed, variable header not yet buffered
+    private var pendingPayloadLength: Int? = nil   // length chunk decoded (nonce consumed), payload not yet buffered
 
     private var addressHeader: Data?
 
@@ -194,7 +191,6 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
         }
     }
 
-    /// Encrypts data into standard AEAD chunks (for subsequent sends after handshake).
     private func sealChunks(plaintext: Data) throws -> Data {
         guard let subkey = writeSubkey else { throw ShadowsocksError.decryptionFailed }
         let maxPayload = ShadowsocksAEADWriter.maxPayloadSize
@@ -231,14 +227,14 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
 
         if let varLen = pendingVarHeaderLen {
             guard let parsed = try parseVariableHeader(varLen: varLen) else {
-                return Data() // still need more data
+                return Data()
             }
             output.append(parsed)
         }
 
         if !responseHeaderParsed {
             guard let parsed = try parseResponseHeader() else {
-                return Data() // need more data
+                return Data()
             }
             output.append(parsed)
         }
@@ -314,7 +310,7 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
         }
     }
 
-    /// Parses the variable-length response header chunk. Returns nil if not enough data yet.
+    /// Returns nil if the full chunk isn't buffered yet.
     private func parseVariableHeader(varLen: Int) throws -> Data? {
         let varChunkLen = varLen + tagSize
         guard readBuffer.count >= varChunkLen else {
@@ -339,7 +335,6 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
         return varData
     }
 
-    /// Decrypts standard AEAD chunks from the read buffer.
     private func decryptChunks() throws -> Data {
         guard let subkey = readSubkey else { return Data() }
         var output = Data()
@@ -369,7 +364,7 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
             let payloadNeeded = payloadLen + tagSize
             let remainingAfterLen = readBuffer.count - offset
             guard remainingAfterLen >= payloadNeeded else {
-                // Save state — length nonce already consumed, wait for payload data
+                // length nonce already consumed; resume at payload once buffered
                 pendingPayloadLength = payloadLen
                 break
             }
@@ -396,7 +391,6 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
 
 // MARK: - Shadowsocks2022UDPConnection (AES variant)
 
-/// Shadowsocks 2022 per-packet UDP encryption (AES variant).
 /// Packet: AES-ECB(sessionID(8) + packetID(8)) + AEAD(body), nonce = header[4:16].
 nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
@@ -408,12 +402,10 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
     private let dstHost: String
     private let dstPort: UInt16
 
-    // Session state
     private let sessionID: UInt64
     private var packetID: UInt64 = 0
     private let sessionCipher: Data  // AEAD key derived from sessionID
 
-    // Remote session tracking
     private var remoteSessionID: UInt64 = 0
     private var remoteSessionCipher: Data?
 
@@ -624,7 +616,6 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
 
 // MARK: - Shadowsocks2022ChaChaUDPConnection
 
-/// Shadowsocks 2022 per-packet UDP encryption (ChaCha20 variant).
 /// Packet: nonce(24) + XChaCha20-Poly1305(sessionID + packetID + type + timestamp + padding + address + payload).
 nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
@@ -632,7 +623,6 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     private let dstHost: String
     private let dstPort: UInt16
 
-    // Session state
     private let sessionID: UInt64
     private var packetID: UInt64 = 0
 
@@ -837,7 +827,7 @@ private func aesECBDecrypt(key: Data, block: Data) throws -> Data {
 
 // MARK: - XChaCha20-Poly1305
 
-/// XChaCha20-Poly1305 implementation using HChaCha20 + ChaChaPoly.
+/// Built from HChaCha20 + ChaChaPoly (no native XChaCha in CryptoKit).
 enum XChaCha20Poly1305 {
 
     static func seal(key: Data, nonce: Data, plaintext: Data) throws -> Data {
@@ -889,14 +879,12 @@ enum XChaCha20Poly1305 {
         state[2] = 0x79622d32
         state[3] = 0x6b206574
 
-        // Key (little-endian)
         key.withUnsafeBytes { ptr in
             for i in 0..<8 {
                 state[4 + i] = ptr.load(fromByteOffset: i * 4, as: UInt32.self).littleEndian
             }
         }
 
-        // Nonce (little-endian)
         nonce.withUnsafeBytes { ptr in
             for i in 0..<4 {
                 state[12 + i] = ptr.load(fromByteOffset: i * 4, as: UInt32.self).littleEndian

@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Wraps a `RawUDPSocket` as a pull-based `ProxyConnection`; the socket's
-/// push receive loop is armed lazily on the first `receiveRaw`.
+/// Adapts a push-based `RawUDPSocket` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
     private let socket: RawUDPSocket

@@ -7,9 +7,7 @@
 
 import Foundation
 
-/// Protocol-agnostic in-flight message the HTTP/1 and HTTP/2 rewriters parse into,
-/// scripts process, and the rewriters re-emit from. Only `body` is read back from a
-/// script; `method`, `url`, `status`, and `headers` are read-only there.
+/// Scripts may only write back `body`; all other fields are read-only to them.
 struct HTTPMessage {
     let phase: MITMPhase
     var method: String?

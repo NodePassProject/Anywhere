@@ -9,8 +9,7 @@ import Foundation
 
 // MARK: - MultiplexerPool
 
-/// Generic base for pooled-multiplexer managers keyed by `host:port:sni`.
-/// The pooled type conforms to ``Multiplexer`` (see Multiplexer.swift).
+/// Pooled-multiplexer managers keyed by `host:port:sni`.
 nonisolated class MultiplexerPool<S: Multiplexer> {
 
     /// Guards `multiplexers` and any subclass-owned auxiliary storage.

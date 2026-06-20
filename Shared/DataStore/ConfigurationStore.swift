@@ -25,7 +25,7 @@ class ConfigurationStore {
         Task { @MainActor in await self.loadInitial() }
     }
 
-    /// One-time initial load: decodes off the main actor, publishes the result, then coordinates.
+    /// One-time initial load; decodes off the main actor before publishing.
     private func loadInitial() async {
         let outcome = await Task.detached(priority: .userInitiated) {
             () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in

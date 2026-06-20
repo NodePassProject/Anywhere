@@ -34,7 +34,7 @@ final class AnyTLSPaddingScheme {
         self.scheme = scheme
     }
 
-    /// Verbatim copy of Go's `padding.DefaultPaddingScheme` so the server's `padding-md5` check passes.
+    /// Must match the server's default scheme byte-for-byte so the `padding-md5` check passes.
     static let `default`: AnyTLSPaddingScheme = {
         let raw = Data("""
         stop=8
@@ -55,7 +55,7 @@ final class AnyTLSPaddingScheme {
         )
     }()
 
-    /// Returns `nil` when `stop` is missing or non-numeric — matches Go's `NewPaddingFactory`.
+    /// Returns `nil` when `stop` is missing or non-numeric.
     static func parse(_ raw: Data) -> AnyTLSPaddingScheme? {
         let map = AnyTLSProtocol.decodeStringMap(raw)
         guard let stopString = map["stop"], let stop = UInt32(stopString) else {
@@ -96,7 +96,7 @@ final class AnyTLSPaddingScheme {
         return out
     }
 
-    /// CSPRNG draw in `[lo, hi)` — matches `crypto/rand.Int(reader, big.NewInt(hi-lo))` then `+lo`.
+    /// CSPRNG draw in the half-open interval `[lo, hi)`.
     private static func randomInRange(lo: Int, hi: Int) -> Int {
         let span = UInt64(hi - lo)
         guard span > 0 else { return lo }

@@ -72,7 +72,7 @@ class TVChainEditorViewController: UITableViewController {
         guard let section = Section(rawValue: section) else { return 0 }
         switch section {
         case .name: return 1
-        case .proxies: return selectedProxies.count + 1 // proxies + "Add Proxy" button
+        case .proxies: return selectedProxies.count + 1
         case .routePreview: return 1
         }
     }
@@ -124,7 +124,6 @@ class TVChainEditorViewController: UITableViewController {
                 content.secondaryText = "\(proxy.serverAddress):\(proxy.serverPort)"
                 content.secondaryTextProperties.color = .secondaryLabel
 
-                // Entry/Exit indicator
                 if index == 0 {
                     content.image = UIImage(systemName: "circle.fill")
                     content.imageProperties.tintColor = .systemBlue
@@ -138,7 +137,6 @@ class TVChainEditorViewController: UITableViewController {
 
                 cell.contentConfiguration = content
 
-                // Role label
                 let roleLabel = UILabel()
                 if index == 0 {
                     roleLabel.text = String(localized: "Entry")
@@ -150,7 +148,6 @@ class TVChainEditorViewController: UITableViewController {
                 roleLabel.sizeToFit()
                 cell.accessoryView = roleLabel
             } else {
-                // Add proxy button
                 var content = cell.defaultContentConfiguration()
                 content.text = String(localized: "Add Proxy")
                 content.image = UIImage(systemName: "plus")
@@ -210,7 +207,6 @@ class TVChainEditorViewController: UITableViewController {
 
         case .proxies:
             if indexPath.row >= selectedProxies.count {
-                // Add proxy
                 presentProxyPicker()
             }
 

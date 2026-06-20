@@ -29,8 +29,6 @@ class TVConfigPickerViewController: UITableViewController {
         dismiss(animated: true)
     }
 
-    /// Builds picker sections in the canonical order: standalone (no header),
-    /// chains (under "Chains"), then one section per non-empty subscription.
     private static func buildSections(viewModel: VPNViewModel) -> [(header: String?, items: [PickerItem])] {
         var sections: [(header: String?, items: [PickerItem])] = []
         let standalone = ConfigurationStore.shared.standalonePickerItems

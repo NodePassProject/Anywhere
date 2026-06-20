@@ -28,7 +28,7 @@ extension TLSClient {
         receiveTLS12HandshakeMessages(buffer: buffer, completion: completion)
     }
 
-    /// Receives TLS 1.2 handshake messages until ServerHelloDone (0x0E) is found.
+    /// Loops until ServerHelloDone (0x0E) is seen.
     private func receiveTLS12HandshakeMessages(
         buffer: Data,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
@@ -66,11 +66,11 @@ extension TLSClient {
         var certificateDERs: [Data] = []
         var serverKeyExchange: Data?
         var serverHelloDoneOffset: Int = 0
-        /// All handshake message bytes (for transcript)
+        /// Raw handshake message bytes fed into the transcript hash.
         var handshakeBytes: Data = Data()
     }
 
-    /// Parses TLS 1.2 handshake messages from the buffer; returns nil if ServerHelloDone not yet seen.
+    /// Returns nil if ServerHelloDone not yet seen.
     private func parseTLS12HandshakeMessages(buffer: Data) -> TLS12HandshakeMessages? {
         var result = TLS12HandshakeMessages()
         var offset = 0
@@ -360,7 +360,6 @@ extension TLSClient {
 
     // MARK: - TLS 1.2 Key Derivation & Finish
 
-    /// Completes the TLS 1.2 handshake: derives keys, sends CKE + CCS + Finished, receives server CCS + Finished.
     private func completeTLS12Handshake(
         preMasterSecret: Data,
         clientKeyExchangeBody: Data,
@@ -621,7 +620,6 @@ extension TLSClient {
         }
     }
 
-    /// Receives the server's ChangeCipherSpec and Finished messages.
     private func receiveTLS12ServerFinished(
         buffer: Data,
         keys: TLS12HandshakeKeys,
@@ -660,7 +658,7 @@ extension TLSClient {
         }
     }
 
-    /// Parses server CCS + encrypted Finished; returns remaining bytes on success or nil if incomplete.
+    /// Returns remaining post-handshake bytes on success, or nil if the record is incomplete.
     private func parseTLS12ServerCCSAndFinished(
         buffer: Data,
         keys: TLS12HandshakeKeys

@@ -7,13 +7,11 @@
 
 import Foundation
 
-/// Stable identity of where a connection was routed, shared by routing, accounting,
-/// stats, and the request log. The `.proxy` id is the app's authoritative configuration
-/// or chain id — never the dialing `ProxyConfiguration` id, which gets regenerated.
+/// `.proxy` id is the authoritative configuration/chain id — never the dialing
+/// `ProxyConfiguration` id, which gets regenerated.
 enum RouteTarget: Hashable, Sendable {
     case direct
     case reject
-    /// Proxied through the configuration or chain with this app id.
     case proxy(UUID)
 
     var configurationID: UUID? {
@@ -25,7 +23,6 @@ enum RouteTarget: Hashable, Sendable {
 // MARK: - Codable (compact string form)
 
 extension RouteTarget: Codable {
-    // Encoded as a single compact string — "direct", "reject", or "proxy:<uuid>".
     init(from decoder: any Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         switch raw {
@@ -48,7 +45,7 @@ extension RouteTarget: Codable {
         try container.encode(storageKey)
     }
 
-    /// Stable string form; also the `Codable` representation.
+    /// Also used as the `Codable` representation.
     var storageKey: String {
         switch self {
         case .direct: return "direct"

@@ -24,12 +24,9 @@ fileprivate struct CameraProperties {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized: return Permission.approved
         case .notDetermined:
-            /// Requesting Camera Access
             if await AVCaptureDevice.requestAccess(for: .video) {
-                /// Permission Granted
                 return Permission.approved
             } else {
-                /// Permission Denied
                 return Permission.denied
             }
         case .denied, .restricted: return Permission.denied
@@ -49,7 +46,6 @@ extension View {
 fileprivate struct QRScannerViewModifier: ViewModifier {
     @Binding var isScanning: Bool
     var onScan: (String) -> Void
-    /// Modifier Properties
     @State private var showFullScreenCover: Bool = false
     func body(content: Content) -> some View {
         content
@@ -83,7 +79,6 @@ fileprivate struct QRScannerViewModifier: ViewModifier {
 fileprivate struct DIQRScannerView: View {
     var onClose: () -> ()
     var onScan: (String) -> Void
-    /// View Properties
     @State private var isInitialized: Bool = false
     @State private var showContent: Bool = false
     @State private var isExpanding: Bool = false
@@ -93,8 +88,7 @@ fileprivate struct DIQRScannerView: View {
         GeometryReader {
             let size = $0.size
             let safeArea = $0.safeAreaInsets
-            
-            /// Dynamic Island
+
             let haveDynamicIsland: Bool = safeArea.top >= 59
             let dynamicIslandWidth: CGFloat = 120
             let dynamicIslandHeight: CGFloat = 36
@@ -112,8 +106,7 @@ fileprivate struct DIQRScannerView: View {
                     .onTapGesture {
                         toggle(false)
                     }
-                
-                /// Scanner Animated View
+
                 if showContent {
                     RoundedRectangle(cornerRadius: 40)
                         .fill(.black)
@@ -124,7 +117,6 @@ fileprivate struct DIQRScannerView: View {
                                 ScannerView(cameraSize)
                             }
                             .overlay(alignment: .bottom) {
-                                /// Your Custom Text
                                 Text("Scan your QR code")
                                     .font(.caption2)
                                     .foregroundStyle(.white.secondary)
@@ -180,14 +172,12 @@ fileprivate struct DIQRScannerView: View {
         }
         .statusBarHidden()
     }
-    
-    /// Scanner View
+
     @ViewBuilder
     private func ScannerView(_ size: CGSize) -> some View {
         let shape = RoundedRectangle(cornerRadius: 40, style: .continuous)
         
         ZStack {
-            /// Camera AVSessionLayer View!
             if let permissionState = camera.permissionState {
                 if permissionState == .approved {
                     CameraLayerView(size: size, camera: $camera)
@@ -200,11 +190,9 @@ fileprivate struct DIQRScannerView: View {
         .frame(width: size.width, height: size.height)
         .clipShape(shape)
     }
-    
-    /// Permission Denied View
+
     @ViewBuilder
     private func PermissionDeniedView() -> some View {
-        /// Showing Info with Setting url to change the camera settings!
         VStack(spacing: 4) {
             Image(systemName: "camera.viewfinder")
                 .font(.system(size: 45))
@@ -236,7 +224,6 @@ fileprivate struct DIQRScannerView: View {
         }
         
         if !status {
-            /// Stopping session safely
             DispatchQueue.global(qos: .background).async {
                 camera.session.stopRunning()
             }
@@ -314,36 +301,25 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                 let output = parent.camera.output
                 
                 guard !session.isRunning else { return }
-                /// Use a virtual multi-camera device (triple → dual → wide fallback).
-                /// Virtual devices auto-switch to the ultra-wide for macro when close,
-                /// and zoom factor 2x gives a telephoto framing at normal distance.
+                /// Virtual multi-camera device auto-switches to ultra-wide for macro when close.
                 let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera], mediaType: .video, position: .back)
                 guard let device = discovery.devices.first else {
                     return
                 }
 
-                /// Camera Input
                 let input = try AVCaptureDeviceInput(device: device)
-                /// Checking whether input & output can be added to the session
                 guard session.canAddInput(input), session.canAddOutput(output) else {
                     return
                 }
 
-                /// Adding input & output to camera session
                 session.beginConfiguration()
                 session.addInput(input)
                 session.addOutput(output)
-                /// Setting output configuration to read QR codes
                 output.metadataObjectTypes = [.qr]
-                /// Adding delegate to retrieve the scanned QR code
                 output.setMetadataObjectsDelegate(self, queue: .main)
                 session.commitConfiguration()
 
-                /// Set zoom to the telephoto switch-over point so the actual
-                /// telephoto lens is engaged. Must be set AFTER session
-                /// configuration, otherwise commitConfiguration resets it.
-                /// The virtual device still auto-switches to ultra-wide
-                /// for macro when close.
+                /// Set zoom AFTER configuration, otherwise commitConfiguration resets it; engages the telephoto lens.
                 try device.lockForConfiguration()
                 let switchOverFactors = device.virtualDeviceSwitchOverVideoZoomFactors
                 if let telephotoZoom = switchOverFactors.last?.doubleValue {
@@ -352,8 +328,7 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                     device.videoZoomFactor = min(2.0, device.activeFormat.videoMaxZoomFactor)
                 }
                 device.unlockForConfiguration()
-                /// Starting Session
-                /// NOTE: Session must be started in background thread
+                /// Session must be started on a background thread.
                 DispatchQueue.global(qos: .background).async {
                     session.startRunning()
                 }
@@ -363,9 +338,7 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
         }
         
         func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-            /// FETCH QR CODE
             if let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject, let code = object.stringValue {
-                /// One Time Update
                 guard parent.camera.scannedCode == nil else { return }
                 parent.camera.scannedCode = code
                 AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))

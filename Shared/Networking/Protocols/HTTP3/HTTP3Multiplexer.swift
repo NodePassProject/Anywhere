@@ -11,17 +11,15 @@ nonisolated private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
 
 // MARK: - HTTP3StreamHandler
 
-/// Per-stream handler to which the multiplexer demuxes QUIC stream data and
-/// connection-level errors.
 protocol HTTP3StreamHandler: AnyObject {
     // Requirements are nonisolated: handlers run on the QUICConnection's serial
     // queue, never the main actor (the project default isolation).
 
-    /// The assigned QUIC stream ID, or nil before one has been opened.
+    /// nil before a stream has been opened.
     nonisolated var quicStreamID: Int64? { get }
-    /// Delivers raw QUIC stream payload (HTTP/3 frames). Called on the multiplexer queue.
+    /// Delivers raw HTTP/3 frame payload. Called on the multiplexer queue.
     nonisolated func handleStreamData(_ data: Data, fin: Bool)
-    /// Signals that the multiplexer failed or closed. Called on the multiplexer queue.
+    /// Called on the multiplexer queue.
     nonisolated func handleSessionError(_ error: Error)
 }
 
@@ -301,7 +299,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     private func processServerControlFrames() {
         while !serverControlBuffer.isEmpty {
             guard let (frame, consumed) = HTTP3Framer.parseFrame(from: serverControlBuffer) else {
-                break // Incomplete frame
+                break
             }
             serverControlBuffer = Data(serverControlBuffer.dropFirst(consumed))
 

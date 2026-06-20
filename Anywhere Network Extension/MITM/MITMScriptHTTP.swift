@@ -7,9 +7,9 @@
 
 import Foundation
 
-/// Outbound HTTP for the Anywhere.http script API. Requests go out as the NE's own URLSession
-/// traffic, which the kernel keeps out of the managed tunnel. Each call gets its own ephemeral
-/// session for independent redirect/TLS policy and no shared cookie jar.
+/// Requests go out as the NE's own URLSession traffic, which the kernel keeps out of the managed
+/// tunnel. Each call gets its own ephemeral session for independent redirect/TLS policy and no
+/// shared cookie jar.
 final class MITMScriptHTTPClient {
     static let shared = MITMScriptHTTPClient()
     private init() {}
