@@ -560,10 +560,4 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         return ips.isEmpty ? nil : ips
     }
-
-    // MARK: - Configuration Parsing
-
-    static func parseConfiguration(from configurationDict: [String: Any]) -> ProxyConfiguration? {
-        ProxyConfiguration.parse(from: configurationDict)
-    }
 }

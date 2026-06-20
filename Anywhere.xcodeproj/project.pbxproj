@@ -167,7 +167,6 @@
 				Networking/Protocols/Core/MultiplexerPool.swift,
 				Networking/Protocols/Core/ProxyClient.swift,
 				Networking/Protocols/Core/ProxyConfiguration.swift,
-				"Networking/Protocols/Core/ProxyConfiguration+DictParsing.swift",
 				"Networking/Protocols/Core/ProxyConfiguration+URLExport.swift",
 				"Networking/Protocols/Core/ProxyConfiguration+URLParsing.swift",
 				Networking/Protocols/Core/ProxyConnection.swift,

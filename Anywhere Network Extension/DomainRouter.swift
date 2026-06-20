@@ -343,11 +343,9 @@ class DomainRouter {
     // MARK: - Streaming ingestion
     
     fileprivate func ingestConfigurations(_ slice: Data) {
-        guard let configurations = try? JSONSerialization.jsonObject(with: slice) as? [String: Any] else { return }
-        for (key, value) in configurations {
-            guard let configurationId = UUID(uuidString: key),
-                  let configurationDict = value as? [String: Any],
-                  let configuration = ProxyConfiguration.parse(from: configurationDict) else { continue }
+        guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else { return }
+        for (key, configuration) in configurations {
+            guard let configurationId = UUID(uuidString: key) else { continue }
             configurationMap[configurationId] = configuration
         }
     }

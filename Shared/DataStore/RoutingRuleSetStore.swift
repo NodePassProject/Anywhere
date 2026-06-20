@@ -309,7 +309,7 @@ class RoutingRuleSetStore {
 
         await Task.detached {
             var entries: [RoutingBinaryWriter.Entry] = []
-            var configurationsDict: [String: Any] = [:]
+            var configurationsById: [String: ProxyConfiguration] = [:]
 
             for ruleSet in snapshot {
                 guard let assignedId = ruleSet.assignedConfigurationId else { continue }
@@ -333,11 +333,9 @@ class RoutingRuleSetStore {
                 } else if let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
                     action = .proxy
                     configId = id
-                    var serialized = configuration.serializedConfiguration
-                    if let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress) {
-                        serialized["resolvedIP"] = resolvedIP
-                    }
-                    configurationsDict[assignedId] = serialized
+                    configurationsById[assignedId] = configuration.withResolvedIP(
+                        VPNViewModel.resolveServerAddress(configuration.serverAddress)
+                    )
                 } else {
                     continue
                 }
@@ -355,8 +353,9 @@ class RoutingRuleSetStore {
                 }
             }
             
-            let configurationData = (try? JSONSerialization.data(withJSONObject: configurationsDict, options: .sortedKeys))
-                ?? Data([0x7B, 0x7D])  // "{}"
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            let configurationData = (try? encoder.encode(configurationsById)) ?? Data([0x7B, 0x7D])  // "{}"
             let data = RoutingBinaryWriter.encode(configurationData: configurationData, entries: entries)
 
             if data != AWCore.getRoutingData() {

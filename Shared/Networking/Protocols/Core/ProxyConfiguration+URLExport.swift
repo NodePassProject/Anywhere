@@ -300,8 +300,9 @@ extension ProxyConfiguration {
             if xhttp.mode != .auto {
                 params.append("mode=\(xhttp.mode.rawValue)")
             }
-            // Only the up/download detach blob round-trips; other advanced XHTTP fields are intentionally not exported.
-            if let ds = xhttp.downloadSettings, let extra = ds.urlExtraParam {
+            // All non-default advanced fields and the up/download detach blob travel as the
+            // `extra` JSON the importer reads back; host/path/mode stay as their own params.
+            if let extra = xhttp.urlExtraParam {
                 params.append("extra=\(extra)")
             }
         case .tcp:

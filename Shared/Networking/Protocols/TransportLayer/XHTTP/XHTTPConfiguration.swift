@@ -616,10 +616,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 // MARK: - Editor Export
 
 extension XHTTPConfiguration {
-
-    /// Encodes the non-default "extra" fields back to the JSON string the proxy editor's
-    /// advanced-settings field displays. Empty when every field is at its default.
-    var encodedExtra: String {
+    var advancedExtraJSON: [String: Any] {
         var dictionary: [String: Any] = [:]
 
         if !headers.isEmpty { dictionary["headers"] = headers }
@@ -639,6 +636,10 @@ extension XHTTPConfiguration {
         if !sessionKey.isEmpty { dictionary["sessionKey"] = sessionKey }
         if seqPlacement != .path { dictionary["seqPlacement"] = seqPlacement.rawValue }
         if !seqKey.isEmpty { dictionary["seqKey"] = seqKey }
+        if !sessionIDTable.isEmpty { dictionary["sessionIDTable"] = sessionIDTable }
+        if sessionIDLengthFrom != 0 || sessionIDLengthTo != 0 {
+            dictionary["sessionIDLength"] = ["from": sessionIDLengthFrom, "to": sessionIDLengthTo]
+        }
         if uplinkDataPlacement != .body { dictionary["uplinkDataPlacement"] = uplinkDataPlacement.rawValue }
         let defaultDataKey: String
         let defaultChunkSize: Int
@@ -651,6 +652,11 @@ extension XHTTPConfiguration {
         if uplinkChunkSize != defaultChunkSize { dictionary["uplinkChunkSize"] = uplinkChunkSize }
         if let xmux, xmux.isEnabled { dictionary["xmux"] = xmux.jsonObject }
 
+        return dictionary
+    }
+    
+    var encodedExtra: String {
+        let dictionary = advancedExtraJSON
         guard !dictionary.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys, .prettyPrinted]),
               let string = String(data: data, encoding: .utf8) else {
@@ -707,12 +713,27 @@ extension XHTTPConfiguration {
         if noGRPCHeader { j["noGRPCHeader"] = true }
         return j
     }
+
+    /// The URL-encoded `extra` query value for a `vless://` link: every non-default advanced
+    /// field plus the up/download detach blob, in the JSON shape `parse(from:)` reads back.
+    var urlExtraParam: String? {
+        var extra = advancedExtraJSON
+        if let downloadSettings { extra["downloadSettings"] = downloadSettings.urlDownloadJSON }
+        guard !extra.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        // Escape only the characters that would break query-param splitting (& = + #).
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+#")
+        return json.addingPercentEncoding(withAllowedCharacters: allowed) ?? json
+    }
 }
 
 extension XHTTPDownloadSettings {
-    /// The URL-encoded `extra` query value carrying the up/download detach settings,
-    /// or nil when it can't be serialized.
-    var urlExtraParam: String? {
+    /// The `downloadSettings` object embedded in a `vless://` URL's `extra` blob. The download
+    /// leg carries only its server identity; its advanced fields are inherited from the parent
+    /// `extra` on import (the legs must share session/seq/padding placement to correlate).
+    var urlDownloadJSON: [String: Any] {
         var dl: [String: Any] = [
             "address": serverAddress,
             "port": Int(serverPort),
@@ -735,14 +756,7 @@ extension XHTTPDownloadSettings {
             ]
         }
         dl["xhttpSettings"] = xhttp.urlSettingsJSON
-
-        let extra: [String: Any] = ["downloadSettings": dl]
-        guard let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
-        // Escape only the characters that would break query-param splitting (& = + #).
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&=+#")
-        return json.addingPercentEncoding(withAllowedCharacters: allowed) ?? json
+        return dl
     }
 }
 

@@ -306,6 +306,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         )
     }
 
+    func withResolvedIP(_ resolvedIP: String?) -> ProxyConfiguration {
+        ProxyConfiguration(
+            id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
+            resolvedIP: resolvedIP, subscriptionId: subscriptionId,
+            outbound: outbound, chain: chain
+        )
+    }
+
     /// Compares content ignoring `id`, `resolvedIP`, and `subscriptionId`,
     /// to detect unchanged configs during subscription updates.
     func contentEquals(_ other: ProxyConfiguration) -> Bool {
