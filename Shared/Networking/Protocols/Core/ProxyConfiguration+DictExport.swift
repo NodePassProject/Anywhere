@@ -11,10 +11,8 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    /// Serializes the configuration into the `[String: Any]` shape the Network Extension's
-    /// routing layer expects, with nested `chain` hops serialized recursively.
-    ///
-    /// Inverse of `ProxyConfiguration.parse(from:)`.
+    /// Serializes into the `[String: Any]` shape the Network Extension's routing layer expects;
+    /// nested `chain` hops recurse. Inverse of `ProxyConfiguration.parse(from:)`.
     var serializedConfiguration: [String: Any] {
         let vlessUUID: UUID
         let vlessEncryption: String

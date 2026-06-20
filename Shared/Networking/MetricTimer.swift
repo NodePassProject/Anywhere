@@ -7,9 +7,7 @@
 
 import Foundation
 
-/// Stopwatch for connection-establishment latencies; records to
-/// `ConnectionMetrics` on `stop()`. Each owner keeps its own instance and
-/// drives it from a single queue.
+/// Not thread-safe; each owner drives its own instance from a single queue.
 nonisolated struct MetricTimer {
     let metric: ConnectionMetrics.Metric
     /// When `false`, ``stop()`` skips recording — e.g. direct/bypass dials.
@@ -25,13 +23,12 @@ nonisolated struct MetricTimer {
         startedAt = ContinuousClock().now
     }
 
-    /// Records the elapsed span to ``ConnectionMetrics``. No-op if disabled or never started.
     func stop() {
         guard enabled, let startedAt else { return }
         ConnectionMetrics.shared.record(metric, ContinuousClock().now - startedAt)
     }
 
-    /// Wraps a completion to record elapsed time on `.success` before forwarding.
+    /// Records elapsed time only on `.success` before forwarding the result.
     static func timing<Value, Failure: Error>(
         _ metric: ConnectionMetrics.Metric,
         _ completion: @escaping (Result<Value, Failure>) -> Void

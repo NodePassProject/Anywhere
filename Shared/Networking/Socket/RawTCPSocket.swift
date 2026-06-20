@@ -12,7 +12,6 @@ nonisolated private let logger = AnywhereLogger(category: "RawTCPSocket")
 
 // MARK: - RawTransport
 
-/// Raw I/O transport abstraction used by TLS/Reality handshakes and proxy chaining.
 protocol RawTransport: AnyObject {
     var isTransportReady: Bool { get }
 
@@ -70,10 +69,8 @@ enum SocketError: Error, LocalizedError {
 
 // MARK: - IPEndpoint
 
-/// A numeric IPv4/IPv6 address + port packed into a `sockaddr_storage` for
-/// `connect(2)`/`sendto(2)`.
 struct IPEndpoint {
-    /// Socket family — `AF_INET` or `AF_INET6`.
+    /// `AF_INET` or `AF_INET6`.
     let family: Int32
 
     let length: socklen_t
@@ -433,7 +430,7 @@ nonisolated class RawTCPSocket: RawTransport {
         }
 
         if rc == 0 {
-            // Unusual but legal on loopback: connect completes synchronously.
+            // Connect completed synchronously (legal, e.g. loopback).
             handleConnectReady()
             return
         }

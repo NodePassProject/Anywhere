@@ -10,8 +10,7 @@ import Darwin
 
 // MARK: - FDReliefPriority
 
-/// Priority tier for FD relief, keyed to failure visibility rather than wire
-/// protocol (QUIC is `.userVisible` despite being UDP).
+/// Keyed to failure visibility, not wire protocol: QUIC is `.userVisible` despite being UDP.
 nonisolated enum FDReliefPriority {
     /// Failure is user-visible (TCP, or QUIC carrying proxied traffic).
     case userVisible
@@ -21,10 +20,8 @@ nonisolated enum FDReliefPriority {
 
 // MARK: - FDPressureRelief
 
-/// Process-wide hook invoked when `socket(2)` fails with `EMFILE`/`ENFILE`;
-/// the handler evicts idle UDP flows and returns whether any FDs were freed.
-/// The handler's `udpQueue.sync` hop is deadlock-safe: udpQueue never
-/// sync-waits back on the caller's I/O queues.
+/// Handler's `udpQueue.sync` hop is deadlock-safe: udpQueue never sync-waits back
+/// on the caller's I/O queues.
 enum FDPressureRelief {
 
     /// Must only be accessed under `handlerLock`.
@@ -37,8 +34,7 @@ enum FDPressureRelief {
         set { handlerLock.withLock { _handler = newValue } }
     }
 
-    /// Invokes ``handler`` if set; returns whether any FDs were freed. The
-    /// handler is snapshotted, then invoked outside the lock so a long relief
+    /// Handler is snapshotted, then invoked outside the lock so a long relief
     /// doesn't block other lock users.
     @inline(__always)
     static func relieve(for priority: FDReliefPriority) -> Bool {
@@ -46,7 +42,7 @@ enum FDPressureRelief {
         return snapshot?(priority) ?? false
     }
 
-    /// True when `errno` indicates per-process or system-wide FD exhaustion.
+    /// EMFILE = per-process limit, ENFILE = system-wide limit.
     @inline(__always)
     static func isFDExhaustion(_ err: Int32) -> Bool {
         err == EMFILE || err == ENFILE

@@ -317,7 +317,6 @@ enum MITMJSONPatch {
         }
     }
 
-    /// Removes every `key` member at any depth.
     static func deleteKeyRecursive(_ node: Any?, key: String, depth: Int = 0) {
         guard depth < maxRecursionDepth else { return }
         if let dictionary = node as? NSMutableDictionary {

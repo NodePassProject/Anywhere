@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - ChunkedTransferDecoder
 
-/// Stateful chunked transfer encoding decoder (HTTP/1.1 RFC 7230 §4.1). Handles partial reads.
+/// Chunked transfer decoder (RFC 7230 §4.1); tolerates partial reads across `feed` calls.
 struct ChunkedTransferDecoder {
     private var buffer = Data()
     private var _isFinished = false
@@ -43,8 +43,8 @@ struct ChunkedTransferDecoder {
 
         if chunkSize == 0 {
             _isFinished = true
-            // Consume "0\r\n\r\n" (the trailing CRLF after the zero chunk)
             let termEnd = crlfRange.upperBound
+            // +2 skips the trailing CRLF after the zero chunk
             if buffer.endIndex >= termEnd + 2 {
                 buffer.removeFirst(termEnd + 2 - buffer.startIndex)
             }
@@ -60,7 +60,6 @@ struct ChunkedTransferDecoder {
 
         let chunkData = buffer.subdata(in: dataStart..<dataStart + Int(chunkSize))
 
-        // Consume the chunk from the buffer (size line + \r\n + data + \r\n)
         buffer.removeFirst(needed - buffer.startIndex)
         if buffer.isEmpty { buffer = Data() } else { buffer = Data(buffer) }
 
@@ -70,21 +69,21 @@ struct ChunkedTransferDecoder {
 
 // MARK: - ChunkedTransferEncoder
 
-/// Chunked transfer encoding encoder (HTTP/1.1 RFC 7230 §4.1).
+/// Chunked transfer encoder (RFC 7230 §4.1).
 enum ChunkedTransferEncoder {
     /// Encodes data as a single chunked-encoded chunk: `{hex-size}\r\n{data}\r\n`.
     static func encode(_ data: Data) -> Data {
         let sizeStr = String(data.count, radix: 16)
         var encoded = Data()
         encoded.append(contentsOf: sizeStr.utf8)
-        encoded.append(contentsOf: [0x0D, 0x0A]) // \r\n
+        encoded.append(contentsOf: [0x0D, 0x0A])
         encoded.append(data)
-        encoded.append(contentsOf: [0x0D, 0x0A]) // \r\n
+        encoded.append(contentsOf: [0x0D, 0x0A])
         return encoded
     }
 
     /// Encodes the terminal zero-length chunk: `0\r\n\r\n`.
     static func encodeTerminator() -> Data {
-        return Data([0x30, 0x0D, 0x0A, 0x0D, 0x0A]) // "0\r\n\r\n"
+        return Data([0x30, 0x0D, 0x0A, 0x0D, 0x0A])
     }
 }

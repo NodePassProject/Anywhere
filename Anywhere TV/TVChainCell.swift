@@ -7,26 +7,21 @@
 
 import UIKit
 
-/// Reusable table view cell for displaying a proxy chain on tvOS.
 /// Pre-creates all subviews once; `configure(…)` updates text/visibility without rebuilding the hierarchy.
 class TVChainCell: UITableViewCell {
 
     static let reuseIdentifier = "TVChainCell"
 
-    // Name row
     private let nameLabel = UILabel()
     private let checkmarkView = UIImageView()
 
-    // Route preview row (proxy1 → proxy2 → proxy3) — pre-allocated for up to maxProxies
     private let routeRow = UIStackView()
     private var routeLabels: [UILabel] = []
     private var routeArrows: [UIImageView] = []
     private static let maxProxies = 8
 
-    // Info row
     private let infoLabel = UILabel()
 
-    // Error row
     private let errorLabel = UILabel()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -52,7 +47,6 @@ class TVChainCell: UITableViewCell {
             vStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
         ])
 
-        // Name row
         let nameRow = UIStackView()
         nameRow.axis = .horizontal
         nameRow.spacing = 12
@@ -71,7 +65,6 @@ class TVChainCell: UITableViewCell {
 
         vStack.addArrangedSubview(nameRow)
 
-        // Route preview row — pre-allocate labels and arrows
         routeRow.axis = .horizontal
         routeRow.spacing = 6
         routeRow.alignment = .center
@@ -97,13 +90,11 @@ class TVChainCell: UITableViewCell {
 
         vStack.addArrangedSubview(routeRow)
 
-        // Info row
         infoLabel.font = .systemFont(ofSize: 20, weight: .regular)
         infoLabel.textColor = .tertiaryLabel
         infoLabel.lineBreakMode = .byTruncatingTail
         vStack.addArrangedSubview(infoLabel)
 
-        // Error row
         errorLabel.font = .systemFont(ofSize: 22, weight: .regular)
         errorLabel.textColor = .systemRed
         vStack.addArrangedSubview(errorLabel)
@@ -121,7 +112,6 @@ class TVChainCell: UITableViewCell {
             errorLabel.isHidden = true
             contentView.alpha = 1.0
 
-            // Update route labels/arrows visibility
             let proxyNames = item.proxyNames
             for (index, label) in routeLabels.enumerated() {
                 if index < proxyNames.count {
@@ -130,7 +120,7 @@ class TVChainCell: UITableViewCell {
                 } else {
                     label.isHidden = true
                 }
-                // Arrow before this label (arrows array is offset by 1)
+                // routeArrows is offset by 1: arrow[i-1] precedes label[i]
                 if index > 0 {
                     routeArrows[index - 1].isHidden = index >= proxyNames.count
                 }

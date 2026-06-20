@@ -179,7 +179,7 @@ struct TLSClientHelloBuilder {
         return ext(0x0033, payload)
     }
 
-    /// 0x3374 (13172) — Next Protocol Negotiation (legacy, for 360 Browser).
+    /// 0x3374 (13172) — Next Protocol Negotiation (legacy).
     private static func npnExt() -> Data { ext(0x3374) }
 
     /// 0x4469 (17513) — Application settings (ALPS, old codepoint).
@@ -210,7 +210,7 @@ struct TLSClientHelloBuilder {
         return ext(0x44CD, payload)
     }
 
-    /// 0x754F (30031) — Fake Channel ID (old extension ID, for 360 Browser).
+    /// 0x754F (30031) — Fake Channel ID (old extension ID).
     private static func fakeChannelIDOldExt() -> Data { ext(0x754F) }
 
     /// 0xFE0D — GREASE Encrypted Client Hello.
@@ -507,7 +507,7 @@ struct TLSClientHelloBuilder {
             pskKeyExchangeModesExt(),
             supportedVersionsExt([gVersion, 0x0304, 0x0303]),
             compressCertExt([0x0002]),                        // Brotli
-            applicationSettingsNewExt(["h2"]),                // New ALPS codepoint
+            applicationSettingsNewExt(["h2"]),
             boringGREASEECH(random: random),
             greaseExt(gExt2),
         ]
@@ -630,7 +630,7 @@ struct TLSClientHelloBuilder {
             pskKeyExchangeModesExt(),
             supportedVersionsExt([gVersion, 0x0304, 0x0303]),
             compressCertExt([0x0002]),                        // Brotli
-            applicationSettingsExt(["h2"]),                   // ALPS (original codepoint)
+            applicationSettingsExt(["h2"]),
             greaseExt(gExt2),
         ]
 
@@ -969,7 +969,7 @@ struct TLSClientHelloBuilder {
             pskKeyExchangeModesExt(),
             supportedVersionsExt([gVersion, 0x0304, 0x0303, 0x0302, 0x0301]),
             compressCertExt([0x0002]),                        // Brotli
-            applicationSettingsExt(["h2"]),                   // Old ALPS codepoint
+            applicationSettingsExt(["h2"]),
             greaseExt(gExt2),
         ]
 
@@ -1015,9 +1015,9 @@ struct TLSClientHelloBuilder {
             supportedGroupsExt([0x0017, 0x0018, 0x0019]),    // P256, P384, P521
             ecPointFormatsExt(),
             sessionTicketExt(),
-            npnExt(),                                          // Next Protocol Negotiation (legacy)
+            npnExt(),
             alpnExt(protocols),
-            fakeChannelIDOldExt(),                             // Channel ID (old extension ID)
+            fakeChannelIDOldExt(),
             statusRequestExt(),
             signatureAlgorithmsExt([
                 0x0401, 0x0501, 0x0201,                       // PKCS1 SHA256/384/SHA1
@@ -1035,22 +1035,17 @@ struct TLSClientHelloBuilder {
 
     // MARK: - Encrypted Client Hello (real ECH)
 
-    /// The signature algorithms offered in the inner/outer ECH ClientHellos.
     private static let echSignatureAlgorithms: [UInt16] = [
         0x0403, 0x0804, 0x0401,  // ECDSA-P256-SHA256, PSS-SHA256, PKCS1-SHA256
         0x0503, 0x0805, 0x0501,  // ECDSA-P384-SHA384, PSS-SHA384, PKCS1-SHA384
         0x0806, 0x0601,          // PSS-SHA512, PKCS1-SHA512
     ]
 
-    /// Build a ClientHelloInner handshake message.
-    ///
-    /// This is a clean TLS 1.3-only hello carrying the *real* SNI and the ECH
-    /// "inner" marker (extension 0xFE0D = [0x01]). It becomes the negotiated
-    /// ClientHello if the server accepts ECH. The TLS 1.2-only extensions
-    /// (ec_point_formats, session_ticket, renegotiation_info,
-    /// extended_master_secret) are intentionally omitted, since the inner
-    /// negotiates TLS 1.3 only. `sessionId` is empty for the encoded (encrypted)
-    /// form and the outer's session_id for the transcript form.
+    /// TLS 1.3-only inner hello carrying the real SNI and the ECH inner marker
+    /// (extension 0xFE0D = [0x01]). TLS 1.2-only extensions (ec_point_formats,
+    /// session_ticket, renegotiation_info, extended_master_secret) are omitted.
+    /// `sessionId` is empty for the encoded (encrypted) form, the outer's
+    /// session_id for the transcript form.
     private static func buildECHInnerHello(
         random: Data, sessionId: Data, serverName: String, publicKey: Data, alpn: [String]?
     ) -> Data {
@@ -1076,11 +1071,10 @@ struct TLSClientHelloBuilder {
         )
     }
 
-    /// Build a ClientHelloOuter handshake message: a Chrome-120-style camouflage
-    /// hello with the cover `publicName` as SNI and a *real* outer
-    /// encrypted_client_hello extension carrying the sealed inner. The X25519
-    /// key share matches the inner's, so the ECDHE result is identical whether
-    /// or not the server accepts ECH.
+    /// Chrome-120-style camouflage outer hello: cover `publicName` as SNI plus a
+    /// real outer encrypted_client_hello carrying the sealed inner. Its X25519
+    /// key share matches the inner's, so the ECDHE result is identical whether or
+    /// not the server accepts ECH.
     private static func buildECHOuterHello(
         random: Data, sessionId: Data, publicName: String, publicKey: Data, alpn: [String]?, echExtData: Data
     ) -> Data {
@@ -1141,17 +1135,15 @@ struct TLSClientHelloBuilder {
         )
     }
 
-    /// Assemble a complete ECH ClientHelloOuter and the matching inner-hello
-    /// state, performing the HPKE seal. Returns the outer handshake message to
-    /// put on the wire and an `ECHClientContext` carrying the inner transcript
-    /// material the handshake needs to detect acceptance.
+    /// Assemble the ECH ClientHelloOuter and matching inner state, performing the
+    /// HPKE seal. Returns the outer wire message and an `ECHClientContext` with
+    /// the inner transcript material needed to detect acceptance.
     ///
-    /// The two-pass assembly implements the chicken-and-egg of the seal's AAD:
-    /// the AAD is the serialized ClientHelloOuter with a zero-filled payload of
-    /// the eventual ciphertext length, so we build the outer once with zeros,
-    /// seal against it, then rebuild with the real ciphertext (same length, so
-    /// every other byte is identical — which is exactly what the server zeroes
-    /// and re-derives).
+    /// Two-pass to resolve the seal's AAD chicken-and-egg: the AAD is the
+    /// serialized outer with a zero-filled payload of the eventual ciphertext
+    /// length, so we build the outer with zeros, seal against it, then rebuild
+    /// with the real ciphertext (same length → identical layout, which the
+    /// server zeroes and re-derives).
     static func buildECHClientHello(
         outerRandom: Data,
         innerRandom: Data,
@@ -1207,7 +1199,6 @@ struct TLSClientHelloBuilder {
 
     // MARK: - QUIC ClientHello
 
-    /// The signature algorithms offered in the QUIC ClientHello.
     static let quicSignatureAlgorithms: [UInt16] = [
         TLSSignatureScheme.ecdsa_secp256r1_sha256,
         TLSSignatureScheme.rsa_pss_rsae_sha256,

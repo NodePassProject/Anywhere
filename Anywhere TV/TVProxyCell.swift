@@ -7,20 +7,16 @@
 
 import UIKit
 
-/// Reusable table view cell for displaying a proxy configuration on tvOS.
-/// Pre-creates all subviews once; `configure(…)` updates text/visibility without rebuilding the hierarchy.
 class TVProxyCell: UITableViewCell {
 
     static let reuseIdentifier = "TVProxyCell"
 
-    // Name row
     private let nameLabel = UILabel()
     private let checkmarkView = UIImageView()
 
-    // Tags row (up to 4 tags: protocol, transport, security, vision)
+    // Tags: protocol, transport, security, vision
     private let tagsRow = UIStackView()
 
-    // Pre-allocated tag containers (reused each configure call)
     private var tagContainers: [(container: UIView, label: UILabel)] = []
     private static let maxTags = 4
 
@@ -47,7 +43,6 @@ class TVProxyCell: UITableViewCell {
             vStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
         ])
 
-        // Name row
         let nameRow = UIStackView()
         nameRow.axis = .horizontal
         nameRow.spacing = 12
@@ -66,7 +61,6 @@ class TVProxyCell: UITableViewCell {
 
         vStack.addArrangedSubview(nameRow)
 
-        // Tags row
         tagsRow.axis = .horizontal
         tagsRow.spacing = 8
         tagsRow.alignment = .center

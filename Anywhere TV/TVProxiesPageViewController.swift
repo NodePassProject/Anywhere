@@ -7,9 +7,6 @@
 
 import UIKit
 
-/// Hosts the proxy and chain lists behind a Proxies/Chains segmented control.
-/// The children own their data sources and bar buttons; this container swaps
-/// them in and out and surfaces the active child's bar buttons.
 class TVProxiesPageViewController: UIViewController {
 
     private let segmentedControl = UISegmentedControl(items: [

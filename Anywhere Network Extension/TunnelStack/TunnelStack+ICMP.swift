@@ -14,9 +14,8 @@ extension TunnelStack {
     // Sent for UDP to a stale fake IP (e.g. from a previous VPN session) so
     // QUIC/UDP clients abandon it and re-resolve DNS instead of retrying forever.
 
-    /// Crafts and queues an ICMP Port Unreachable response. `srcIP`/`dstIP` are
-    /// the original datagram's raw source/destination bytes; the builders swap
-    /// them into the response.
+    /// `srcIP`/`dstIP` are the original datagram's raw source/destination bytes;
+    /// the builders swap them so the response appears to come from `dstIP`.
     func sendICMPPortUnreachable(
         srcIP: Data,
         srcPort: UInt16,

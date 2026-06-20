@@ -8,7 +8,6 @@
 import Foundation
 
 extension Data {
-    /// Initialize from hex string
     init?(hexString: String) {
         let hex = hexString.replacingOccurrences(of: " ", with: "")
         guard hex.count % 2 == 0 else { return nil }
@@ -26,13 +25,11 @@ extension Data {
         self = data
     }
 
-    /// Initialize from base64url encoded string
     init?(base64URLEncoded string: String) {
         var base64 = string
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
 
-        // Add padding if needed
         let remainder = base64.count % 4
         if remainder > 0 {
             base64 += String(repeating: "=", count: 4 - remainder)
@@ -42,7 +39,6 @@ extension Data {
         self = data
     }
 
-    /// Convert to hex string
     func hexEncodedString() -> String {
         let hexChars: [Character] = Array("0123456789abcdef")
         var result = ""
@@ -54,7 +50,6 @@ extension Data {
         return result
     }
 
-    /// Convert to base64url encoded string (no padding)
     func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")

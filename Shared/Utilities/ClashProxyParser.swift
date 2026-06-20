@@ -121,18 +121,15 @@ struct ClashProxyParser {
 
     // MARK: - VLESS
 
-    /// Outcome of reading a Clash/mihomo `ech-opts` block.
     private enum ClashECHOpts {
         case disabled
         case enabled(String)
         case enabledWithoutConfig
     }
 
-    /// Parses an `ech-opts` block (mihomo: `enable` bool, `config` base64
-    /// ECHConfigList with standard padding, `query-server-name` — the last
-    /// unused, since the cover SNI comes from the config's public_name). With an
-    /// inline `config:` it is honored directly; `enable: true` without a config
-    /// becomes opportunistic discovery.
+    /// mihomo `ech-opts`: `config` is a base64 ECHConfigList; `query-server-name` is
+    /// ignored since the cover SNI comes from the config's public_name. `enable: true`
+    /// without an inline config becomes opportunistic discovery.
     private static func parseECHOpts(_ node: YAML.Node) -> ClashECHOpts {
         let opts = node["ech-opts"]
         guard opts.type == .map, getBool(opts, key: "enable") == true else { return .disabled }
@@ -142,9 +139,7 @@ struct ClashProxyParser {
         return .enabledWithoutConfig
     }
 
-    /// Maps a parsed `ech-opts` outcome onto `TLSConfiguration`'s ECH fields:
-    /// `enabled` is the master switch, `config` the inline ECHConfigList (nil when
-    /// the config is to be discovered opportunistically).
+    /// `config` is nil when the ECHConfigList is to be discovered opportunistically.
     private static func echSettings(_ node: YAML.Node) -> (config: String?, enabled: Bool) {
         switch parseECHOpts(node) {
         case .disabled:             return (nil, false)
@@ -228,8 +223,7 @@ struct ClashProxyParser {
     
     // MARK: - Hysteria2
 
-    /// Our Hysteria client lacks Salamander obfuscation, so obfuscated nodes are skipped. The
-    /// `ports` (multi-port hop range) and `hop-interval` fields are imported as `portHopping`.
+    /// Obfuscated nodes are skipped — our Hysteria client lacks Salamander obfuscation.
     private static func parseHysteria2Proxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
@@ -237,9 +231,7 @@ struct ClashProxyParser {
 
         let portHopping: HysteriaPortHopping?
         if let ports = getString(node, key: "ports"), !ports.isEmpty {
-            // An unparseable range would silently collapse to one port and likely fail to
-            // connect, so skip the node entirely — matching how this parser drops nodes
-            // whose features it can't faithfully represent.
+            // Skip rather than silently collapse an unparseable range to one port.
             guard HysteriaPortHopping.parseRanges(ports) != nil else { return nil }
             let interval = getInt(node, key: "hop-interval") ?? getInt(node, key: "hop_interval")
             portHopping = HysteriaPortHopping(
@@ -278,9 +270,8 @@ struct ClashProxyParser {
 
     // MARK: - Trojan
 
-    /// Nodes using Reality, gRPC, the Trojan-Go SS layer, or any non-TCP transport are skipped —
-    /// silently downgrading would speak a different wire format than the server expects. ECH is
-    /// imported when it carries an inline ECHConfigList; see `parseECHOpts`.
+    /// Nodes using Reality, gRPC, the Trojan-Go SS layer, or any non-TCP transport are
+    /// skipped — silently downgrading would speak a different wire format than the server expects.
     private static func parseTrojanProxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),

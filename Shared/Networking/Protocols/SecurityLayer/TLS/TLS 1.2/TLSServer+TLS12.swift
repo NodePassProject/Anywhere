@@ -85,8 +85,7 @@ extension TLSServer {
         }
         chosenCipherSuite = suite
 
-        // Default to the server preferred signature algorithm if the client did
-        // not send a signature_algorithms extension.
+        // Absent signature_algorithms extension is allowed; defaults to server preference.
         if !parsed.signatureAlgorithms.isEmpty && !parsed.signatureAlgorithms.contains(TLSSignatureScheme.ecdsa_secp256r1_sha256) {
             sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.handshakeFailure, message: "ecdsa_secp256r1_sha256 required (TLS 1.2)")
             return

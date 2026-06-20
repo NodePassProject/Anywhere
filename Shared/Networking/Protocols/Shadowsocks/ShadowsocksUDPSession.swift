@@ -14,9 +14,9 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksUDPSession
 
 // MARK: - ShadowsocksUDPSession
 
-/// Shared Shadowsocks UDP session: multiplexes every destination flow through one
-/// socket, sessionID, and packetID; replies demultiplex by (host, port) from the SS
-/// header, falling back to port-only match when the server replies from an unseeded IP.
+/// Multiplexes every destination flow through one socket, sessionID, and packetID;
+/// replies demultiplex by (host, port), falling back to port-only when the server
+/// replies from an unseeded IP.
 nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Mode
@@ -32,7 +32,6 @@ nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Registration
 
-    /// Opaque registration handle.
     typealias Token = UInt64
 
     private final class Registration {
@@ -157,7 +156,6 @@ nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Public API (call on `delegateQueue`)
 
-    /// True while the session can still accept registrations and sends.
     var isUsable: Bool {
         switch state {
         case .idle, .connecting, .ready: return true
@@ -199,7 +197,6 @@ nonisolated final class ShadowsocksUDPSession {
         return token
     }
 
-    /// Adds response-address hints so replies from those IPs match exactly.
     func addResponseHints(token: Token, hints: [String]) {
         guard let reg = registrations[token] else { return }
         var inserted = false
@@ -212,7 +209,7 @@ nonisolated final class ShadowsocksUDPSession {
         }
     }
 
-    /// Removes a registration. Idempotent; no-ops if the token is unknown.
+    /// Idempotent; no-ops if the token is unknown.
     func unregister(token: Token) {
         guard let reg = registrations.removeValue(forKey: token) else { return }
         for host in reg.responseHosts {
@@ -222,7 +219,7 @@ nonisolated final class ShadowsocksUDPSession {
         pendingSends.removeAll { $0.token == token }
     }
 
-    /// Encrypts and sends a UDP payload, buffering in order while the socket is still connecting.
+    /// Buffers in order while the socket is still connecting.
     func send(token: Token,
               dstHost: String,
               dstPort: UInt16,
@@ -249,8 +246,7 @@ nonisolated final class ShadowsocksUDPSession {
         }
     }
 
-    /// Tears down the socket and errors out all registered flows; in-flight send
-    /// completions may still fire after this returns.
+    /// In-flight send completions may still fire after this returns.
     func cancel() {
         if case .cancelled = state { return }
         state = .cancelled
@@ -511,7 +507,7 @@ nonisolated final class ShadowsocksUDPSession {
         case .ss2022AES(let cipher, let pskList):
             guard data.count >= 16 + 16 else { throw ShadowsocksError.decryptionFailed }
 
-            // Header AES-ECB decrypt uses the user PSK (pskList.last), per sing-shadowsocks.
+            // Header AES-ECB decrypt uses the user PSK (pskList.last).
             let header = try ssAESECBDecryptBlock(key: pskList.last!, block: Data(data.prefix(16)))
 
             var sidBE: UInt64 = 0

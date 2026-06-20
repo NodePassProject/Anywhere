@@ -183,7 +183,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parses the security layer from dict keys. VLESS-only.
+    /// VLESS-only.
     private static func parseSecurityLayer(
         from configurationDict: [String: Any],
         serverAddress: String
@@ -221,7 +221,7 @@ extension ProxyConfiguration {
         return .none
     }
 
-    /// Parses the transport layer from dict keys. VLESS-only.
+    /// VLESS-only.
     private static func parseTransportLayer(
         from configurationDict: [String: Any],
         serverAddress: String,
@@ -293,7 +293,6 @@ extension ProxyConfiguration {
         }
     }
 
-    /// Reconstructs the Nowhere TLS configuration from serialized dict keys.
     private static func parseNowhereTLS(
         from dict: [String: Any],
         serverAddress: String
@@ -306,7 +305,6 @@ extension ProxyConfiguration {
         return TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: echEnabled, echConfig: ech)
     }
 
-    /// Reconstructs the Trojan mandatory TLS configuration from serialized dict keys.
     private static func parseTrojanTLS(
         from dict: [String: Any],
         serverAddress: String
@@ -325,7 +323,6 @@ extension ProxyConfiguration {
         return TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: echEnabled, echConfig: ech, fingerprint: fingerprint)
     }
 
-    /// Reconstructs the AnyTLS mandatory TLS configuration from serialized dict keys.
     private static func parseAnyTLSTLS(
         from dict: [String: Any],
         serverAddress: String

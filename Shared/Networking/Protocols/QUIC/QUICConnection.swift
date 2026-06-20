@@ -15,21 +15,17 @@ nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
 // MARK: - QUICPortHopping
 
-/// Rotate the UDP destination port across `ports` every `interval`. Transport-level technique
-/// (Hysteria's "port hopping"): the server DNATs the whole range to one listening port, so the
-/// rotation is invisible to QUIC on both ends. See `HysteriaPortHopping` for the wire format.
+/// Port hopping: the server DNATs the whole range to one listening port, so rotating the
+/// UDP destination is invisible to QUIC on both ends.
 struct QUICPortHopping {
-    /// Inclusive port ranges to draw from; assumed non-empty.
+    /// Assumed non-empty.
     let ports: [ClosedRange<UInt16>]
-    /// Seconds between hops.
     let interval: TimeInterval
 
-    /// Count of distinct ports across all ranges.
     var totalPortCount: Int {
         ports.reduce(0) { $0 + (Int($1.upperBound) - Int($1.lowerBound) + 1) }
     }
 
-    /// A uniformly random port across the union of ranges, or `nil` if empty.
     func randomPort() -> UInt16? {
         let total = totalPortCount
         guard total > 0 else { return nil }
@@ -220,8 +216,7 @@ nonisolated class QUICConnection {
         self.alpn = alpn
         self.datagramsEnabled = datagramsEnabled
         self.tuning = tuning
-        // Port hopping needs a kernel socket whose destination we control; a chained transport
-        // has none, so drop it there rather than silently no-op deeper down.
+        // Port hopping needs a kernel socket whose destination we control; a chained transport has none.
         self.portHopping = transport == nil ? portHopping : nil
         self.transport = transport
         self.queue = DispatchQueue(label: AWCore.Identifier.quicQueue, qos: .userInitiated)
@@ -653,7 +648,7 @@ nonisolated class QUICConnection {
                 }
             )
             startHopTimer()
-            writeToUDP()    // send client initial
+            writeToUDP()
             rescheduleTimer()
         } catch {
             // Nil connectCompletion before firing to prevent double-fire from stray callbacks.
@@ -689,7 +684,7 @@ nonisolated class QUICConnection {
                     self.close(error: err)
                 }
             }
-            writeToUDP()    // send client initial
+            writeToUDP()
             rescheduleTimer()
         } catch {
             state = .closed

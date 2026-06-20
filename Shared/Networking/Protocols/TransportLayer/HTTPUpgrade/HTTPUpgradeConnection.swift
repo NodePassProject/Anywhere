@@ -59,7 +59,6 @@ nonisolated class HTTPUpgradeConnection {
 
     // MARK: - HTTP Upgrade Handshake
 
-    /// Performs the HTTP upgrade handshake.
     func performUpgrade(completion: @escaping (Error?) -> Void) {
         var request = "GET \(configuration.normalizedPath) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"

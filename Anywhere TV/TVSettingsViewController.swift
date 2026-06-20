@@ -11,11 +11,9 @@ class TVSettingsViewController: UIViewController {
 
     private let viewModel = VPNViewModel.shared
 
-    // Left side
     private let iconView = UIImageView()
     private let descriptionLabel = UILabel()
 
-    // Right side
     private let alwaysOnButton = UIButton(type: .custom)
     private let alwaysOnLabel = UILabel()
     private let alwaysOnValueLabel = UILabel()
@@ -142,13 +140,11 @@ class TVSettingsViewController: UIViewController {
     // MARK: - Layout
 
     private func setupLayout() {
-        // Left container: icon fixed at center, description fills below
         let leftContainer = UIView()
         leftContainer.translatesAutoresizingMaskIntoConstraints = false
         leftContainer.addSubview(iconView)
         leftContainer.addSubview(descriptionLabel)
 
-        // Right container
         let rightStack = UIStackView(arrangedSubviews: [alwaysOnButton, insecureButton, iCloudSyncButton])
         rightStack.axis = .vertical
         rightStack.spacing = 20
@@ -162,24 +158,20 @@ class TVSettingsViewController: UIViewController {
         view.addSubview(rightContainer)
 
         NSLayoutConstraint.activate([
-            // Left half
             leftContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             leftContainer.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.5),
             leftContainer.topAnchor.constraint(equalTo: view.topAnchor),
             leftContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            // Icon: fixed at center of left half
             iconView.centerXAnchor.constraint(equalTo: leftContainer.centerXAnchor),
             iconView.centerYAnchor.constraint(equalTo: leftContainer.centerYAnchor),
             iconView.heightAnchor.constraint(equalToConstant: 300),
 
-            // Description: below icon, fills remaining space
             descriptionLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 40),
             descriptionLabel.centerXAnchor.constraint(equalTo: leftContainer.centerXAnchor),
             descriptionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 700),
             descriptionLabel.bottomAnchor.constraint(lessThanOrEqualTo: leftContainer.bottomAnchor, constant: -60),
 
-            // Right half
             rightContainer.leadingAnchor.constraint(equalTo: leftContainer.trailingAnchor),
             rightContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             rightContainer.topAnchor.constraint(equalTo: view.topAnchor),
@@ -270,7 +262,6 @@ class TVSettingsViewController: UIViewController {
                 }
             }
 
-            // Update description based on focused button
             let newText: String?
             if context.nextFocusedView === self.alwaysOnButton {
                 newText = String(localized: "Automatically reconnect VPN when it is disconnected.")

@@ -11,8 +11,7 @@ nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
 
 // MARK: - TrojanUDPConnection
 
-/// Wraps a TLS-backed ProxyConnection as a Trojan UDP-over-TCP session: each datagram
-/// is framed as `addr:port + length + CRLF + payload` after a one-shot UDP request header.
+/// Each datagram is framed as `addr:port + length + CRLF + payload`, after a one-shot UDP request header.
 nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let passwordKey: Data
@@ -20,7 +19,7 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let dstPort: UInt16
 
     private var headerSent = false
-    /// Buffers TLS stream bytes across receives; leftovers carry over to the next call.
+    /// Leftover TLS stream bytes carried across receives until a full packet is framed.
     private var receiveBuffer = Data()
 
     init(inner: ProxyConnection, password: String, destinationHost: String, destinationPort: UInt16) {
@@ -53,7 +52,6 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
 
     // MARK: - Framing
 
-    /// Prepends the one-shot request header (first call only) to a framed UDP packet.
     private func frame(_ payload: Data) -> Data {
         var out = Data()
         lock.lock()

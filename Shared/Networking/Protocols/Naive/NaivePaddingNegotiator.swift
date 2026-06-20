@@ -90,7 +90,7 @@ enum NaivePaddingNegotiator {
 
     // MARK: - Response Parsing
 
-    /// Parses the negotiated padding type from response headers; a bare `padding` header implies `.variant1` (backward compatibility, matching the C++ reference).
+    /// Parses the negotiated padding type from response headers; a bare `padding` header implies `.variant1` (backward compatibility).
     static func parseResponse(headers: [(name: String, value: String)]) -> PaddingType {
         if let replyHeader = headers.first(where: { $0.name.lowercased() == "padding-type-reply" }) {
             let trimmed = replyHeader.value.trimmingCharacters(in: .whitespaces)

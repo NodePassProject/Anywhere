@@ -200,8 +200,7 @@ enum UDPPacket {
         return pkt
     }
 
-    /// Writes the 8-byte UDP header (checksum zero, patched by the caller) and
-    /// payload at `udpStart`.
+    /// Writes the UDP header with checksum zero; the caller patches it in.
     private static func writeUDP(_ p: UnsafeMutablePointer<UInt8>, udpStart: Int,
                                  srcPort: UInt16, dstPort: UInt16, udpLen: Int, payload: Data) {
         p[udpStart + 0] = UInt8(srcPort >> 8); p[udpStart + 1] = UInt8(srcPort & 0xFF)

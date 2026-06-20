@@ -14,7 +14,6 @@ struct DynamicSheet<Content: View>: View {
     var body: some View {
         ZStack {
             content
-                /// As this will fix the size of the view in the vertical direction!
                 .fixedSize(horizontal: false, vertical: true)
                 .onGeometryChange(for: CGSize.self) {
                     $0.size
@@ -26,8 +25,7 @@ struct DynamicSheet<Content: View>: View {
         }
         .modifier(SheetHeightModifier(height: sheetHeight))
     }
-    
-    /// You can use property to limit the max height, but I'm using the window size height to do so!
+
     var windowSize: CGSize {
         if let size = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.size {
             return size

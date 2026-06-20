@@ -9,8 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
 
-/// Process-wide registry of `AnyTLSMultiplexerPool`s keyed by `(host, port, password)`;
-/// configs sharing the same triple reuse the same warm TLS-multiplexer pool.
+/// Keyed by `(host, port, password)`; configs sharing the triple reuse one warm pool.
 nonisolated final class AnyTLSMultiplexerRegistry {
 
     static let shared = AnyTLSMultiplexerRegistry()
@@ -26,7 +25,7 @@ nonisolated final class AnyTLSMultiplexerRegistry {
 
     private init() {}
 
-    /// Returns the per-server pool, creating it on first use; on reuse the passed `dialOut` is dropped.
+    /// Creates the pool on first use; on reuse the passed `dialOut` is dropped.
     func client(
         for configuration: ProxyConfiguration,
         dialOut: @escaping AnyTLSMultiplexerPool.DialOut
@@ -57,8 +56,7 @@ nonisolated final class AnyTLSMultiplexerRegistry {
         return client
     }
 
-    /// Closes every pooled multiplexer; called on wake/path change/stop because the
-    /// kernel may have torn down the underlying sockets.
+    /// Called on wake/path change/stop because the kernel may have torn down the sockets.
     func closeAll() {
         lock.lock()
         let snapshot = Array(clients.values)

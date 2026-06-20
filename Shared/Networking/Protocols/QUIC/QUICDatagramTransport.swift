@@ -7,10 +7,9 @@
 
 import Foundation
 
-/// Datagram transport used by `QUICConnection` in place of a kernel socket. Terminal failures
-/// MUST surface through `errorHandler` so QUIC fails fast rather than idling on keep-alive PINGs;
-/// `startReceiving` delivers exactly one whole, non-empty datagram per call (use `errorHandler`
-/// for EOF). Callbacks may fire on any queue.
+/// Terminal failures MUST surface through `errorHandler` so QUIC fails fast rather than idling on
+/// keep-alive PINGs; `startReceiving` delivers exactly one whole, non-empty datagram per call (use
+/// `errorHandler` for EOF). Callbacks may fire on any queue.
 protocol QUICDatagramTransport: AnyObject {
     func sendDatagram(_ data: Data)
 
@@ -22,8 +21,6 @@ protocol QUICDatagramTransport: AnyObject {
     func cancel()
 }
 
-/// Adapts a `ProxyConnection` whose destination is already encoded; each datagram
-/// is opaque payload to/from one fixed peer.
 final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
     private let connection: ProxyConnection
 
@@ -39,15 +36,15 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
     func sendDatagram(_ data: Data) {
         connection.send(data: data) { [weak self] error in
             guard let error else { return }
-            // Transient errors (PMTU shrink, fragmentation refusal, queue overflow) are
-            // NOT terminal — outer QUIC loss recovery treats the drop as ordinary loss.
+            // Transient errors (PMTU shrink, fragmentation refusal, queue overflow) are not
+            // terminal — outer QUIC loss recovery treats the drop as ordinary loss.
             if Self.isTransientDatagramError(error) { return }
             self?.surfaceFailure(error)
         }
     }
 
-    /// True for per-datagram errors ("this packet didn't fit"), false for terminal
-    /// ones ("the transport is broken"); the outer QUIC must NOT close on transient errors.
+    /// True for per-datagram errors (packet didn't fit), false for terminal ones; the outer
+    /// QUIC must not close on transient errors.
     private static func isTransientDatagramError(_ error: Error) -> Bool {
         if let quicError = error as? QUICConnection.QUICError {
             switch quicError {

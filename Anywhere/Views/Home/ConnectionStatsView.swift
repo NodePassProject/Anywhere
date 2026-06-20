@@ -45,7 +45,6 @@ struct ConnectionStatsView: View {
 
     // MARK: - Card layout
 
-    /// One case per card; `size` is the card's grid footprint.
     private enum StatUnit: Hashable {
         case upload
         case download
@@ -195,7 +194,6 @@ struct ConnectionStatsView: View {
 
 // MARK: - Card sizing
 
-/// Grid footprint of a stat card: `small` is 1×1, `medium` is 2×1.
 enum StatCardSize {
     case small
     case medium
@@ -218,8 +216,7 @@ enum StatCardSize {
 }
 
 extension EnvironmentValues {
-    /// Edge of a 1×1 stat card, set by `ConnectionStatsView` from the measured
-    /// width.
+    /// Edge of a 1×1 stat card, set by `ConnectionStatsView` from measured width.
     @Entry var statCardUnitLength: CGFloat = 170
 }
 
@@ -276,7 +273,6 @@ struct StatValue: View {
     }
 }
 
-/// Caption row under a `StatValue`: dimmed label, animated trailing value.
 private struct StatDetailRow: View {
     let label: LocalizedStringKey
     let value: String

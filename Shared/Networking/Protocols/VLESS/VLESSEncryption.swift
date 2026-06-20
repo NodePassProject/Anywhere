@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Parsed VLESS `encryption` (client) field, the `mlkem768x25519plus` scheme:
-/// `mlkem768x25519plus.<xor>.<rtt>[.<padSeg>...].<base64Key>[.<base64Key>...]`.
+/// Wire grammar: `mlkem768x25519plus.<xor>.<rtt>[.<padSeg>...].<base64Key>[.<base64Key>...]`.
 struct VLESSEncryptionConfig: Equatable, Hashable {
 
     enum XORMode: UInt8 {
@@ -92,8 +91,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
             throw ParseError.unknownRTTMode(String(segments[2]))
         }
 
-        // Segments shorter than 20 chars are padding specs, the rest are base64url
-        // keys — the `len(r) < 20` heuristic.
+        // Segments under 20 chars are padding specs; longer ones are base64url keys.
         var paddingSegments: [String] = []
         var publicKeys: [Data] = []
         for raw in segments[3...] {
@@ -121,7 +119,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
         )
     }
 
-    /// Re-encodes as the canonical `mlkem768x25519plus...` string; round-trips with `parse`.
+    /// Round-trips with `parse`.
     func encoded() -> String {
         var parts: [String] = ["mlkem768x25519plus"]
         switch xorMode {

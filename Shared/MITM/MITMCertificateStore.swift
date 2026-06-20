@@ -45,7 +45,6 @@ final class MITMCertificateStore {
 
     // MARK: - CA Lifecycle
 
-    /// Returns the persisted CA cert + private key, generating them on first use.
     func loadOrCreateCA() throws -> (privateKey: SecKey, certificateDER: Data) {
         lock.lock()
         defer { lock.unlock() }
@@ -69,7 +68,6 @@ final class MITMCertificateStore {
         }
     }
 
-    /// Returns the persisted CA cert + private key, or `nil` if not yet generated.
     func loadCA() -> (privateKey: SecKey, certificateDER: Data)? {
         lock.lock()
         defer { lock.unlock() }
@@ -85,7 +83,6 @@ final class MITMCertificateStore {
         return try generateCAUnlocked()
     }
 
-    /// Wipes the persisted CA without regenerating.
     func delete() {
         lock.lock()
         defer { lock.unlock() }
@@ -94,7 +91,6 @@ final class MITMCertificateStore {
 
     // MARK: - Trust State
 
-    /// Whether the persisted CA is trusted by the system SSL policy.
     func isCATrusted() -> Bool {
         guard let (caKey, caCertDER) = loadCA() else {
             return false
@@ -353,7 +349,7 @@ final class MITMCertificateStore {
 
     // MARK: - Private — Keychain (Legacy serial item)
 
-    /// Purges the legacy monotonic-counter item left behind by old installs.
+    /// Purges the legacy monotonic-counter serial item left behind by old installs; serials are now random.
     private func deleteSerial() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

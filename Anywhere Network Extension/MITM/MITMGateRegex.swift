@@ -127,11 +127,9 @@ final class MITMGateRegex: @unchecked Sendable {
         }
     }
 
-    /// Capture groups of the first match (index 0 = whole match), or nil on no
-    /// match, timeout, or quarantine. Unlike ``matches(_:)`` the result is **not**
-    /// memoized — capture arrays are URL-specific with an unbounded working set and
-    /// only templated rewrites (uncommon) need them — but it shares the same
-    /// deadline, hard-cap crash, and strike/quarantine machinery.
+    /// Capture groups of the first match (index 0 = whole match), or nil on no match,
+    /// timeout, or quarantine. Not memoized (unbounded URL-specific working set), but shares
+    /// the deadline, hard-cap crash, and strike/quarantine machinery of ``matches(_:)``.
     func firstMatchCaptures(_ normalizedURL: String) -> [String?]? {
         // A literal pattern has no capturing groups; group 0 is the matched span.
         if isLiteral {

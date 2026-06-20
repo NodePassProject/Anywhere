@@ -19,7 +19,6 @@ nonisolated class TLSRecordConnection {
 
     var connection: (any RawTransport)?
 
-    /// The negotiated TLS version.
     let tlsVersion: UInt16
 
     /// The value of the ALPN sent by the peer; empty when the peer selected none.

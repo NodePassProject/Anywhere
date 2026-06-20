@@ -9,8 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
-/// Native regex find-and-replace over a text body, with a ``MITMCaptureTemplate``
-/// replacement. A body decodable as neither UTF-8 nor latin-1 is returned unchanged.
+/// A body decodable as neither UTF-8 nor latin-1 is returned unchanged.
 enum MITMBodyReplace {
 
     /// Pre-compiled so the per-message hot path skips pattern + template parsing.

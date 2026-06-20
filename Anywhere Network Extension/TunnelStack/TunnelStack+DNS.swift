@@ -17,7 +17,6 @@ extension TunnelStack {
     // get fake-IP answers so routing is decided at connection time — rule
     // changes take effect without waiting for OS DNS cache expiry.
 
-    /// Classifies a DNS destination IP for interception.
     enum DNSDestination {
         /// Tunnel peer address — no real upstream behind it; non-A/AAAA query
         /// types are forwarded via the proxy.
@@ -38,7 +37,6 @@ extension TunnelStack {
         "2001:4860:4860::8844": .publicResolver,
     ]
 
-    /// Returns the interception mode for `dstIP`, or `nil` if not intercepted.
     static func dnsDestination(for dstIP: String) -> DNSDestination? {
         interceptedDNSServers[dstIP]
     }

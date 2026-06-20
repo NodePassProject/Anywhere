@@ -110,9 +110,9 @@ enum HTTPHeader {
         let bytes = name.utf8
         guard !bytes.isEmpty else { return "empty field name" }
         for (i, c) in bytes.enumerated() {
-            if c >= 0x41, c <= 0x5A { return "uppercase \(hexByte(c)) at \(i)" }            // uppercase
-            if c <= 0x20 || c >= 0x7F { return "control/SP/DEL/high \(hexByte(c)) at \(i)" } // control / SP / DEL / high
-            if c == 0x3A, i != 0 { return "non-leading colon at \(i)" }                     // colon only as the leading sigil
+            if c >= 0x41, c <= 0x5A { return "uppercase \(hexByte(c)) at \(i)" }
+            if c <= 0x20 || c >= 0x7F { return "control/SP/DEL/high \(hexByte(c)) at \(i)" }
+            if c == 0x3A, i != 0 { return "non-leading colon at \(i)" }
         }
         return nil
     }
@@ -122,7 +122,7 @@ enum HTTPHeader {
     /// when conformant; a non-nil reason names the failing octet only, never the value text.
     private static func valueInvalidReason(_ value: String) -> String? {
         let bytes = value.utf8
-        guard let first = bytes.first else { return nil } // empty value: allowed
+        guard let first = bytes.first else { return nil }
         if first == 0x20 || first == 0x09 { return "leading whitespace \(hexByte(first))" }
         if let last = bytes.last, last == 0x20 || last == 0x09 { return "trailing whitespace \(hexByte(last))" }
         for (i, c) in bytes.enumerated() {

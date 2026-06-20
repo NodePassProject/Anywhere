@@ -73,7 +73,6 @@ extension ProxyClient {
         }
     }
 
-    /// Wraps a bare transport connection with Shadowsocks AEAD encryption.
     fileprivate func wrapWithShadowsocks(
         inner: ProxyConnection,
         command: ProxyCommand,

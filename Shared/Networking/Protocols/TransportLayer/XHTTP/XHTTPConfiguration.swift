@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// XHTTP transfer mode: how the upload and download legs map onto HTTP requests.
 enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     case auto
     case streamOne = "stream-one"
@@ -24,7 +23,6 @@ enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     }
 }
 
-/// Where XHTTP carries a piece of metadata or payload in the HTTP request.
 enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case path
     case query
@@ -34,7 +32,6 @@ enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case body
 }
 
-/// How X-Padding filler is generated.
 enum XHTTPPaddingMethod: String, Codable, Equatable, Hashable {
     case repeatX = "repeat-x"
     case tokenish
@@ -350,7 +347,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         if let predefined = XHTTPConfiguration.predefinedSessionIDTables[table] {
             table = predefined
         }
-        // Half-open range [from, to); from == to → from.
         let length: Int
         if sessionIDLengthTo <= sessionIDLengthFrom {
             length = sessionIDLengthFrom
@@ -385,7 +381,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         let n = max(1, Int(ceil(Double(targetBytes) / 0.8)))
         var chars = (0..<n).map { _ in charset[Int.random(in: 0..<charset.count)] }
         var adjust: Character = "X"
-        // validationTolerance = 2, maxIter = 150 (both mirror the reference).
         for _ in 0..<150 {
             let diff = HPACKHuffman.encodedByteLength(String(chars)) - targetBytes
             if abs(diff) <= 2 { break }
@@ -568,7 +563,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
         let uplinkDataPlacement = XHTTPPlacement(rawValue: extra["uplinkDataPlacement"] as? String ?? "body") ?? .body
 
-        // Defaults depend on placement.
         let defaultUplinkDataKey: String
         switch uplinkDataPlacement {
         case .header: defaultUplinkDataKey = "X-Data"
@@ -646,7 +640,6 @@ extension XHTTPConfiguration {
         if seqPlacement != .path { dict["seqPlacement"] = seqPlacement.rawValue }
         if !seqKey.isEmpty { dict["seqKey"] = seqKey }
         if uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = uplinkDataPlacement.rawValue }
-        // Data key and chunk size have placement-dependent defaults.
         let defaultDataKey: String
         let defaultChunkSize: Int
         switch uplinkDataPlacement {

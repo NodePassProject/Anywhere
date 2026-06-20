@@ -19,7 +19,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var serverAddress = ""
     private var serverPort = ""
 
-    // VLESS fields
     private var vlessUUID = ""
     private var vlessEncryption = "none"
     private var vlessFlow = ""
@@ -53,9 +52,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var vlessTLSECH = ""
     private var vlessFingerprint: TLSFingerprint = .chrome120
 
-    // VLESS XHTTP up/download detach: a separate download source, flattened into
-    // its own server + security + host/path (effectively a second proxy that the
-    // download stream is dialed to).
+    // XHTTP detach: download stream dialed to a separate server, flattened into its own security + host/path (effectively a second proxy).
     private var vlessXHTTPDownloadEnabled = false
     private var vlessXHTTPDownloadAddress = ""
     private var vlessXHTTPDownloadPort = ""
@@ -70,7 +67,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var vlessXHTTPDownloadRealityShortId = ""
     private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome120
 
-    // Hysteria fields
     private var hysteriaPassword = ""
     private var hysteriaCC: HysteriaCongestionControl = .brutal
     private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
@@ -79,13 +75,11 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
     private var hysteriaSNI = ""
 
-    // Nowhere fields
     private var nowhereKey = ""
     private var nowhereSpec = ""
     private var nowhereSNI = ""
     private var nowhereALPN = ""
 
-    // Trojan fields
     private var trojanPassword = ""
     private var trojanSNI = ""
     private var trojanALPN = ""
@@ -93,7 +87,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var trojanECH = ""
     private var trojanFingerprint: TLSFingerprint = .chrome120
 
-    // AnyTLS fields
     private var anytlsPassword = ""
     private var anytlsSNI = ""
     private var anytlsALPN = ""
@@ -101,15 +94,12 @@ class TVProxyEditorViewController: UITableViewController {
     private var anytlsECH = ""
     private var anytlsFingerprint: TLSFingerprint = .chrome120
 
-    // Shadowsocks fields
     private var ssPassword = ""
     private var ssMethod = "aes-128-gcm"
 
-    // SOCKS5 fields
     private var socks5Username = ""
     private var socks5Password = ""
 
-    // Sudoku fields
     private var sudokuKey = ""
     private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
     private var sudokuPaddingMinText = "5"
@@ -124,7 +114,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var sudokuHTTPMaskPathRoot = ""
     private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
 
-    // Shared credential fields for HTTPS/HTTP2/QUIC
     private var naiveUsername = ""
     private var naivePassword = ""
 
@@ -182,12 +171,10 @@ class TVProxyEditorViewController: UITableViewController {
     private var formSections: [(title: String?, rows: [RowType])] {
         var sections: [(title: String?, rows: [RowType])] = []
 
-        // Name
         sections.append((nil, [
             .text(label: String(localized: "Name"), value: name, placeholder: "Name", key: .name),
         ]))
 
-        // Protocol
         let protocolOptions: [(String, String)] = [
             ("VLESS", "vless"),
             ("Hysteria", "hysteria"),
@@ -205,16 +192,13 @@ class TVProxyEditorViewController: UITableViewController {
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),
         ]))
 
-        // Server
         var serverRows: [RowType] = [
             .text(label: String(localized: "Address"), value: serverAddress, placeholder: String(localized: "Address"), key: .address),
             .text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port),
         ]
         if isVLESS {
             serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: vlessUUID, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .vlessUUID))
-            // Encryption (mlkem768x25519plus) requires CryptoKit's
-            // ML-KEM-768 — tvOS 26+ only. Older OSes refuse the feature
-            // at dial time, so don't expose the field there.
+            // Encryption (mlkem768x25519plus) needs CryptoKit ML-KEM-768; older OSes refuse it at dial time, so hide the field.
             if #available(tvOS 26.0, *) {
                 serverRows.append(.text(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: vlessEncryption, placeholder: "none", key: .vlessEncryption))
             }
@@ -265,7 +249,6 @@ class TVProxyEditorViewController: UITableViewController {
         }
         sections.append((String(localized: "Server"), serverRows))
 
-        // Transport (VLESS only)
         if isVLESS {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
@@ -314,7 +297,6 @@ class TVProxyEditorViewController: UITableViewController {
             sections.append((String(localized: "Transport"), transportRows))
         }
 
-        // Security / TLS — one section per protocol
         if isVLESS {
             var tlsRows: [RowType] = [
                 .selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
@@ -338,8 +320,7 @@ class TVProxyEditorViewController: UITableViewController {
                 tlsRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: vlessRealityShortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .vlessRealityShortId))
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: vlessFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .vlessFingerprint))
             }
-            // When the download stream is detached, the main TLS only secures the
-            // upload leg — label it so it pairs with the "TLS (Download)" section.
+            // With detach on, the main TLS only secures the upload leg; label it to pair with the "TLS (Download)" section.
             let tlsTitle = (vlessTransport == "xhttp" && vlessXHTTPDownloadEnabled)
                 ? String(localized: "TLS (Upload)") : String(localized: "TLS")
             sections.append((tlsTitle, tlsRows))
@@ -377,7 +358,6 @@ class TVProxyEditorViewController: UITableViewController {
             sections.append((nil, hysteriaRows))
         }
 
-        // XHTTP up/download detach
         if isVLESS && vlessTransport == "xhttp" {
             var detachRows: [RowType] = [
                 .toggle(label: String(localized: "Detached Download"), isOn: vlessXHTTPDownloadEnabled, key: .vlessXHTTPDownloadEnabled),
@@ -925,9 +905,7 @@ class TVProxyEditorViewController: UITableViewController {
         navigationItem.rightBarButtonItem?.isEnabled = isValid
     }
 
-    /// Builds the `downloadSettings` object for the XHTTP `extra` blob from the
-    /// flattened detach fields, or nil when the split is off or its address/port
-    /// are missing. Keys match what `XHTTPConfiguration.parse` reads back.
+    /// Keys must match what `XHTTPConfiguration.parse` reads back. Returns nil when detach is off or address/port are missing.
     private func xhttpDownloadSettingsDict() -> [String: Any]? {
         guard vlessXHTTPDownloadEnabled,
               !vlessXHTTPDownloadAddress.isEmpty,
@@ -1014,8 +992,7 @@ class TVProxyEditorViewController: UITableViewController {
             let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
             let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
             var params: [String: String] = ["host": host, "path": vlessXHTTPPath, "mode": mode.rawValue]
-            // `extra` carries the advanced fields (vlessXHTTPExtra) plus the detached
-            // download source; merge so neither clobbers the other.
+            // Merge advanced fields (vlessXHTTPExtra) with the detached download source so neither clobbers the other.
             var extra: [String: Any] = [:]
             if !vlessXHTTPExtra.isEmpty, let data = vlessXHTTPExtra.data(using: .utf8),
                let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

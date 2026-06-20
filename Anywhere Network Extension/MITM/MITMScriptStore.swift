@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Key/value store backing `Anywhere.store`, namespaced per rule set and reclaimed by
-/// purgeExcept on reload.
+/// Backs `Anywhere.store`; namespaced per rule set, stale scopes reclaimed by purgeExcept on reload.
 final class MITMScriptStore {
 
     static let shared = MITMScriptStore()
@@ -44,8 +43,7 @@ final class MITMScriptStore {
     func set(scope: UUID, key: String, value: Data, onDisk: Bool = false) throws {
         if onDisk { return try MITMScriptDiskStore.shared.set(scope: scope, key: key, value: value) }
         lock.lock(); defer { lock.unlock() }
-        // Mutate through `buckets[scope, default:]` to stay in-place; aliasing the COW
-        // storage would copy the whole bucket on every write.
+        // Mutate via subscript to stay in-place; aliasing COW storage copies the whole bucket per write.
         let keyBytes = key.utf8.count
         let oldEntryBytes = buckets[scope]?[key].map { $0.count + keyBytes } ?? 0
         let newEntryBytes = value.count + keyBytes
@@ -66,7 +64,7 @@ final class MITMScriptStore {
     func delete(scope: UUID, key: String, onDisk: Bool = false) {
         if onDisk { return MITMScriptDiskStore.shared.delete(scope: scope, key: key) }
         lock.lock(); defer { lock.unlock() }
-        // Mutate through the subscript so removing a key stays in-place (no COW copy).
+        // Mutate via subscript to stay in-place (no COW copy).
         guard let existing = buckets[scope]?[key] else { return }
         let delta = existing.count + key.utf8.count
         bucketSizes[scope] = (bucketSizes[scope] ?? 0) - delta

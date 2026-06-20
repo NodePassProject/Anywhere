@@ -35,12 +35,10 @@ nonisolated final class RawUDPSocket {
     private let stateLock = UnfairLock()
     private var _state: State = .setup
 
-    /// The current state. Thread-safe.
     private var state: State {
         stateLock.withLock { _state }
     }
 
-    /// Whether the socket is connected and ready for I/O. Thread-safe.
     var isReady: Bool {
         if case .ready = state { return true }
         return false
@@ -72,7 +70,6 @@ nonisolated final class RawUDPSocket {
     /// Bounded so a pre-handler burst can't OOM us.
     private var pendingDatagrams: [Data] = []
     private static let maxPendingDatagrams = 1024
-    /// One-shot latch for the pre-handler overflow warning.
     private var didWarnPendingOverflow = false
 
     // MARK: - Lifecycle
@@ -87,8 +84,6 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Connect
 
-    /// Resolves `host` and connects a non-blocking UDP socket; `completion`
-    /// fires on `completionQueue`.
     func connect(host: String, port: UInt16,
                  completionQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
@@ -128,7 +123,7 @@ nonisolated final class RawUDPSocket {
         }
     }
 
-    /// Creates, configures, and connects the socket. Must run on `ioQueue`.
+    /// Must run on `ioQueue`.
     private func attemptConnect(ip: String, port: UInt16) -> Result<Void, SocketError> {
         guard let endpoint = IPEndpoint(ip: ip, port: port) else {
             return .failure(.connectionFailed("inet_pton failed for \(ip)"))
@@ -168,10 +163,9 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Receive
 
-    /// Installs the receive handler (fires on `handlerQueue`, or `ioQueue` if
-    /// nil) and drains datagrams buffered since connect. `errorHandler` fires
-    /// once on a non-transient recv errno; the read source then stops, so
-    /// callers should treat it as terminal and close the flow.
+    /// Handler fires on `handlerQueue`, or `ioQueue` if nil. `errorHandler`
+    /// fires once on a non-transient recv errno; the read source then stops,
+    /// so callers must treat it as terminal and close the flow.
     func startReceiving(queue handlerQueue: DispatchQueue? = nil,
                         handler: @escaping (Data) -> Void,
                         errorHandler: ((Error) -> Void)? = nil) {
@@ -259,7 +253,6 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Send
 
-    /// Fire-and-forget datagram send.
     func send(data: Data) {
         ioQueue.async { [weak self] in
             _ = self?.performSend(data)
@@ -329,8 +322,7 @@ nonisolated final class RawUDPSocket {
         }
     }
 
-    /// Tears down the read source and closes the socket FD. Must run on
-    /// `ioQueue`.
+    /// Must run on `ioQueue`.
     private func performTeardownOnIOQueue() {
         if let source = readSource {
             source.cancel()

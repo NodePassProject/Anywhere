@@ -77,7 +77,6 @@ nonisolated class WebSocketConnection {
             request += "\(key): \(value)\r\n"
         }
 
-        // Default to Chrome UA if unset.
         if !configuration.headers.keys.contains(where: { $0.lowercased() == "user-agent" }) {
             request += "User-Agent: \(Self.chromeUserAgent)\r\n"
         }
@@ -170,7 +169,6 @@ nonisolated class WebSocketConnection {
         send(data: data) { _ in }
     }
 
-    /// Receives a complete WebSocket frame payload.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         if let result = lock.withLock({ tryExtractFrame() }) {
             handleFrameResult(result, completion: completion)
@@ -232,10 +230,10 @@ nonisolated class WebSocketConnection {
     private func buildFrame(opcode: UInt8, payload: Data) -> Data {
         var frame = Data()
 
-        // FIN=1, opcode
+        // First byte: 0x80 sets FIN bit, low nibble is the opcode.
         frame.append(0x80 | opcode)
 
-        // Mask bit = 1 (client frames are always masked) + payload length
+        // 0x80 on length byte sets the mask bit; client frames MUST be masked (RFC 6455 5.3).
         let length = payload.count
         if length <= 125 {
             frame.append(UInt8(length) | 0x80)
@@ -250,7 +248,6 @@ nonisolated class WebSocketConnection {
             }
         }
 
-        // 4-byte random mask key
         var maskKey = [UInt8](repeating: 0, count: 4)
         _ = SecRandomCopyBytes(kSecRandomDefault, 4, &maskKey)
         frame.append(contentsOf: maskKey)
@@ -370,7 +367,6 @@ nonisolated class WebSocketConnection {
                 self?.receive(completion: completion)
             }
         case .pong:
-            // Unsolicited pong, ignore and continue receiving
             receive(completion: completion)
         case .close(let code, let reason):
             var closePayload = Data()

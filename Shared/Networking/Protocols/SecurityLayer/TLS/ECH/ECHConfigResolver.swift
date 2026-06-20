@@ -9,8 +9,7 @@ import Foundation
 
 enum ECHConfigResolver {
 
-    /// Decode an `ech` spec into the ECHConfigList bytes the handshake seals
-    /// against, or nil when no usable spec is configured.
+    /// ECHConfigList bytes the handshake seals against, or nil when no usable spec is configured.
     static func resolveImmediate(_ spec: String?) -> Data? {
         guard let spec = spec?.trimmingCharacters(in: .whitespacesAndNewlines), !spec.isEmpty else { return nil }
         return decodeBase64(spec)

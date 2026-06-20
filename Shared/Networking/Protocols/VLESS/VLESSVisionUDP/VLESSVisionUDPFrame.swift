@@ -9,7 +9,6 @@ import Foundation
 
 // MARK: - Enums & Types
 
-/// Session status values: New / Keep / End / KeepAlive.
 enum VLESSVisionUDPFrameStatus: UInt8 {
     case new       = 0x01
     case keep      = 0x02
@@ -28,7 +27,6 @@ enum VLESSVisionUDPNetwork: UInt8 {
     case udp = 0x02
 }
 
-/// Mux address type (port-first format).
 private enum MuxAddressType: UInt8 {
     case ipv4   = 0x01
     case domain = 0x02
@@ -44,30 +42,28 @@ struct VLESSVisionUDPFrameMetadata {
     var network: VLESSVisionUDPNetwork?
     var targetHost: String?
     var targetPort: UInt16?
-    var globalID: Data?  // 8 bytes, zeros for now (VLESSVisionUDPGlobalID #16)
+    var globalID: Data?  // 8 bytes
 
-    /// Encodes metadata into wire bytes (not including the 2-byte metadata_length prefix).
+    /// Wire bytes excluding the 2-byte metadata_length prefix.
     func encode() -> Data {
         var buf = Data()
 
-        // Session ID (2B big-endian)
         buf.append(UInt8(sessionID >> 8))
         buf.append(UInt8(sessionID & 0xFF))
 
         buf.append(status.rawValue)
         buf.append(option.rawValue)
 
-        // Address block for New frames
         if status == .new, let network, let host = targetHost, let port = targetPort {
             buf.append(network.rawValue)
 
-            // Port (2B big-endian) — port-first format
+            // Port precedes address (port-first wire format)
             buf.append(UInt8(port >> 8))
             buf.append(UInt8(port & 0xFF))
 
             encodeAddress(host, into: &buf)
 
-            // GlobalID (8B) — omitted unless VLESSVisionUDPGlobalID is active
+            // GlobalID: 8B, UDP only
             if network == .udp, let gid = globalID, gid.count == 8 {
                 buf.append(gid)
             }
@@ -111,7 +107,7 @@ struct VLESSVisionUDPFrameMetadata {
             metadata.targetHost = host
             offset += addrLen
 
-            // GlobalID for UDP (optional — only present with VLESSVisionUDPGlobalID)
+            // GlobalID: optional 8B trailer, UDP only
             if network == .udp && data.count >= offset + 8 {
                 metadata.globalID = data[(base + offset)..<(base + offset + 8)]
                 offset += 8
@@ -131,7 +127,6 @@ struct VLESSVisionUDPFrameMetadata {
             buf.append(MuxAddressType.ipv6.rawValue)
             buf.append(contentsOf: ipv6Bytes)
         } else {
-            // Domain
             let domainData = host.data(using: .utf8) ?? Data()
             buf.append(MuxAddressType.domain.rawValue)
             buf.append(UInt8(domainData.count))
@@ -143,7 +138,7 @@ struct VLESSVisionUDPFrameMetadata {
         let base = data.startIndex
         guard data.count > offset else { return nil }
         guard let addrType = MuxAddressType(rawValue: data[base + offset]) else { return nil }
-        var pos = 1  // consumed addr_type byte
+        var pos = 1
 
         switch addrType {
         case .ipv4:
@@ -202,13 +197,11 @@ enum VLESSVisionUDPFrame {
 
         var frame = Data(capacity: 2 + metaBytes.count + (payload != nil ? 2 + payload!.count : 0))
 
-        // Metadata length (2B big-endian)
         frame.append(UInt8(metaLen >> 8))
         frame.append(UInt8(metaLen & 0xFF))
 
         frame.append(metaBytes)
 
-        // Payload (if HasData flag set)
         if let payload, metadata.option.contains(.data) {
             let payloadLen = UInt16(payload.count)
             frame.append(UInt8(payloadLen >> 8))
@@ -222,7 +215,6 @@ enum VLESSVisionUDPFrame {
 
 // MARK: - Streaming Frame Parser
 
-/// Streaming parser that buffers partial reads and emits complete frames.
 nonisolated class VLESSVisionUDPFrameParser {
     private var buffer = Data()
     private var bufferOffset = 0
@@ -236,7 +228,6 @@ nonisolated class VLESSVisionUDPFrameParser {
 
         while true {
             let remaining = buffer.count - bufferOffset
-            // Need at least 2 bytes for metadata length
             guard remaining >= 2 else { break }
 
             let metaLen = Int(UInt16(buffer[bufferOffset]) << 8 | UInt16(buffer[bufferOffset + 1]))
@@ -280,7 +271,6 @@ nonisolated class VLESSVisionUDPFrameParser {
             buffer.removeSubrange(0..<bufferOffset)
             bufferOffset = 0
         } else if bufferOffset > 0 && bufferOffset == buffer.count {
-            // Fully consumed — reset cheaply
             buffer.removeAll(keepingCapacity: true)
             bufferOffset = 0
         }

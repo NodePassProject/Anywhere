@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over a ``TLSRecordConnection`` transport.
 nonisolated class RealityProxyConnection: ProxyConnection {
     private let realityConnection: TLSRecordConnection
 

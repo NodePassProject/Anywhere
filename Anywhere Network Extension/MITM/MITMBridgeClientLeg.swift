@@ -9,12 +9,9 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBridgeClientLeg")
 
-/// Session-facing side of the h2 client leg: the leg decodes client h2 into neutral request
-/// events, the session dials and binds an upstream leg (HTTP/1.1 or HTTP/2), then routes to it.
 protocol MITMBridgeClientLegDelegate: AnyObject {
-    /// A request head is ready. The session dials (on the first request), binds the
-    /// upstream leg from the negotiated ALPN, and forwards the head. `url` seeds the
-    /// response-phase rewrite correlation.
+    /// Session dials (first request) and binds the upstream leg from negotiated ALPN. `url` seeds
+    /// the response-phase rewrite correlation.
     func clientLegSendRequestHead(_ head: MITMRequestHead, url: String?, endStream: Bool)
     /// Raw (unframed) request body bytes; the upstream leg applies its own framing.
     func clientLegSendRequestData(streamID: UInt32, _ data: Data, endStream: Bool)
@@ -31,9 +28,7 @@ protocol MITMBridgeClientLegDelegate: AnyObject {
     func clientLegFatalError(_ message: String)
 }
 
-/// The client-facing HTTP/2 endpoint: decodes client frames into neutral request IR and encodes
-/// response IR back into the multiplexed client stream, pacing bodies against client flow-control
-/// windows. lwIP-queue-confined.
+/// lwIP-queue-confined.
 final class MITMBridgeClientLeg: MITMResponseSink {
 
     weak var delegate: MITMBridgeClientLegDelegate?
@@ -520,7 +515,6 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
 
-        // Pre-script rewrite synth (302 / reject sub-modes).
         if let synth = rewriter.requestSynthResponse(requestURL: requestURL) {
             answerSynth(streamID: streamID, response: synth)
             return false

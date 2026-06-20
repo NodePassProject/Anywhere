@@ -110,7 +110,6 @@ nonisolated enum TransportErrorLogger {
 
     // MARK: - Transient Failure Logging
 
-    /// Logs a non-terminal send failure at warning level.
     static func logTransientSend(
         endpoint: String,
         error: Error,
@@ -124,8 +123,7 @@ nonisolated enum TransportErrorLogger {
 
 // MARK: - ConnectionFailureReporter
 
-/// One-shot terminal-failure reporter: the first report logs (subject to demotion
-/// rules), later calls no-op, so a connection's death emits exactly one line.
+/// Emits exactly one terminal-failure line per connection; later reports no-op.
 /// Not thread-safe; the owning connection must serialize access on its own queue.
 final class ConnectionFailureReporter {
     private let prefix: String

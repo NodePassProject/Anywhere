@@ -8,7 +8,6 @@
 import Foundation
 
 extension ProxyClient {
-    /// Connects through a SOCKS5 proxy via TCP CONNECT or UDP ASSOCIATE.
     func connectWithSOCKS5(
         command: ProxyCommand,
         destinationHost: String,
@@ -127,8 +126,6 @@ extension ProxyClient {
         }
     }
 
-    /// Opens a UDP relay to the SOCKS5-assigned address, riding the same proxied
-    /// path as the control channel.
     func openSOCKS5UDPRelay(
         relayHost: String,
         relayPort: UInt16,

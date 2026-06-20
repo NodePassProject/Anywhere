@@ -25,10 +25,8 @@ extension MITMPhase: CustomStringConvertible {
     }
 }
 
-/// One declarative edit to a JSON message body. Matching `bodyJSON` rules compose
-/// in rule order; a non-JSON body or an unresolved edit leaves the body untouched.
-/// `path` is a JSONPath; `value`/`values` are JSON literals (a non-JSON string is
-/// taken as a literal string, so `value = Anywhere` means `"Anywhere"`).
+/// `path` is a JSONPath; `value`/`values` are JSON literals, but a non-JSON
+/// string is taken literally (`value = Anywhere` means `"Anywhere"`).
 enum MITMJSONOperation: Equatable {
     /// Upsert: create or overwrite the addressed member; an array index appends when index == count.
     case add(path: String, value: String)
@@ -346,12 +344,10 @@ struct MITMRule: Codable, Equatable, Identifiable {
 }
 
 extension MITMRule {
-    /// Row title: the phase and operation names.
     var summaryTitle: String {
         "\(phase.description) \(operation.description)"
     }
 
-    /// Row subtitle: the operation's most salient parameter.
     var summarySubtitle: String {
         switch operation {
         case .rewrite(let action):
@@ -383,10 +379,9 @@ extension MITMRule {
     }
 }
 
-/// Sub-mode of the rewrite operation; cases map 1:1 to the import format's
-/// numeric ids (transparent 0, redirect302 1, reject200Text 2, reject200Gif 3,
-/// reject200Data 4). Only `transparent` dials upstream — it rewrites the URL
-/// and `Host`/`:authority`; the rest synthesize the response locally.
+/// Cases map 1:1 to the import format's numeric ids (transparent 0 … reject200Data 4).
+/// Only `transparent` dials upstream — it rewrites the URL and `Host`/`:authority`;
+/// the rest synthesize the response locally.
 enum MITMRewriteAction: Equatable {
     case transparent(url: String)
     case redirect302(url: String)
@@ -448,8 +443,6 @@ extension MITMRewriteAction: Codable {
     }
 }
 
-/// An ordered, named group of rewrite rules applied to any host matching one
-/// of `domainSuffixes`.
 struct MITMRuleSet: Codable, Equatable, Identifiable {
     static let maxRuleCount = 10000
 
@@ -534,7 +527,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     }
 }
 
-/// Persisted shape for the MITM feature: master toggle plus the user's rule sets.
 struct MITMSnapshot: Codable, Equatable {
     var enabled: Bool
     var ruleSets: [MITMRuleSet]
@@ -660,8 +652,7 @@ enum MITMBinaryFormat {
     }
 }
 
-/// Encodes a MITM snapshot to the `AMR1` binary the extension mmaps. Mirrors
-/// `RoutingBinaryWriter`.
+/// Layout must stay in sync with `RoutingBinaryWriter`.
 struct MITMBinaryWriter {
     private var bytes: [UInt8] = []
 

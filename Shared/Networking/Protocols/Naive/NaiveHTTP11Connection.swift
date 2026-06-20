@@ -11,8 +11,7 @@ nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP11Connection
 
 // MARK: - NaiveHTTP11Connection
 
-/// HTTP/1.1 CONNECT tunnel through a TLS proxy. Parses only the status line,
-/// so `responseHeaders` is always empty.
+/// Parses only the status line, so `responseHeaders` is always empty.
 nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
     // MARK: Properties
@@ -95,7 +94,6 @@ nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
     // MARK: - CONNECT Response
 
-    /// Buffers chunks until `\r\n\r\n` is found, then validates the status line.
     private func receiveConnectResponse(buffer: Data, completion: @escaping (Error?) -> Void) {
         transport.receive { [weak self] data, error in
             guard let self else { return }

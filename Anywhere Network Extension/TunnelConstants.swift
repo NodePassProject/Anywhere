@@ -11,13 +11,13 @@ enum TunnelConstants {
 
     // MARK: - Connection Timeouts
 
-    /// Inactivity timeout for TCP connections (default 300s).
+    /// Inactivity timeout for TCP connections.
     static let connectionIdleTimeout: TimeInterval = 300
-    /// Timeout after uplink (local → remote) finishes (default 1s).
+    /// Timeout after uplink (local → remote) finishes.
     static let downlinkOnlyTimeout: TimeInterval = 1
-    /// Timeout after downlink (remote → local) finishes (default 1s).
+    /// Timeout after downlink (remote → local) finishes.
     static let uplinkOnlyTimeout: TimeInterval = 1
-    /// Timeout for the entire connection setup phase (60s).
+    /// Timeout for the entire connection setup phase.
     static let handshakeTimeout: TimeInterval = 60
     /// Max wait for a TLS ClientHello before falling back to IP-based routing,
     /// so server-speaks-first protocols (SSH, SMTP, FTP) don't stall.
@@ -40,7 +40,6 @@ enum TunnelConstants {
 
     // MARK: - UDP Settings
 
-    /// Maximum buffer size for queued UDP datagrams.
     static let udpMaxBufferSize = 256 * 1024
     /// Idle timeout for unreplied UDP flows; mirrors Linux conntrack's `nf_conntrack_udp_timeout` (30s) so probe storms are reaped fast.
     static let udpIdleTimeoutUnreplied: TimeInterval = 30
@@ -75,7 +74,7 @@ enum TunnelConstants {
     static let udpCleanupIntervalSec = 1
     /// Leeway for the UDP cleanup reaper (ms); reaping tolerates the slack.
     static let udpCleanupLeewayMs = 250
-    /// Retry delay when TCP overflow drain makes no progress (milliseconds).
+    /// Retry delay when TCP overflow drain makes no progress.
     static let drainRetryDelayMs = 250
 
     // MARK: - Stack Lifecycle

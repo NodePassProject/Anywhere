@@ -9,8 +9,6 @@ import Foundation
 
 // MARK: - TransportClosures
 
-/// Closure triple adapting the differing send/receive/cancel APIs of plain TCP,
-/// TLS, and tunneled transports so protocol logic stays transport-agnostic.
 struct TransportClosures {
     let send: (Data, @escaping (Error?) -> Void) -> Void
     let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
@@ -51,7 +49,7 @@ extension TransportClosures {
         )
     }
 
-    /// Placeholder for XHTTP-over-HTTP/3, which multiplexes over QUIC; these closures are never invoked.
+    /// For XHTTP-over-HTTP/3, which multiplexes over QUIC; these closures are never invoked.
     static var unused: TransportClosures {
         TransportClosures(
             send: { _, completion in completion(nil) },

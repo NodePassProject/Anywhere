@@ -17,8 +17,7 @@ struct ProxyEditorView: View {
     @State private var name = ""
     @State private var serverAddress = ""
     @State private var serverPort = ""
-    
-    // VLESS fields
+
     @State private var vlessUUID = ""
     @State private var vlessEncryption = "none"
     @State private var vlessFlow = ""
@@ -65,8 +64,7 @@ struct ProxyEditorView: View {
     @State private var vlessXHTTPDownloadRealityPublicKey = ""
     @State private var vlessXHTTPDownloadRealityShortId = ""
     @State private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome120
-    
-    // Hysteria fields
+
     @State private var hysteriaPassword = ""
     @State private var hysteriaCC: HysteriaCongestionControl = .brutal
     @State private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
@@ -75,13 +73,11 @@ struct ProxyEditorView: View {
     @State private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
     @State private var hysteriaSNI = ""
 
-    // Nowhere fields
     @State private var nowhereKey = ""
     @State private var nowhereSpec = ""
     @State private var nowhereSNI = ""
     @State private var nowhereALPN = ""
 
-    // Trojan fields
     @State private var trojanPassword = ""
     @State private var trojanSNI = ""
     @State private var trojanALPN = ""
@@ -89,7 +85,6 @@ struct ProxyEditorView: View {
     @State private var trojanECHConfig = ""
     @State private var trojanFingerprint: TLSFingerprint = .chrome120
 
-    // AnyTLS fields
     @State private var anytlsPassword = ""
     @State private var anytlsSNI = ""
     @State private var anytlsALPN = ""
@@ -97,15 +92,12 @@ struct ProxyEditorView: View {
     @State private var anytlsECHConfig = ""
     @State private var anytlsFingerprint: TLSFingerprint = .chrome120
 
-    // Shadowsocks fields
     @State private var ssPassword = ""
     @State private var ssMethod = "aes-128-gcm"
-    
-    // SOCKS5 fields
+
     @State private var socks5Username = ""
     @State private var socks5Password = ""
 
-    // Sudoku fields
     @State private var sudokuKey = ""
     @State private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
     @State private var sudokuPaddingMinText = "5"
@@ -120,7 +112,6 @@ struct ProxyEditorView: View {
     @State private var sudokuHTTPMaskPathRoot = ""
     @State private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
 
-    // Shared credential fields for HTTPS/HTTP2/QUIC
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
 
@@ -172,7 +163,7 @@ struct ProxyEditorView: View {
             return !ssPassword.isEmpty
         }
         if isSOCKS5 {
-            return true // username/password optional for SOCKS5
+            return true
         }
         if isSudoku {
             guard !sudokuKey.isEmpty else { return false }
@@ -290,8 +281,7 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "UUID", comment: "UUID for VLESS protocol", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                 }
-                // Encryption (mlkem768x25519plus) requires CryptoKit's
-                // ML-KEM-768 — iOS/macOS/tvOS 26+ only.
+                // mlkem768x25519plus encryption needs CryptoKit ML-KEM-768 (26+ only).
                 if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
                     LabeledContent {
                         TextField(String("none"), text: $vlessEncryption)
@@ -1127,9 +1117,7 @@ struct ProxyEditorView: View {
         }
     }
 
-    /// Builds the `downloadSettings` object for the XHTTP `extra` blob from the
-    /// flattened detach fields, or nil when the split is off or its address/port
-    /// are missing. Keys match what `XHTTPConfiguration.parse` reads back.
+    /// Keys must match what `XHTTPConfiguration.parse` reads back. Returns nil when the split is off or address/port are missing.
     private func xhttpDownloadSettingsDict() -> [String: Any]? {
         guard vlessXHTTPDownloadEnabled,
               !vlessXHTTPDownloadAddress.isEmpty,
@@ -1218,14 +1206,12 @@ struct ProxyEditorView: View {
         if vlessTransport == "xhttp" {
             let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
             let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
-            // Parse extra JSON for advanced settings, passing through to XHTTPConfiguration.parse
             var params: [String: String] = [
                 "host": host,
                 "path": vlessXHTTPPath,
                 "mode": mode.rawValue
             ]
-            // `extra` carries the advanced fields (vlessXHTTPExtra) plus the detached
-            // download source; merge so neither clobbers the other.
+            // Merge advanced fields and the detached download source so neither clobbers the other.
             var extra: [String: Any] = [:]
             if !vlessXHTTPExtra.isEmpty, let data = vlessXHTTPExtra.data(using: .utf8),
                let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -1317,9 +1303,7 @@ struct ProxyEditorView: View {
         case .anytls:
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
             let alpn: [String]? = anytlsALPN.isEmpty ? nil : anytlsALPN.split(separator: ",").map { String($0) }
-            // Pool-tuning knobs are not editable in the UI — preserve any
-            // values the original config carried (URL/dict imports may set
-            // them), or fall back to sing-anytls's defaults.
+            // Pool-tuning knobs aren't UI-editable: preserve imported values, else sing-anytls defaults.
             let ici: Int
             let it: Int
             let mis: Int

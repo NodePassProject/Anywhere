@@ -8,10 +8,10 @@
 import Foundation
 
 struct RealityConfiguration {
-    let serverName: String          // SNI (target website to impersonate)
-    let publicKey: Data             // Server's X25519 public key (32 bytes)
-    let shortId: Data               // 0-8 bytes identifier
-    let fingerprint: TLSFingerprint // Browser fingerprint to mimic
+    let serverName: String          // SNI of the website to impersonate
+    let publicKey: Data             // X25519, 32 bytes
+    let shortId: Data               // 0-8 bytes
+    let fingerprint: TLSFingerprint
 
     init(serverName: String, publicKey: Data, shortId: Data, fingerprint: TLSFingerprint = .chrome120) {
         self.serverName = serverName
@@ -96,19 +96,15 @@ extension RealityConfiguration: Equatable, Hashable {
 }
 
 enum TLSFingerprint: String, Codable, CaseIterable {
-    // Chrome
     case chrome133 = "chrome_133"
     case chrome120 = "chrome_120"
     case chrome106 = "chrome_106"
 
-    // Firefox
     case firefox148 = "firefox_148"
     case firefox120 = "firefox_120"
 
-    // Safari
     case safari26 = "safari_26"
 
-    // Edge
     case edge106 = "edge_106"
 
     /// Minimal ClientHello for real (non-camouflage) handshakes, e.g. the MITM outer leg.
@@ -116,8 +112,7 @@ enum TLSFingerprint: String, Codable, CaseIterable {
     /// send — strict origins (e.g. Google's GFE) abort with `unexpected_message`.
     case nonBrowser = "non_browser"
 
-    /// Tolerant decoder: proxies saved with a since-removed fingerprint
-    /// (e.g. `ios_14`, `edge_85`, `safari_16`, `random`) fall back to Chrome 120
+    /// Tolerant decoder: an unknown saved fingerprint falls back to Chrome 120
     /// rather than failing to decode.
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
@@ -152,7 +147,7 @@ enum RealityError: Error, LocalizedError {
     case handshakeFailed(String)
     case authenticationFailed
     case connectionFailed(String)
-    case decryptionFailed  // Record no longer decrypts with the derived keys — server may have switched to direct copy
+    case decryptionFailed  // Record no longer decrypts — server may have switched to direct copy
 
     var errorDescription: String? {
         switch self {

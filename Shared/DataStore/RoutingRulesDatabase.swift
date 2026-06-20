@@ -10,8 +10,7 @@ import SQLite3
 
 nonisolated private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
-/// Read-only SQLite database of bundled routing rules: `rules(source, type, value)`
-/// and `metadata(key, value)` with JSON-encoded values.
+/// Read-only SQLite over bundled `rules(source, type, value)` and `metadata(key, value)`; metadata values are JSON.
 final class RoutingRulesDatabase {
     static let shared = RoutingRulesDatabase()
 
@@ -30,7 +29,6 @@ final class RoutingRulesDatabase {
 
     // MARK: - Queries
 
-    /// Returns all rules for a given source (e.g. "ADBlock", "Telegram", "CN").
     func loadRules(for source: String) -> [RoutingRule] {
         guard let db else { return [] }
 
@@ -52,7 +50,6 @@ final class RoutingRulesDatabase {
         return rules
     }
 
-    /// Returns a metadata value (JSON string) for the given key.
     func loadMetadata(_ key: String) -> String? {
         guard let db else { return nil }
 
@@ -69,7 +66,6 @@ final class RoutingRulesDatabase {
         return String(cString: cValue)
     }
 
-    /// Convenience: decodes a metadata value as a JSON array of strings.
     func loadStringArray(_ key: String) -> [String] {
         guard let json = loadMetadata(key),
               let data = json.data(using: .utf8),
@@ -79,7 +75,6 @@ final class RoutingRulesDatabase {
         return array
     }
 
-    /// Convenience: decodes a metadata value as a JSON dictionary of string→string.
     func loadStringDictionary(_ key: String) -> [String: String] {
         guard let json = loadMetadata(key),
               let data = json.data(using: .utf8),

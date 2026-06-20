@@ -7,27 +7,23 @@
 
 import Foundation
 
-/// Newest connection-establishment timings for the live home stats, reflecting
-/// the default outbound proxy only. The handshake subtraction is global, so it
-/// is approximate under concurrent dials; clamped at zero. Thread-safe via
-/// lock; `nonisolated` to stay off the main actor.
+/// Default outbound proxy only. Handshake subtraction is global, so timings are
+/// approximate under concurrent dials; clamped at zero.
 nonisolated final class ConnectionMetrics: @unchecked Sendable {
     static let shared = ConnectionMetrics()
 
-    /// A connection-establishment latency tracked for the live stats.
     enum Metric {
         /// First-hop TCP connect — the "dial".
         case dial
-        /// Full proxy setup to tunnel-ready; the recorded span includes the
-        /// dial, which `record(_:_:)` subtracts off.
+        /// Full proxy setup span, includes the dial which `record` subtracts off.
         case handshake
-        /// Full setup span for a QUIC transport (no first-hop TCP dial).
+        /// QUIC setup span — no first-hop TCP dial.
         case handshakeNoDial
     }
 
     private let lock = NSLock()
-    /// Newest first-hop dial, parked until a default-proxy handshake promotes
-    /// it — the socket can't know its route at dial time.
+    /// Parked until a default-proxy handshake promotes it — the socket can't
+    /// know its route at dial time.
     private var pendingDialMs: Int?
     private var dialMs: Int?
     private var handshakeMs: Int?
@@ -45,19 +41,17 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
         let avgHandshakeMs: Int?
     }
 
-    /// Records a measured latency; no-op while recording is suspended.
+    /// No-op while recording is suspended.
     func record(_ metric: Metric, _ duration: Duration) {
         let ms = max(0, duration.milliseconds)
         lock.lock()
         if suspendDepth == 0 {
             switch metric {
             case .dial:
-                // Parked; committed only by the next default-proxy handshake.
                 pendingDialMs = ms
             case .handshake:
-                // Default proxy only: commit the pending dial and the post-TCP
-                // remainder together for the same connection. The dial is
-                // consumed so it can't be double-counted into the averages.
+                // Commit pending dial and post-TCP remainder for the same
+                // connection; consume the dial so it isn't double-counted.
                 let remainder: Int
                 if let dial = pendingDialMs {
                     pendingDialMs = nil
@@ -82,8 +76,7 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Suppresses recording during a latency-test probe; re-entrant, pair with
-    /// `resumeRecording()`.
+    /// Re-entrant; pair with `resumeRecording()`.
     func suspendRecording() {
         lock.lock()
         suspendDepth += 1

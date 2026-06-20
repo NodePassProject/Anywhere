@@ -25,24 +25,17 @@ nonisolated final class AWCore {
 
         // MARK: Proxy socket & protocol queue labels
         //
-        // Centralized so labels share one prefix and group in Instruments.
         // Per-socket/per-session queues deliberately share one label per role.
 
         static let rawTCPSocketQueue = "\(bundle).raw-tcp-socket"
         static let rawUDPSocketQueue = "\(bundle).raw-udp-socket"
-        /// Per-connection queue label for the ngtcp2 QUIC event loop.
         static let quicQueue = "\(bundle).quic"
-        /// Per-connection queue label for the HTTP/1.1 CONNECT relay.
         static let http11Queue = "\(bundle).http11"
         static let http2SessionQueue = "\(bundle).http2-session"
-        /// Idle-session reaper queue label for the Naive HTTP/3 pool.
         static let http3PoolCleanupQueue = "\(bundle).http3-pool-cleanup"
-        /// Idle-session reaper queue label for an AnyTLS client.
         static let anyTLSIdleQueue = "\(bundle).anytls-idle-cleanup"
-        /// Stream-handshake-timeout queue label for AnyTLS.
         static let anyTLSSessionTimerQueue = "\(bundle).anytls-session-timer"
 
-        // Sudoku per-stream read/write queues (dotted `transport.role` hierarchy).
         static let sudokuTCPReadQueue = "\(bundle).sudoku.tcp.read"
         static let sudokuTCPWriteQueue = "\(bundle).sudoku.tcp.write"
         static let sudokuMuxReadQueue = "\(bundle).sudoku.mux.read"
@@ -55,11 +48,8 @@ nonisolated final class AWCore {
         // A supervisor must run off the worker queue it watches; one shared
         // monitor queue hosts every hard-cap check.
 
-        /// Shared low-priority supervisor queue for all MITM hard-cap checks.
         static let mitmMonitorQueue = "\(bundle).mitm-monitor"
-        /// Worker queue label carrying the (possibly runaway) body-replace regex.
         static let mitmBodyWatchdogQueue = "\(bundle).mitm-body-watchdog"
-        /// Concurrent worker queue label for bounded URL-gate regex matching.
         static let mitmGateMatchQueue = "\(bundle).mitm-gate-match"
     }
     
@@ -119,7 +109,6 @@ nonisolated final class AWCore {
         static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
     }
 
-    /// One-time migration of a JSON file from the app's documents directory into the App Group container.
     static func migrateToAppGroup(fileName: String) {
         let fileManager = FileManager.default
         let oldURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(fileName)
@@ -407,7 +396,7 @@ nonisolated final class AWCore {
     static func setRoutingData(_ data: Data) {
         do {
             try data.write(to: routingDataURL, options: [.atomic, .noFileProtection])
-            // Shed the legacy UserDefaults copy left behind by earlier builds.
+            // Drop the obsolete UserDefaults copy now that routing lives in a file.
             userDefaults.removeObject(forKey: "routingData")
         } catch {
             logger.error("Failed to write routing data: \(error)")

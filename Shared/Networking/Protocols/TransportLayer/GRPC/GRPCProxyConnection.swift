@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over a ``GRPCConnection`` transport.
 nonisolated class GRPCProxyConnection: ProxyConnection {
     private let grpcConnection: GRPCConnection
 

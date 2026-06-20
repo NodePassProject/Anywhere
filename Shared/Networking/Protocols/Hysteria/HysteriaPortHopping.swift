@@ -7,14 +7,10 @@
 
 import Foundation
 
-/// Hysteria "port hopping" (a.k.a. multi-port / port jumping): the client rotates the UDP
-/// destination port across a configured set on a fixed interval.
-///
-/// Spec format follows the conventions seen in the wild: comma- or whitespace-separated entries,
-/// each either a single port (`443`) or an inclusive range using `-` or `:` (`5000-6000`,
-/// `5000:6000`). Examples: `"20000-50000"`, `"443,5000-6000"`.
+/// Spec: comma/whitespace-separated entries, each a single port (`443`) or an inclusive range
+/// using `-` or `:` (`5000-6000`, `5000:6000`).
 struct HysteriaPortHopping: Hashable, Codable {
-    /// Raw spec exactly as configured/imported; preserved so links and stored configs round-trip.
+    /// Preserved verbatim so links and stored configs round-trip.
     let portsSpec: String
     /// Seconds between hops.
     let intervalSeconds: Int
@@ -27,21 +23,17 @@ struct HysteriaPortHopping: Hashable, Codable {
         self.intervalSeconds = intervalSeconds > 0 ? intervalSeconds : HysteriaPortHopping.defaultIntervalSeconds
     }
 
-    /// Parsed inclusive ranges, or `nil` when the spec yields no valid port.
     var ranges: [ClosedRange<UInt16>]? { Self.parseRanges(portsSpec) }
 
-    /// Builds a config from a possibly-absent spec, returning `nil` when the spec is missing,
-    /// empty, or parses to no valid port. `intervalSeconds` falls back to the default when absent.
-    /// Centralizes the "absent/empty/invalid → no hopping" decision for the lenient importers.
+    /// Centralizes the "absent/empty/invalid → no hopping" decision for lenient importers.
     static func make(spec: String?, intervalSeconds: Int?) -> HysteriaPortHopping? {
         guard let spec, parseRanges(spec) != nil else { return nil }
         return HysteriaPortHopping(portsSpec: spec,
                                    intervalSeconds: intervalSeconds ?? defaultIntervalSeconds)
     }
 
-    /// Parses the spec into normalized inclusive ranges. Reversed bounds are swapped; empty,
-    /// non-numeric, or out-of-range (`0` / `>65535`) tokens are skipped. Returns `nil` if nothing
-    /// parses, which callers treat as "port hopping disabled".
+    /// Reversed bounds are swapped; empty, non-numeric, or out-of-range (`0`/`>65535`) tokens
+    /// are skipped. `nil` means "port hopping disabled".
     static func parseRanges(_ spec: String) -> [ClosedRange<UInt16>]? {
         var result: [ClosedRange<UInt16>] = []
         let entries = spec.split { $0 == "," || $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }

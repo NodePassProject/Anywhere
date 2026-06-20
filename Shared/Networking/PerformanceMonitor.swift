@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// Debug-only instrument for the data plane: timed spans, sampled gauges, and
-/// overwhelm counters, opt-in by category. The lock is a leaf lock never held
-/// across timed work or logging, so nested spans cannot self-deadlock.
+/// The lock is a leaf lock never held across timed work or logging, so nested
+/// spans cannot self-deadlock.
 nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Category (the print/enable filter)
@@ -35,7 +34,6 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Component (timed spans)
 
-    /// A timed stage in the send/receive path.
     enum Component: Int, CaseIterable, Sendable {
         case socketSendTCP
         case socketReceiveTCP
@@ -114,8 +112,8 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Gauge (sampled levels)
 
-    /// A sampled level (backlog, queue depth). High-water thresholds come from
-    /// call sites so this `Shared` type stays free of NE-only symbols.
+    /// High-water thresholds come from call sites so this `Shared` type stays
+    /// free of NE-only symbols.
     enum Gauge: Int, CaseIterable, Sendable {
         case tcpDownlinkBacklog
         case tcpUploadBacklog
@@ -145,7 +143,6 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Event (overwhelm counters)
 
-    /// A counted overwhelm incident (drop, stall retry, eviction).
     enum Event: Int, CaseIterable, Sendable {
         case downlinkStallRetry
         case lwipWriteFatal

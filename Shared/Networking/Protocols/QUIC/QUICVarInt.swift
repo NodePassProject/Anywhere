@@ -9,9 +9,7 @@ import Foundation
 
 // MARK: - QUICVarInt
 
-/// QUIC variable-length integer codec (RFC 9000 §16). The two high bits of the first
-/// byte select a 1/2/4/8-byte encoding; the remaining bits hold the value. A transport
-/// primitive shared by the HTTP/3 framing and QPACK layers, which ride QUIC streams.
+/// RFC 9000 §16: the two high bits of the first byte select a 1/2/4/8-byte encoding; the remaining bits hold the value.
 enum QUICVarInt {
 
     static func encode(_ value: UInt64) -> Data {

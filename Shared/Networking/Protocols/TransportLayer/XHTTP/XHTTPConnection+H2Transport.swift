@@ -13,8 +13,8 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Setup
 
-    /// HTTP/2 setup matching Go's http2.Transport: preface + SETTINGS + WINDOW_UPDATE
-    /// + HEADERS in one write, without waiting for the server's SETTINGS first.
+    /// HTTP/2 setup: preface + SETTINGS + WINDOW_UPDATE + HEADERS in one write,
+    /// without waiting for the server's SETTINGS first.
     func performH2Setup(completion: @escaping (Error?) -> Void) {
         var initData = h2ClientPreface()
 
@@ -22,8 +22,7 @@ extension XHTTPConnection {
         // buffer it until the backend sees POST body data, so waiting would deadlock.
         switch role {
         case .uploadOnly:
-            // Upload leg: the POST is stream 1; no stream here is the download
-            // stream, so reads are only a flow-control/response drain.
+            // POST is stream 1; no download stream, so reads are only a flow-control/response drain.
             h2UploadStreamId = 1
             h2DownloadStreamId = .max
             if mode == .streamUp {
@@ -42,7 +41,6 @@ extension XHTTPConnection {
             }
 
         case .downloadOnly:
-            // Download leg: GET on stream 1 only (no upload stream on this leg).
             let headerBlock = encodeH2RequestHeaders(method: "GET", includeMeta: true)
             initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders | Self.h2FlagEndStream, streamId: 1, payload: headerBlock))
             downloadSend(initData) { [weak self] error in
@@ -61,7 +59,6 @@ extension XHTTPConnection {
                 let headerBlock = encodeH2RequestHeaders(method: "GET", includeMeta: true)
                 initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders | Self.h2FlagEndStream, streamId: 1, payload: headerBlock))
             }
-            // For stream-up, also open the upload stream (stream 3) on this connection.
             if mode == .streamUp {
                 let uploadHeaders = encodeH2UploadHeaders(seq: nil)
                 initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: h2UploadStreamId, payload: uploadHeaders))
@@ -187,7 +184,6 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Send
 
-    /// Marks the H2 connection as closed so subsequent sends fail fast.
     func markH2Closed() {
         lock.lock()
         h2StreamClosed = true
@@ -253,7 +249,7 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends a packet-up batch as a new HTTP/2 stream: HEADERS + DATA + END_STREAM.
+    /// Sends a packet-up batch as a new HTTP/2 stream.
     func sendH2PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if h2StreamClosed {
@@ -283,7 +279,6 @@ extension XHTTPConnection {
 
         guard sendsBody else {
             lock.unlock()
-            // No body frame: empty payload, or payload carried in headers/cookies.
             // Rate limiting between POSTs is handled upstream by flushPacketUpBatch.
             downloadSend(outbound) { [weak self] error in
                 if error != nil {
@@ -294,7 +289,6 @@ extension XHTTPConnection {
             return
         }
 
-        // Batch DATA frames with HEADERS into a single write when window allows
         let window = min(connectionWindow, streamWindow)
         var currentOffset = 0
         var windowRemaining = window
@@ -444,7 +438,7 @@ extension XHTTPConnection {
 
                 switch frame.type {
                 case Self.h2FrameData:
-                    // Batch WINDOW_UPDATEs at >= 50% of window consumed (matches Go http2).
+                    // Batch WINDOW_UPDATEs at >= 50% of window consumed.
                     // Stream-level updates only for the download stream — updating a
                     // possibly-closed upload stream draws RST_STREAM (STREAM_CLOSED).
                     if !frame.payload.isEmpty {

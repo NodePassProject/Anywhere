@@ -12,7 +12,6 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack")
 
 // MARK: - Traffic Accounting
 
-/// Per-route cumulative payload byte counts for one tunnel session.
 struct TrafficByteCounts {
     struct ByteCounts: Sendable {
         var bytesIn: Int64 = 0

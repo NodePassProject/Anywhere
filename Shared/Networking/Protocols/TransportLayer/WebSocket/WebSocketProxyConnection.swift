@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over a ``WebSocketConnection`` transport.
 nonisolated class WebSocketProxyConnection: ProxyConnection {
     private let wsConnection: WebSocketConnection
 

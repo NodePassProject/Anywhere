@@ -26,7 +26,6 @@ private enum SOCKS5 {
 
 // MARK: - SOCKS5Buffer
 
-/// Shared read buffer for the SOCKS5 handshake.
 nonisolated class SOCKS5Buffer {
     private var data = Data()
     private let transport: any RawTransport
@@ -102,7 +101,6 @@ nonisolated class SOCKS5Transport: RawTransport {
 
 // MARK: - SOCKS5Handshake
 
-/// SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE).
 enum SOCKS5Handshake {
 
     struct UDPRelayInfo {

@@ -896,7 +896,6 @@ class TCPConnection {
             if written > 0 {
                 pendingWriteOffset += written
                 if pendingWriteOffset >= pendingWrite.count {
-                    // Fully drained — keep the backing allocation.
                     pendingWrite.removeAll(keepingCapacity: true)
                     pendingWriteOffset = 0
                 } else if pendingWriteOffset > pendingWrite.count - pendingWriteOffset {

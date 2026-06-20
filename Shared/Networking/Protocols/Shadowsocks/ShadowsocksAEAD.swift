@@ -91,7 +91,6 @@ enum ShadowsocksKeyDerivation {
                                      input: input, count: keySize)
     }
 
-    /// Matches sing-shadowsocks SessionKey().
     static func deriveSessionKey(psk: Data, salt: Data, keySize: Int) -> Data {
         var input = Data(psk)
         input.append(salt)
@@ -191,7 +190,6 @@ nonisolated class ShadowsocksAEADWriter {
     private var salt: Data
     private var saltWritten = false
 
-    /// Maximum payload bytes per chunk.
     static let maxPayloadSize = 0x3FFF // 16383
 
     init(cipher: ShadowsocksCipher, masterKey: Data) {
@@ -251,7 +249,6 @@ nonisolated class ShadowsocksAEADWriter {
 
 // MARK: - ShadowsocksAEADReader (Decrypt)
 
-/// Decrypts Shadowsocks AEAD chunk format.
 nonisolated class ShadowsocksAEADReader {
     private let cipher: ShadowsocksCipher
     private let masterKey: Data
@@ -351,7 +348,6 @@ nonisolated class ShadowsocksAEADReader {
 
 // MARK: - UDP Crypto
 
-/// Per-packet encryption/decryption for Shadowsocks UDP.
 enum ShadowsocksUDPCrypto {
 
     /// Encrypts a UDP packet: random salt + single AEAD seal (no chunking).
@@ -366,7 +362,6 @@ enum ShadowsocksUDPCrypto {
             masterKey: masterKey, salt: salt, keySize: cipher.keySize
         )
 
-        // Single AEAD seal with all-zero nonce
         let nonce = Data(repeating: 0, count: cipher.nonceSize)
         let encrypted = try ShadowsocksAEADCrypto.seal(
             cipher: cipher, key: subkey, nonce: nonce, plaintext: payload

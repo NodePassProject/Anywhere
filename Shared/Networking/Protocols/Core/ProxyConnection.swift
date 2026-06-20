@@ -21,7 +21,6 @@ protocol ProxyConnectionProtocol: AnyObject {
 
 // MARK: - ProxyConnection
 
-/// Abstract base class for proxy connections.
 nonisolated class ProxyConnection: ProxyConnectionProtocol {
     /// Generic per-connection lock for subclass state; no base-class invariant depends on it.
     let lock = UnfairLock()

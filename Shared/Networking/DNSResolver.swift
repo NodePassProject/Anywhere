@@ -21,7 +21,6 @@ nonisolated private let logger = AnywhereLogger(category: "DNSResolver")
 nonisolated final class DNSResolver {
     static let shared = DNSResolver()
 
-    /// Default TTL for cached entries (seconds).
     static let defaultTTL: TimeInterval = 120
 
     /// How long past TTL a stale answer is still served before cleanup drops it.
@@ -30,12 +29,9 @@ nonisolated final class DNSResolver {
     /// Backstop cap; TTL-based cleanup normally bounds the cache.
     static let maxEntries = 1024
 
-    /// Clamp bounds for a cached ECH HTTPS-record result.
     static let echMinTTL: TimeInterval = 60
     static let echMaxTTL: TimeInterval = 86_400
-    /// How long a "no ECH record" answer is cached.
     static let echNegativeTTL: TimeInterval = 30
-    /// Per-lookup timeout for the system-resolver HTTPS-record query.
     static let echQueryTimeout: TimeInterval = 5
 
     private struct CacheEntry {
@@ -289,7 +285,7 @@ nonisolated final class DNSResolver {
                 echWaiters[key]?.append(completion)
                 return .joined
             }
-            echWaiters[key] = []          // claim leadership for this host
+            echWaiters[key] = []          // non-nil empty list claims leadership for this host
             return .lead(generation: generation)
         }
 

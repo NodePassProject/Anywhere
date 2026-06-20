@@ -308,7 +308,7 @@ nonisolated final class HysteriaSession {
                     "Auth stream ended before HEADERS frame"
                 ))
             }
-            return // incomplete
+            return
         }
         authBuffer = Data(authBuffer.dropFirst(consumed))
 

@@ -21,7 +21,6 @@ enum VLESSAddressType: UInt8 {
 
 struct VLESSProtocol {
 
-    /// VLESS protocol version (always 0).
     static let version: UInt8 = 0
 
     /// Encode VLESS addons. Protobuf schema: `{ string Flow = 1; bytes Seed = 2; }`

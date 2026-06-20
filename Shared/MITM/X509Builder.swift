@@ -110,7 +110,6 @@ enum X509Builder {
         return ASN1.sequence(rdnSequence)
     }
 
-    /// Encodes a single RDN as a SET containing one AttributeTypeAndValue.
     private static func encodeRDN(oid: Data, value: String) -> Data {
         var atv = Data()
         atv.append(oid)
@@ -567,7 +566,7 @@ private enum ASN1 {
             v >>= 8
         } while !(v == 0 || v == -1)
 
-        // Sign correction
+        // DER INTEGER sign correction: pad 0x00 to keep positives positive, 0xFF for negatives.
         if !negative, let first = bytes.first, first & 0x80 != 0 {
             bytes.insert(0x00, at: 0)
         } else if negative, let first = bytes.first, first & 0x80 == 0 {

@@ -29,7 +29,7 @@ enum ShadowsocksCipher {
     /// Salt size (also called IV size).
     var saltSize: Int { keySize }
 
-    /// AEAD authentication tag size (16 for all AEAD ciphers).
+    /// AEAD authentication tag size in bytes (16 for all AEAD ciphers).
     var tagSize: Int {
         switch self {
         case .none: return 0
@@ -37,7 +37,7 @@ enum ShadowsocksCipher {
         }
     }
 
-    /// AEAD nonce size (12 for GCM and ChaCha20-Poly1305).
+    /// AEAD nonce size in bytes (12 for GCM and ChaCha20-Poly1305).
     var nonceSize: Int {
         switch self {
         case .none: return 0

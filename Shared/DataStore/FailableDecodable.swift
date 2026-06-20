@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Wraps a `Decodable` so a single corrupt element doesn't fail the whole
-/// array and wipe the rest of the user's data.
+/// Wraps a `Decodable` so one corrupt element doesn't fail the whole array.
 struct FailableDecodable<T: Decodable>: Decodable {
     let value: T?
     init(from decoder: Decoder) throws {

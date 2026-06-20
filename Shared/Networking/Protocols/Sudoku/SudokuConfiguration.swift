@@ -217,9 +217,7 @@ struct SudokuConfiguration: Codable, Hashable {
         try container.encode(httpMask, forKey: .httpMask)
     }
 
-    /// Normalizes custom table entries. Plural table entries win when they
-    /// contain at least one usable value; otherwise the legacy single-table
-    /// field remains a fallback.
+    /// Plural entries win when any is usable; otherwise the legacy single-table field is the fallback.
     static func normalizeCustomTables(_ tables: [String], legacy: String = "", legacyFallback: Bool = true) -> [String] {
         var seen = Set<String>()
         var normalized: [String] = []

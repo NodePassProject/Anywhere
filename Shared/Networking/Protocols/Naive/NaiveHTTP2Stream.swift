@@ -9,8 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Stream")
 
-/// A single CONNECT tunnel multiplexed on an HTTP/2 multiplexer, with its own flow-control
-/// window; response headers are exposed so the proxy layer can run its own negotiation.
 nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
     // MARK: - State
@@ -33,14 +31,11 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
     private var state: StreamState = .idle
 
-    // Per-stream flow control (send side)
     private(set) var sendWindow: Int
 
-    // Per-stream flow control (receive side)
     private var recvConsumed: Int = 0
     private var recvWindowSize: Int = NaiveHTTP2FlowControl.naiveInitialWindowSize
 
-    // Receive buffering — data delivered by the multiplexer's read loop
     private var receiveQueue: [Data] = []
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var endStreamReceived = false
@@ -80,7 +75,6 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
                     return
                 }
 
-                // Adopt the peer's initial window size for this new stream
                 self.sendWindow = multiplexer.peerInitialWindowSize
 
                 self.connectCompletion = completion
@@ -136,7 +130,7 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
             if endStreamReceived {
                 state = .closed
-                completion(nil, nil)  // EOF
+                completion(nil, nil)
                 return
             }
 
@@ -221,7 +215,7 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
                 pendingReceive = nil
                 state = .closed
                 multiplexer?.removeStream(self)
-                pending(nil, nil)  // EOF
+                pending(nil, nil)
             }
             // Empty DATA without END_STREAM: keep waiting
         } else if !payload.isEmpty {
@@ -267,7 +261,6 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
     // MARK: - Flow Control (called by multiplexer on multiplexer.queue)
 
-    /// Opens per-stream and connection receive windows for data the consumer actually read.
     private func acknowledgeConsumedData(count: Int) {
         recvConsumed += count
         if recvConsumed >= recvWindowSize / 2 {

@@ -53,14 +53,11 @@ enum YAML {
             }
         }
 
-        /// The scalar text, or "" for non-scalar nodes.
         var scalar: String {
             if case .scalar(let value) = storage { return value }
             return ""
         }
 
-        /// Mapping lookup by key. Returns an undefined node when the key is
-        /// absent or the receiver isn't a mapping.
         subscript(key: String) -> Node {
             guard case .map(let pairs) = storage else { return Node() }
             for pair in pairs where pair.key.scalar == key {
@@ -69,8 +66,6 @@ enum YAML {
             return Node()
         }
 
-        /// Sequence (and key/value pair) indexing. Returns an undefined node
-        /// when out of range or the receiver isn't a sequence.
         subscript(index: Int) -> Node {
             guard case .sequence(let elements) = storage,
                   index >= 0, index < elements.count else { return Node() }
@@ -78,7 +73,6 @@ enum YAML {
         }
     }
 
-    /// Parses the first document of `input` into a `Node` tree.
     static func load(_ input: String) throws -> Node {
         var parser = yaml_parser_t()
         guard yaml_parser_initialize(&parser) == 1 else {
@@ -143,24 +137,21 @@ private final class Loader {
         return event
     }
 
-    /// Skips stream/document framing and returns the document's root node.
     func loadDocument() throws -> YAML.Node {
         while true {
             var event = try nextEvent()
             let type = event.type
             yaml_event_delete(&event)
             if type == YAML_STREAM_END_EVENT {
-                return YAML.Node()                       // empty input
+                return YAML.Node()
             }
             if type == YAML_DOCUMENT_START_EVENT {
                 return try parseNode() ?? YAML.Node()
             }
-            // STREAM_START and anything else: keep advancing.
         }
     }
 
-    /// Builds the node for the next event, or nil when that event closes a
-    /// container (so callers can loop until nil).
+    /// Returns nil when the next event closes a container, so callers can loop until nil.
     private func parseNode() throws -> YAML.Node? {
         var event = try nextEvent()
         defer { yaml_event_delete(&event) }

@@ -11,8 +11,7 @@ nonisolated private let logger = AnywhereLogger(category: "XHTTPConnection")
 
 // MARK: - XHTTP Channel Role
 
-/// Which half of an XHTTP session a connection drives; a detached session pairs
-/// a `.downloadOnly` leg (GET) with an `.uploadOnly` leg (POSTs) sharing one session ID.
+/// A detached session pairs a `.downloadOnly` leg (GET) with an `.uploadOnly` leg (POSTs) sharing one session ID.
 enum XHTTPChannelRole {
     case combined
     case downloadOnly
@@ -21,7 +20,6 @@ enum XHTTPChannelRole {
 
 // MARK: - XHTTPConnection
 
-/// XHTTP connection implementing packet-up, stream-up, and stream-one modes.
 nonisolated class XHTTPConnection {
 
     let configuration: XHTTPConfiguration
@@ -41,7 +39,6 @@ nonisolated class XHTTPConnection {
     var uploadReceive: ((@escaping (Data?, Bool, Error?) -> Void) -> Void)?
     var uploadCancel: (() -> Void)?
 
-    /// Role of this connection in an up/download-detached session.
     var role: XHTTPChannelRole = .combined
     /// Upload leg owned by this download leg when detached; sends are delegated to it.
     var uploadChannel: XHTTPConnection?
@@ -154,7 +151,6 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Returns the request path with query-based padding appended if needed.
     func pathWithQueryPadding(_ basePath: String) -> String {
         if configuration.xPaddingObfsMode && configuration.xPaddingPlacement == .query {
             let padding = configuration.generatePadding()
@@ -165,7 +161,6 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Session/Seq Metadata
 
-    /// Applies session ID to the request path, headers, query, or cookie based on configuration.
     func applySessionId(to request: inout String, path: inout String) {
         guard !sessionId.isEmpty else { return }
         let key = configuration.normalizedSessionKey
@@ -184,7 +179,6 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Returns query string components for session/seq placed in query params.
     func queryParamsForMeta(seq: Int64? = nil) -> String {
         var parts: [String] = []
         if !sessionId.isEmpty && configuration.sessionPlacement == .query {
@@ -198,7 +192,6 @@ nonisolated class XHTTPConnection {
         return parts.joined(separator: "&")
     }
 
-    /// Applies sequence number to the request path, headers, or cookie based on configuration.
     func applySeq(to request: inout String, path: inout String, seq: Int64) {
         let key = configuration.normalizedSeqKey
         switch configuration.seqPlacement {
@@ -233,7 +226,6 @@ nonisolated class XHTTPConnection {
         case cookie(pair: String)
     }
 
-    /// Whether packet-up payloads travel outside the request body (header/cookie placement).
     var uplinkDataIsNonBody: Bool {
         configuration.uplinkDataPlacement == .header || configuration.uplinkDataPlacement == .cookie
     }
@@ -286,7 +278,6 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Initializers
 
-    /// Designated initializer taking a pre-built download `TransportClosures`.
     init(download: TransportClosures, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.configuration = configuration
         self.mode = mode
@@ -532,7 +523,6 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Packet-Up Batching
 
-    /// Queues a write for the next batched POST in packet-up mode.
     func enqueuePacketUpSend(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if !_isConnected || (useHTTP2 && h2StreamClosed) || (useHTTP3 && h3Closed) {
@@ -687,7 +677,6 @@ nonisolated final class XHTTPXMUXMultiplexerLease {
     }
 }
 
-/// One pooled connection plus its xmux usage/rotation counters.
 nonisolated final class XHTTPXMUXMultiplexerClient {
     enum State { case dialing, ready, failed }
     var state: State = .dialing
@@ -723,7 +712,6 @@ nonisolated final class XHTTPXMUXMultiplexerClient {
     }
 }
 
-/// Pools and rotates underlying connections for one XHTTP destination.
 /// All state is guarded by `lock`.
 nonisolated final class XHTTPXMUXMultiplexerManager {
     private let config: XHTTPXMUXMultiplexerConfiguration
@@ -852,22 +840,19 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
         lock.unlock()
     }
 
-    /// Whether the pool currently holds no clients.
     fileprivate func hasNoClients() -> Bool {
         lock.lock(); defer { lock.unlock() }
         return clients.isEmpty
     }
 }
 
-/// Global registry of per-destination xmux managers.
 nonisolated final class XHTTPXMUXMultiplexerRegistry {
     static let shared = XHTTPXMUXMultiplexerRegistry()
     private var managers: [String: XHTTPXMUXMultiplexerManager] = [:]
     private let lock = UnfairLock()
     private init() {}
 
-    /// Returns the manager for `key`, creating it on first use with a destination-bound
-    /// connection factory. The factory must not capture per-session/per-flow state.
+    /// The factory is destination-bound and must not capture per-session/per-flow state.
     func manager(
         key: String,
         config: XHTTPXMUXMultiplexerConfiguration,
@@ -907,7 +892,6 @@ extension HTTP3Multiplexer: XHTTPXMUXMultiplexerPoolable {
 // Carries many XHTTP sessions as independent H2 streams over one socket. Gated behind
 // xmux config; the default 1:1 H2 path (XHTTPConnection+H2*.swift) is unchanged.
 
-/// One virtual HTTP/2 stream on a shared connection: a single XHTTP request/response.
 /// All mutable state is guarded by the owning connection's lock.
 nonisolated final class XHTTPH2Stream {
     let streamId: UInt32
@@ -950,8 +934,7 @@ nonisolated final class XHTTPH2Stream {
     func close() { connection?.removeStream(self) }
 }
 
-/// A shared HTTP/2 connection multiplexing many XHTTP sessions (xmux). Owns one byte
-/// transport; one always-on read loop demuxes frames to per-stream buffers. State under `lock`.
+/// One always-on read loop demuxes frames to per-stream buffers. State under `lock`.
 nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     private let transportSend: (Data, @escaping (Error?) -> Void) -> Void
     private let transportCancel: () -> Void

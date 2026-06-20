@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Protocol providing UDP packet framing capabilities
 /// UDP packets are length-prefixed with 2 bytes (big-endian)
 protocol UDPFramingCapable: AnyObject {
     var udpBuffer: Data { get set }

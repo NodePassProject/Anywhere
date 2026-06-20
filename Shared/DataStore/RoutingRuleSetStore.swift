@@ -57,7 +57,6 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 
-    /// Returns a parsed http(s) URL whose path ends with `.arrs` (case-insensitive), or nil.
     static func validSubscriptionURL(from rawValue: String) -> URL? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
@@ -429,7 +428,6 @@ extension RoutingRuleSetStore {
         if !affected.isEmpty { orphanedRuleSetNames = affected }
     }
 
-    /// Dismisses the orphaned-rule-set notice.
     func acknowledgeOrphans() {
         orphanedRuleSetNames = []
     }

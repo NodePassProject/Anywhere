@@ -244,8 +244,6 @@ final class MITMSession {
         }
     }
 
-    /// Adapts a per-stream response stream's IR to the client leg's sink, tagging each event with the
-    /// client stream ID.
     private final class BridgeResponseIRSink: MITMHTTP1ResponseIRSink {
         let streamID: UInt32
         weak var client: MITMBridgeClientLeg?
@@ -332,7 +330,7 @@ final class MITMSession {
         self.dialer = dialer
         self.lwipQueue = lwipQueue
         self.innerTransport = InnerTransport(queue: lwipQueue)
-        // Keyed by the matched set's id so it lines up with the Anywhere.store scope.
+        // Scope keyed by matched set id to line up with the Anywhere.store scope.
         self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
         // effectiveAuthority is late-bound by a transparent rewrite on the first request.
         self.requestStream = MITMHTTP1Stream(

@@ -57,7 +57,6 @@ struct NaiveHTTP2FlowControl {
         var connInc: UInt32?
         var streamInc: UInt32?
 
-        // Send WINDOW_UPDATE when >= 50% of window has been consumed
         if connectionRecvConsumed >= connectionRecvWindowSize / 2 {
             connInc = UInt32(connectionRecvConsumed)
             connectionRecvConsumed = 0

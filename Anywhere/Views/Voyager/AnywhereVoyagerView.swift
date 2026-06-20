@@ -165,10 +165,8 @@ struct VoyagerBackground: View {
             let P: (CGFloat, CGFloat) -> CGPoint = { CGPoint(x: $0 / designWidth * width, y: $1 / designHeight * height) }
  
             ZStack {
-                // 1 — Night-to-dawn sky
                 Rectangle().fill(skyGradient)
- 
-                // 2 — Dawn glow rising from the horizon
+
                 Rectangle()
                     .fill(EllipticalGradient(
                         gradient: Gradient(stops: dawnStops),
@@ -177,15 +175,13 @@ struct VoyagerBackground: View {
                         endRadiusFraction: 0.5))
                     .frame(width: width * (720 / designWidth), height: height * (500 / designHeight))
                     .position(P(220, 418))
- 
-                // 3 — Curved horizon, seen from altitude
+
                 Path { p in
                     p.move(to: P(-20, 470))
                     p.addQuadCurve(to: P(460, 470), control: P(220, 438))
                 }
                 .stroke(Color(hex: 0xF4D9A8, alpha: 0.18), lineWidth: 1.2 * scale)
- 
-                // 4 — Stars
+
                 ForEach(stars.indices, id: \.self) { i in
                     Circle()
                         .fill(Color(hex: 0xFBF4DE, alpha: stars[i].o))
@@ -202,8 +198,7 @@ struct VoyagerBackground: View {
                     .scaleEffect(twinkle ? 1.12 : 1.0)
                     .animation(.easeInOut(duration: 2.8).repeatForever(autoreverses: true), value: twinkle)
                     .position(P(210, 60))
- 
-                // 5 — Route line to a destination waypoint
+
                 Path { p in
                     p.move(to: P(58, 168))
                     p.addCurve(to: P(384, 132), control1: P(150, 92), control2: P(292, 92))
@@ -230,8 +225,7 @@ struct VoyagerBackground: View {
                     .scaleEffect(twinkle ? 1.18 : 1.0)
                     .animation(.easeInOut(duration: 2.3).repeatForever(autoreverses: true).delay(0.4), value: twinkle)
                     .position(P(384, 132))
- 
-                // 6 — Edge vignette for depth
+
                 Rectangle().fill(vignette(height: height))
             }
             .clipped()

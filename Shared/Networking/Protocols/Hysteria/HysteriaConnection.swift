@@ -50,7 +50,6 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         super.init()
     }
 
-    /// Lock-guarded readiness mirror; callable from any queue.
     override var isConnected: Bool {
         readyLock.withLock { _isReady }
     }
@@ -257,7 +256,6 @@ nonisolated final class HysteriaConnection: ProxyConnection {
                 completion(nil, nil)
                 return
             }
-            // Downlink half-closed and nothing buffered — report EOF.
             if self.readClosed {
                 completion(nil, nil)
                 return

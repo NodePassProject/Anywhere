@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over an ``XHTTPConnection`` transport.
 nonisolated class XHTTPProxyConnection: ProxyConnection {
     private let xhttpConnection: XHTTPConnection
 

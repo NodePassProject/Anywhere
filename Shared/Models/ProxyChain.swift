@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// A named, ordered proxy chain: the last proxy is the exit (talks to the
-/// target), preceding proxies are tunneled through in order.
 struct ProxyChain: Identifiable, Codable, Hashable {
     let id: UUID
     var name: String
@@ -22,13 +20,12 @@ struct ProxyChain: Identifiable, Codable, Hashable {
         self.proxyIds = proxyIds
     }
 
-    /// Resolves the ordered proxy IDs against the pool; missing IDs are skipped.
+    /// Missing IDs are skipped.
     func resolveProxies(from pool: [ProxyConfiguration]) -> [ProxyConfiguration] {
         proxyIds.compactMap { id in pool.first(where: { $0.id == id }) }
     }
 
-    /// Resolves into a single composite configuration (last = exit, rest fill `chain`);
-    /// nil if any proxy is missing or fewer than 2 resolve.
+    /// Composite config: last = exit, rest fill `chain`. nil if any proxy is missing or fewer than 2 resolve.
     func resolveComposite(from pool: [ProxyConfiguration]) -> ProxyConfiguration? {
         let configs = resolveProxies(from: pool)
         guard configs.count == proxyIds.count, configs.count >= 2 else { return nil }
@@ -42,8 +39,7 @@ struct ProxyChain: Identifiable, Codable, Hashable {
         )
     }
 
-    /// Display summary for a chain row, resolved against the pool: the member names,
-    /// whether the chain is complete (≥2 proxies, none missing), and the entry/exit addresses.
+    /// `isValid` means complete: ≥2 proxies, none missing.
     func listDisplayInfo(configurations: [ProxyConfiguration]) -> (names: [String], isValid: Bool, entry: String?, exit: String?) {
         let proxies = resolveProxies(from: configurations)
         let isValid = proxies.count == proxyIds.count && proxies.count >= 2

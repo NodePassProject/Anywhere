@@ -117,7 +117,6 @@ extension TLSClient {
 
     // MARK: - TLS 1.3 Encrypted Handshake Processing
 
-    /// Decrypts and processes encrypted TLS 1.3 handshake records until Server Finished is found.
     private func consumeRemainingTLS13Handshake(
         buffer: Data,
         startOffset: Int = 0,
@@ -429,7 +428,6 @@ extension TLSClient {
         }
     }
 
-    /// Sends the ChangeCipherSpec and encrypted Client Finished messages (TLS 1.3).
     private func sendTLS13ClientFinished(completion: @escaping (Error?) -> Void) {
         guard let keys = tls13.handshakeKeys,
               let transcript = tls13.handshakeTranscript,
@@ -480,7 +478,6 @@ extension TLSClient {
             throw TLSError.handshakeFailed("Missing key derivation")
         }
 
-        // Verify that the signature algorithm matches the client's offer.
         guard Self.offeredSignatureAlgorithms.contains(algorithm) else {
             throw TLSError.certificateValidationFailed("CertificateVerify algorithm not offered")
         }

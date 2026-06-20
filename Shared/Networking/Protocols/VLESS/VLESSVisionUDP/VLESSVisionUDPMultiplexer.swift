@@ -36,7 +36,6 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
 
     private var frameParser = VLESSVisionUDPFrameParser()
 
-    // 16s idle timer
     private var idleTimer: DispatchSourceTimer?
     private static let idleTimeout: TimeInterval = 16
 

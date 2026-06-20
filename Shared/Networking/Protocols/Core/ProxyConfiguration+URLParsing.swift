@@ -65,7 +65,6 @@ extension ProxyConfiguration {
             throw ProxyError.invalidURL("Invalid UUID: \(uuidString)")
         }
 
-        // Handles both "host:port/?params" and "host:port?params".
         let hostPort: String
         var queryString: String?
         if let questionIndex = serverPart.firstIndex(of: "?") {
@@ -113,7 +112,6 @@ extension ProxyConfiguration {
 
         let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
 
-        // Mux/xudp default to true.
         let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
         let xudpEnabled = params["xudp"].map { $0 != "false" && $0 != "0" } ?? true
 
@@ -162,7 +160,6 @@ extension ProxyConfiguration {
             serverPart = String(serverPart[..<slashIndex])
         }
 
-        // Whole userinfo is the password (no user:pass split)
         let password = userInfo.removingPercentEncoding ?? userInfo
 
         let (host, port) = try parseHostPort(serverPart)
@@ -399,7 +396,7 @@ extension ProxyConfiguration {
             let userInfo = String(urlWithoutScheme[..<atIndex])
             var serverPart = String(urlWithoutScheme[urlWithoutScheme.index(after: atIndex)...])
 
-            // Strip trailing path/query (we don't carry SS plugin params)
+            // We don't carry SS plugin params.
             if let questionIndex = serverPart.firstIndex(of: "?") {
                 serverPart = String(serverPart[..<questionIndex])
             }

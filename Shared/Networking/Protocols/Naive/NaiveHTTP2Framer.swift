@@ -44,7 +44,6 @@ enum NaiveHTTP2FrameType: UInt8 {
     case windowUpdate = 0x8
 }
 
-/// HTTP/2 frame flag constants.
 enum NaiveHTTP2FrameFlags {
     /// DATA, HEADERS: last frame the endpoint will send for the stream.
     static let endStream: UInt8    = 0x1
@@ -67,7 +66,6 @@ struct NaiveHTTP2Frame {
 
     func hasFlag(_ flag: UInt8) -> Bool { flags & flag != 0 }
 
-    /// Serializes this frame to wire format (RFC 7540 §4.1): 9-byte header + payload.
     var serialized: Data {
         var data = Data(capacity: NaiveHTTP2Framer.headerSize + payload.count)
         HTTP2FrameWire.appendHeader(type: type.rawValue, flags: flags, streamID: streamID,
@@ -139,7 +137,7 @@ enum NaiveHTTP2Framer {
         return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.windowUpdate, flags: 0, streamID: streamID, payload: payload)
     }
 
-    /// Creates a HEADERS frame (END_HEADERS set) with an HPACK-encoded header block.
+    /// `headerBlock` must already be HPACK-encoded; END_HEADERS is always set.
     static func headersFrame(streamID: UInt32, headerBlock: Data, endStream: Bool = false) -> NaiveHTTP2Frame {
         var flags: UInt8 = NaiveHTTP2FrameFlags.endHeaders
         if endStream { flags |= NaiveHTTP2FrameFlags.endStream }

@@ -103,23 +103,18 @@ enum HTTP3Framer {
     static func clientSettingsFrame() -> Data {
         var payload = Data()
 
-        // QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
         payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.qpackMaxTableCapacity.rawValue))
         payload.append(contentsOf: QUICVarInt.encode(0))
 
-        // QPACK_BLOCKED_STREAMS = 0
         payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.qpackBlockedStreams.rawValue))
         payload.append(contentsOf: QUICVarInt.encode(0))
 
-        // MAX_FIELD_SECTION_SIZE = 262144
         payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.maxFieldSectionSize.rawValue))
         payload.append(contentsOf: QUICVarInt.encode(262144))
 
-        // SETTINGS_ENABLE_CONNECT_PROTOCOL = 1 (RFC 9220 — extended CONNECT)
         payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.enableConnectProtocol.rawValue))
         payload.append(contentsOf: QUICVarInt.encode(1))
 
-        // SETTINGS_H3_DATAGRAM = 1 (RFC 9297 — HTTP Datagrams / CONNECT-UDP)
         payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.h3Datagram.rawValue))
         payload.append(contentsOf: QUICVarInt.encode(1))
 
@@ -151,7 +146,6 @@ enum HTTP3Framer {
         let totalLen = pos - offset + Int(payloadLen)
         guard offset + totalLen <= data.count else { return nil }
 
-        // Slice with absolute indices (startIndex + relative offset).
         let base = data.startIndex
         let payload = data[(base + pos)..<(base + pos + Int(payloadLen))]
         return (Frame(type: frameType, payload: payload), totalLen)

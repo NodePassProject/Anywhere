@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over an ``HTTPUpgradeConnection`` transport (raw TCP after HTTP upgrade).
 nonisolated class HTTPUpgradeProxyConnection: ProxyConnection {
     private let huConnection: HTTPUpgradeConnection
 

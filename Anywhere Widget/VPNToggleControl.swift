@@ -35,7 +35,6 @@ struct VPNToggleControl: ControlWidget {
 
 private let anywhereNEBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
 
-/// Returns the NETunnelProviderManager owned by Anywhere, if any.
 private func loadManager() async throws -> NETunnelProviderManager? {
     let managers = try await NETunnelProviderManager.loadAllFromPreferences()
     return managers.first {

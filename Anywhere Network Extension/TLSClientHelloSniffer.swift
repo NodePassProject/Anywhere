@@ -125,7 +125,6 @@ struct TLSClientHelloSniffer {
         return parseExtensions(extensions)
     }
 
-    /// Walks the extension list looking for server_name (type 0x0000).
     private func parseExtensions(_ buf: Data) -> State {
         var cur = Cursor(buf)
         while !cur.isAtEnd {

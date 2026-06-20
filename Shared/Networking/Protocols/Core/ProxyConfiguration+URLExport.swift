@@ -22,7 +22,6 @@ extension ProxyConfiguration {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    /// Export configuration as a shareable URL string.
     func toURL() -> String {
         switch outboundProtocol {
         case .vless:
@@ -191,7 +190,7 @@ extension ProxyConfiguration {
         if let ech = tls.echQueryValue {
             params.append("ech=\(ech)")
         }
-        // Emit pool tuners only when they differ from the sing-anytls defaults.
+        // Emit pool tuners only when they differ from the sing-anytls defaults (30/30/0).
         if ici != 30 { params.append("ici=\(ici)") }
         if it != 30 { params.append("it=\(it)") }
         if mis != 0 { params.append("mis=\(mis)") }
@@ -301,8 +300,7 @@ extension ProxyConfiguration {
             if xhttp.mode != .auto {
                 params.append("mode=\(xhttp.mode.rawValue)")
             }
-            // Up/download detach round-trips via the `extra` blob; other advanced
-            // XHTTP fields are intentionally not exported.
+            // Only the up/download detach blob round-trips; other advanced XHTTP fields are intentionally not exported.
             if let ds = xhttp.downloadSettings, let extra = ds.urlExtraParam {
                 params.append("extra=\(extra)")
             }

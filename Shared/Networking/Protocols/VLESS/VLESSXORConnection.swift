@@ -177,7 +177,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     // MARK: - Helpers
 
     /// Decodes bytes 3–4 of a TLS `application_data` header. Returns 0 on mismatch or
-    /// out-of-range length so a corrupted stream re-enters header mode (matches Go).
+    /// out-of-range length so a corrupted stream re-enters header mode.
     private func decodeHeaderLength(_ header: Data) -> Int {
         let base = header.startIndex
         if header[base] != 23 || header[base + 1] != 3 || header[base + 2] != 3 {

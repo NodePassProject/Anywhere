@@ -7,8 +7,8 @@
 
 import Foundation
 
-/// Fires `onTimeout` when `update()` has not been called within the configured
-/// interval. All operations must run on the provided serial queue.
+/// Fires `onTimeout` when `update()` has not been called within the interval.
+/// All operations must run on the provided serial queue.
 class ActivityTimer {
     private var timer: DispatchSourceTimer?
     private var hasActivity = false
@@ -16,7 +16,6 @@ class ActivityTimer {
     private let onTimeout: () -> Void
     private var cancelled = false
 
-    /// Creates and starts the timer; it is cancelled before `onTimeout` fires.
     init(queue: DispatchQueue, timeout: TimeInterval, onTimeout: @escaping () -> Void) {
         self.queue = queue
         self.onTimeout = onTimeout
@@ -33,7 +32,6 @@ class ActivityTimer {
         hasActivity = true
     }
 
-    /// Replaces the check interval, restarting the timer.
     func setTimeout(_ timeout: TimeInterval) {
         guard !cancelled else { return }
         timer?.cancel()

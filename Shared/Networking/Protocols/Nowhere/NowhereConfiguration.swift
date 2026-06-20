@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Configuration for a Nowhere QUIC session.
 struct NowhereConfiguration: Hashable {
     let proxyHost: String
     let proxyPort: UInt16

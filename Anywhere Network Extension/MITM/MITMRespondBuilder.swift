@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Builds synthesized responses for non-transparent rewrite modes (302 redirect / 200 reject).
 enum MITMRespondBuilder {
 
     static func response(for action: ResolvedRewriteAction) -> MITMScriptEngine.SynthesizedResponse? {

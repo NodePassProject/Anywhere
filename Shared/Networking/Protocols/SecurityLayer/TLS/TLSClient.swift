@@ -14,12 +14,10 @@ import Compression
 // MARK: - ServerHello Result
 
 private enum ServerHelloResult {
-    /// TLS 1.3: server provided a key_share extension with an X25519 public key.
+    /// key_share carries an X25519 public key.
     case tls13(keyShare: Data, cipherSuite: UInt16)
     case tls12(cipherSuite: UInt16, serverRandom: Data, version: UInt16, extendedMasterSecret: Bool)
-    /// The server sent a HelloRetryRequest. We don't perform a second ClientHello
-    /// flight, so this is surfaced as a distinct, terminal outcome rather than a
-    /// generic parse failure.
+    /// Surfaced as a terminal outcome: we don't send a second ClientHello flight.
     case helloRetryRequest
 }
 
@@ -29,28 +27,23 @@ nonisolated class TLSClient {
     let configuration: TLSConfiguration
     var connection: (any RawTransport)?
 
-    // Ephemeral key pair (cleared after handshake)
+    // Cleared after handshake.
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var storedClientHello: Data?
     private var sentSessionID: Data?
 
-    /// Encrypted Client Hello state, set when ECH is attempted — an inline
-    /// `echConfig` or an opportunistic config discovered from DNS. Holds the
-    /// inner-hello transcript material used to detect whether the server accepted
-    /// ECH. `nil` means ECH was not attempted.
+    /// Inner-hello transcript material used to detect ECH acceptance; `nil` means ECH was not attempted.
     var echContext: ECHClientContext?
     /// Set once the ECH accept-confirmation in the ServerHello verifies.
     var echAccepted = false
 
-    /// ECHConfigList discovered from the server domain's DNS HTTPS record,
-    /// populated by `prepareECH` before the handshake when ECH is enabled without
-    /// an inline `echConfig`. `nil` otherwise.
+    /// ECHConfigList discovered from DNS HTTPS record by `prepareECH`, when ECH is enabled without an inline `echConfig`.
     private var resolvedECHConfigList: Data?
 
-    /// TLS 1.3 session state (cleared after handshake).
+    // Cleared after handshake.
     var tls13 = TLS13HandshakeState()
 
-    // TLS 1.2 session state (cleared after handshake)
+    // TLS 1.2 session state, cleared after handshake.
     var clientRandom: Data?
     var serverRandom: Data?
     var masterSecret: Data?
@@ -71,7 +64,6 @@ nonisolated class TLSClient {
     /// The value of the ALPN sent by the peer; empty when the server echoed none.
     var negotiatedALPN: String = ""
 
-    /// The signature algorithms offered in the ClientHello fingerprints.
     static let offeredSignatureAlgorithms: Set<UInt16> = [
         TLSSignatureScheme.rsa_pkcs1_sha1,
         TLSSignatureScheme.ecdsa_sha1,
@@ -86,7 +78,6 @@ nonisolated class TLSClient {
         TLSSignatureScheme.rsa_pss_rsae_sha512,
     ]
 
-    /// The TLS 1.2 cipher suites this client implements.
     private static let supportedTLS12CipherSuites: Set<UInt16> = [
         TLSCipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
         TLSCipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
@@ -118,7 +109,6 @@ nonisolated class TLSClient {
 
     // MARK: - Public API
 
-    /// Connects to a server and performs the TLS handshake.
     func connect(
         host: String,
         port: UInt16,
@@ -169,7 +159,6 @@ nonisolated class TLSClient {
         }
     }
 
-    /// Connects over an existing proxy tunnel (proxy chaining) and performs the TLS handshake.
     func connect(
         overTunnel tunnel: ProxyConnection,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
@@ -249,10 +238,7 @@ nonisolated class TLSClient {
     // MARK: - ClientHello
 
     /// Resolves an opportunistic ECHConfigList from DNS before the handshake.
-    /// Returns immediately with no error unless ECH is enabled without an inline
-    /// `echConfig` (`echIsOpportunistic`). Fail-closed: a discovery miss is
-    /// surfaced as an error so the caller never falls back to a cleartext-SNI
-    /// handshake.
+    /// Fail-closed: a discovery miss errors so the caller never falls back to a cleartext-SNI handshake.
     private func prepareECH(completion: @escaping (Error?) -> Void) {
         guard configuration.echIsOpportunistic else {
             completion(nil)
@@ -287,9 +273,7 @@ nonisolated class TLSClient {
         }
         sentSessionID = sessionId
 
-        // Encrypted Client Hello: when enabled, send a ClientHelloOuter carrying
-        // the cover name and the HPKE-sealed inner — the ECHConfigList is inline
-        // (base64) or discovered opportunistically from DNS by `prepareECH`.
+        // ECH: send a ClientHelloOuter carrying the cover name and the HPKE-sealed inner.
         if configuration.echEnabled,
            let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) ?? resolvedECHConfigList {
             let configs = try ECHConfigParser.parseConfigList(echConfigData)
@@ -318,12 +302,10 @@ nonisolated class TLSClient {
             self.echContext = context
             return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: outerMessage)
         } else if configuration.echEnabled, configuration.echConfig != nil {
-            // ECH was requested but its ECHConfigList isn't valid base64. Fail
-            // rather than silently sending the real SNI in the clear.
+            // Fail rather than silently send the real SNI in the clear.
             throw TLSError.handshakeFailed("ECH requested but its ECHConfigList is not valid base64")
         } else if configuration.echEnabled {
-            // `prepareECH` is fail-closed, so opportunistic discovery should have
-            // a resolved config by now; guard defensively rather than leak the SNI.
+            // `prepareECH` is fail-closed; guard defensively rather than leak the SNI.
             throw TLSError.handshakeFailed("Opportunistic ECH requested but no ECH config was discovered")
         }
 
@@ -428,10 +410,8 @@ nonisolated class TLSClient {
 
         switch serverHelloResult {
         case .helloRetryRequest:
-            // HelloRetryRequest requires re-sending a ClientHello (new key_share,
-            // cookie, and for ECH a re-sealed inner). We don't implement that
-            // second flight; fail with a specific error. The handshake aborts
-            // without leaking the inner SNI, since the ClientHello is already sent.
+            // We don't implement the second ClientHello flight HRR requires. Aborting
+            // here doesn't leak the inner SNI, since the ClientHello is already sent.
             completion(.failure(TLSError.helloRetryRequest))
             return
 
@@ -459,7 +439,6 @@ nonisolated class TLSClient {
 
     // MARK: - ServerHello Parsing
 
-    /// Whether the buffer holds a complete Handshake record whose payload starts with a ServerHello.
     private func bufferContainsCompleteServerHello(_ buffer: Data) -> Bool {
         var offset = 0
         while offset + 5 <= buffer.count {
@@ -477,7 +456,7 @@ nonisolated class TLSClient {
         return false
     }
 
-    /// Extracts the ServerHello message bytes, handling records that coalesce multiple handshake messages.
+    /// Handles records that coalesce multiple handshake messages.
     func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {
@@ -504,7 +483,6 @@ nonisolated class TLSClient {
         return Data()
     }
 
-    /// Parses the ServerHello to detect the negotiated TLS version and key parameters; nil on failure.
     private func parseServerHello(data: Data) -> ServerHelloResult? {
         var offset = 0
 
@@ -521,14 +499,9 @@ nonisolated class TLSClient {
                 continue
             }
 
-            // Let's validate this ServerHello. The rules:
-            //
-            // - helloRetryRequest is forbidden
-            // - the chosen compression option must be zero
-            // - for TLS 1.3, the legacy version number must be TLSv1.2
-            // - for TLS 1.3, the server must have echoed our legacy session ID
-            //   (in TLS 1.2 and below, a full handshake carries the server's own
-            //   session ID instead of an echo)
+            // ServerHello validation: compression must be zero; for TLS 1.3 the
+            // legacy version must be TLSv1.2 and the server must echo our legacy
+            // session ID (TLS 1.2 and below carry the server's own session ID, not an echo).
             let randomOffset = offset + 1 + 3 + 2
             guard randomOffset + 32 <= data.count else { return nil }
 
@@ -699,7 +672,6 @@ nonisolated class TLSClient {
         tls13 = TLS13HandshakeState()
         postHandshakeBuffer = nil
         serverCertificates.removeAll()
-        // TLS 1.2 state
         clientRandom = nil
         serverRandom = nil
         masterSecret = nil

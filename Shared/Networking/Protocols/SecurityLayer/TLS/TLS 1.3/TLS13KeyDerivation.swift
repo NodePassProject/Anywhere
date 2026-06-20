@@ -69,13 +69,7 @@ struct TLS13KeyDerivation {
     }
 
     func expandLabel(secret: SymmetricKey, label: String, context: Data, length: Int) -> Data {
-        // We need to build HkdfLabel:
-        //
-        // struct {
-        //   uint16 length = Length;
-        //   opaque label<7..255> = "tls13 " + Label;
-        //   opaque context<0..255> = Context;
-        // } HkdfLabel
+        // HkdfLabel (RFC 8446 §7.1): uint16 length; opaque label<7..255>="tls13 "+Label; opaque context<0..255>.
         let fullLabel = "tls13 " + label
         var hkdfLabel = Data()
         hkdfLabel.append(UInt8((length >> 8) & 0xFF))
@@ -170,7 +164,6 @@ struct TLS13KeyDerivation {
         return (next, key, iv)
     }
 
-    /// The expected payload of Finished for the given traffic secret (client or server).
     func finishedPayload(trafficSecret: Data, transcript: Data) -> Data {
         let tsKey = SymmetricKey(data: trafficSecret)
         let finishedKey = expandLabel(secret: tsKey, label: "finished", context: Data(), length: hashLength)
@@ -184,7 +177,6 @@ struct TLS13KeyDerivation {
         }
     }
 
-    /// The expected payload of client Finished.
     func clientFinishedPayload(clientTrafficSecret: Data, transcript: Data) -> Data {
         finishedPayload(trafficSecret: clientTrafficSecret, transcript: transcript)
     }
@@ -193,7 +185,6 @@ struct TLS13KeyDerivation {
 // MARK: - Server-Side Helpers
 
 extension TLS13KeyDerivation {
-    /// The expected payload of server Finished.
     func serverFinishedPayload(serverTrafficSecret: Data, transcript: Data) -> Data {
         finishedPayload(trafficSecret: serverTrafficSecret, transcript: transcript)
     }

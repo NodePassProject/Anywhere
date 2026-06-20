@@ -9,7 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSStream")
 
-/// One logical stream multiplexed inside an `AnyTLSMultiplexer`.
 nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
 
     let sid: UInt32
@@ -91,7 +90,6 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         guard !already else { return }
         logger.debug("[AnyTLSStream] cancel sid=\(sid)")
         multiplexer?.removeStream(sid: sid)
-        // Local close is also an end — fire the recycle hook.
         fireOnEndOnce()
     }
 

@@ -9,28 +9,22 @@ import Foundation
 
 // MARK: - Multiplexer
 
-/// Common contract shared by every stream-fanout multiplexer (mux.cool, AnyTLS, HTTP/2, HTTP/3).
-/// Each multiplexer owns one underlying connection and fans out many logical streams over it.
+/// One underlying connection fanned out into many logical streams.
 protocol Multiplexer: AnyObject {
-    /// Whether the multiplexer has been torn down; closed multiplexers are evicted by their pool.
+    /// Closed multiplexers are evicted by their pool.
     var isClosed: Bool { get }
 
-    /// Number of logical streams currently open on this multiplexer.
     var activeStreamCount: Int { get }
 
-    /// Tears down the multiplexer and all its streams. `error` is non-nil for a transport failure,
-    /// nil for a clean / deliberate close.
+    /// `error` non-nil for transport failure, nil for clean close.
     func close(error: Error?)
 }
 
 // MARK: - MultiplexerStreamSink
 
-/// The demux side of one logical stream: the owning multiplexer pushes inbound payload and
-/// close / EOF notifications here as it parses the wire.
 protocol MultiplexerStreamSink: AnyObject {
-    /// Deliver inbound payload bytes to the stream.
     func deliverData(_ data: Data)
 
-    /// Signal stream end. `error` is non-nil for an abnormal termination, nil for clean EOF.
+    /// `error` non-nil for abnormal termination, nil for clean EOF.
     func deliverClose(error: Error?)
 }

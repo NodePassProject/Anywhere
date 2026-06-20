@@ -7,15 +7,13 @@
 
 import Foundation
 
-/// Shared low-priority queue for every MITM hard-cap supervisor; runs off the
-/// watched worker queue so it is never wedged behind the runaway it exists to catch.
+/// Runs off the watched worker queue so it is never wedged behind the runaway it exists to catch.
 enum MITMWatchdogMonitor {
     static let queue = DispatchQueue(label: AWCore.Identifier.mitmMonitorQueue, qos: .utility)
 }
 
-/// Crash-on-runaway watchdog for synchronous JS spans. JSC sync execution is uninterruptible,
-/// so crashing the extension for a clean OS relaunch is the only recovery. Samples from the
-/// monitor queue; a suspended `await` already called end(), so slow async fetches never trip this.
+/// JSC sync execution is uninterruptible, so crashing for a clean OS relaunch is the only recovery.
+/// A suspended `await` already called end(), so slow async fetches never trip this.
 enum MITMScriptWatchdog {
 
     /// Hard wall-clock cap on one synchronous JS span; any legitimate span finishes far inside this.
@@ -29,7 +27,7 @@ enum MITMScriptWatchdog {
     /// Script source string surfaced in the crash report to identify the offending rule.
     private static var spanLabel = ""
 
-    /// Repeating sampler, lazily started on the first begin().
+    /// Lazily started on the first begin().
     private static let sampler: DispatchSourceTimer = {
         let timer = DispatchSource.makeTimerSource(queue: MITMWatchdogMonitor.queue)
         timer.schedule(

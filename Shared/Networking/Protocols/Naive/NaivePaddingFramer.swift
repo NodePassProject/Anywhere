@@ -7,8 +7,7 @@
 
 import Foundation
 
-/// Encodes and decodes NaiveProxy padding frames for the first `maxFrames` reads/writes; afterwards data passes through unframed.
-///
+/// Only the first `maxFrames` reads/writes are framed; afterwards data passes through unframed.
 /// Wire format: `[2B payload_size BE][1B padding_size][payload][padding zeros]`.
 struct NaivePaddingFramer {
     static let frameHeaderSize = 3
@@ -49,7 +48,7 @@ struct NaivePaddingFramer {
             switch state {
             case .payloadLength1:
                 if numReadFrames >= maxFrames {
-                    // Past padding threshold — raw passthrough
+                    // Past padding threshold: remaining bytes are unframed, pass through raw.
                     output.append(padded.suffix(from: padded.startIndex + offset))
                     offset = padded.count
                     break
@@ -100,7 +99,6 @@ struct NaivePaddingFramer {
 
     // MARK: - Write
 
-    /// Returns header + payload + zero-padding.
     mutating func write(payload: Data, paddingSize: Int) -> Data {
         let paddingSize = min(paddingSize, Self.maxPaddingSize)
         let frameSize = Self.frameHeaderSize + payload.count + paddingSize

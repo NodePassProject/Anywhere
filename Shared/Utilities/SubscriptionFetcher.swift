@@ -59,7 +59,6 @@ struct SubscriptionFetcher {
         let profileTitle = parseProfileTitle(from: httpResponse)
         let userInfo = parseSubscriptionUserInfo(from: httpResponse)
 
-        // Decode body: try base64 first, fall back to raw UTF-8
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
            let decodedString = String(data: decoded, encoding: .utf8),
@@ -71,7 +70,6 @@ struct SubscriptionFetcher {
             throw FetchError.noConfigurations
         }
 
-        // Try Clash YAML format first
         if bodyString.contains("proxies:") {
             let result = try ClashProxyParser.parse(yaml: bodyString)
             guard !result.configurations.isEmpty else {

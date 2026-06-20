@@ -94,7 +94,6 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
 
     // MARK: - Eviction
 
-    /// Removes the multiplexer from both the pool bucket and ``dedicatedMultiplexers``.
     override func removeMultiplexer(_ multiplexer: NaiveHTTP2Multiplexer, key: String) {
         super.removeMultiplexer(multiplexer, key: key)
         lock.lock()

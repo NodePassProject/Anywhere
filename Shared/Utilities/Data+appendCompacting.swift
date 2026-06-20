@@ -8,11 +8,8 @@
 import Foundation
 
 extension Data {
-    /// Appends a fresh read to a long-lived parse buffer, re-canonicalizing the
-    /// storage first.
-    ///
-    /// `other` should be a freshly allocated read (all call sites pass one);
-    /// when `self` is empty it is adopted as-is, slices and all.
+    /// `other` must be a freshly allocated read: when `self` is empty it is
+    /// adopted as-is, slices and all.
     mutating func appendCompacting(_ other: Data) {
         if isEmpty {
             self = other

@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// Congestion controller for `.hysteria`. `brutal` paces each direction at a
-/// fixed user-configured rate; `bbr` lets the connection adapt and asks the
-/// server to run its own bandwidth detection.
+/// `brutal` paces each direction at a fixed user-configured rate; `bbr` adapts
+/// and asks the server to run its own bandwidth detection.
 enum HysteriaCongestionControl: String, Codable, Hashable, CaseIterable {
     case brutal
     case bbr

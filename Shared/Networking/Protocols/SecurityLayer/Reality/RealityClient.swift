@@ -18,7 +18,7 @@ nonisolated class RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any RawTransport)?
 
-    // Ephemeral key pair (cleared after handshake)
+    // Handshake state, cleared after the handshake completes.
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var authKey: Data?
     private var storedClientHello: Data?
@@ -326,7 +326,6 @@ nonisolated class RealityClient {
 
     // MARK: - ServerHello Parsing
 
-    /// True when the buffer holds a complete Handshake record starting with ServerHello (0x02).
     private func bufferContainsCompleteServerHello(_ buffer: Data) -> Bool {
         var offset = 0
         while offset + 5 <= buffer.count {
@@ -344,7 +343,7 @@ nonisolated class RealityClient {
         return offset > 0
     }
 
-    /// Extracts the ServerHello handshake message from the buffer (without TLS record header).
+    /// Returns the ServerHello message without its TLS record header.
     private func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {
@@ -379,11 +378,8 @@ nonisolated class RealityClient {
                 continue
             }
 
-            // Let's validate this ServerHello. The rules:
-            //
-            // - helloRetryRequest is forbidden
-            // - the server must have echoed our legacy session ID
-            // - the chosen compression option must be zero
+            // Reject helloRetryRequest, require the server to echo our legacy session ID,
+            // and require compression == 0.
             let randomOffset = offset + 1 + 3 + 2
             guard randomOffset + 32 <= data.count else { return nil }
             if data.subdata(in: randomOffset..<(randomOffset + 32)) == TLSRandom.helloRetryRequest {

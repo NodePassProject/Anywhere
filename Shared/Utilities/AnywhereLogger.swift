@@ -8,21 +8,18 @@
 import Foundation
 import os.log
 
-/// Unified logger. Every level goes to os.log (`debug` in DEBUG builds only);
-/// `info` and above also reach the bounded user-facing log viewer, so keep
-/// `info` to low-volume milestones or it evicts the warnings and errors.
+/// `info`+ also reach the bounded user-facing viewer; keep `info` low-volume or
+/// it evicts warnings and errors.
 nonisolated struct AnywhereLogger {
     private let osLogger: Logger
 
-    /// Sink for the user-facing log viewer; set by the Network Extension at
-    /// startup, nil in the main app.
+    /// Set by the Network Extension at startup; nil in the main app.
     static var logSink: ((String, Level) -> Void)?
 
-    /// Lowest severity that reaches `logSink`; os.log receives every level
-    /// regardless of this floor.
+    /// Floor for `logSink` only; os.log receives every level regardless.
     static let minimumSinkLevel: Level = .info
 
-    /// Severity, ordered low → high so a line can be gated against a floor.
+    /// Ordered low → high so a line can be gated against a floor.
     enum Level: Int, Comparable, Sendable {
         case debug = 0
         case info = 1
@@ -38,8 +35,7 @@ nonisolated struct AnywhereLogger {
         self.osLogger = Logger(subsystem: "com.argsment.Anywhere", category: category)
     }
 
-    /// Verbose per-connection/per-packet diagnostics, os.log only. Compiled out
-    /// of release, where the autoclosure message is never even built.
+    /// os.log only; compiled out of release, where the autoclosure is never built.
     func debug(_ message: @autoclosure () -> String) {
 #if DEBUG
         let text = message()
@@ -47,15 +43,13 @@ nonisolated struct AnywhereLogger {
 #endif
     }
 
-    /// Lifecycle milestones; keep low volume — they share the bounded
-    /// user-facing buffer with warnings and errors.
+    /// Keep low volume — shares the bounded user-facing buffer with warnings/errors.
     func info(_ message: @autoclosure () -> String) { emit(message(), level: .info) }
 
-    /// Degraded-but-recoverable conditions worth surfacing to the user.
     func warning(_ message: @autoclosure () -> String) { emit(message(), level: .warning) }
 
-    /// A failure the user can feel. Route connection teardown errors through
-    /// `ConnectionFailureReporter` so each connection logs at most once.
+    /// Route connection teardown errors through `ConnectionFailureReporter` so
+    /// each connection logs at most once.
     func error(_ message: @autoclosure () -> String) { emit(message(), level: .error) }
 
     private func emit(_ message: String, level: Level) {

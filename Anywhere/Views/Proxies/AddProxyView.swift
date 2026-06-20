@@ -234,8 +234,7 @@ struct AddProxyView: View {
 
     private func checkClipboard() {
         guard let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        // Accept any single-proxy URL the parser knows, plus `http://`/`https://`
-        // for subscription URLs (schemes that are never a single proxy).
+        // http/https accepted as subscription URLs since those schemes are never a single proxy.
         if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
             linkURL = clip
         }
@@ -258,8 +257,7 @@ struct AddProxyView: View {
     private func importFromString(_ string: String) {
         let trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // `https://` is no longer a single proxy — only schemes the parser knows
-        // take the proxy-link path; everything else is a subscription URL.
+        // Only schemes the parser knows take the proxy-link path; everything else is a subscription URL.
         if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL)
@@ -270,7 +268,6 @@ struct AddProxyView: View {
                 showingError = true
             }
         } else {
-            // Treat as subscription URL
             let requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(for: trimmedURL)
             if requiresRemnawaveHWID && !AWCore.getRemnawaveHWIDEnabled() {
                 pendingSubscriptionURL = trimmedURL
