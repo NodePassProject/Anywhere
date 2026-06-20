@@ -79,36 +79,36 @@ extension TLSClient {
     ///     conf = Hash(innerTranscript || ServerHello with random[24..32] zeroed)
     ///     tag  = HKDF-Expand-Label(PRK, "ech accept confirmation", conf, 8)
     private func echAcceptConfirmed(serverHello: Data, ech: ECHClientContext, kd: TLS13KeyDerivation) -> Bool {
-        let sh = [UInt8](serverHello)
-        guard sh.count >= 38 else { return false }
+        let serverHelloBytes = [UInt8](serverHello)
+        guard serverHelloBytes.count >= 38 else { return false }
 
         var confInput = ech.innerTranscriptMessage
-        confInput.append(contentsOf: sh[0..<30])
+        confInput.append(contentsOf: serverHelloBytes[0..<30])
         confInput.append(Data(repeating: 0, count: 8))
-        confInput.append(contentsOf: sh[38...])
+        confInput.append(contentsOf: serverHelloBytes[38...])
         let confHash = kd.transcriptHash(confInput)
 
         let prk = kd.extract(inputKeyMaterial: ech.innerRandom, salt: Data()).key
         let expected = kd.expandLabel(secret: prk, label: "ech accept confirmation", context: confHash, length: 8)
 
-        return constantTimeEqual(expected, Data(sh[30..<38]))
+        return constantTimeEqual(expected, Data(serverHelloBytes[30..<38]))
     }
 
     /// Extract the `retry_configs` ECHConfigList from the server's
     /// encrypted_client_hello extension in EncryptedExtensions, if present.
     private func parseECHRetryConfigList(fromEncryptedExtensions body: Data) -> Data? {
-        let b = [UInt8](body)
-        guard b.count >= 2 else { return nil }
-        let extsTotal = Int(b[0]) << 8 | Int(b[1])
-        let end = min(2 + extsTotal, b.count)
+        let extensionsBytes = [UInt8](body)
+        guard extensionsBytes.count >= 2 else { return nil }
+        let extsTotal = Int(extensionsBytes[0]) << 8 | Int(extensionsBytes[1])
+        let end = min(2 + extsTotal, extensionsBytes.count)
         var offset = 2
         while offset + 4 <= end {
-            let extType = UInt16(b[offset]) << 8 | UInt16(b[offset + 1])
-            let extLen = Int(b[offset + 2]) << 8 | Int(b[offset + 3])
+            let extType = UInt16(extensionsBytes[offset]) << 8 | UInt16(extensionsBytes[offset + 1])
+            let extLen = Int(extensionsBytes[offset + 2]) << 8 | Int(extensionsBytes[offset + 3])
             offset += 4
             guard offset + extLen <= end else { return nil }
             if extType == 0xFE0D {
-                return Data(b[offset..<(offset + extLen)])
+                return Data(extensionsBytes[offset..<(offset + extLen)])
             }
             offset += extLen
         }
