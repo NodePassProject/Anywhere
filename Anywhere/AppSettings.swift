@@ -19,6 +19,10 @@ final class AppSettings {
         didSet { AWCore.setExperimentalEnabled(experimentalEnabled) }
     }
     
+    var hiddenSettingsItems: Set<String> {
+        didSet { AWCore.setHiddenSettingsItems(Array(hiddenSettingsItems)) }
+    }
+    
     var iCloudSyncEnabled: Bool {
         didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
     }
@@ -154,8 +158,23 @@ final class AppSettings {
         }
     }
 
+    // MARK: - Settings Visibility
+
+    func isVisible(_ item: SettingsItem) -> Bool {
+        !hiddenSettingsItems.contains(item.rawValue)
+    }
+
+    func setVisible(_ item: SettingsItem, _ visible: Bool) {
+        if visible {
+            hiddenSettingsItems.remove(item.rawValue)
+        } else {
+            hiddenSettingsItems.insert(item.rawValue)
+        }
+    }
+
     private init() {
         experimentalEnabled = AWCore.getExperimentalEnabled()
+        hiddenSettingsItems = Set(AWCore.getHiddenSettingsItems())
         iCloudSyncEnabled = AWCore.getICloudSyncEnabled()
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
 
