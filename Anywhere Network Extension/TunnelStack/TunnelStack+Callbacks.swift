@@ -82,7 +82,7 @@ extension TunnelStack {
 
             // DROP if the host is flooding, RESET otherwise.
             func reject(host: String, reason: String) -> Int32 {
-                shared.requestLog.record(proto: "TCP", host: host, port: dstPort, routeTarget: .reject)
+                shared.requestLog.record(protocolName: "TCP", host: host, port: dstPort, routeTarget: .reject)
                 if rejectFloodTracker.shouldDrop(host: host) {
                     logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
                     return Int32(LWIP_BRIDGE_SYN_DROP)
@@ -177,7 +177,7 @@ extension TunnelStack {
             }
 
             shared.requestLog.record(
-                proto: "TCP",
+                protocolName: "TCP",
                 host: dstHost,
                 port: dstPort,
                 routeTarget: routeTarget,

@@ -17,7 +17,7 @@ class RequestsModel {
     struct Entry: Identifiable, Equatable {
         let id: UUID
         let timestamp: Date
-        let proto: String
+        let protocolName: String
         let host: String
         let port: UInt16
         let routeTarget: RouteTarget
@@ -75,7 +75,7 @@ class RequestsModel {
             Entry(
                 id: entry.id,
                 timestamp: Date(timeIntervalSinceReferenceDate: entry.timestamp),
-                proto: entry.proto,
+                protocolName: entry.protocolName,
                 host: entry.host,
                 port: entry.port,
                 routeTarget: entry.routeTarget,

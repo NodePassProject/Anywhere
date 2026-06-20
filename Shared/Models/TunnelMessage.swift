@@ -167,7 +167,7 @@ struct TunnelRequestEntry: Codable, Sendable, Hashable {
     /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).
     var timestamp: TimeInterval
     /// Transport: "TCP" or "UDP".
-    var proto: String
+    var protocolName: String
     /// Destination host: resolved domain when known (fake-IP/SNI), else literal IP.
     var host: String
     var port: UInt16

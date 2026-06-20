@@ -63,7 +63,7 @@ struct RequestsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         HStack(spacing: 4) {
-                            Text(entry.proto)
+                            Text(entry.protocolName)
                             Text("·")
                             Text(label(for: entry))
                             if let name = routeName(for: entry) {
