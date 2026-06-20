@@ -97,6 +97,7 @@ nonisolated final class AWCore {
         static let encryptedDNSProtocol = "encryptedDNSProtocol"
         static let encryptedDNSServer = "encryptedDNSServer"
         static let experimentalEnabled = "experimentalEnabled"
+        static let hiddenSettingsItems = "hiddenSettingsItems"
         static let hideVPNIcon = "hideVPNIcon"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
@@ -242,6 +243,14 @@ nonisolated final class AWCore {
 
     static func setExperimentalEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.experimentalEnabled)
+    }
+
+    static func getHiddenSettingsItems() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.hiddenSettingsItems) ?? []
+    }
+
+    static func setHiddenSettingsItems(_ value: [String]) {
+        userDefaults.set(value, forKey: UserDefaultsKey.hiddenSettingsItems)
     }
 
     static func getHideVPNIcon() -> Bool {
