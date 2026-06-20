@@ -74,9 +74,9 @@ struct SettingsView: View {
     }
     
     private var showAppSection: Bool {
-        settings.isVisible(.iCloudSync)
+        settings.isVisible(.iCloudSync) || settings.isVisible(.personalization)
     }
-    
+
     private var showVPNSection: Bool {
         settings.isVisible(.alwaysOn)
     }
@@ -103,11 +103,18 @@ struct SettingsView: View {
     @ViewBuilder
     private var appSection: some View {
         @Bindable var settings = settings
-        if showAppSection{
+        if showAppSection {
             Section("App") {
                 if settings.isVisible(.iCloudSync) {
                     Toggle(isOn: $settings.iCloudSyncEnabled) {
                         SettingsItem.iCloudSync.label
+                    }
+                }
+                if settings.isVisible(.personalization) {
+                    NavigationLink {
+                        PersonalizationSettingsView()
+                    } label: {
+                        SettingsItem.personalization.label
                     }
                 }
             }
