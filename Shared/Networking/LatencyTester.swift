@@ -36,7 +36,7 @@ nonisolated enum LatencyTester {
         let testConfiguration = resolvedConfiguration(configuration)
 
         do {
-            let ms = try await withThrowingTaskGroup(of: Int.self) { group in
+            let latencyMilliseconds = try await withThrowingTaskGroup(of: Int.self) { group in
                 group.addTask {
                     try await Self.performTest(testConfiguration)
                 }
@@ -49,7 +49,7 @@ nonisolated enum LatencyTester {
                 group.cancelAll()
                 return result
             }
-            return .success(ms)
+            return .success(latencyMilliseconds)
         } catch let error as TLSError {
             if case .certificateValidationFailed = error {
                 logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")
@@ -194,10 +194,10 @@ nonisolated enum LatencyTester {
 
         func cancel() {
             lock.lock()
-            let h = hook
+            let capturedHook = hook
             hook = nil
             lock.unlock()
-            h?(CancellationError())
+            capturedHook?(CancellationError())
         }
     }
 
@@ -214,10 +214,10 @@ nonisolated enum LatencyTester {
 
         func resume(_ result: Result<T, Error>) {
             lock.lock()
-            let c = continuation
+            let snapshotContinuation = continuation
             continuation = nil
             lock.unlock()
-            c?.resume(with: result)
+            snapshotContinuation?.resume(with: result)
         }
     }
 

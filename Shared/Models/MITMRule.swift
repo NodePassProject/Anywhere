@@ -657,13 +657,13 @@ struct MITMBinaryWriter {
     private var bytes: [UInt8] = []
 
     static func encode(enabled: Bool, ruleSets: [MITMRuleSet]) -> Data {
-        var w = MITMBinaryWriter()
-        w.append(MITMBinaryFormat.magic)
-        w.bytes.append(MITMBinaryFormat.version)
-        w.bytes.append(enabled ? 1 : 0)
-        w.u32(UInt32(ruleSets.count))
-        for set in ruleSets { w.encodeSet(set) }
-        return Data(w.bytes)
+        var writer = MITMBinaryWriter()
+        writer.append(MITMBinaryFormat.magic)
+        writer.bytes.append(MITMBinaryFormat.version)
+        writer.bytes.append(enabled ? 1 : 0)
+        writer.u32(UInt32(ruleSets.count))
+        for set in ruleSets { writer.encodeSet(set) }
+        return Data(writer.bytes)
     }
 
     private mutating func encodeSet(_ set: MITMRuleSet) {

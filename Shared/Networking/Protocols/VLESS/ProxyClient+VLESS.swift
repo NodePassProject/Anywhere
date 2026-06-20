@@ -122,8 +122,8 @@ extension ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let vlessUUID: UUID
-        if case .vless(let u, _, _, _, _, _, _) = configuration.outbound {
-            vlessUUID = u
+        if case .vless(let uuid, _, _, _, _, _, _) = configuration.outbound {
+            vlessUUID = uuid
         } else {
             vlessUUID = configuration.id
         }
@@ -199,8 +199,8 @@ extension ProxyClient {
 
     fileprivate func wrapWithVision(_ connection: ProxyConnection) -> VLESSVisionConnection {
         let vlessUUID: UUID
-        if case .vless(let u, _, _, _, _, _, _) = configuration.outbound {
-            vlessUUID = u
+        if case .vless(let uuid, _, _, _, _, _, _) = configuration.outbound {
+            vlessUUID = uuid
         } else {
             vlessUUID = configuration.id
         }

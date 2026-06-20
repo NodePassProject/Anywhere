@@ -391,7 +391,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .hysteria:
             // Absent keys default to Brutal with server-driven downlink; SNI falls
             // back to serverAddress so it is always populated.
-            let cc = try container.decodeIfPresent(HysteriaCongestionControl.self, forKey: .hysteriaCongestionControl) ?? .brutal
+            let congestionControl = try container.decodeIfPresent(HysteriaCongestionControl.self, forKey: .hysteriaCongestionControl) ?? .brutal
             let rawUp = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
                 ?? HysteriaCongestionControl.uploadMbpsDefault
             let rawDown = try container.decodeIfPresent(Int.self, forKey: .hysteriaDownloadMbps) ?? 0
@@ -400,7 +400,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let hopInterval = try container.decodeIfPresent(Int.self, forKey: .hysteriaHopInterval)
             outbound = .hysteria(
                 password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
-                congestionControl: cc,
+                congestionControl: congestionControl,
                 uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp),
                 downloadMbps: HysteriaCongestionControl.clampDownloadMbps(rawDown),
                 portHopping: HysteriaPortHopping.make(spec: portsSpec, intervalSeconds: hopInterval),
@@ -433,16 +433,16 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .anytls:
             let password = try container.decodeIfPresent(String.self, forKey: .anytlsPassword) ?? ""
             // Stored unclamped so the JSON round-trips exactly; AnyTLSMultiplexerPool clamps at use time.
-            let ici = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
-            let it  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
-            let mis = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0
+            let idleCheckInterval = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
+            let idleTimeout  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
+            let minIdleSession = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0
             let tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .anytlsTLS)
                 ?? TLSConfiguration(serverName: serverAddress)
             outbound = .anytls(
                 password: password,
-                idleCheckInterval: ici,
-                idleTimeout: it,
-                minIdleSession: mis,
+                idleCheckInterval: idleCheckInterval,
+                idleTimeout: idleTimeout,
+                minIdleSession: minIdleSession,
                 tls: tls
             )
 
@@ -542,13 +542,13 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .trojanPassword)
             try container.encode(tls, forKey: .trojanTLS)
-        case .anytls(let password, let ici, let it, let mis, let tls):
+        case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let tls):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .anytlsPassword)
-            try container.encode(ici, forKey: .anytlsIdleCheckInterval)
-            try container.encode(it, forKey: .anytlsIdleTimeout)
-            try container.encode(mis, forKey: .anytlsMinIdleSession)
+            try container.encode(idleCheckInterval, forKey: .anytlsIdleCheckInterval)
+            try container.encode(idleTimeout, forKey: .anytlsIdleTimeout)
+            try container.encode(minIdleSession, forKey: .anytlsMinIdleSession)
             try container.encode(tls, forKey: .anytlsTLS)
         case .shadowsocks(let password, let method):
             try container.encode(id, forKey: .uuid)

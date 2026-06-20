@@ -30,9 +30,9 @@ nonisolated class HTTPUpgradeConnection {
 
     var isConnected: Bool {
         lock.lock()
-        let v = _isConnected
+        let connected = _isConnected
         lock.unlock()
-        return v
+        return connected
     }
 
     // MARK: - Initializers

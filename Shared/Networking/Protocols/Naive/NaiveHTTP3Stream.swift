@@ -70,14 +70,14 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
                     return
                 }
 
-                guard let sid = multiplexer.openBidiStream() else {
+                guard let streamID = multiplexer.openBidiStream() else {
                     self.state = .closed
                     multiplexer.markStreamBlocked()
                     completion(HTTP3Error.streamIdBlocked)
                     return
                 }
-                self.quicStreamID = sid
-                multiplexer.registerStream(self, streamID: sid)
+                self.quicStreamID = streamID
+                multiplexer.registerStream(self, streamID: streamID)
 
                 self.connectCompletion = completion
                 self.state = .connectSent
@@ -109,7 +109,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
                 )
                 let headersFrame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
 
-                multiplexer.writeStream(sid, data: headersFrame) { [weak self] error in
+                multiplexer.writeStream(streamID, data: headersFrame) { [weak self] error in
                     if let error {
                         self?.multiplexer?.queue.async {
                             self?.handleStreamError(error)
@@ -126,12 +126,12 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
             return
         }
         let block: () -> Void = { [self] in
-            guard state == .open, let sid = quicStreamID else {
+            guard state == .open, let streamID = quicStreamID else {
                 completion(state == .closed ? HTTP3Error.streamClosed : HTTP3Error.notReady)
                 return
             }
             let frame = HTTP3Framer.dataFrame(payload: data)
-            multiplexer.writeStream(sid, data: frame, completion: completion)
+            multiplexer.writeStream(streamID, data: frame, completion: completion)
         }
         if multiplexer.isOnQueue {
             block()
@@ -187,9 +187,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
             // Shutdown lets the server reclaim the slot via MAX_STREAMS; a
             // pre-completion close signals H3_REQUEST_CANCELLED.
-            if let sid = quicStreamID {
+            if let streamID = quicStreamID {
                 let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
-                multiplexer.shutdownStream(sid, code: code)
+                multiplexer.shutdownStream(streamID, code: code)
             }
 
             if let callback = connectCompletion {
@@ -323,15 +323,15 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     /// Extends the QUIC receive window to signal consumed bytes to the server.
     private func ackQuicBytes(_ count: Int) {
-        guard count > 0, let sid = quicStreamID else { return }
-        multiplexer?.extendStreamOffset(sid, count: count)
+        guard count > 0, let streamID = quicStreamID else { return }
+        multiplexer?.extendStreamOffset(streamID, count: count)
     }
 
     private func handleStreamError(_ error: Error) {
         guard state != .closed else { return }
         streamError = error
         let code: HTTP3ErrorCode
-        if let h3 = error as? HTTP3Error, case .tunnelFailed = h3 {
+        if let http3Error = error as? HTTP3Error, case .tunnelFailed = http3Error {
             code = .connectError
         } else if error is HTTP3Error {
             code = .requestCancelled
@@ -355,8 +355,8 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         guard state != .closed else { return }
         state = .closed
         multiplexer?.removeStream(self)
-        if let sid = quicStreamID {
-            multiplexer?.shutdownStream(sid, code: code)
+        if let streamID = quicStreamID {
+            multiplexer?.shutdownStream(streamID, code: code)
         }
     }
 }

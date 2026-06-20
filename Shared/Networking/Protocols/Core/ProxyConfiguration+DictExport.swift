@@ -17,8 +17,8 @@ extension ProxyConfiguration {
         let vlessUUID: UUID
         let vlessEncryption: String
         let vlessFlow: String?
-        if case .vless(let u, let enc, let fl, _, _, _, _) = outbound {
-            vlessUUID = u; vlessEncryption = enc; vlessFlow = fl
+        if case .vless(let uuid, let encryption, let flow, _, _, _, _) = outbound {
+            vlessUUID = uuid; vlessEncryption = encryption; vlessFlow = flow
         } else {
             vlessUUID = id; vlessEncryption = "none"; vlessFlow = nil
         }
@@ -67,11 +67,11 @@ extension ProxyConfiguration {
             configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
             if let ech = tls.echConfig { configurationDict["trojanEch"] = ech }
             if tls.echEnabled != (tls.echConfig != nil) { configurationDict["trojanEchEnabled"] = tls.echEnabled }
-        case .anytls(let password, let ici, let it, let mis, let tls):
+        case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let tls):
             configurationDict["anytlsPassword"] = password
-            configurationDict["anytlsIdleCheckInterval"] = ici
-            configurationDict["anytlsIdleTimeout"] = it
-            configurationDict["anytlsMinIdleSession"] = mis
+            configurationDict["anytlsIdleCheckInterval"] = idleCheckInterval
+            configurationDict["anytlsIdleTimeout"] = idleTimeout
+            configurationDict["anytlsMinIdleSession"] = minIdleSession
             configurationDict["anytlsSNI"] = tls.serverName
             if let alpn = tls.alpn, !alpn.isEmpty {
                 configurationDict["anytlsALPN"] = alpn.joined(separator: ",")
@@ -167,8 +167,8 @@ extension ProxyConfiguration {
                 }
                 configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
                 // Carry downloadSettings as one JSON value (lossless) rather than flattening each field.
-                if let ds = xhttp.downloadSettings,
-                   let data = try? JSONEncoder().encode(ds),
+                if let downloadSettings = xhttp.downloadSettings,
+                   let data = try? JSONEncoder().encode(downloadSettings),
                    let json = String(data: data, encoding: .utf8) {
                     configurationDict["xhttpDownloadSettings"] = json
                 }

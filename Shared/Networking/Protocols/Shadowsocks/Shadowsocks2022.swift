@@ -404,10 +404,10 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
 
     private let sessionID: UInt64
     private var packetID: UInt64 = 0
-    private let sessionCipher: Data  // AEAD key derived from sessionID
+    private let sessionKey: Data  // AEAD key derived from sessionID
 
     private var remoteSessionID: UInt64 = 0
-    private var remoteSessionCipher: Data?
+    private var remoteSessionKey: Data?
 
     init(inner: ProxyConnection, cipher: ShadowsocksCipher, pskList: [Data], dstHost: String, dstPort: UInt16) {
         self.inner = inner
@@ -424,15 +424,15 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         }
         self.pskHashes = hashes
 
-        var sid: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &sid) { pointer in
+        var randomSessionID: UInt64 = 0
+        _ = withUnsafeMutableBytes(of: &randomSessionID) { pointer in
             SecRandomCopyBytes(kSecRandomDefault, 8, pointer.baseAddress!)
         }
-        self.sessionID = sid
+        self.sessionID = randomSessionID
 
-        var sidBE = sid.bigEndian
+        var sidBE = randomSessionID.bigEndian
         let sidData = Data(bytes: &sidBE, count: 8)
-        self.sessionCipher = ShadowsocksKeyDerivation.deriveSessionKey(psk: pskList.last!, salt: sidData, keySize: cipher.keySize)
+        self.sessionKey = ShadowsocksKeyDerivation.deriveSessionKey(psk: pskList.last!, salt: sidData, keySize: cipher.keySize)
 
         super.init()
     }
@@ -523,7 +523,7 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         // AEAD seal body: nonce = header[4:16] (last 12 bytes of header)
         let nonce = header[4..<16]
         let sealedBody = try ShadowsocksAEADCrypto.seal(
-            cipher: cipher, key: sessionCipher, nonce: nonce, plaintext: body
+            cipher: cipher, key: sessionKey, nonce: nonce, plaintext: body
         )
 
         let encryptedHeader = try aesECBEncrypt(key: headerEncryptPSK, block: header)
@@ -550,14 +550,14 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         let remoteSession = UInt64(bigEndian: sidBE)
 
         let remoteCipherKey: Data
-        if remoteSession == remoteSessionID, let cached = remoteSessionCipher {
+        if remoteSession == remoteSessionID, let cached = remoteSessionKey {
             remoteCipherKey = cached
         } else {
-            var rsBE = remoteSession.bigEndian
-            let rsData = Data(bytes: &rsBE, count: 8)
+            var remoteSessionBE = remoteSession.bigEndian
+            let rsData = Data(bytes: &remoteSessionBE, count: 8)
             remoteCipherKey = ShadowsocksKeyDerivation.deriveSessionKey(psk: psk, salt: rsData, keySize: cipher.keySize)
             remoteSessionID = remoteSession
-            remoteSessionCipher = remoteCipherKey
+            remoteSessionKey = remoteCipherKey
         }
 
         // AEAD open body: nonce = header[4:16]
@@ -863,9 +863,9 @@ enum XChaCha20Poly1305 {
 
         let symmetricKey = SymmetricKey(data: subkey)
         let nonceObj = try ChaChaPoly.Nonce(data: chachaNonce)
-        let ct = ciphertext.prefix(ciphertext.count - 16)
+        let ciphertextWithoutTag = ciphertext.prefix(ciphertext.count - 16)
         let tag = ciphertext.suffix(16)
-        let box = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
+        let box = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ciphertextWithoutTag, tag: tag)
         return try ChaChaPoly.open(box, using: symmetricKey)
     }
 

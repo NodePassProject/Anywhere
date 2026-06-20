@@ -149,10 +149,10 @@ extension XHTTPConnection {
                 case Self.h2FrameWindowUpdate:
                     self.lock.lock()
                     if frame.payload.count >= 4 {
-                        let raw = frame.payload.prefix(4).withUnsafeBytes {
+                        let windowIncrementRaw = frame.payload.prefix(4).withUnsafeBytes {
                             $0.load(as: UInt32.self).bigEndian
                         }
-                        let increment = Int(raw & 0x7FFFFFFF)
+                        let increment = Int(windowIncrementRaw & 0x7FFFFFFF)
                         if frame.streamId == 0 {
                             self.h2PeerConnectionWindow += increment
                         } else if self.h2PacketStreamWindows[frame.streamId] != nil {
@@ -457,18 +457,18 @@ extension XHTTPConnection {
 
                         var updates = Data()
                         if connConsumed >= threshold {
-                            let inc = UInt32(connConsumed)
-                            var p = Data(count: 4)
-                            p[0] = UInt8((inc >> 24) & 0xFF); p[1] = UInt8((inc >> 16) & 0xFF)
-                            p[2] = UInt8((inc >> 8) & 0xFF); p[3] = UInt8(inc & 0xFF)
-                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: p))
+                            let increment = UInt32(connConsumed)
+                            var windowUpdatePayload = Data(count: 4)
+                            windowUpdatePayload[0] = UInt8((increment >> 24) & 0xFF); windowUpdatePayload[1] = UInt8((increment >> 16) & 0xFF)
+                            windowUpdatePayload[2] = UInt8((increment >> 8) & 0xFF); windowUpdatePayload[3] = UInt8(increment & 0xFF)
+                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: windowUpdatePayload))
                         }
                         if isDownloadStream && streamConsumed >= threshold {
-                            let inc = UInt32(streamConsumed)
-                            var p = Data(count: 4)
-                            p[0] = UInt8((inc >> 24) & 0xFF); p[1] = UInt8((inc >> 16) & 0xFF)
-                            p[2] = UInt8((inc >> 8) & 0xFF); p[3] = UInt8(inc & 0xFF)
-                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: frame.streamId, payload: p))
+                            let increment = UInt32(streamConsumed)
+                            var windowUpdatePayload = Data(count: 4)
+                            windowUpdatePayload[0] = UInt8((increment >> 24) & 0xFF); windowUpdatePayload[1] = UInt8((increment >> 16) & 0xFF)
+                            windowUpdatePayload[2] = UInt8((increment >> 8) & 0xFF); windowUpdatePayload[3] = UInt8(increment & 0xFF)
+                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: frame.streamId, payload: windowUpdatePayload))
                         }
                         if !updates.isEmpty {
                             self.downloadSend(updates) { _ in }

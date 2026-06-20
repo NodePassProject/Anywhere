@@ -180,12 +180,12 @@ nonisolated final class ShadowsocksUDPSession {
         // Pre-supplied hints count as a pinned source; `dstHost` alone does not.
         let pinned = hosts.count > 1
 
-        let reg = Registration(token: token, port: dstPort,
+        let registration = Registration(token: token, port: dstPort,
                                responseHosts: hosts,
                                hasLearnedSource: pinned,
                                handler: handler,
                                errorHandler: errorHandler)
-        registrations[token] = reg
+        registrations[token] = registration
         for host in hosts {
             tokensByResponse[ResponseKey(host: host, port: dstPort), default: []].append(token)
         }
@@ -198,24 +198,24 @@ nonisolated final class ShadowsocksUDPSession {
     }
 
     func addResponseHints(token: Token, hints: [String]) {
-        guard let reg = registrations[token] else { return }
+        guard let registration = registrations[token] else { return }
         var inserted = false
-        for hint in hints where reg.responseHosts.insert(hint).inserted {
-            tokensByResponse[ResponseKey(host: hint, port: reg.port), default: []].append(token)
+        for hint in hints where registration.responseHosts.insert(hint).inserted {
+            tokensByResponse[ResponseKey(host: hint, port: registration.port), default: []].append(token)
             inserted = true
         }
         if inserted {
-            reg.hasLearnedSource = true
+            registration.hasLearnedSource = true
         }
     }
 
     /// Idempotent; no-ops if the token is unknown.
     func unregister(token: Token) {
-        guard let reg = registrations.removeValue(forKey: token) else { return }
-        for host in reg.responseHosts {
-            removeToken(token, from: &tokensByResponse, key: ResponseKey(host: host, port: reg.port))
+        guard let registration = registrations.removeValue(forKey: token) else { return }
+        for host in registration.responseHosts {
+            removeToken(token, from: &tokensByResponse, key: ResponseKey(host: host, port: registration.port))
         }
-        removeToken(token, from: &tokensByPort, key: reg.port)
+        removeToken(token, from: &tokensByPort, key: registration.port)
         pendingSends.removeAll { $0.token == token }
     }
 
@@ -285,9 +285,9 @@ nonisolated final class ShadowsocksUDPSession {
             // Drain anything queued while connecting, preserving order.
             let flushes = self.pendingSends
             self.pendingSends.removeAll()
-            for p in flushes {
-                self.sendNow(dstHost: p.dstHost, dstPort: p.dstPort,
-                             payload: p.payload, completion: p.completion)
+            for pendingSend in flushes {
+                self.sendNow(dstHost: pendingSend.dstHost, dstPort: pendingSend.dstPort,
+                             payload: pendingSend.payload, completion: pendingSend.completion)
             }
         }
     }
@@ -336,8 +336,8 @@ nonisolated final class ShadowsocksUDPSession {
         let key = ResponseKey(host: decoded.host, port: decoded.port)
 
         if let tokens = tokensByResponse[key],
-           let reg = firstRegistration(in: tokens) {
-            reg.handler(decoded.payload)
+           let registration = firstRegistration(in: tokens) {
+            registration.handler(decoded.payload)
             return
         }
 
@@ -362,7 +362,7 @@ nonisolated final class ShadowsocksUDPSession {
 
     private func firstRegistration(in tokens: [Token]) -> Registration? {
         for token in tokens {
-            if let reg = registrations[token] { return reg }
+            if let registration = registrations[token] { return registration }
         }
         return nil
     }
@@ -370,7 +370,7 @@ nonisolated final class ShadowsocksUDPSession {
     private func firstRegistration(in tokens: [Token],
                                    where predicate: (Registration) -> Bool) -> Registration? {
         for token in tokens {
-            if let reg = registrations[token], predicate(reg) { return reg }
+            if let registration = registrations[token], predicate(registration) { return registration }
         }
         return nil
     }

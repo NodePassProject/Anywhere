@@ -31,7 +31,7 @@ nonisolated final class AnyTLSMultiplexerRegistry {
         dialOut: @escaping AnyTLSMultiplexerPool.DialOut
     ) -> AnyTLSMultiplexerPool? {
         guard
-            case .anytls(let password, let ici, let it, let mis, _) = configuration.outbound
+            case .anytls(let password, let idleSessionCheckInterval, let idleSessionTimeout, let minIdleSession, _) = configuration.outbound
         else {
             logger.debug("[AnyTLSMultiplexerRegistry] outbound is not .anytls — refusing to create client")
             return nil
@@ -45,14 +45,14 @@ nonisolated final class AnyTLSMultiplexerRegistry {
         }
         let client = AnyTLSMultiplexerPool(
             password: password,
-            idleSessionCheckInterval: TimeInterval(ici),
-            idleSessionTimeout:       TimeInterval(it),
-            minIdleSession:           mis,
+            idleSessionCheckInterval: TimeInterval(idleSessionCheckInterval),
+            idleSessionTimeout:       TimeInterval(idleSessionTimeout),
+            minIdleSession:           minIdleSession,
             dialOut: dialOut
         )
         clients[key] = client
         lock.unlock()
-        logger.debug("[AnyTLSMultiplexerRegistry] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(ici)s it=\(it)s mis=\(mis)")
+        logger.debug("[AnyTLSMultiplexerRegistry] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(idleSessionCheckInterval)s it=\(idleSessionTimeout)s mis=\(minIdleSession)")
         return client
     }
 

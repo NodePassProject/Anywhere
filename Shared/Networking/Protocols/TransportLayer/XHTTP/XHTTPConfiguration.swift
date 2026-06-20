@@ -127,14 +127,14 @@ struct XHTTPXMUXMultiplexerConfiguration: Codable, Equatable, Hashable {
 
     /// JSON object for the `extra`/`xhttpSettings` blob, emitting only non-zero fields.
     var jsonObject: [String: Any] {
-        var j: [String: Any] = [:]
-        if !maxConcurrency.isZero { j["maxConcurrency"] = maxConcurrency.jsonValue }
-        if !maxConnections.isZero { j["maxConnections"] = maxConnections.jsonValue }
-        if !cMaxReuseTimes.isZero { j["cMaxReuseTimes"] = cMaxReuseTimes.jsonValue }
-        if !hMaxRequestTimes.isZero { j["hMaxRequestTimes"] = hMaxRequestTimes.jsonValue }
-        if !hMaxReusableSecs.isZero { j["hMaxReusableSecs"] = hMaxReusableSecs.jsonValue }
-        if hKeepAlivePeriod != 0 { j["hKeepAlivePeriod"] = hKeepAlivePeriod }
-        return j
+        var json: [String: Any] = [:]
+        if !maxConcurrency.isZero { json["maxConcurrency"] = maxConcurrency.jsonValue }
+        if !maxConnections.isZero { json["maxConnections"] = maxConnections.jsonValue }
+        if !cMaxReuseTimes.isZero { json["cMaxReuseTimes"] = cMaxReuseTimes.jsonValue }
+        if !hMaxRequestTimes.isZero { json["hMaxRequestTimes"] = hMaxRequestTimes.jsonValue }
+        if !hMaxReusableSecs.isZero { json["hMaxReusableSecs"] = hMaxReusableSecs.jsonValue }
+        if hKeepAlivePeriod != 0 { json["hKeepAlivePeriod"] = hKeepAlivePeriod }
+        return json
     }
 }
 
@@ -484,15 +484,15 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         } else if let s = json?["alpn"] as? String, !s.isEmpty {
             alpn = s.split(separator: ",").map(String.init)
         }
-        let fp = (json?["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome120
+        let fingerprint = (json?["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome120
         let ech = (json?["ech"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return TLSConfiguration(serverName: serverName, alpn: alpn, echConfig: ech, fingerprint: fp)
+        return TLSConfiguration(serverName: serverName, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
     }
 
     /// Returns nil when the public key is missing or not a valid 32-byte key (base64url or base64).
     private static func mapDownloadReality(_ json: [String: Any]?, serverAddress: String) -> RealityConfiguration? {
-        guard let json, let pbkString = json["publicKey"] as? String, !pbkString.isEmpty else { return nil }
-        guard let publicKey = (Data(base64URLEncoded: pbkString) ?? Data(base64Encoded: pbkString)),
+        guard let json, let publicKeyString = json["publicKey"] as? String, !publicKeyString.isEmpty else { return nil }
+        guard let publicKey = (Data(base64URLEncoded: publicKeyString) ?? Data(base64Encoded: publicKeyString)),
               publicKey.count == 32 else { return nil }
         let serverName = (json["serverName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? serverAddress
         let shortId = Data(hexString: (json["shortId"] as? String) ?? "") ?? Data()

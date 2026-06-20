@@ -27,7 +27,7 @@ struct TLSClientHelloBuilder {
 
     // MARK: - Deterministic Pseudo-Random Derivation
 
-    private static func derivePRBytes(from random: Data, label: String, length: Int) -> Data {
+    private static func derivePseudoRandomBytes(from random: Data, label: String, length: Int) -> Data {
         var result = Data()
         var counter: UInt8 = 0
         while result.count < length {
@@ -215,9 +215,9 @@ struct TLSClientHelloBuilder {
 
     /// 0xFE0D — GREASE Encrypted Client Hello.
     private static func greaseECHExt(random: Data, kdfId: UInt16, aeadId: UInt16, payloadLen: Int) -> Data {
-        let enc = derivePRBytes(from: random, label: "ech-enc", length: 32)
-        let payload = derivePRBytes(from: random, label: "ech-payload", length: payloadLen)
-        let configId = derivePRBytes(from: random, label: "ech-config", length: 1)[0]
+        let enc = derivePseudoRandomBytes(from: random, label: "ech-enc", length: 32)
+        let payload = derivePseudoRandomBytes(from: random, label: "ech-payload", length: payloadLen)
+        let configId = derivePseudoRandomBytes(from: random, label: "ech-config", length: 1)[0]
 
         var data = Data()
         data.append(0x00)
@@ -478,8 +478,8 @@ struct TLSClientHelloBuilder {
             (group: gGroup, keyData: Data([0x00])),           // GREASE key share
         ]
 
-        if !omitPQKeyShares, let ekKey = mlkemEncapsulationKey {
-            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: ekKey, publicKey: publicKey)
+        if !omitPQKeyShares, let encapsulationKey = mlkemEncapsulationKey {
+            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: encapsulationKey, publicKey: publicKey)
             supportedGroups = [gGroup, 0x11EC, 0x001D, 0x0017, 0x0018]
             keyShares.append((group: 0x11EC, keyData: hybrid))
         } else {
@@ -664,8 +664,8 @@ struct TLSClientHelloBuilder {
         let supportedGroups: [UInt16]
         var keyShares: [(group: UInt16, keyData: Data)] = []
 
-        if !omitPQKeyShares, let ekKey = mlkemEncapsulationKey {
-            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: ekKey, publicKey: publicKey)
+        if !omitPQKeyShares, let encapsulationKey = mlkemEncapsulationKey {
+            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: encapsulationKey, publicKey: publicKey)
             supportedGroups = [0x11EC, 0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101]
             keyShares.append((group: 0x11EC, keyData: hybrid))
         } else {
@@ -790,8 +790,8 @@ struct TLSClientHelloBuilder {
             (group: gGroup, keyData: Data([0x00])),           // GREASE key share
         ]
 
-        if !omitPQKeyShares, let ekKey = mlkemEncapsulationKey {
-            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: ekKey, publicKey: publicKey)
+        if !omitPQKeyShares, let encapsulationKey = mlkemEncapsulationKey {
+            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: encapsulationKey, publicKey: publicKey)
             supportedGroups = [gGroup, 0x11EC, 0x001D, 0x0017, 0x0018, 0x0019]
             keyShares.append((group: 0x11EC, keyData: hybrid))
         } else {

@@ -18,31 +18,31 @@ enum H2Framing {
 
     /// Serializes a frame: 24-bit length, 8-bit type, 8-bit flags, 31-bit stream id, payload.
     static func frame(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) -> Data {
-        var f = Data(capacity: headerSize + payload.count)
+        var frameData = Data(capacity: headerSize + payload.count)
         let length = UInt32(payload.count)
-        f.append(UInt8((length >> 16) & 0xFF))
-        f.append(UInt8((length >> 8) & 0xFF))
-        f.append(UInt8(length & 0xFF))
-        f.append(type)
-        f.append(flags)
+        frameData.append(UInt8((length >> 16) & 0xFF))
+        frameData.append(UInt8((length >> 8) & 0xFF))
+        frameData.append(UInt8(length & 0xFF))
+        frameData.append(type)
+        frameData.append(flags)
         let sid = streamId & 0x7FFFFFFF
-        f.append(UInt8((sid >> 24) & 0xFF))
-        f.append(UInt8((sid >> 16) & 0xFF))
-        f.append(UInt8((sid >> 8) & 0xFF))
-        f.append(UInt8(sid & 0xFF))
-        f.append(payload)
-        return f
+        frameData.append(UInt8((sid >> 24) & 0xFF))
+        frameData.append(UInt8((sid >> 16) & 0xFF))
+        frameData.append(UInt8((sid >> 8) & 0xFF))
+        frameData.append(UInt8(sid & 0xFF))
+        frameData.append(payload)
+        return frameData
     }
 
     /// Consumes one complete frame from the front of `buffer`; nil until a full frame is buffered.
     static func parseFrame(from buffer: inout Data) -> Frame? {
         guard buffer.count >= headerSize else { return nil }
-        let b = buffer
-        let length = (UInt32(b[b.startIndex]) << 16) | (UInt32(b[b.startIndex + 1]) << 8) | UInt32(b[b.startIndex + 2])
-        let type = b[b.startIndex + 3]
-        let flags = b[b.startIndex + 4]
-        let sid = ((UInt32(b[b.startIndex + 5]) << 24) | (UInt32(b[b.startIndex + 6]) << 16)
-                   | (UInt32(b[b.startIndex + 7]) << 8) | UInt32(b[b.startIndex + 8])) & 0x7FFFFFFF
+        let bytes = buffer
+        let length = (UInt32(bytes[bytes.startIndex]) << 16) | (UInt32(bytes[bytes.startIndex + 1]) << 8) | UInt32(bytes[bytes.startIndex + 2])
+        let type = bytes[bytes.startIndex + 3]
+        let flags = bytes[bytes.startIndex + 4]
+        let sid = ((UInt32(bytes[bytes.startIndex + 5]) << 24) | (UInt32(bytes[bytes.startIndex + 6]) << 16)
+                   | (UInt32(bytes[bytes.startIndex + 7]) << 8) | UInt32(bytes[bytes.startIndex + 8])) & 0x7FFFFFFF
         let total = headerSize + Int(length)
         guard buffer.count >= total else { return nil }
         let payload = buffer.subdata(in: buffer.startIndex + headerSize ..< buffer.startIndex + total)
@@ -53,16 +53,16 @@ enum H2Framing {
     }
 
     /// Big-endian UInt32 from the first 4 bytes of `d`.
-    static func readUInt32(_ d: Data) -> UInt32 {
-        (UInt32(d[d.startIndex]) << 24) | (UInt32(d[d.startIndex + 1]) << 16)
-        | (UInt32(d[d.startIndex + 2]) << 8) | UInt32(d[d.startIndex + 3])
+    static func readUInt32(_ data: Data) -> UInt32 {
+        (UInt32(data[data.startIndex]) << 24) | (UInt32(data[data.startIndex + 1]) << 16)
+        | (UInt32(data[data.startIndex + 2]) << 8) | UInt32(data[data.startIndex + 3])
     }
 
     /// Big-endian 4-byte encoding of `v`.
-    static func uint32Data(_ v: UInt32) -> Data {
+    static func uint32Data(_ value: UInt32) -> Data {
         var d = Data(count: 4)
-        d[0] = UInt8((v >> 24) & 0xFF); d[1] = UInt8((v >> 16) & 0xFF)
-        d[2] = UInt8((v >> 8) & 0xFF); d[3] = UInt8(v & 0xFF)
+        d[0] = UInt8((value >> 24) & 0xFF); d[1] = UInt8((value >> 16) & 0xFF)
+        d[2] = UInt8((value >> 8) & 0xFF); d[3] = UInt8(value & 0xFF)
         return d
     }
 }

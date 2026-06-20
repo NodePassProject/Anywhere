@@ -72,14 +72,14 @@ struct TLSClientHelloSniffer {
         let total = buf.count
         while true {
             guard total - offset >= 5 else { return .needMore }
-            let h = buf.index(base, offsetBy: offset)
-            guard buf[h] == 0x16 else { return .unavailable } // non-handshake record mid-message
+            let recordStart = buf.index(base, offsetBy: offset)
+            guard buf[recordStart] == 0x16 else { return .unavailable } // non-handshake record mid-message
             // RFC 8446 §5.1: record fragment length ≤ 2^14.
-            let fragLen = (Int(buf[buf.index(h, offsetBy: 3)]) << 8) | Int(buf[buf.index(h, offsetBy: 4)])
+            let fragLen = (Int(buf[buf.index(recordStart, offsetBy: 3)]) << 8) | Int(buf[buf.index(recordStart, offsetBy: 4)])
             guard fragLen > 0, fragLen <= 16_384 else { return .unavailable }
             let recordTotal = 5 + fragLen
             guard total - offset >= recordTotal else { return .needMore }
-            let fStart = buf.index(h, offsetBy: 5)
+            let fStart = buf.index(recordStart, offsetBy: 5)
             let fEnd = buf.index(fStart, offsetBy: fragLen)
             fragment.append(buf[fStart..<fEnd])
             offset += recordTotal
@@ -91,8 +91,8 @@ struct TLSClientHelloSniffer {
                             | Int(fragment[fragment.index(b, offsetBy: 3)])
                 messageLength = 4 + bodyLen
             }
-            if let ml = messageLength, fragment.count >= ml {
-                return parseHandshake(fragment.prefix(ml))
+            if let messageLength, fragment.count >= messageLength {
+                return parseHandshake(fragment.prefix(messageLength))
             }
         }
     }
@@ -150,11 +150,11 @@ struct TLSClientHelloSniffer {
     private func parseServerNameList(_ buf: Data) -> String? {
         var current = Cursor(buf)
         guard let listLen = current.readU16(), let list = current.readBytes(listLen) else { return nil }
-        var lc = Cursor(list)
-        while !lc.isAtEnd {
-            guard let nameType = lc.readU8(),
-                  let nameLen = lc.readU16(),
-                  let nameData = lc.readBytes(nameLen) else { return nil }
+        var listCursor = Cursor(list)
+        while !listCursor.isAtEnd {
+            guard let nameType = listCursor.readU8(),
+                  let nameLen = listCursor.readU16(),
+                  let nameData = listCursor.readBytes(nameLen) else { return nil }
             if nameType == 0x00,
                !nameData.isEmpty,
                let host = String(data: nameData, encoding: .utf8) {
@@ -168,46 +168,46 @@ struct TLSClientHelloSniffer {
 
     private struct Cursor {
         let data: Data
-        var pos: Int
+        var position: Int
 
         init(_ data: Data) {
             self.data = data
-            self.pos = data.startIndex
+            self.position = data.startIndex
         }
 
-        var isAtEnd: Bool { pos >= data.endIndex }
+        var isAtEnd: Bool { position >= data.endIndex }
 
         mutating func skip(_ n: Int) -> Bool {
-            guard n >= 0, pos &+ n <= data.endIndex else { return false }
-            pos += n
+            guard n >= 0, position &+ n <= data.endIndex else { return false }
+            position += n
             return true
         }
 
         mutating func readU8() -> UInt8? {
-            guard pos < data.endIndex else { return nil }
-            let v = data[pos]
-            pos += 1
+            guard position < data.endIndex else { return nil }
+            let v = data[position]
+            position += 1
             return v
         }
 
         mutating func readU16() -> Int? {
-            guard pos &+ 2 <= data.endIndex else { return nil }
-            let v = (Int(data[pos]) << 8) | Int(data[pos &+ 1])
-            pos += 2
+            guard position &+ 2 <= data.endIndex else { return nil }
+            let v = (Int(data[position]) << 8) | Int(data[position &+ 1])
+            position += 2
             return v
         }
 
         mutating func readU24() -> Int? {
-            guard pos &+ 3 <= data.endIndex else { return nil }
-            let v = (Int(data[pos]) << 16) | (Int(data[pos &+ 1]) << 8) | Int(data[pos &+ 2])
-            pos += 3
+            guard position &+ 3 <= data.endIndex else { return nil }
+            let v = (Int(data[position]) << 16) | (Int(data[position &+ 1]) << 8) | Int(data[position &+ 2])
+            position += 3
             return v
         }
 
         mutating func readBytes(_ n: Int) -> Data? {
-            guard n >= 0, pos &+ n <= data.endIndex else { return nil }
-            let slice = data[pos..<(pos &+ n)]
-            pos += n
+            guard n >= 0, position &+ n <= data.endIndex else { return nil }
+            let slice = data[position..<(position &+ n)]
+            position += n
             return slice
         }
     }

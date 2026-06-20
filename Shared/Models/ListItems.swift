@@ -76,13 +76,13 @@ final class ChainListItem: Identifiable {
     }
 
     init(_ chain: ProxyChain, configurations: [ProxyConfiguration], isSelected: Bool, latency: LatencyResult?) {
-        let d = chain.listDisplayInfo(configurations: configurations)
+        let displayInfo = chain.listDisplayInfo(configurations: configurations)
         id = chain.id
         name = chain.name
-        proxyNames = d.names
-        isValid = d.isValid
-        entryAddress = d.entry
-        exitAddress = d.exit
+        proxyNames = displayInfo.names
+        isValid = displayInfo.isValid
+        entryAddress = displayInfo.entry
+        exitAddress = displayInfo.exit
         self.isSelected = isSelected
         self.latency = latency
     }

@@ -219,10 +219,10 @@ nonisolated final class DNSResolver {
     }
 
     private static func isIPAddress(_ host: String) -> Bool {
-        var sa4 = sockaddr_in()
-        if inet_pton(AF_INET, host, &sa4.sin_addr) == 1 { return true }
-        var sa6 = sockaddr_in6()
-        if inet_pton(AF_INET6, host, &sa6.sin6_addr) == 1 { return true }
+        var ipv4SockAddr = sockaddr_in()
+        if inet_pton(AF_INET, host, &ipv4SockAddr.sin_addr) == 1 { return true }
+        var ipv6SockAddr = sockaddr_in6()
+        if inet_pton(AF_INET6, host, &ipv6SockAddr.sin6_addr) == 1 { return true }
         return false
     }
 
@@ -361,9 +361,9 @@ nonisolated final class DNSResolver {
         while result.config == nil, !result.answered {
             let remaining = deadline - CFAbsoluteTimeGetCurrent()
             if remaining <= 0 { break }
-            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&pfd, 1, Int32(remaining * 1000))
-            guard ready > 0, (pfd.revents & Int16(POLLIN)) != 0 else { break }
+            var pollDescriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&pollDescriptor, 1, Int32(remaining * 1000))
+            guard ready > 0, (pollDescriptor.revents & Int16(POLLIN)) != 0 else { break }
             if DNSServiceProcessResult(serviceRef) != kDNSServiceErr_NoError { break }
         }
         guard let config = result.config else { return nil }

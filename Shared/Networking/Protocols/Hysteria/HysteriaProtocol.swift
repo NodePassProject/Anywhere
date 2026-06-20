@@ -175,13 +175,13 @@ enum HysteriaProtocol {
         guard data.count >= udpHeaderFixedSize else { return nil }
         var offset = 0
 
-        let sid = data.withUnsafeBytes { buffer -> UInt32 in
+        let sessionID = data.withUnsafeBytes { buffer -> UInt32 in
             var v: UInt32 = 0
             memcpy(&v, buffer.baseAddress!.advanced(by: 0), 4)
             return UInt32(bigEndian: v)
         }
         offset += 4
-        let pid = data.withUnsafeBytes { buffer -> UInt16 in
+        let packetID = data.withUnsafeBytes { buffer -> UInt16 in
             var v: UInt16 = 0
             memcpy(&v, buffer.baseAddress!.advanced(by: 4), 2)
             return UInt16(bigEndian: v)
@@ -210,7 +210,7 @@ enum HysteriaProtocol {
         let payloadStart = data.index(data.startIndex, offsetBy: offset)
         let payload = data.subdata(in: payloadStart..<data.endIndex)
         return UDPMessage(
-            sessionID: sid, packetID: pid, fragID: fragID, fragCount: fragCount,
+            sessionID: sessionID, packetID: packetID, fragID: fragID, fragCount: fragCount,
             address: address, data: payload
         )
     }

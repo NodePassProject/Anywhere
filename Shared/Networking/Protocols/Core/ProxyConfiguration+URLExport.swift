@@ -173,7 +173,7 @@ extension ProxyConfiguration {
     }
 
     private func toAnyTLSURL() -> String {
-        guard case .anytls(let password, let ici, let it, let mis, let tls) = outbound else { return "" }
+        guard case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let tls) = outbound else { return "" }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var parameters: [String] = []
@@ -191,9 +191,9 @@ extension ProxyConfiguration {
             parameters.append("ech=\(ech)")
         }
         // Emit pool tuners only when they differ from the sing-anytls defaults (30/30/0).
-        if ici != 30 { parameters.append("ici=\(ici)") }
-        if it != 30 { parameters.append("it=\(it)") }
-        if mis != 0 { parameters.append("mis=\(mis)") }
+        if idleCheckInterval != 30 { parameters.append("ici=\(idleCheckInterval)") }
+        if idleTimeout != 30 { parameters.append("it=\(idleTimeout)") }
+        if minIdleSession != 0 { parameters.append("mis=\(minIdleSession)") }
         let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "anytls://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }

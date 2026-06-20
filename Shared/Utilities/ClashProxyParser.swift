@@ -84,8 +84,8 @@ struct ClashProxyParser {
     }
 
     private static func getInt(_ node: YAML.Node, key: String) -> Int? {
-        guard let s = getString(node, key: key) else { return nil }
-        return Int(s)
+        guard let stringValue = getString(node, key: key) else { return nil }
+        return Int(stringValue)
     }
 
     private static func getBool(_ node: YAML.Node, key: String) -> Bool? {
@@ -480,10 +480,10 @@ struct ClashProxyParser {
             let headers = wsOpts["headers"]
             if headers.type == .map {
                 for pair in headers {
-                    let k = pair[0].scalar
-                    let v = pair[1].scalar
-                    wsHeaders[k] = v
-                    if k == "Host" { wsHost = v }
+                    let headerName = pair[0].scalar
+                    let headerValue = pair[1].scalar
+                    wsHeaders[headerName] = headerValue
+                    if headerName == "Host" { wsHost = headerValue }
                 }
             }
         }
@@ -519,15 +519,15 @@ struct ClashProxyParser {
         )
     }
 
-    private static func mapFingerprint(_ fp: String?) -> String {
-        switch fp?.lowercased() {
+    private static func mapFingerprint(_ rawFingerprint: String?) -> String {
+        switch rawFingerprint?.lowercased() {
         case "chrome":  return TLSFingerprint.chrome133.rawValue
         case "firefox": return TLSFingerprint.firefox148.rawValue
         case "safari":  return TLSFingerprint.safari26.rawValue
         case "ios":     return TLSFingerprint.chrome120.rawValue
         case "edge":    return TLSFingerprint.edge106.rawValue
         case "random":  return TLSFingerprint.chrome120.rawValue
-        default:        return fp ?? TLSFingerprint.chrome120.rawValue
+        default:        return rawFingerprint ?? TLSFingerprint.chrome120.rawValue
         }
     }
 }

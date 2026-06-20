@@ -202,11 +202,11 @@ nonisolated final class HysteriaSession {
         }
         // QPACK encoder (0x02) / decoder (0x03) uni streams; dynamic table
         // is 0, so they carry only the type byte.
-        if let enc = quic.openUniStream() {
-            quic.writeStream(enc, data: Data([0x02])) { _ in }
+        if let encoderStreamID = quic.openUniStream() {
+            quic.writeStream(encoderStreamID, data: Data([0x02])) { _ in }
         }
-        if let dec = quic.openUniStream() {
-            quic.writeStream(dec, data: Data([0x03])) { _ in }
+        if let decoderStreamID = quic.openUniStream() {
+            quic.writeStream(decoderStreamID, data: Data([0x03])) { _ in }
         }
     }
 
@@ -398,7 +398,7 @@ nonisolated final class HysteriaSession {
 
     // MARK: - TCP stream API (called by HysteriaConnection)
 
-    func openTCPStream(for conn: HysteriaConnection, completion: @escaping (Int64?, Error?) -> Void) {
+    func openTCPStream(for connection: HysteriaConnection, completion: @escaping (Int64?, Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else { completion(nil, HysteriaError.streamClosed); return }
             guard self.state == .ready else {
@@ -409,7 +409,7 @@ nonisolated final class HysteriaSession {
                 completion(nil, HysteriaError.connectionFailed("Failed to open TCP stream"))
                 return
             }
-            self.tcpStreams[sid] = conn
+            self.tcpStreams[sid] = connection
             self._poolLock.lock()
             self._poolTCPCount += 1
             self._poolLock.unlock()

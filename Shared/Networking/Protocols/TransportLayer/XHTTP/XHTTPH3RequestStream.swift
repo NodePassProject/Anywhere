@@ -71,20 +71,20 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
                     return
                 }
 
-                guard let sid = multiplexer.openBidiStream() else {
+                guard let streamID = multiplexer.openBidiStream() else {
                     self.state = .closed
                     multiplexer.markStreamBlocked()
                     completion(HTTP3Error.streamIdBlocked)
                     return
                 }
-                self.quicStreamID = sid
+                self.quicStreamID = streamID
                 // Register before the write so a fast response can't race ahead of the callback.
                 self.onResponse = onResponse
-                multiplexer.registerStream(self, streamID: sid)
+                multiplexer.registerStream(self, streamID: streamID)
                 self.state = .requestSent
 
                 let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
-                multiplexer.writeStream(sid, data: frame, fin: endStream) { [weak self] error in
+                multiplexer.writeStream(streamID, data: frame, fin: endStream) { [weak self] error in
                     if let error {
                         self?.multiplexer?.queue.async { self?.handleStreamError(error) }
                     }

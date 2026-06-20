@@ -294,12 +294,12 @@ extension TLSClient {
             throw TLSError.certificateValidationFailed("Failed to extract public key")
         }
 
-        guard let cRandom = clientRandom, let sRandom = serverRandom else {
+        guard let clientRandom = clientRandom, let serverRandom = serverRandom else {
             throw TLSError.handshakeFailed("Missing randoms for signature verification")
         }
 
-        var content = cRandom
-        content.append(sRandom)
+        var content = clientRandom
+        content.append(serverRandom)
         content.append(body.subdata(in: 0..<paramsEnd))
 
         let secAlgorithm = secKeyAlgorithm(for: sigAlgorithm)
@@ -388,30 +388,30 @@ extension TLSClient {
             return
         }
 
-        let ms: Data
+        let masterSecret: Data
         if useExtendedMasterSecret {
             let sessionHash = TLS12KeyDerivation.transcriptHash(transcript, useSHA384: useSHA384)
-            ms = TLS12KeyDerivation.extendedMasterSecret(
+            masterSecret = TLS12KeyDerivation.extendedMasterSecret(
                 preMasterSecret: preMasterSecret,
                 sessionHash: sessionHash,
                 useSHA384: useSHA384
             )
         } else {
-            ms = TLS12KeyDerivation.masterSecret(
+            masterSecret = TLS12KeyDerivation.masterSecret(
                 preMasterSecret: preMasterSecret,
                 clientRandom: cRandom,
                 serverRandom: sRandom,
                 useSHA384: useSHA384
             )
         }
-        self.masterSecret = ms
+        self.masterSecret = masterSecret
 
         let macLen = TLSCipherSuite.macLength(tls12CipherSuite)
         let keyLen = TLSCipherSuite.keyLength(tls12CipherSuite)
         let ivLen = TLSCipherSuite.ivLength(tls12CipherSuite)
 
         let keys = TLS12KeyDerivation.keysFromMasterSecret(
-            masterSecret: ms,
+            masterSecret: masterSecret,
             clientRandom: cRandom,
             serverRandom: sRandom,
             macLen: macLen,
@@ -422,7 +422,7 @@ extension TLSClient {
 
         let transcriptHash = TLS12KeyDerivation.transcriptHash(transcript, useSHA384: useSHA384)
         let clientVerifyData = TLS12KeyDerivation.finishedPayload(
-            masterSecret: ms, label: "client finished",
+            masterSecret: masterSecret, label: "client finished",
             handshakeHash: transcriptHash, useSHA384: useSHA384
         )
 

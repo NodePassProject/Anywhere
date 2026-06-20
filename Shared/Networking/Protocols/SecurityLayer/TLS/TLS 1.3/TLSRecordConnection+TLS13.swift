@@ -67,11 +67,11 @@ extension TLSRecordConnection {
 
         var innerContentType: UInt8 = 0
         let contentLen: ssize_t = decrypted.withUnsafeBytes { pointer -> ssize_t in
-            let p = pointer.bindMemory(to: UInt8.self)
-            var i = p.count - 1
-            while i >= 0 && p[i] == 0 { i -= 1 }
+            let decryptedBytes = pointer.bindMemory(to: UInt8.self)
+            var i = decryptedBytes.count - 1
+            while i >= 0 && decryptedBytes[i] == 0 { i -= 1 }
             guard i >= 0 else { return -1 }
-            innerContentType = p[i]
+            innerContentType = decryptedBytes[i]
             return ssize_t(i)
         }
 
@@ -129,10 +129,10 @@ extension TLSRecordConnection {
     /// Ingress is the server keys for a client and the client keys for a server. No-op when the
     /// traffic secret is unavailable (e.g. TLS 1.2).
     private func rekeyIngress() {
-        let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
+        let keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
         if direction == .server {
             guard let current = clientAppSecret else { return }
-            let next = kd.nextApplicationGeneration(trafficSecret: current)
+            let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
             seqLock.lock()
             clientAppSecret = next.secret
             clientKey = next.key
@@ -142,7 +142,7 @@ extension TLSRecordConnection {
             seqLock.unlock()
         } else {
             guard let current = serverAppSecret else { return }
-            let next = kd.nextApplicationGeneration(trafficSecret: current)
+            let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
             seqLock.lock()
             serverAppSecret = next.secret
             serverKey = next.key

@@ -73,9 +73,9 @@ nonisolated class GRPCConnection {
 
     var isConnected: Bool {
         lock.lock()
-        let v = _isConnected
+        let connected = _isConnected
         lock.unlock()
-        return v
+        return connected
     }
 
     // MARK: - Initializers
@@ -118,23 +118,23 @@ nonisolated class GRPCConnection {
         // Client SETTINGS: ENABLE_PUSH=0, INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE=10MB.
         var settingsPayload = Data()
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
-        let winSize = UInt32(h2LocalWindowSize)
+        let windowSize = UInt32(h2LocalWindowSize)
         settingsPayload.append(contentsOf: [
             0x00, 0x04,
-            UInt8((winSize >> 24) & 0xFF), UInt8((winSize >> 16) & 0xFF),
-            UInt8((winSize >> 8) & 0xFF), UInt8(winSize & 0xFF),
+            UInt8((windowSize >> 24) & 0xFF), UInt8((windowSize >> 16) & 0xFF),
+            UInt8((windowSize >> 8) & 0xFF), UInt8(windowSize & 0xFF),
         ])
         settingsPayload.append(contentsOf: [0x00, 0x06, 0x00, 0xA0, 0x00, 0x00])
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
         // Connection-level WINDOW_UPDATE (1 GB).
         let connWindowInc = Self.h2ConnectionWindowSize
-        var wuPayload = Data(count: 4)
-        wuPayload[0] = UInt8((connWindowInc >> 24) & 0xFF)
-        wuPayload[1] = UInt8((connWindowInc >> 16) & 0xFF)
-        wuPayload[2] = UInt8((connWindowInc >> 8) & 0xFF)
-        wuPayload[3] = UInt8(connWindowInc & 0xFF)
-        initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
+        var windowUpdatePayload = Data(count: 4)
+        windowUpdatePayload[0] = UInt8((connWindowInc >> 24) & 0xFF)
+        windowUpdatePayload[1] = UInt8((connWindowInc >> 16) & 0xFF)
+        windowUpdatePayload[2] = UInt8((connWindowInc >> 8) & 0xFF)
+        windowUpdatePayload[3] = UInt8(connWindowInc & 0xFF)
+        initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: windowUpdatePayload))
 
         // HEADERS for the gRPC stream; END_STREAM deliberately unset — the tunnel keeps sending DATA.
         let headerBlock = encodeGRPCRequestHeaders()
@@ -339,16 +339,16 @@ extension GRPCConnection {
     private func parseH2FrameLocked() -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)? {
         guard h2ReadBuffer.count >= Self.h2FrameHeaderSize else { return nil }
 
-        let b = h2ReadBuffer
-        let length = (UInt32(b[b.startIndex]) << 16)
-            | (UInt32(b[b.startIndex + 1]) << 8)
-            | UInt32(b[b.startIndex + 2])
-        let type = b[b.startIndex + 3]
-        let flags = b[b.startIndex + 4]
-        let streamId = (UInt32(b[b.startIndex + 5]) << 24)
-            | (UInt32(b[b.startIndex + 6]) << 16)
-            | (UInt32(b[b.startIndex + 7]) << 8)
-            | UInt32(b[b.startIndex + 8])
+        let buffer = h2ReadBuffer
+        let length = (UInt32(buffer[buffer.startIndex]) << 16)
+            | (UInt32(buffer[buffer.startIndex + 1]) << 8)
+            | UInt32(buffer[buffer.startIndex + 2])
+        let type = buffer[buffer.startIndex + 3]
+        let flags = buffer[buffer.startIndex + 4]
+        let streamId = (UInt32(buffer[buffer.startIndex + 5]) << 24)
+            | (UInt32(buffer[buffer.startIndex + 6]) << 16)
+            | (UInt32(buffer[buffer.startIndex + 7]) << 8)
+            | UInt32(buffer[buffer.startIndex + 8])
         let sid = streamId & 0x7FFFFFFF
 
         let totalSize = Self.h2FrameHeaderSize + Int(length)
@@ -1066,18 +1066,18 @@ extension GRPCConnection {
 
         var updates = Data()
         if connConsumed >= threshold {
-            let inc = UInt32(connConsumed)
-            var p = Data(count: 4)
-            p[0] = UInt8((inc >> 24) & 0xFF); p[1] = UInt8((inc >> 16) & 0xFF)
-            p[2] = UInt8((inc >> 8) & 0xFF); p[3] = UInt8(inc & 0xFF)
-            updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: p))
+            let increment = UInt32(connConsumed)
+            var payload = Data(count: 4)
+            payload[0] = UInt8((increment >> 24) & 0xFF); payload[1] = UInt8((increment >> 16) & 0xFF)
+            payload[2] = UInt8((increment >> 8) & 0xFF); payload[3] = UInt8(increment & 0xFF)
+            updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: payload))
         }
         if onOurStream, streamConsumed >= threshold {
-            let inc = UInt32(streamConsumed)
-            var p = Data(count: 4)
-            p[0] = UInt8((inc >> 24) & 0xFF); p[1] = UInt8((inc >> 16) & 0xFF)
-            p[2] = UInt8((inc >> 8) & 0xFF); p[3] = UInt8(inc & 0xFF)
-            updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: Self.streamId, payload: p))
+            let increment = UInt32(streamConsumed)
+            var payload = Data(count: 4)
+            payload[0] = UInt8((increment >> 24) & 0xFF); payload[1] = UInt8((increment >> 16) & 0xFF)
+            payload[2] = UInt8((increment >> 8) & 0xFF); payload[3] = UInt8(increment & 0xFF)
+            updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: Self.streamId, payload: payload))
         }
         if !updates.isEmpty {
             transportSend(updates) { _ in }
@@ -1296,15 +1296,15 @@ extension GRPCConnection {
         let first = Int(data[start] & UInt8(maxPrefix))
         if first < maxPrefix { return (first, 1) }
         var value = maxPrefix
-        var m = 0
+        var shift = 0
         var offset = start + 1
         while offset < data.endIndex {
             let b = data[offset]
-            value += (Int(b & 0x7F)) << m
+            value += (Int(b & 0x7F)) << shift
             offset += 1
-            m += 7
+            shift += 7
             if b & 0x80 == 0 { return (value, offset - start) }
-            if m >= 64 { return (value, offset - start) }
+            if shift >= 64 { return (value, offset - start) }
         }
         return (value, offset - start)
     }

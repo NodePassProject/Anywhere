@@ -138,7 +138,7 @@ enum ECHEncryption {
         guard innerMessage.count >= 4 else { throw ECHEncryptionError.malformedInnerHello }
 
         // Drop the 4-byte handshake header (type + uint24 length).
-        var h = Data(innerMessage.dropFirst(4))
+        var encodedHelloBody = Data(innerMessage.dropFirst(4))
 
         let base: Int
         if !serverName.isEmpty {
@@ -146,11 +146,11 @@ enum ECHEncryption {
         } else {
             base = maxNameLength + 9
         }
-        let paddingLength = 31 - ((h.count + base - 1) % 32)
+        let paddingLength = 31 - ((encodedHelloBody.count + base - 1) % 32)
         if paddingLength > 0 {
-            h.append(Data(repeating: 0, count: paddingLength))
+            encodedHelloBody.append(Data(repeating: 0, count: paddingLength))
         }
-        return h
+        return encodedHelloBody
     }
 
     // MARK: - Outer extension serialization

@@ -64,10 +64,10 @@ struct SudokuXorshift64Star {
         var hi = max(Int(pmax), lo)
         lo = min(lo, 100)
         hi = min(hi, 100)
-        let minv = (UInt64(lo) * sudokuProbabilityOne) / 100
-        let maxv = (UInt64(hi) * sudokuProbabilityOne) / 100
-        guard maxv > minv else { return minv }
-        return minv + ((UInt64(nextUInt32()) * (maxv - minv)) >> 32)
+        let minThreshold = (UInt64(lo) * sudokuProbabilityOne) / 100
+        let maxThreshold = (UInt64(hi) * sudokuProbabilityOne) / 100
+        guard maxThreshold > minThreshold else { return minThreshold }
+        return minThreshold + ((UInt64(nextUInt32()) * (maxThreshold - minThreshold)) >> 32)
     }
 
     mutating func shouldPad(threshold: UInt64) -> Bool {
@@ -244,7 +244,7 @@ private let sudokuGoCooked: [Int64] = [
 private struct SudokuGoSource {
     private var tap = 0
     private var feed = 607 - 273
-    private var vec = Array(repeating: Int64(0), count: 607)
+    private var lagTable = Array(repeating: Int64(0), count: 607)
 
     init(seed: Int64) { seedSource(seed) }
 
@@ -275,7 +275,7 @@ private struct SudokuGoSource {
             x = Self.seedrand(x)
             u ^= Int64(x)
             u ^= sudokuGoCooked[i]
-            vec[i] = u
+            lagTable[i] = u
         }
     }
 
@@ -284,8 +284,8 @@ private struct SudokuGoSource {
         if tap < 0 { tap += 607 }
         feed -= 1
         if feed < 0 { feed += 607 }
-        let x = vec[feed] &+ vec[tap]
-        vec[feed] = x
+        let x = lagTable[feed] &+ lagTable[tap]
+        lagTable[feed] = x
         return UInt64(bitPattern: x)
     }
 
@@ -466,9 +466,9 @@ nonisolated final class SudokuTable {
                 shuffled.swapAt(i, j)
             }
         }
-        var enc = Array(repeating: [[UInt8]](), count: 256)
-        var dec = [UInt32: UInt8]()
-        dec.reserveCapacity(8192)
+        var encodeTableBuilder = Array(repeating: [[UInt8]](), count: 256)
+        var decodeMapBuilder = [UInt32: UInt8]()
+        decodeMapBuilder.reserveCapacity(8192)
         for byteValue in 0..<256 {
             let target = shuffled[byteValue]
             for positions in statics.hintPositions {
@@ -480,12 +480,12 @@ nonisolated final class SudokuTable {
                     layout.encodeHint[Int(values[2] - 1)][Int(positions[2])],
                     layout.encodeHint[Int(values[3] - 1)][Int(positions[3])]
                 ]
-                enc[byteValue].append(hints)
-                dec[sudokuPackHints(hints[0], hints[1], hints[2], hints[3])] = UInt8(byteValue)
+                encodeTableBuilder[byteValue].append(hints)
+                decodeMapBuilder[sudokuPackHints(hints[0], hints[1], hints[2], hints[3])] = UInt8(byteValue)
             }
         }
-        encodeTable = enc
-        decodeMap = dec
+        encodeTable = encodeTableBuilder
+        decodeMap = decodeMapBuilder
     }
 
     func encode(_ data: Data, rng: inout SudokuXorshift64Star, paddingThreshold: UInt64) -> Data {
@@ -648,8 +648,8 @@ struct SudokuPureDecoder {
 
 struct SudokuPackedDecoder {
     private let padMarker: UInt8
-    private var bitbuf: UInt64 = 0
-    private var bitcount = 0
+    private var bitBuffer: UInt64 = 0
+    private var bitCount = 0
     private var pending = SudokuDecodedPending()
 
     init(table: SudokuTable) { padMarker = table.layout.padMarker }
@@ -671,7 +671,7 @@ struct SudokuPackedDecoder {
                 let input = rawInput.bindMemory(to: UInt8.self)
                 var index = 0
                 while index < input.count {
-                    if bitcount == 0, written + 3 <= outputLimit, index + 3 < input.count {
+                    if bitCount == 0, written + 3 <= outputLimit, index + 3 < input.count {
                         let b1 = input[index]
                         let b2 = input[index + 1]
                         let b3 = input[index + 2]
@@ -696,19 +696,19 @@ struct SudokuPackedDecoder {
                     index += 1
                     guard hintTable[Int(b)] else {
                         if b == padMarker {
-                            bitbuf = 0
-                            bitcount = 0
+                            bitBuffer = 0
+                            bitCount = 0
                         }
                         continue
                     }
                     guard groupValid[Int(b)] else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
                     let group = UInt64(decodeGroup[Int(b)])
-                    bitbuf = (bitbuf << 6) | group
-                    bitcount += 6
-                    while bitcount >= 8 {
-                        bitcount -= 8
-                        let value = UInt8(truncatingIfNeeded: bitbuf >> UInt64(bitcount))
-                        bitbuf = bitcount == 0 ? 0 : bitbuf & ((UInt64(1) << UInt64(bitcount)) - 1)
+                    bitBuffer = (bitBuffer << 6) | group
+                    bitCount += 6
+                    while bitCount >= 8 {
+                        bitCount -= 8
+                        let value = UInt8(truncatingIfNeeded: bitBuffer >> UInt64(bitCount))
+                        bitBuffer = bitCount == 0 ? 0 : bitBuffer & ((UInt64(1) << UInt64(bitCount)) - 1)
                         appendDecoded(value, to: outBytes, written: &written, limit: outputLimit)
                     }
                 }

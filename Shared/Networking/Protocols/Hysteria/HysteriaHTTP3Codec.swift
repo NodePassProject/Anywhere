@@ -33,16 +33,16 @@ enum HysteriaHTTP3Codec {
     /// Names for "Literal Field Line with Name Reference"; the server may
     /// pick any index whose canonical name matches, then override the value.
     private static let nameByIndex: [Int: String] = {
-        var m: [Int: String] = [
+        var mapping: [Int: String] = [
             0: ":authority",
             1: ":path",
             4: "content-length",
             6: "date",
         ]
         for i in [24, 25, 26, 27, 28, 63, 64, 65, 66, 67, 68, 69, 70, 71] {
-            m[i] = ":status"
+            mapping[i] = ":status"
         }
-        return m
+        return mapping
     }()
 
     // MARK: - Request encoding

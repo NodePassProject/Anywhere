@@ -39,7 +39,7 @@ private let aeadEncrypt: @convention(c) (
         bytesNoCopy: UnsafeMutableRawPointer(mutating: nonce),
         count: noncelen, deallocator: .none
     )
-    let ptData: Data = (plaintext != nil && plaintextlen > 0)
+    let plaintextData: Data = (plaintext != nil && plaintextlen > 0)
         ? Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: plaintext!),
                count: plaintextlen, deallocator: .none)
         : Data()
@@ -52,24 +52,24 @@ private let aeadEncrypt: @convention(c) (
         switch aeadType {
         case NGTCP2_APPLE_AEAD_AES_128_GCM, NGTCP2_APPLE_AEAD_AES_256_GCM:
             let gcmNonce = try AES.GCM.Nonce(data: nonceData)
-            let sealed = try AES.GCM.seal(ptData, using: symmetricKey, nonce: gcmNonce,
+            let sealed = try AES.GCM.seal(plaintextData, using: symmetricKey, nonce: gcmNonce,
                                           authenticating: aadData)
-            let ctLen = sealed.ciphertext.count
+            let ciphertextLength = sealed.ciphertext.count
             sealed.ciphertext.withUnsafeBytes { buffer in
-                if let base = buffer.baseAddress, ctLen > 0 {
-                    memcpy(destination, base, ctLen)
+                if let base = buffer.baseAddress, ciphertextLength > 0 {
+                    memcpy(destination, base, ciphertextLength)
                 }
             }
             sealed.tag.withUnsafeBytes { buffer in
                 if let base = buffer.baseAddress {
-                    memcpy(destination.advanced(by: ctLen), base, buffer.count)
+                    memcpy(destination.advanced(by: ciphertextLength), base, buffer.count)
                 }
             }
             return 0
 
         case NGTCP2_APPLE_AEAD_CHACHA20_POLY1305:
-            let ccNonce = try ChaChaPoly.Nonce(data: nonceData)
-            let sealed = try ChaChaPoly.seal(ptData, using: symmetricKey, nonce: ccNonce,
+            let chachaNonce = try ChaChaPoly.Nonce(data: nonceData)
+            let sealed = try ChaChaPoly.seal(plaintextData, using: symmetricKey, nonce: chachaNonce,
                                             authenticating: aadData)
             let ctLen = sealed.ciphertext.count
             sealed.ciphertext.withUnsafeBytes { buffer in
@@ -118,7 +118,7 @@ private let aeadDecrypt: @convention(c) (
         bytesNoCopy: UnsafeMutableRawPointer(mutating: nonce),
         count: noncelen, deallocator: .none
     )
-    let ctData = Data(
+    let ciphertextData = Data(
         bytesNoCopy: UnsafeMutableRawPointer(mutating: ciphertext),
         count: ctLen, deallocator: .none
     )
@@ -135,7 +135,7 @@ private let aeadDecrypt: @convention(c) (
         switch aeadType {
         case NGTCP2_APPLE_AEAD_AES_128_GCM, NGTCP2_APPLE_AEAD_AES_256_GCM:
             let gcmNonce = try AES.GCM.Nonce(data: nonceData)
-            let sealedBox = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ctData, tag: tagData)
+            let sealedBox = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertextData, tag: tagData)
             let plaintext = try AES.GCM.open(sealedBox, using: symmetricKey,
                                              authenticating: aadData)
             plaintext.withUnsafeBytes { buffer in
@@ -147,7 +147,7 @@ private let aeadDecrypt: @convention(c) (
 
         case NGTCP2_APPLE_AEAD_CHACHA20_POLY1305:
             let ccNonce = try ChaChaPoly.Nonce(data: nonceData)
-            let sealedBox = try ChaChaPoly.SealedBox(nonce: ccNonce, ciphertext: ctData, tag: tagData)
+            let sealedBox = try ChaChaPoly.SealedBox(nonce: ccNonce, ciphertext: ciphertextData, tag: tagData)
             let plaintext = try ChaChaPoly.open(sealedBox, using: symmetricKey,
                                                authenticating: aadData)
             plaintext.withUnsafeBytes { buffer in

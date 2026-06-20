@@ -18,10 +18,10 @@ enum ECHConfigResolver {
     /// Decode a base64 ECHConfigList, tolerating URL-safe alphabets and missing
     /// padding (configs are often pasted from URLs/QR codes).
     static func decodeBase64(_ string: String) -> Data? {
-        var s = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        s = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        let remainder = s.count % 4
-        if remainder != 0 { s += String(repeating: "=", count: 4 - remainder) }
-        return Data(base64Encoded: s)
+        var normalized = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized = normalized.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        let remainder = normalized.count % 4
+        if remainder != 0 { normalized += String(repeating: "=", count: 4 - remainder) }
+        return Data(base64Encoded: normalized)
     }
 }

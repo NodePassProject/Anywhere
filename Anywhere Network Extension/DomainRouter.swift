@@ -111,34 +111,34 @@ class DomainRouter {
 
             var head = 0
             while head < queue.count {
-                let u = queue[head]; head += 1
+                let node = queue[head]; head += 1
 
-                let sortedChildren = u.children.sorted { $0.key < $1.key }
-                for (byte, v) in sortedChildren {
+                let sortedChildren = node.children.sorted { $0.key < $1.key }
+                for (byte, childNode) in sortedChildren {
                     // Standard AC failure: nearest ancestor-of-failure with a
-                    // `byte` child (≠ v), else root. u.failure is nil only for root.
-                    var f = u.failure
+                    // `byte` child (≠ childNode), else root. node.failure is nil only for root.
+                    var f = node.failure
                     while let current = f, current.children[byte] == nil, current !== root {
                         f = current.failure
                     }
-                    if let current = f, let next = current.children[byte], next !== v {
-                        v.failure = next
+                    if let current = f, let next = current.children[byte], next !== childNode {
+                        childNode.failure = next
                     } else {
-                        v.failure = root
+                        childNode.failure = root
                     }
-                    v.dictSuffix = (v.failure?.actionID ?? ActionTable.noneID) != ActionTable.noneID
-                        ? v.failure
-                        : v.failure?.dictSuffix
+                    childNode.dictSuffix = (childNode.failure?.actionID ?? ActionTable.noneID) != ActionTable.noneID
+                        ? childNode.failure
+                        : childNode.failure?.dictSuffix
 
                     let childID = Int32(nFailure.count)
-                    v.nodeID = childID
-                    queue.append(v)
+                    childNode.nodeID = childID
+                    queue.append(childNode)
 
-                    nFailure.append(v.failure!.nodeID)
-                    nDictSuffix.append(v.dictSuffix?.nodeID ?? -1)
-                    nActionID.append(v.actionID)
-                    nPatternLength.append(v.patternLength)
-                    nInsertionOrder.append(v.insertionOrder)
+                    nFailure.append(childNode.failure!.nodeID)
+                    nDictSuffix.append(childNode.dictSuffix?.nodeID ?? -1)
+                    nActionID.append(childNode.actionID)
+                    nPatternLength.append(childNode.patternLength)
+                    nInsertionOrder.append(childNode.insertionOrder)
 
                     edgeBytes.append(byte)
                     edgeTargets.append(childID)
@@ -204,9 +204,9 @@ class DomainRouter {
             let end = Int(edgeStart[Int(nodeID) + 1])
             var i = start
             while i < end {
-                let eb = edgeByte[i]
-                if eb == byte { return edgeTarget[i] }
-                if eb > byte { return -1 }
+                let candidateByte = edgeByte[i]
+                if candidateByte == byte { return edgeTarget[i] }
+                if candidateByte > byte { return -1 }
                 i += 1
             }
             return -1
@@ -267,8 +267,8 @@ class DomainRouter {
             if let id = suffixTrie.lookup(domain) {
                 return actionTable.resolve(id)
             }
-            let kid = keywordAutomaton.lookup(domain)
-            return kid == ActionTable.noneID ? nil : actionTable.resolve(kid)
+            let keywordActionID = keywordAutomaton.lookup(domain)
+            return keywordActionID == ActionTable.noneID ? nil : actionTable.resolve(keywordActionID)
         }
 
         func lookupIPv4(_ ip: UInt32) -> RouteTarget? {
@@ -378,14 +378,14 @@ class DomainRouter {
         let bytes: UnsafeBufferPointer<UInt8>
         let data: Data
         let owner: DomainRouter
-        private var i = 0
+        private var cursor = 0
         private var count: Int { bytes.count }
 
         mutating func run() throws {
             try expectMagic()
 
             let configLength = Int(try u32())
-            let configStart = i
+            let configStart = cursor
             try advance(configLength)
             if configLength > 0 {
                 owner.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
@@ -406,7 +406,7 @@ class DomainRouter {
             while remainingRules > 0 {
                 let typeByte = try u8()
                 let length = Int(try u16())
-                let valueStart = i
+                let valueStart = cursor
                 try advance(length)
                 if let type = RoutingRuleType(rawValue: Int(typeByte)) {
                     owner.ingestRule(tierIndex: Int(tier.rawValue), action: action, type: type,
@@ -429,41 +429,41 @@ class DomainRouter {
 
         private mutating func expectMagic() throws {
             let magic = RoutingBinaryFormat.magic
-            guard i + magic.count <= count else { throw ReadError.truncated }
-            for k in 0..<magic.count where bytes[i + k] != magic[k] { throw ReadError.badMagic }
-            i += magic.count
+            guard cursor + magic.count <= count else { throw ReadError.truncated }
+            for k in 0..<magic.count where bytes[cursor + k] != magic[k] { throw ReadError.badMagic }
+            cursor += magic.count
         }
 
         private mutating func u8() throws -> UInt8 {
-            guard i < count else { throw ReadError.truncated }
-            defer { i += 1 }
-            return bytes[i]
+            guard cursor < count else { throw ReadError.truncated }
+            defer { cursor += 1 }
+            return bytes[cursor]
         }
 
         private mutating func u16() throws -> UInt16 {
-            guard i + 2 <= count else { throw ReadError.truncated }
-            defer { i += 2 }
-            return UInt16(bytes[i]) | (UInt16(bytes[i + 1]) << 8)
+            guard cursor + 2 <= count else { throw ReadError.truncated }
+            defer { cursor += 2 }
+            return UInt16(bytes[cursor]) | (UInt16(bytes[cursor + 1]) << 8)
         }
 
         private mutating func u32() throws -> UInt32 {
-            guard i + 4 <= count else { throw ReadError.truncated }
-            defer { i += 4 }
-            return UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8) | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
+            guard cursor + 4 <= count else { throw ReadError.truncated }
+            defer { cursor += 4 }
+            return UInt32(bytes[cursor]) | (UInt32(bytes[cursor + 1]) << 8) | (UInt32(bytes[cursor + 2]) << 16) | (UInt32(bytes[cursor + 3]) << 24)
         }
 
         private mutating func advance(_ n: Int) throws {
-            guard n >= 0, i + n <= count else { throw ReadError.truncated }
-            i += n
+            guard n >= 0, cursor + n <= count else { throw ReadError.truncated }
+            cursor += n
         }
 
         private mutating func readUUID() throws -> UUID {
-            guard i + 16 <= count else { throw ReadError.truncated }
-            let u = UUID(uuid: (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3],
-                                bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7],
-                                bytes[i + 8], bytes[i + 9], bytes[i + 10], bytes[i + 11],
-                                bytes[i + 12], bytes[i + 13], bytes[i + 14], bytes[i + 15]))
-            i += 16
+            guard cursor + 16 <= count else { throw ReadError.truncated }
+            let u = UUID(uuid: (bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
+                                bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],
+                                bytes[cursor + 8], bytes[cursor + 9], bytes[cursor + 10], bytes[cursor + 11],
+                                bytes[cursor + 12], bytes[cursor + 13], bytes[cursor + 14], bytes[cursor + 15]))
+            cursor += 16
             return u
         }
     }
@@ -517,9 +517,9 @@ class DomainRouter {
                     }
                     return nil
                 } else {
-                    guard let ip32 = Self.parseIPv4(ip) else { return nil }
+                    guard let ipv4Address = Self.parseIPv4(ip) else { return nil }
                     for i in tiers.indices {
-                        if let action = tiers[i].lookupIPv4(ip32) { return action }
+                        if let action = tiers[i].lookupIPv4(ipv4Address) { return action }
                     }
                     return nil
                 }
@@ -541,11 +541,11 @@ class DomainRouter {
 
     /// Returns the input unchanged (no allocation) when already lowercase ASCII;
     /// otherwise falls back to `lowercased()` to match load-time folding.
-    private static func asciiLowercasedIfNeeded(_ s: String) -> String {
-        for b in s.utf8 where (b >= 0x41 && b <= 0x5A) || b >= 0x80 {
-            return s.lowercased()
+    private static func asciiLowercasedIfNeeded(_ input: String) -> String {
+        for b in input.utf8 where (b >= 0x41 && b <= 0x5A) || b >= 0x80 {
+            return input.lowercased()
         }
-        return s
+        return input
     }
 
     // MARK: - CIDR Parsing
@@ -679,8 +679,8 @@ struct CIDRv4Trie {
                 if childID < 0 { return deepest }
 
                 let child = buffer[Int(childID)]
-                let lcp = Self.lcp(bits, child.bits, cap: min(remaining, child.bitLen))
-                if lcp < child.bitLen { return deepest }
+                let commonPrefixLen = Self.lcp(bits, child.bits, cap: min(remaining, child.bitLen))
+                if commonPrefixLen < child.bitLen { return deepest }
 
                 bits = Self.shiftLeft(bits, child.bitLen)
                 remaining -= child.bitLen
@@ -695,16 +695,16 @@ struct CIDRv4Trie {
     // MARK: - Patricia core
 
     private mutating func insertCore(bits: UInt32, bitLen: UInt8, actionID: Int16) {
-        var b = bits
+        var workingBits = bits
         var remaining = bitLen
         var nodeID: Int32 = 0
 
         while remaining > 0 {
-            let firstBit = UInt8(b >> 31)
+            let firstBit = UInt8(workingBits >> 31)
             let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
 
             if childID < 0 {
-                let leafID = makeLeaf(bits: b, bitLen: remaining, actionID: actionID)
+                let leafID = makeLeaf(bits: workingBits, bitLen: remaining, actionID: actionID)
                 if firstBit == 0 { nodes[Int(nodeID)].left = leafID }
                 else { nodes[Int(nodeID)].right = leafID }
                 return
@@ -712,10 +712,10 @@ struct CIDRv4Trie {
 
             let childBits = nodes[Int(childID)].bits
             let childBitLen = nodes[Int(childID)].bitLen
-            let lcp = Self.lcp(b, childBits, cap: min(remaining, childBitLen))
+            let lcp = Self.lcp(workingBits, childBits, cap: min(remaining, childBitLen))
 
             if lcp == childBitLen {
-                b = Self.shiftLeft(b, lcp)
+                workingBits = Self.shiftLeft(workingBits, lcp)
                 remaining -= lcp
                 nodeID = childID
                 continue
@@ -738,7 +738,7 @@ struct CIDRv4Trie {
             if UInt8(existingNewBits >> 31) == 0 { nodes[Int(midID)].left = childID }
             else { nodes[Int(midID)].right = childID }
 
-            let newBits = Self.shiftLeft(b, lcp)
+            let newBits = Self.shiftLeft(workingBits, lcp)
             let newRemaining = remaining - lcp
             if newRemaining == 0 {
                 nodes[Int(midID)].actionID = actionID

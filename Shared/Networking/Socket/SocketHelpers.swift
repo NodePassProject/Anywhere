@@ -23,8 +23,8 @@ nonisolated enum SocketHelpers {
     /// Sets an `Int32` socket option; failure is deliberately ignored as best-effort.
     @inline(__always)
     static func setInt(_ fd: Int32, level: Int32, name: Int32, value: Int32) {
-        var v = value
-        _ = setsockopt(fd, level, name, &v, socklen_t(MemoryLayout<Int32>.size))
+        var valueCopy = value
+        _ = setsockopt(fd, level, name, &valueCopy, socklen_t(MemoryLayout<Int32>.size))
     }
 
     @inline(__always)

@@ -111,12 +111,12 @@ nonisolated class HPACKDecoder {
     /// dynamic-table size we track matches what the peer's encoder computed (RFC 7541 §4.1). Counting
     /// `utf8` octets would over-count a latin-1-decoded value (a 0x80–0xFF octet becomes a 2-byte UTF-8
     /// scalar) and drift the eviction boundary, desyncing the table against the peer.
-    static func wireOctetCount(_ s: String) -> Int {
-        var n = 0
-        for scalar in s.unicodeScalars {
-            n += scalar.value <= 0xFF ? 1 : String(scalar).utf8.count
+    static func wireOctetCount(_ headerString: String) -> Int {
+        var octetCount = 0
+        for scalar in headerString.unicodeScalars {
+            octetCount += scalar.value <= 0xFF ? 1 : String(scalar).utf8.count
         }
-        return n
+        return octetCount
     }
 
     /// Inserts at the head after evicting from the oldest end to stay within maxSize (RFC 7541 §4.4).
@@ -274,18 +274,18 @@ enum HPACKEncoder {
             return value
         }
 
-        var m = 0
+        var shiftBits = 0
         repeat {
             guard offset < data.endIndex else { return nil }
             // RFC 7541 §5.1: every legitimate integer here fits in 32 bits. Reject
             // over-long or overflowing varints instead of letting `value +=` trap (remote DoS).
-            guard m < 32 else { return nil }
+            guard shiftBits < 32 else { return nil }
             let b = data[offset]
             offset += 1
-            let (next, overflow) = value.addingReportingOverflow(Int(b & 0x7F) << m)
+            let (next, overflow) = value.addingReportingOverflow(Int(b & 0x7F) << shiftBits)
             guard !overflow else { return nil }
             value = next
-            m += 7
+            shiftBits += 7
             if b & 0x80 == 0 { break }
         } while true
 
@@ -700,11 +700,11 @@ enum HTTP2FrameWire {
         out.append(UInt8(payloadLength & 0xFF))
         out.append(type)
         out.append(flags)
-        let sid = streamID & 0x7FFF_FFFF
-        out.append(UInt8((sid >> 24) & 0xFF))
-        out.append(UInt8((sid >> 16) & 0xFF))
-        out.append(UInt8((sid >> 8) & 0xFF))
-        out.append(UInt8(sid & 0xFF))
+        let maskedStreamID = streamID & 0x7FFF_FFFF
+        out.append(UInt8((maskedStreamID >> 24) & 0xFF))
+        out.append(UInt8((maskedStreamID >> 16) & 0xFF))
+        out.append(UInt8((maskedStreamID >> 8) & 0xFF))
+        out.append(UInt8(maskedStreamID & 0xFF))
     }
 
     /// Appends a 32-bit big-endian value — the 4-byte body of WINDOW_UPDATE / RST_STREAM and the

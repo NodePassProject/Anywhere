@@ -21,17 +21,17 @@ struct TLS12KeyDerivation {
     private static func pHash(secret: Data, seed: Data, length: Int, useSHA384: Bool) -> Data {
         let key = SymmetricKey(data: secret)
         var result = Data(capacity: length + 64)
-        var a = seed
+        var aValue = seed
 
         while result.count < length {
             if useSHA384 {
-                a = Data(HMAC<SHA384>.authenticationCode(for: a, using: key))
-                var input = a
+                aValue = Data(HMAC<SHA384>.authenticationCode(for: aValue, using: key))
+                var input = aValue
                 input.append(seed)
                 result.append(Data(HMAC<SHA384>.authenticationCode(for: input, using: key)))
             } else {
-                a = Data(HMAC<SHA256>.authenticationCode(for: a, using: key))
-                var input = a
+                aValue = Data(HMAC<SHA256>.authenticationCode(for: aValue, using: key))
+                var input = aValue
                 input.append(seed)
                 result.append(Data(HMAC<SHA256>.authenticationCode(for: input, using: key)))
             }

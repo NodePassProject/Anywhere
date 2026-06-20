@@ -267,8 +267,8 @@ nonisolated final class NowhereClient {
     }
 
     private static func isStaleSessionError(_ error: Error) -> Bool {
-        guard let nErr = error as? NowhereError else { return false }
-        switch nErr {
+        guard let nowhereError = error as? NowhereError else { return false }
+        switch nowhereError {
         case .notReady, .streamClosed: return true
         default: return false
         }

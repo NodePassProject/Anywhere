@@ -36,8 +36,8 @@ struct MITMByteBuffer {
 
     func prefix(_ n: Int) -> Data {
         let take = Swift.min(n, count)
-        let s = storage.startIndex + offset
-        return storage.subdata(in: s..<(s + take))
+        let absoluteStart = storage.startIndex + offset
+        return storage.subdata(in: absoluteStart..<(absoluteStart + take))
     }
 
     func subdata(in range: Range<Int>) -> Data {

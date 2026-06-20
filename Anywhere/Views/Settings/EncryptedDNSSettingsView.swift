@@ -9,7 +9,7 @@ import SwiftUI
 
 struct EncryptedDNSSettingsView: View {
     @State private var showEnableAlert = false
-    @State private var serverBuffer = ""
+    @State private var serverDraft = ""
 
     var body: some View {
         @Bindable var settings = AppSettings.shared
@@ -36,7 +36,7 @@ struct EncryptedDNSSettingsView: View {
                 }
 
                 Section {
-                    TextField("DNS Server", text: $serverBuffer)
+                    TextField("DNS Server", text: $serverDraft)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -47,7 +47,7 @@ struct EncryptedDNSSettingsView: View {
             }
         }
         .navigationTitle("Encrypted DNS")
-        .onAppear { serverBuffer = settings.encryptedDNSServer }
+        .onAppear { serverDraft = settings.encryptedDNSServer }
         .onDisappear { commitServer() }
         .alert("Encrypted DNS", isPresented: $showEnableAlert) {
             Button("Enable Anyway", role: .destructive) {
@@ -60,6 +60,6 @@ struct EncryptedDNSSettingsView: View {
     }
 
     private func commitServer() {
-        AppSettings.shared.encryptedDNSServer = serverBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        AppSettings.shared.encryptedDNSServer = serverDraft.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

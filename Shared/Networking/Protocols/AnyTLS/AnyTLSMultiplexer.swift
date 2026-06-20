@@ -26,7 +26,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private var nextStreamID: UInt32 = 0
     private var peerVersion: UInt8 = 0
 
-    private var pktCounter: UInt32 = 0
+    private var packetCounter: UInt32 = 0
     private var sendPadding: Bool = true
 
     /// While true, writes accumulate in `outboundBuffer` so cmdSettings+cmdSYN+SocksAddr
@@ -64,7 +64,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     // MARK: - Lifecycle
 
-    /// pktCounter intentionally stays 0 here so the padding schedule aligns with the server.
+    /// packetCounter intentionally stays 0 here so the padding schedule aligns with the server.
     func start() {
         var prologue = Data()
         prologue.append(passwordHash)
@@ -142,10 +142,10 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             armSynDoneTimerLocked()
         }
         let bufferedBytes = outboundBuffer.count
-        let pv = peerVersion
+        let peerVersionSnapshot = peerVersion
         lock.unlock()
 
-        logger.debug("[AnyTLSMultiplexer] openStream sid=\(sid) peerVersion=\(pv) watchdog=\(armWatchdog) buffered=\(bufferedBytes)B")
+        logger.debug("[AnyTLSMultiplexer] openStream sid=\(sid) peerVersion=\(peerVersionSnapshot) watchdog=\(armWatchdog) buffered=\(bufferedBytes)B")
 
         let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: sid, length: 0)
         writeConnLocked(synFrame, completion: { _ in })
@@ -234,8 +234,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             return
         }
 
-        pktCounter &+= 1
-        let packet = pktCounter
+        packetCounter &+= 1
+        let packet = packetCounter
         let scheme = padding
         if packet >= scheme.stop {
             sendPadding = false

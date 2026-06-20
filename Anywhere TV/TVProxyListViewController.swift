@@ -90,8 +90,8 @@ class TVProxyListViewController: UITableViewController {
     // MARK: - Section Headers
 
     override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
-        guard case .subscription(let subID)? = dataSource.sectionIdentifier(for: section),
-              let subscription = subscription(subID) else { return nil }
+        guard case .subscription(let subscriptionID)? = dataSource.sectionIdentifier(for: section),
+              let subscription = subscription(subscriptionID) else { return nil }
         let header = tableView.dequeueReusableHeaderFooterView(withIdentifier: TVSubscriptionHeaderView.reuseIdentifier) as! TVSubscriptionHeaderView
         configureHeader(header, subscription: subscription)
         return header

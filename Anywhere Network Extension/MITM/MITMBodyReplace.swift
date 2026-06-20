@@ -85,13 +85,13 @@ enum MITMBodyReplace {
         substitutionInFlight = true
         inFlightLock.unlock()
 
-        let box = ResultBox()
+        let resultBox = ResultBox()
         let done = DispatchSemaphore(value: 0)
         watchdogQueue.async {
             if let literal = op.staticReplacement {
-                box.value = text.replacing(op.search, with: literal)
+                resultBox.value = text.replacing(op.search, with: literal)
             } else {
-                box.value = text.replacing(op.search) { match in
+                resultBox.value = text.replacing(op.search) { match in
                     op.template.expand(output: match.output)
                 }
             }
@@ -100,14 +100,14 @@ enum MITMBodyReplace {
             inFlightLock.unlock()
             done.signal()
         }
-        // The semaphore establishes happens-before for the unsynchronized box.
+        // The semaphore establishes happens-before for the unsynchronized resultBox.
         guard done.wait(timeout: .now() + substitutionTimeLimit) == .success else {
             logger.warning("bodyReplace: regex substitution exceeded its time budget over a \(text.utf8.count) B body; leaving the body unchanged (possible catastrophic backtracking in the pattern)")
             // The worker is still spinning with the in-flight flag stuck; arm the hard-cap crash.
             Self.scheduleHardCapCheck(done, byteCount: text.utf8.count)
             return nil
         }
-        return box.value
+        return resultBox.value
     }
 
     /// One-shot crash check after the hard cap: a finished substitution signals the

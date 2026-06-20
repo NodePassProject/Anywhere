@@ -115,7 +115,7 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
 
 private extension Duration {
     nonisolated var milliseconds: Int {
-        let c = components
-        return Int(c.seconds * 1_000 + c.attoseconds / 1_000_000_000_000_000)
+        let components = self.components
+        return Int(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
     }
 }

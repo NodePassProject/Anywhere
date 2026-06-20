@@ -76,24 +76,24 @@ enum UDPPacket {
         }
     }
 
-    private static func finish(_ p: UnsafePointer<UInt8>, len: Int, headerLen: Int,
+    private static func finish(_ packetBytes: UnsafePointer<UInt8>, len: Int, headerLen: Int,
                                isIPv6: Bool, srcOffset: Int, dstOffset: Int,
                                addrLen: Int) -> Inbound? {
-        let u = p + headerLen
-        let srcPort = (UInt16(u[0]) << 8) | UInt16(u[1])
-        let dstPort = (UInt16(u[2]) << 8) | UInt16(u[3])
-        let udpLen = Int((UInt16(u[4]) << 8) | UInt16(u[5]))
+        let udpHeader = packetBytes + headerLen
+        let srcPort = (UInt16(udpHeader[0]) << 8) | UInt16(udpHeader[1])
+        let dstPort = (UInt16(udpHeader[2]) << 8) | UInt16(udpHeader[3])
+        let udpLen = Int((UInt16(udpHeader[4]) << 8) | UInt16(udpHeader[5]))
         // The UDP length field counts its own 8-byte header, so below 8 is malformed.
         // Clamp to the bytes that arrived so a bogus length can't over-read.
         guard udpLen >= 8 else { return nil }
         let payloadLen = min(udpLen, len - headerLen) - 8
         return Inbound(
             isIPv6: isIPv6,
-            srcIP: loadIP(p + srcOffset, addrLen),
+            srcIP: loadIP(packetBytes + srcOffset, addrLen),
             srcPort: srcPort,
-            dstIP: loadIP(p + dstOffset, addrLen),
+            dstIP: loadIP(packetBytes + dstOffset, addrLen),
             dstPort: dstPort,
-            payload: Data(bytes: u + 8, count: payloadLen)
+            payload: Data(bytes: udpHeader + 8, count: payloadLen)
         )
     }
 

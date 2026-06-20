@@ -435,12 +435,12 @@ final class MITMSession {
         bridgeClient = nil
         h2Upstream?.markTorn()
         h2Upstream = nil
-        for bs in bridgeStreams.values {
-            bs.tlsClient?.cancel()
-            bs.connection?.cancel()
-            bs.proxyClient?.cancel()
-            bs.upstreamRecord?.cancel()
-            bs.responseStream.markTorn()
+        for bridgeStream in bridgeStreams.values {
+            bridgeStream.tlsClient?.cancel()
+            bridgeStream.connection?.cancel()
+            bridgeStream.proxyClient?.cancel()
+            bridgeStream.upstreamRecord?.cancel()
+            bridgeStream.responseStream.markTorn()
         }
         bridgeStreams.removeAll()
         sharedUpstreamRecord?.cancel()

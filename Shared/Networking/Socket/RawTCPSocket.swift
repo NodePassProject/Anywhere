@@ -425,11 +425,11 @@ nonisolated class RawTCPSocket: RawTransport {
         socketFD = fd
         armConnectTimer()
 
-        let rc = endpoint.withSockAddr { sa, length in
+        let connectResult = endpoint.withSockAddr { sa, length in
             Darwin.connect(fd, sa, length)
         }
 
-        if rc == 0 {
+        if connectResult == 0 {
             // Connect completed synchronously (legal, e.g. loopback).
             handleConnectReady()
             return
@@ -491,18 +491,18 @@ nonisolated class RawTCPSocket: RawTransport {
     /// Write source fired during connect: check `SO_ERROR`.
     private func handleConnectWritable() {
         guard socketFD >= 0 else { return }
-        var soerr: Int32 = 0
+        var socketError: Int32 = 0
         var length = socklen_t(MemoryLayout<Int32>.size)
-        let gsr = getsockopt(socketFD, SOL_SOCKET, SO_ERROR, &soerr, &length)
-        if gsr != 0 {
+        let getsockoptResult = getsockopt(socketFD, SOL_SOCKET, SO_ERROR, &socketError, &length)
+        if getsockoptResult != 0 {
             let e = errno
             logger.debug("[TCP] getsockopt(SO_ERROR) failed: \(String(cString: strerror(e)))")
             tearDownSocket()
             tryConnectNext()
             return
         }
-        if soerr != 0 {
-            logger.debug("[TCP] connect completed with error: \(String(cString: strerror(soerr)))")
+        if socketError != 0 {
+            logger.debug("[TCP] connect completed with error: \(String(cString: strerror(socketError)))")
             tearDownSocket()
             tryConnectNext()
             return
@@ -527,9 +527,9 @@ nonisolated class RawTCPSocket: RawTransport {
         pendingInitialData = nil
         remainingIPs.removeAll()
 
-        let c = connectCompletion
+        let completion = connectCompletion
         connectCompletion = nil
-        c?(nil)
+        completion?(nil)
 
         if !sendQueue.isEmpty {
             drainSendQueue()
@@ -615,9 +615,9 @@ nonisolated class RawTCPSocket: RawTransport {
 
     /// Fails every buffered send with `err`. Must run on `ioQueue`.
     private func failPendingSends(with err: Error) {
-        let q = sendQueue
+        let pendingSends = sendQueue
         sendQueue.removeAll()
-        for p in q { p.completion?(err) }
+        for p in pendingSends { p.completion?(err) }
     }
 
     /// Arms the write source for a partial-send wait. Idempotent.

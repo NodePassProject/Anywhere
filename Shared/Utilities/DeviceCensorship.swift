@@ -73,11 +73,11 @@ public enum DeviceCensorship {
         guard let cgImageData = cgImage.dataProvider?.data as Data? else { return false }
         imageData = cgImageData
 #endif
-        let rawData: UnsafePointer<UInt8> = CFDataGetBytePtr(imageData as CFData)
+        let pixelBytePointer: UnsafePointer<UInt8> = CFDataGetBytePtr(imageData as CFData)
         for index in stride(from: 0, to: imageData.count, by: 4) {
-            let r = rawData[index]
-            let g = rawData[index + 1]
-            let b = rawData[index + 2]
+            let r = pixelBytePointer[index]
+            let g = pixelBytePointer[index + 1]
+            let b = pixelBytePointer[index + 2]
             if !(r == g && g == b) {
                 return false
             }

@@ -39,22 +39,22 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decode(UUID.self, forKey: .id)
-        self.name = try c.decode(String.self, forKey: .name)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
         // A single corrupt rule shouldn't take down the whole set.
-        self.rules = try c.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
-        self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
-        self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
+        self.rules = try container.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
+        self.subscriptionURL = try container.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 
     func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id)
-        try c.encode(name, forKey: .name)
-        try c.encode(rules, forKey: .rules)
-        try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
-        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(rules, forKey: .rules)
+        try container.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 
     static func validSubscriptionURL(from rawValue: String) -> URL? {
@@ -369,8 +369,8 @@ class RoutingRuleSetStore {
     // MARK: - Persistence
 
     private func saveAssignments() {
-        let dictionary = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { rs in
-            rs.assignedConfigurationId.map { (rs.id, $0) }
+        let dictionary = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { ruleSet in
+            ruleSet.assignedConfigurationId.map { (ruleSet.id, $0) }
         })
         AWCore.setRuleSetAssignments(dictionary)
     }
@@ -444,22 +444,22 @@ private struct RoutingBinaryWriter {
     private var bytes: [UInt8] = []
 
     static func encode(configurationData: Data, entries: [Entry]) -> Data {
-        var w = RoutingBinaryWriter()
-        w.bytes.reserveCapacity(configurationData.count + entries.reduce(0) { $0 + $1.rules.count * 24 } + 16)
+        var writer = RoutingBinaryWriter()
+        writer.bytes.reserveCapacity(configurationData.count + entries.reduce(0) { $0 + $1.rules.count * 24 } + 16)
 
-        w.append(RoutingBinaryFormat.magic)
-        w.u32(UInt32(configurationData.count))
-        w.append(configurationData)
-        w.u32(UInt32(entries.count))
+        writer.append(RoutingBinaryFormat.magic)
+        writer.u32(UInt32(configurationData.count))
+        writer.append(configurationData)
+        writer.u32(UInt32(entries.count))
 
         for entry in entries {
-            w.bytes.append(entry.tier.rawValue)
-            w.bytes.append(entry.action.rawValue)
+            writer.bytes.append(entry.tier.rawValue)
+            writer.bytes.append(entry.action.rawValue)
             if entry.action == .proxy, let id = entry.configId {
-                w.append(withUnsafeBytes(of: id.uuid) { Array($0) })
+                writer.append(withUnsafeBytes(of: id.uuid) { Array($0) })
             }
-            let ruleCountOffset = w.bytes.count
-            w.u32(0)  // back-patched once the kept rules are counted
+            let ruleCountOffset = writer.bytes.count
+            writer.u32(0)  // back-patched once the kept rules are counted
             var kept: UInt32 = 0
             for rule in entry.rules {
                 // Case-fold domain values here, on the host: the extension stores
@@ -474,15 +474,15 @@ private struct RoutingBinaryWriter {
                 }
                 let utf8 = Array(value.utf8)
                 guard utf8.count <= Int(UInt16.max) else { continue }
-                w.bytes.append(UInt8(rule.type.rawValue))
-                w.u16(UInt16(utf8.count))
-                w.append(utf8)
+                writer.bytes.append(UInt8(rule.type.rawValue))
+                writer.u16(UInt16(utf8.count))
+                writer.append(utf8)
                 kept += 1
             }
-            w.patchU32(at: ruleCountOffset, kept)
+            writer.patchU32(at: ruleCountOffset, kept)
         }
 
-        return Data(w.bytes)
+        return Data(writer.bytes)
     }
 
     private mutating func u16(_ v: UInt16) {

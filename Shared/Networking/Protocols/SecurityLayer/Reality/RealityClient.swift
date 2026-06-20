@@ -25,7 +25,7 @@ nonisolated class RealityClient {
     private var sentSessionID: Data?
     private var mlkemPrivateKeyStorage: Any?
 
-    private var tls13 = TLS13HandshakeState()
+    private var tls13State = TLS13HandshakeState()
     private var serverCertVerified = false
 
     // MARK: Initialization
@@ -166,9 +166,9 @@ nonisolated class RealityClient {
         var mlkemEncapsulationKey: Data?
         #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            if let mlkemPK = try? CryptoKit.MLKEM768.PrivateKey() {
-                mlkemPrivateKeyStorage = mlkemPK
-                mlkemEncapsulationKey = Data(mlkemPK.publicKey.rawRepresentation)
+            if let mlkemPrivateKey = try? CryptoKit.MLKEM768.PrivateKey() {
+                mlkemPrivateKeyStorage = mlkemPrivateKey
+                mlkemEncapsulationKey = Data(mlkemPrivateKey.publicKey.rawRepresentation)
             }
         }
         #endif
@@ -307,16 +307,16 @@ nonisolated class RealityClient {
 
             let serverHello = extractServerHelloMessage(from: buffer)
 
-            tls13.keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
+            tls13State.keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
 
             var transcript = Data()
             transcript.append(clientHello)
             transcript.append(serverHello)
 
-            let (hs, keys) = tls13.keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
-            tls13.handshakeSecret = hs
-            tls13.handshakeKeys = keys
-            tls13.handshakeTranscript = transcript
+            let (handshakeSecret, keys) = tls13State.keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
+            tls13State.handshakeSecret = handshakeSecret
+            tls13State.handshakeKeys = keys
+            tls13State.handshakeTranscript = transcript
 
             consumeRemainingHandshake(buffer: buffer, completion: completion)
         } catch {
@@ -457,13 +457,13 @@ nonisolated class RealityClient {
         startOffset: Int = 0,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
+        guard let keys = tls13State.handshakeKeys, let keyDerivation = tls13State.keyDerivation else {
             completion(.failure(RealityError.handshakeFailed("Missing handshake keys")))
             return
         }
 
         var offset = startOffset
-        var fullTranscript = tls13.handshakeTranscript ?? Data()
+        var fullTranscript = tls13State.handshakeTranscript ?? Data()
         var foundServerFinished = false
 
         while offset + 5 <= buffer.count {
@@ -480,16 +480,16 @@ nonisolated class RealityClient {
                 let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
 
                 do {
-                    let seqNum = tls13.serverHandshakeSeqNum
+                    let seqNum = tls13State.serverHandshakeSeqNum
                     let decrypted = try TLSRecordCrypto.decryptRecord(
                         ciphertext: ciphertext,
                         key: SymmetricKey(data: keys.serverKey),
                         iv: keys.serverIV,
                         seqNum: seqNum,
                         recordHeader: recordHeader,
-                        cipherSuite: kd.cipherSuite
+                        cipherSuite: keyDerivation.cipherSuite
                     )
-                    tls13.serverHandshakeSeqNum += 1
+                    tls13State.serverHandshakeSeqNum += 1
 
                     var hsOffset = 0
                     while hsOffset + 4 <= decrypted.count {
@@ -515,7 +515,7 @@ nonisolated class RealityClient {
                             }
 
                         case TLSHandshakeType.finished:
-                            let expectedVerifyData = kd.serverFinishedPayload(
+                            let expectedVerifyData = keyDerivation.serverFinishedPayload(
                                 serverTrafficSecret: keys.serverTrafficSecret,
                                 transcript: fullTranscript
                             )
@@ -546,7 +546,7 @@ nonisolated class RealityClient {
         }
 
         let processedOffset = offset
-        tls13.handshakeTranscript = fullTranscript
+        tls13State.handshakeTranscript = fullTranscript
 
         if foundServerFinished {
             guard serverCertVerified else {
@@ -554,7 +554,7 @@ nonisolated class RealityClient {
                 return
             }
 
-            tls13.applicationKeys = kd.deriveApplicationKeys(handshakeSecret: tls13.handshakeSecret!, fullTranscript: fullTranscript)
+            tls13State.applicationKeys = keyDerivation.deriveApplicationKeys(handshakeSecret: tls13State.handshakeSecret!, fullTranscript: fullTranscript)
 
             sendClientFinished { [weak self] error in
                 guard let self else { return }
@@ -564,7 +564,7 @@ nonisolated class RealityClient {
                     return
                 }
 
-                guard let appKeys = self.tls13.applicationKeys else {
+                guard let appKeys = self.tls13State.applicationKeys else {
                     completion(.failure(RealityError.handshakeFailed("Application keys not available")))
                     return
                 }
@@ -574,7 +574,7 @@ nonisolated class RealityClient {
                     clientIV: appKeys.clientIV,
                     serverKey: appKeys.serverKey,
                     serverIV: appKeys.serverIV,
-                    cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+                    cipherSuite: self.tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
                     clientAppSecret: appKeys.clientTrafficSecret,
                     serverAppSecret: appKeys.serverTrafficSecret
                 )
@@ -618,9 +618,9 @@ nonisolated class RealityClient {
     // MARK: - Client Finished
 
     private func sendClientFinished(completion: @escaping (Error?) -> Void) {
-        guard let keys = tls13.handshakeKeys,
-              let transcript = tls13.handshakeTranscript,
-              let kd = tls13.keyDerivation else {
+        guard let keys = tls13State.handshakeKeys,
+              let transcript = tls13State.handshakeTranscript,
+              let kd = tls13State.keyDerivation else {
             completion(RealityError.handshakeFailed("Missing handshake keys"))
             return
         }
@@ -641,8 +641,8 @@ nonisolated class RealityClient {
                 plaintext: finishedMsg,
                 key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
-                seqNum: 0,
-                cipherSuite: tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+                sequenceNumber: 0,
+                cipherSuite: tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             ccsRecord.append(finishedRecord)
 
@@ -834,17 +834,17 @@ nonisolated class RealityClient {
         storedClientHello = nil
         sentSessionID = nil
         mlkemPrivateKeyStorage = nil
-        tls13 = TLS13HandshakeState()
+        tls13State = TLS13HandshakeState()
         serverCertVerified = false
     }
 
     private func decapsulateMLKEM(ciphertext: Data) throws -> Data {
         #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            guard let pk = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
+            guard let mlkemPrivateKey = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
                 throw RealityError.handshakeFailed("ML-KEM private key not available")
             }
-            let sharedSecret = try pk.decapsulate(ciphertext)
+            let sharedSecret = try mlkemPrivateKey.decapsulate(ciphertext)
             return sharedSecret.withUnsafeBytes { Data($0) }
         }
         #endif

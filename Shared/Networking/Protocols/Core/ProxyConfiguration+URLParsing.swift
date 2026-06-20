@@ -353,9 +353,9 @@ extension ProxyConfiguration {
         let fpString = parameters["fp"] ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
-        let ici = parameters["ici"].flatMap { Int($0) } ?? 30
-        let it  = parameters["it"].flatMap  { Int($0) } ?? 30
-        let mis = parameters["mis"].flatMap { Int($0) } ?? 0
+        let idleCheckInterval = parameters["ici"].flatMap { Int($0) } ?? 30
+        let idleTimeout = parameters["it"].flatMap  { Int($0) } ?? 30
+        let minIdleSession = parameters["mis"].flatMap { Int($0) } ?? 0
 
         let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
         let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
@@ -366,9 +366,9 @@ extension ProxyConfiguration {
             serverPort: port,
             outbound: .anytls(
                 password: password,
-                idleCheckInterval: ici,
-                idleTimeout: it,
-                minIdleSession: mis,
+                idleCheckInterval: idleCheckInterval,
+                idleTimeout: idleTimeout,
+                minIdleSession: minIdleSession,
                 tls: tls
             )
         )

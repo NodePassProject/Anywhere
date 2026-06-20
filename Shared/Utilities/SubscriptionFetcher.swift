@@ -141,17 +141,17 @@ struct SubscriptionFetcher {
             let keyValue = trimmed.split(separator: "=", maxSplits: 1)
             guard keyValue.count == 2 else { continue }
             let key = keyValue[0].trimmingCharacters(in: .whitespaces)
-            let val = keyValue[1].trimmingCharacters(in: .whitespaces)
+            let valueString = keyValue[1].trimmingCharacters(in: .whitespaces)
 
             switch key {
             case "upload":
-                upload = Int64(val)
+                upload = Int64(valueString)
             case "download":
-                download = Int64(val)
+                download = Int64(valueString)
             case "total":
-                total = Int64(val)
+                total = Int64(valueString)
             case "expire":
-                if let timestamp = TimeInterval(val) {
+                if let timestamp = TimeInterval(valueString) {
                     expire = Date(timeIntervalSince1970: timestamp)
                 }
             default:

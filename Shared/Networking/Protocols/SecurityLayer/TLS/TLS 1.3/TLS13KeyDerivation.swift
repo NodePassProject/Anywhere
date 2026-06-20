@@ -31,37 +31,37 @@ struct TLS13KeyDerivation {
 
     // MARK: - HKDF Primitives
 
-    func extract(inputKeyMaterial ikm: Data, salt: Data) -> (prk: Data, key: SymmetricKey) {
+    func extract(inputKeyMaterial: Data, salt: Data) -> (prk: Data, key: SymmetricKey) {
         let saltData = salt.isEmpty ? Data(repeating: 0, count: hashLength) : salt
         let key = SymmetricKey(data: saltData)
 
         let prk: Data
         if cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 {
-            prk = Data(HMAC<SHA384>.authenticationCode(for: ikm, using: key))
+            prk = Data(HMAC<SHA384>.authenticationCode(for: inputKeyMaterial, using: key))
         } else {
-            prk = Data(HMAC<SHA256>.authenticationCode(for: ikm, using: key))
+            prk = Data(HMAC<SHA256>.authenticationCode(for: inputKeyMaterial, using: key))
         }
         return (prk, SymmetricKey(data: prk))
     }
 
     func expand(pseudoRandomKey: SymmetricKey, info: Data, outputByteCount: Int) -> Data {
         var output = Data(capacity: outputByteCount + hashLength)
-        var t = Data()
+        var previousBlock = Data()
         var counter: UInt8 = 1
         var input = Data(capacity: hashLength + info.count + 1)
 
         while output.count < outputByteCount {
             input.removeAll(keepingCapacity: true)
-            input.append(t)
+            input.append(previousBlock)
             input.append(info)
             input.append(counter)
 
             if cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 {
-                t = Data(HMAC<SHA384>.authenticationCode(for: input, using: pseudoRandomKey))
+                previousBlock = Data(HMAC<SHA384>.authenticationCode(for: input, using: pseudoRandomKey))
             } else {
-                t = Data(HMAC<SHA256>.authenticationCode(for: input, using: pseudoRandomKey))
+                previousBlock = Data(HMAC<SHA256>.authenticationCode(for: input, using: pseudoRandomKey))
             }
-            output.append(t)
+            output.append(previousBlock)
             counter += 1
         }
 

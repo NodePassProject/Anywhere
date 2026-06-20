@@ -226,17 +226,17 @@ class TVAddProxyViewController: UITableViewController {
             updateContinueButton()
             Task {
                 do {
-                    let result = try await SubscriptionFetcher.fetch(url: trimmed)
+                    let fetchedSubscription = try await SubscriptionFetcher.fetch(url: trimmed)
                     let subscription = Subscription(
-                        name: result.name ?? URL(string: trimmed)?.host ?? String(localized: "Subscription"),
+                        name: fetchedSubscription.name ?? URL(string: trimmed)?.host ?? String(localized: "Subscription"),
                         url: trimmed,
                         lastUpdate: Date(),
-                        upload: result.upload,
-                        download: result.download,
-                        total: result.total,
-                        expire: result.expire
+                        upload: fetchedSubscription.upload,
+                        download: fetchedSubscription.download,
+                        total: fetchedSubscription.total,
+                        expire: fetchedSubscription.expire
                     )
-                    SubscriptionStore.shared.add(subscription, configurations: result.configurations)
+                    SubscriptionStore.shared.add(subscription, configurations: fetchedSubscription.configurations)
                     dismiss(animated: true)
                 } catch {
                     showError(error.localizedDescription)

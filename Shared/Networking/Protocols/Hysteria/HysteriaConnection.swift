@@ -65,18 +65,18 @@ nonisolated final class HysteriaConnection: ProxyConnection {
             self.openCompletion = completion
             self.state = .openingStream
 
-            self.session.openTCPStream(for: self) { [weak self] sid, error in
+            self.session.openTCPStream(for: self) { [weak self] streamID, error in
                 guard let self else { return }
                 self.session.queue.async {
                     if let error {
                         self.fail(error)
                         return
                     }
-                    guard let sid else {
+                    guard let streamID else {
                         self.fail(HysteriaError.connectionFailed("No stream"))
                         return
                     }
-                    self.streamID = sid
+                    self.streamID = streamID
                     self.sendTCPRequest()
                 }
             }

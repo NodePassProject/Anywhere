@@ -85,15 +85,15 @@ extension ProxyConfiguration {
             outbound = .trojan(password: password, tls: tls)
         case .anytls:
             let password = (configurationDict["anytlsPassword"] as? String) ?? ""
-            let ici = (configurationDict["anytlsIdleCheckInterval"] as? Int) ?? 30
-            let it  = (configurationDict["anytlsIdleTimeout"] as? Int) ?? 30
-            let mis = (configurationDict["anytlsMinIdleSession"] as? Int) ?? 0
+            let idleCheckInterval = (configurationDict["anytlsIdleCheckInterval"] as? Int) ?? 30
+            let idleTimeout = (configurationDict["anytlsIdleTimeout"] as? Int) ?? 30
+            let minIdleSession = (configurationDict["anytlsMinIdleSession"] as? Int) ?? 0
             let tls = parseAnyTLSTLS(from: configurationDict, serverAddress: serverAddress)
             outbound = .anytls(
                 password: password,
-                idleCheckInterval: ici,
-                idleTimeout: it,
-                minIdleSession: mis,
+                idleCheckInterval: idleCheckInterval,
+                idleTimeout: idleTimeout,
+                minIdleSession: minIdleSession,
                 tls: tls
             )
         case .shadowsocks:

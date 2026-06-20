@@ -10,8 +10,8 @@ import CryptoKit
 
 struct TLSRecordCrypto {
 
-    static func encryptHandshakeRecord(plaintext: Data, key: SymmetricKey, iv: Data, seqNum: UInt64, cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) throws -> Data {
-        let nonce = buildNonce(iv: iv, seqNum: seqNum)
+    static func encryptHandshakeRecord(plaintext: Data, key: SymmetricKey, iv: Data, sequenceNumber: UInt64, cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) throws -> Data {
+        let nonce = buildNonce(iv: iv, seqNum: sequenceNumber)
 
         var innerPlaintext = plaintext
         innerPlaintext.append(TLSContentType.handshake)
@@ -56,8 +56,8 @@ struct TLSRecordCrypto {
     }
 
     static func encryptAESGCM(plaintext: Data, key: SymmetricKey, nonce: Data, aad: Data) throws -> Data {
-        let nonceObj = try AES.GCM.Nonce(data: nonce)
-        let sealedBox = try AES.GCM.seal(plaintext, using: key, nonce: nonceObj, authenticating: aad)
+        let typedNonce = try AES.GCM.Nonce(data: nonce)
+        let sealedBox = try AES.GCM.seal(plaintext, using: key, nonce: typedNonce, authenticating: aad)
 
         var result = Data(sealedBox.ciphertext)
         result.append(contentsOf: sealedBox.tag)

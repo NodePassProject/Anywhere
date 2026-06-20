@@ -54,19 +54,19 @@ struct NaiveHTTP2FlowControl {
         connectionRecvConsumed += bytes
         streamRecvConsumed += bytes
 
-        var connInc: UInt32?
-        var streamInc: UInt32?
+        var connectionIncrement: UInt32?
+        var streamIncrement: UInt32?
 
         if connectionRecvConsumed >= connectionRecvWindowSize / 2 {
-            connInc = UInt32(connectionRecvConsumed)
+            connectionIncrement = UInt32(connectionRecvConsumed)
             connectionRecvConsumed = 0
         }
         if streamRecvConsumed >= streamRecvWindowSize / 2 {
-            streamInc = UInt32(streamRecvConsumed)
+            streamIncrement = UInt32(streamRecvConsumed)
             streamRecvConsumed = 0
         }
 
-        return (connInc, streamInc)
+        return (connectionIncrement, streamIncrement)
     }
 
     // MARK: - Remote Updates

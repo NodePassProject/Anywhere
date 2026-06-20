@@ -53,8 +53,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             switch result {
             case .failure(let error):
                 completion(error)
-            case .success(let fid):
-                self.flowID = fid
+            case .success(let flowID):
+                self.flowID = flowID
                 self.state = .ready
                 completion(nil)
             }
