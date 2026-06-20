@@ -268,8 +268,8 @@ nonisolated final class HysteriaSession {
             return
         }
 
-        if let conn = tcpStreams[sid] {
-            conn.handleStreamData(data, fin: fin)
+        if let connection = tcpStreams[sid] {
+            connection.handleStreamData(data, fin: fin)
             return
         }
 
@@ -363,7 +363,7 @@ nonisolated final class HysteriaSession {
         state = .ready
         let callbacks = readyCallbacks
         readyCallbacks.removeAll()
-        for cb in callbacks { cb(nil) }
+        for callback in callbacks { callback(nil) }
     }
 
     private func handleStreamTermination(sid: Int64, error: Error?) {
@@ -378,20 +378,20 @@ nonisolated final class HysteriaSession {
             return
         }
         if rejectedServerStreams.remove(sid) != nil { return }
-        guard let conn = tcpStreams.removeValue(forKey: sid) else { return }
+        guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
         _poolLock.lock()
         _poolTCPCount = max(0, _poolTCPCount - 1)
         _poolLock.unlock()
         updateIdleCloseTimer()
-        conn.handleStreamTermination(error: error)
+        connection.handleStreamTermination(error: error)
     }
 
     // MARK: - Datagram dispatch (UDP)
 
     private func handleDatagram(_ data: Data) {
-        guard let msg = HysteriaProtocol.decodeUDPMessage(data) else { return }
-        if let conn = udpSessions[msg.sessionID] {
-            conn.handleIncomingDatagram(msg)
+        guard let message = HysteriaProtocol.decodeUDPMessage(data) else { return }
+        if let connection = udpSessions[message.sessionID] {
+            connection.handleIncomingDatagram(message)
         }
         // Unknown sessions drop silently; Hysteria has no UDP teardown handshake.
     }
@@ -578,7 +578,7 @@ nonisolated final class HysteriaSession {
 
             let callbacks = self.readyCallbacks
             self.readyCallbacks.removeAll()
-            for cb in callbacks { cb(error) }
+            for callback in callbacks { callback(error) }
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()

@@ -171,39 +171,39 @@ enum MITMJSONPatch {
     /// keys or numeric indices. Nil for malformed input; empty result means the document root.
     static func parseJSONPath(_ raw: String) -> [PathSegment]? {
         var segments: [PathSegment] = []
-        var chars = Substring(raw)
-        if chars.first == "$" { chars = chars.dropFirst() }
-        while let c = chars.first {
+        var characters = Substring(raw)
+        if characters.first == "$" { characters = characters.dropFirst() }
+        while let c = characters.first {
             if c == "." {
-                chars = chars.dropFirst()
+                characters = characters.dropFirst()
                 var name = ""
-                while let d = chars.first, d != ".", d != "[" {
+                while let d = characters.first, d != ".", d != "[" {
                     name.append(d)
-                    chars = chars.dropFirst()
+                    characters = characters.dropFirst()
                 }
                 if name.isEmpty { return nil }
                 segments.append(.key(name))
             } else if c == "[" {
-                chars = chars.dropFirst()
+                characters = characters.dropFirst()
                 var inner = ""
                 // Scan past a quoted key first: it may contain `]` (`["a]b"]`).
-                if let quote = chars.first, quote == "\"" || quote == "'" {
+                if let quote = characters.first, quote == "\"" || quote == "'" {
                     inner.append(quote)
-                    chars = chars.dropFirst()
-                    while let d = chars.first, d != quote {
+                    characters = characters.dropFirst()
+                    while let d = characters.first, d != quote {
                         inner.append(d)
-                        chars = chars.dropFirst()
+                        characters = characters.dropFirst()
                     }
-                    guard chars.first == quote else { return nil }
+                    guard characters.first == quote else { return nil }
                     inner.append(quote)
-                    chars = chars.dropFirst()
+                    characters = characters.dropFirst()
                 }
-                while let d = chars.first, d != "]" {
+                while let d = characters.first, d != "]" {
                     inner.append(d)
-                    chars = chars.dropFirst()
+                    characters = characters.dropFirst()
                 }
-                guard chars.first == "]" else { return nil }
-                chars = chars.dropFirst()
+                guard characters.first == "]" else { return nil }
+                characters = characters.dropFirst()
                 let token = inner.trimmingCharacters(in: .whitespaces)
                 if token.count >= 2,
                    (token.first == "\"" && token.last == "\"") || (token.first == "'" && token.last == "'") {
@@ -219,9 +219,9 @@ enum MITMJSONPatch {
                 }
             } else {
                 var name = ""
-                while let d = chars.first, d != ".", d != "[" {
+                while let d = characters.first, d != ".", d != "[" {
                     name.append(d)
-                    chars = chars.dropFirst()
+                    characters = characters.dropFirst()
                 }
                 if name.isEmpty { return nil }
                 segments.append(.key(name))

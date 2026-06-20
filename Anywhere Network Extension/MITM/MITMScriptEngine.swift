@@ -218,10 +218,10 @@ final class MITMScriptEngine {
         else { return false }
         let ctxRef = context.jsGlobalContextRef
         var exception: JSValueRef?
-        guard let obj = JSValueToObject(ctxRef, ref, &exception), exception == nil else {
+        guard let object = JSValueToObject(ctxRef, ref, &exception), exception == nil else {
             return false
         }
-        return JSObjectIsFunction(ctxRef, obj)
+        return JSObjectIsFunction(ctxRef, object)
     }
 
     /// Runs `process(ctx)`; a thenable return suspends without holding the script
@@ -449,19 +449,19 @@ final class MITMScriptEngine {
     // MARK: - Context bridging
 
     private func makeContextValue(_ msg: Message) -> JSValue {
-        let obj = JSValue(newObjectIn: context)!
-        obj.setObject(
+        let object = JSValue(newObjectIn: context)!
+        object.setObject(
             msg.phase == .httpRequest ? "request" : "response",
             forKeyedSubscript: "phase" as NSString
         )
-        obj.setObject(msg.method as Any, forKeyedSubscript: "method" as NSString)
-        obj.setObject(msg.url as Any, forKeyedSubscript: "url" as NSString)
-        obj.setObject(msg.status as Any, forKeyedSubscript: "status" as NSString)
+        object.setObject(msg.method as Any, forKeyedSubscript: "method" as NSString)
+        object.setObject(msg.url as Any, forKeyedSubscript: "url" as NSString)
+        object.setObject(msg.status as Any, forKeyedSubscript: "status" as NSString)
         // [[name, value], ...] preserves duplicates and emit order.
         let pairs: [[String]] = msg.headers.map { [$0.name, $0.value] }
-        obj.setObject(pairs, forKeyedSubscript: "headers" as NSString)
-        obj.setObject(Self.makeUint8Array(in: context, from: msg.body), forKeyedSubscript: "body" as NSString)
-        return obj
+        object.setObject(pairs, forKeyedSubscript: "headers" as NSString)
+        object.setObject(Self.makeUint8Array(in: context, from: msg.body), forKeyedSubscript: "body" as NSString)
+        return object
     }
 
     /// makeContextValue plus a `frame` `{index, end}` sub-object and persistent
@@ -471,21 +471,21 @@ final class MITMScriptEngine {
         frame: Data,
         state: JSValue?
     ) -> JSValue {
-        let obj = JSValue(newObjectIn: context)!
-        obj.setObject(
+        let object = JSValue(newObjectIn: context)!
+        object.setObject(
             ctx.phase == .httpRequest ? "request" : "response",
             forKeyedSubscript: "phase" as NSString
         )
-        obj.setObject(ctx.method as Any, forKeyedSubscript: "method" as NSString)
-        obj.setObject(ctx.url as Any, forKeyedSubscript: "url" as NSString)
-        obj.setObject(ctx.status as Any, forKeyedSubscript: "status" as NSString)
+        object.setObject(ctx.method as Any, forKeyedSubscript: "method" as NSString)
+        object.setObject(ctx.url as Any, forKeyedSubscript: "url" as NSString)
+        object.setObject(ctx.status as Any, forKeyedSubscript: "status" as NSString)
         let pairs: [[String]] = ctx.headers.map { [$0.name, $0.value] }
-        obj.setObject(pairs, forKeyedSubscript: "headers" as NSString)
+        object.setObject(pairs, forKeyedSubscript: "headers" as NSString)
 
         let frameInfo = JSValue(newObjectIn: context)!
         frameInfo.setObject(ctx.frameIndex, forKeyedSubscript: "index" as NSString)
         frameInfo.setObject(ctx.isLast, forKeyedSubscript: "end" as NSString)
-        obj.setObject(frameInfo, forKeyedSubscript: "frame" as NSString)
+        object.setObject(frameInfo, forKeyedSubscript: "frame" as NSString)
 
         // Using a JSValue in a context other than its own is UB in JSC; reset a
         // stale cursor that survived a rule reload / engine swap rather than trap.
@@ -495,20 +495,20 @@ final class MITMScriptEngine {
         } else {
             stateValue = JSValue(newObjectIn: context)!
         }
-        obj.setObject(stateValue, forKeyedSubscript: "state" as NSString)
+        object.setObject(stateValue, forKeyedSubscript: "state" as NSString)
 
-        obj.setObject(Self.makeUint8Array(in: context, from: frame), forKeyedSubscript: "body" as NSString)
-        return obj
+        object.setObject(Self.makeUint8Array(in: context, from: frame), forKeyedSubscript: "body" as NSString)
+        return object
     }
 
     /// Only `body` is read back; method/url/status/headers assignments are discarded (injection guard).
     private func readBack(_ original: Message, from ctx: JSValue) -> Message {
-        var msg = original
+        var message = original
         if let body = ctx.objectForKeyedSubscript("body"),
            let bytes = Self.bytesFromValue(body, in: context) {
-            msg.body = bytes
+            message.body = bytes
         }
-        return msg
+        return message
     }
 
     /// toInt32() wraps 2^31+ lengths negative (trapping a `0..<negative` range);
@@ -625,12 +625,12 @@ final class MITMScriptEngine {
 
         let utf8 = JSValue(newObjectIn: context)!
         let utf8Encode: @convention(block) (String) -> JSValue = { str in
-            let ctx = JSContext.current()!
-            return Self.makeUint8Array(in: ctx, from: Data(str.utf8))
+            let context = JSContext.current()!
+            return Self.makeUint8Array(in: context, from: Data(str.utf8))
         }
         let utf8Decode: @convention(block) (JSValue) -> String = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             // Lossy: invalid UTF-8 → U+FFFD so partial-text buffers still decode.
             return String(decoding: bytes, as: UTF8.self)
         }
@@ -640,13 +640,13 @@ final class MITMScriptEngine {
 
         let base64 = JSValue(newObjectIn: context)!
         let base64Encode: @convention(block) (JSValue) -> String = { val in
-            let ctx = JSContext.current()!
-            return (Self.bytesFromValue(val, in: ctx) ?? Data()).base64EncodedString()
+            let context = JSContext.current()!
+            return (Self.bytesFromValue(val, in: context) ?? Data()).base64EncodedString()
         }
         let base64Decode: @convention(block) (String) -> JSValue = { str in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             // Lenient: skip embedded whitespace so wrapped base64 still decodes.
-            return Self.makeUint8Array(in: ctx, from: Data(base64Encoded: str, options: .ignoreUnknownCharacters) ?? Data())
+            return Self.makeUint8Array(in: context, from: Data(base64Encoded: str, options: .ignoreUnknownCharacters) ?? Data())
         }
         base64.setObject(base64Encode, forKeyedSubscript: "encode" as NSString)
         base64.setObject(base64Decode, forKeyedSubscript: "decode" as NSString)
@@ -656,12 +656,12 @@ final class MITMScriptEngine {
         // alphabet, padded or not) — tokens in the wild arrive in mixed shapes.
         let base64url = JSValue(newObjectIn: context)!
         let base64URLEncodeBlock: @convention(block) (JSValue) -> String = { val in
-            let ctx = JSContext.current()!
-            return Self.encodeBase64URL(Self.bytesFromValue(val, in: ctx) ?? Data())
+            let context = JSContext.current()!
+            return Self.encodeBase64URL(Self.bytesFromValue(val, in: context) ?? Data())
         }
         let base64URLDecodeBlock: @convention(block) (String) -> JSValue = { str in
-            let ctx = JSContext.current()!
-            return Self.makeUint8Array(in: ctx, from: Self.decodeBase64URL(str) ?? Data())
+            let context = JSContext.current()!
+            return Self.makeUint8Array(in: context, from: Self.decodeBase64URL(str) ?? Data())
         }
         base64url.setObject(base64URLEncodeBlock, forKeyedSubscript: "encode" as NSString)
         base64url.setObject(base64URLDecodeBlock, forKeyedSubscript: "decode" as NSString)
@@ -669,13 +669,13 @@ final class MITMScriptEngine {
 
         let hex = JSValue(newObjectIn: context)!
         let hexEncode: @convention(block) (JSValue) -> String = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             return bytes.map { String(format: "%02x", $0) }.joined()
         }
         let hexDecode: @convention(block) (String) -> JSValue = { str in
-            let ctx = JSContext.current()!
-            return Self.makeUint8Array(in: ctx, from: Self.decodeHex(str))
+            let context = JSContext.current()!
+            return Self.makeUint8Array(in: context, from: Self.decodeHex(str))
         }
         hex.setObject(hexEncode, forKeyedSubscript: "encode" as NSString)
         hex.setObject(hexDecode, forKeyedSubscript: "decode" as NSString)
@@ -685,58 +685,58 @@ final class MITMScriptEngine {
         // varints are BigInt (lossless 64-bit), wire-1/2/5 payloads are Uint8Array, groups 3/4 rejected.
         let protobuf = JSValue(newObjectIn: context)!
         let pbDecodeBlock: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            guard let bytes = Self.bytesFromValue(val, in: ctx) else {
-                ctx.exception = JSValue(
+            let context = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(val, in: context) else {
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.decode: expected Uint8Array/ArrayBuffer/string",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             do {
                 let entries = try Self.protobufDecodeWire(bytes)
-                return Self.makeProtobufEntries(entries, in: ctx)
+                return Self.makeProtobufEntries(entries, in: context)
             } catch {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.decode: \(error)",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
         }
         let pbEncodeBlock: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             do {
-                let entries = try Self.parseProtobufEntries(val, in: ctx)
-                return Self.makeUint8Array(in: ctx, from: Self.protobufEncodeWire(entries))
+                let entries = try Self.parseProtobufEntries(val, in: context)
+                return Self.makeUint8Array(in: context, from: Self.protobufEncodeWire(entries))
             } catch {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.encode: \(error)",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
         }
         // Single-varint helpers for hand-walking embedded messages without a full decode roundtrip.
         let pbEncodeVarintBlock: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let u = Self.uint64FromJSValue(val) else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.encodeVarint: expected non-negative Number or BigInt",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
-            return Self.makeUint8Array(in: ctx, from: Self.writeVarint(u))
+            return Self.makeUint8Array(in: context, from: Self.writeVarint(u))
         }
         let pbDecodeVarintBlock: @convention(block) (JSValue, JSValue) -> JSValue = { bytesVal, offsetVal in
-            let ctx = JSContext.current()!
-            guard let bytes = Self.bytesFromValue(bytesVal, in: ctx) else {
-                ctx.exception = JSValue(
+            let context = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(bytesVal, in: context) else {
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.decodeVarint: expected Uint8Array/ArrayBuffer/string",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             let offset: Int
             if offsetVal.isUndefined || offsetVal.isNull {
@@ -744,27 +744,27 @@ final class MITMScriptEngine {
             } else if offsetVal.isNumber {
                 offset = Int(offsetVal.toInt32())
             } else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.decodeVarint: offset must be a Number",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             guard offset >= 0, offset <= bytes.count else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.protobuf.decodeVarint: offset out of range",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             // null on truncated/malformed: easier to branch on than try/catch for a probe primitive.
             guard let (value, end) = Self.readVarint(bytes, from: offset) else {
-                return JSValue(nullIn: ctx)
+                return JSValue(nullIn: context)
             }
-            let obj = JSValue(newObjectIn: ctx)!
-            obj.setObject(Self.makeBigInt(value, in: ctx), forKeyedSubscript: "value" as NSString)
-            obj.setObject(end - offset, forKeyedSubscript: "consumed" as NSString)
-            return obj
+            let object = JSValue(newObjectIn: context)!
+            object.setObject(Self.makeBigInt(value, in: context), forKeyedSubscript: "value" as NSString)
+            object.setObject(end - offset, forKeyedSubscript: "consumed" as NSString)
+            return object
         }
         protobuf.setObject(pbDecodeBlock, forKeyedSubscript: "decode" as NSString)
         protobuf.setObject(pbEncodeBlock, forKeyedSubscript: "encode" as NSString)
@@ -782,125 +782,125 @@ final class MITMScriptEngine {
     /// Handles nested compression the auto-decoding pipeline never sees (e.g. a gzipped
     /// JSON field); decode throws on malformed input or past the decompression-bomb cap.
     private func installCompressionCodec(on codecNamespace: JSValue, named name: String, codec codecKind: MITMBodyCodec.Codec) {
-        let obj = JSValue(newObjectIn: context)!
+        let object = JSValue(newObjectIn: context)!
         let encodeBlock: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            guard let bytes = Self.bytesFromValue(val, in: ctx) else {
-                ctx.exception = JSValue(
+            let context = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(val, in: context) else {
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.codec.\(name).encode: expected Uint8Array/ArrayBuffer/string",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             guard let out = MITMBodyCodec.encode(bytes, codec: codecKind) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.codec.\(name).encode failed", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.codec.\(name).encode failed", in: context)
+                return JSValue(undefinedIn: context)
             }
-            return Self.makeUint8Array(in: ctx, from: out)
+            return Self.makeUint8Array(in: context, from: out)
         }
         let decodeBlock: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            guard let bytes = Self.bytesFromValue(val, in: ctx) else {
-                ctx.exception = JSValue(
+            let context = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(val, in: context) else {
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.codec.\(name).decode: expected Uint8Array/ArrayBuffer/string",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             guard let out = MITMBodyCodec.decode(bytes, codec: codecKind) else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.codec.\(name).decode failed (malformed input or exceeds \(MITMBodyCodec.maxBufferedBodyBytes) B cap)",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
-            return Self.makeUint8Array(in: ctx, from: out)
+            return Self.makeUint8Array(in: context, from: out)
         }
-        obj.setObject(encodeBlock, forKeyedSubscript: "encode" as NSString)
-        obj.setObject(decodeBlock, forKeyedSubscript: "decode" as NSString)
-        codecNamespace.setObject(obj, forKeyedSubscript: name as NSString)
+        object.setObject(encodeBlock, forKeyedSubscript: "encode" as NSString)
+        object.setObject(decodeBlock, forKeyedSubscript: "decode" as NSString)
+        codecNamespace.setObject(object, forKeyedSubscript: name as NSString)
     }
 
     private func installCryptoGlobals(on anywhere: JSValue) {
         let crypto = JSValue(newObjectIn: context)!
         let md5Block: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
-            return Self.makeUint8Array(in: ctx, from: Data(Insecure.MD5.hash(data: bytes)))
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
+            return Self.makeUint8Array(in: context, from: Data(Insecure.MD5.hash(data: bytes)))
         }
         let sha1Block: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
-            return Self.makeUint8Array(in: ctx, from: Data(Insecure.SHA1.hash(data: bytes)))
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
+            return Self.makeUint8Array(in: context, from: Data(Insecure.SHA1.hash(data: bytes)))
         }
         let sha256Block: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
-            return Self.makeUint8Array(in: ctx, from: Data(SHA256.hash(data: bytes)))
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
+            return Self.makeUint8Array(in: context, from: Data(SHA256.hash(data: bytes)))
         }
         let sha384Block: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
-            return Self.makeUint8Array(in: ctx, from: Data(SHA384.hash(data: bytes)))
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
+            return Self.makeUint8Array(in: context, from: Data(SHA384.hash(data: bytes)))
         }
         let sha512Block: @convention(block) (JSValue) -> JSValue = { val in
-            let ctx = JSContext.current()!
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
-            return Self.makeUint8Array(in: ctx, from: Data(SHA512.hash(data: bytes)))
+            let context = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
+            return Self.makeUint8Array(in: context, from: Data(SHA512.hash(data: bytes)))
         }
         let hmacSHA1Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
-            let ctx = JSContext.current()!
-            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
-            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let context = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: context) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: context) ?? Data()
             let mac = HMAC<Insecure.SHA1>.authenticationCode(for: data, using: SymmetricKey(data: key))
-            return Self.makeUint8Array(in: ctx, from: Data(mac))
+            return Self.makeUint8Array(in: context, from: Data(mac))
         }
         let hmacSHA256Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
-            let ctx = JSContext.current()!
-            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
-            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let context = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: context) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: context) ?? Data()
             let mac = HMAC<SHA256>.authenticationCode(for: data, using: SymmetricKey(data: key))
-            return Self.makeUint8Array(in: ctx, from: Data(mac))
+            return Self.makeUint8Array(in: context, from: Data(mac))
         }
         let hmacSHA384Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
-            let ctx = JSContext.current()!
-            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
-            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let context = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: context) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: context) ?? Data()
             let mac = HMAC<SHA384>.authenticationCode(for: data, using: SymmetricKey(data: key))
-            return Self.makeUint8Array(in: ctx, from: Data(mac))
+            return Self.makeUint8Array(in: context, from: Data(mac))
         }
         let hmacSHA512Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
-            let ctx = JSContext.current()!
-            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
-            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let context = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: context) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: context) ?? Data()
             let mac = HMAC<SHA512>.authenticationCode(for: data, using: SymmetricKey(data: key))
-            return Self.makeUint8Array(in: ctx, from: Data(mac))
+            return Self.makeUint8Array(in: context, from: Data(mac))
         }
         // Capped at 64 KiB: a script typo can't pin the NE's RAM budget.
         let randomBytesBlock: @convention(block) (JSValue) -> JSValue = { lenVal in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             let d = lenVal.toDouble()
             guard d.isFinite, d >= 0, d <= 65536, d == d.rounded() else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.crypto.randomBytes: length must be an integer in [0, 65536]",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             let n = Int(d)
-            if n == 0 { return Self.makeUint8Array(in: ctx, from: Data()) }
+            if n == 0 { return Self.makeUint8Array(in: context, from: Data()) }
             var bytes = [UInt8](repeating: 0, count: n)
-            let status = bytes.withUnsafeMutableBufferPointer { buf in
-                SecRandomCopyBytes(kSecRandomDefault, n, buf.baseAddress!)
+            let status = bytes.withUnsafeMutableBufferPointer { buffer in
+                SecRandomCopyBytes(kSecRandomDefault, n, buffer.baseAddress!)
             }
             guard status == errSecSuccess else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.crypto.randomBytes: SecRandomCopyBytes failed (status \(status))",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
-            return Self.makeUint8Array(in: ctx, from: Data(bytes))
+            return Self.makeUint8Array(in: context, from: Data(bytes))
         }
         let uuidBlock: @convention(block) () -> String = {
             UUID().uuidString.lowercased()
@@ -921,30 +921,30 @@ final class MITMScriptEngine {
         // (decrypt only), aad optional. Decrypt throws a catchable JS error on auth failure.
         let aesGCM = JSValue(newObjectIn: context)!
         let aesGCMEncryptBlock: @convention(block) (JSValue) -> JSValue = { spec in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard !spec.isUndefined, !spec.isNull else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: expected a spec object", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: expected a spec object", in: context)
+                return JSValue(undefinedIn: context)
             }
-            guard let key = Self.bytesFromValue(spec.objectForKeyedSubscript("key"), in: ctx),
+            guard let key = Self.bytesFromValue(spec.objectForKeyedSubscript("key"), in: context),
                   key.count == 16 || key.count == 24 || key.count == 32 else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: key must be a Uint8Array of length 16, 24, or 32", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: key must be a Uint8Array of length 16, 24, or 32", in: context)
+                return JSValue(undefinedIn: context)
             }
-            guard let plaintext = Self.bytesFromValue(spec.objectForKeyedSubscript("plaintext"), in: ctx) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: plaintext must be Uint8Array/ArrayBuffer/string", in: ctx)
-                return JSValue(undefinedIn: ctx)
+            guard let plaintext = Self.bytesFromValue(spec.objectForKeyedSubscript("plaintext"), in: context) else {
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: plaintext must be Uint8Array/ArrayBuffer/string", in: context)
+                return JSValue(undefinedIn: context)
             }
             let nonceData: Data?
             let nonceVal = spec.objectForKeyedSubscript("nonce")
             if let nonceVal, !nonceVal.isUndefined, !nonceVal.isNull {
-                guard let n = Self.bytesFromValue(nonceVal, in: ctx) else {
-                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be Uint8Array/ArrayBuffer/string", in: ctx)
-                    return JSValue(undefinedIn: ctx)
+                guard let n = Self.bytesFromValue(nonceVal, in: context) else {
+                    context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be Uint8Array/ArrayBuffer/string", in: context)
+                    return JSValue(undefinedIn: context)
                 }
                 guard n.count == 12 else {
-                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be 12 bytes", in: ctx)
-                    return JSValue(undefinedIn: ctx)
+                    context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be 12 bytes", in: context)
+                    return JSValue(undefinedIn: context)
                 }
                 nonceData = n
             } else {
@@ -953,9 +953,9 @@ final class MITMScriptEngine {
             let aadData: Data?
             let aadVal = spec.objectForKeyedSubscript("aad")
             if let aadVal, !aadVal.isUndefined, !aadVal.isNull {
-                guard let a = Self.bytesFromValue(aadVal, in: ctx) else {
-                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: aad must be Uint8Array/ArrayBuffer/string", in: ctx)
-                    return JSValue(undefinedIn: ctx)
+                guard let a = Self.bytesFromValue(aadVal, in: context) else {
+                    context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: aad must be Uint8Array/ArrayBuffer/string", in: context)
+                    return JSValue(undefinedIn: context)
                 }
                 aadData = a
             } else {
@@ -975,47 +975,47 @@ final class MITMScriptEngine {
                 } else {
                     box = try AES.GCM.seal(plaintext, using: symKey, nonce: nonce)
                 }
-                let out = JSValue(newObjectIn: ctx)!
-                out.setObject(Self.makeUint8Array(in: ctx, from: Data(box.nonce)), forKeyedSubscript: "nonce" as NSString)
-                out.setObject(Self.makeUint8Array(in: ctx, from: box.ciphertext), forKeyedSubscript: "ciphertext" as NSString)
-                out.setObject(Self.makeUint8Array(in: ctx, from: box.tag), forKeyedSubscript: "tag" as NSString)
+                let out = JSValue(newObjectIn: context)!
+                out.setObject(Self.makeUint8Array(in: context, from: Data(box.nonce)), forKeyedSubscript: "nonce" as NSString)
+                out.setObject(Self.makeUint8Array(in: context, from: box.ciphertext), forKeyedSubscript: "ciphertext" as NSString)
+                out.setObject(Self.makeUint8Array(in: context, from: box.tag), forKeyedSubscript: "tag" as NSString)
                 return out
             } catch {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: \(error)", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: \(error)", in: context)
+                return JSValue(undefinedIn: context)
             }
         }
         let aesGCMDecryptBlock: @convention(block) (JSValue) -> JSValue = { spec in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard !spec.isUndefined, !spec.isNull else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: expected a spec object", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: expected a spec object", in: context)
+                return JSValue(undefinedIn: context)
             }
-            guard let key = Self.bytesFromValue(spec.objectForKeyedSubscript("key"), in: ctx),
+            guard let key = Self.bytesFromValue(spec.objectForKeyedSubscript("key"), in: context),
                   key.count == 16 || key.count == 24 || key.count == 32 else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: key must be a Uint8Array of length 16, 24, or 32", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: key must be a Uint8Array of length 16, 24, or 32", in: context)
+                return JSValue(undefinedIn: context)
             }
-            guard let nonce = Self.bytesFromValue(spec.objectForKeyedSubscript("nonce"), in: ctx),
+            guard let nonce = Self.bytesFromValue(spec.objectForKeyedSubscript("nonce"), in: context),
                   nonce.count == 12 else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: nonce must be a Uint8Array of length 12", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: nonce must be a Uint8Array of length 12", in: context)
+                return JSValue(undefinedIn: context)
             }
-            guard let ciphertext = Self.bytesFromValue(spec.objectForKeyedSubscript("ciphertext"), in: ctx) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: ciphertext must be Uint8Array/ArrayBuffer/string", in: ctx)
-                return JSValue(undefinedIn: ctx)
+            guard let ciphertext = Self.bytesFromValue(spec.objectForKeyedSubscript("ciphertext"), in: context) else {
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: ciphertext must be Uint8Array/ArrayBuffer/string", in: context)
+                return JSValue(undefinedIn: context)
             }
-            guard let tag = Self.bytesFromValue(spec.objectForKeyedSubscript("tag"), in: ctx),
+            guard let tag = Self.bytesFromValue(spec.objectForKeyedSubscript("tag"), in: context),
                   tag.count == 16 else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: tag must be a Uint8Array of length 16", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: tag must be a Uint8Array of length 16", in: context)
+                return JSValue(undefinedIn: context)
             }
             let aadData: Data?
             let aadVal = spec.objectForKeyedSubscript("aad")
             if let aadVal, !aadVal.isUndefined, !aadVal.isNull {
-                guard let a = Self.bytesFromValue(aadVal, in: ctx) else {
-                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: aad must be Uint8Array/ArrayBuffer/string", in: ctx)
-                    return JSValue(undefinedIn: ctx)
+                guard let a = Self.bytesFromValue(aadVal, in: context) else {
+                    context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: aad must be Uint8Array/ArrayBuffer/string", in: context)
+                    return JSValue(undefinedIn: context)
                 }
                 aadData = a
             } else {
@@ -1031,10 +1031,10 @@ final class MITMScriptEngine {
                 } else {
                     plaintext = try AES.GCM.open(box, using: symKey)
                 }
-                return Self.makeUint8Array(in: ctx, from: plaintext)
+                return Self.makeUint8Array(in: context, from: plaintext)
             } catch {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: \(error)", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: \(error)", in: context)
+                return JSValue(undefinedIn: context)
             }
         }
         aesGCM.setObject(aesGCMEncryptBlock, forKeyedSubscript: "encrypt" as NSString)
@@ -1048,28 +1048,28 @@ final class MITMScriptEngine {
     private func installJWTGlobals(on anywhere: JSValue) {
         let jwt = JSValue(newObjectIn: context)!
         let jwtDecodeBlock: @convention(block) (String) -> JSValue = { token in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             let parts = token.split(separator: ".", omittingEmptySubsequences: false)
             guard parts.count == 2 || parts.count == 3 else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.jwt.decode: expected 2 or 3 dot-separated segments, got \(parts.count)",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             guard let headerBytes = Self.decodeBase64URL(String(parts[0])) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: header is not valid base64url", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: header is not valid base64url", in: context)
+                return JSValue(undefinedIn: context)
             }
             guard let payloadBytes = Self.decodeBase64URL(String(parts[1])) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: payload is not valid base64url", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: payload is not valid base64url", in: context)
+                return JSValue(undefinedIn: context)
             }
             let signatureBytes: Data
             if parts.count == 3 {
                 guard let sig = Self.decodeBase64URL(String(parts[2])) else {
-                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: signature is not valid base64url", in: ctx)
-                    return JSValue(undefinedIn: ctx)
+                    context.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: signature is not valid base64url", in: context)
+                    return JSValue(undefinedIn: context)
                 }
                 signatureBytes = sig
             } else {
@@ -1077,64 +1077,64 @@ final class MITMScriptEngine {
             }
             // RFC 7519 §5: header MUST be JSON.
             guard let headerStr = String(data: headerBytes, encoding: .utf8),
-                  let headerObj = Self.parseJSON(headerStr, in: ctx) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: header is not valid JSON", in: ctx)
-                return JSValue(undefinedIn: ctx)
+                  let headerObj = Self.parseJSON(headerStr, in: context) else {
+                context.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: header is not valid JSON", in: context)
+                return JSValue(undefinedIn: context)
             }
             // Payload: try JSON; fall back to raw bytes (binary JWS payload per RFC 7797).
             let payloadVal: JSValue
             if let payloadStr = String(data: payloadBytes, encoding: .utf8),
-               let parsed = Self.parseJSON(payloadStr, in: ctx) {
+               let parsed = Self.parseJSON(payloadStr, in: context) {
                 payloadVal = parsed
             } else {
-                payloadVal = Self.makeUint8Array(in: ctx, from: payloadBytes)
+                payloadVal = Self.makeUint8Array(in: context, from: payloadBytes)
             }
             let signingInput = "\(parts[0]).\(parts[1])"
-            let result = JSValue(newObjectIn: ctx)!
+            let result = JSValue(newObjectIn: context)!
             result.setObject(headerObj, forKeyedSubscript: "header" as NSString)
             result.setObject(payloadVal, forKeyedSubscript: "payload" as NSString)
-            result.setObject(Self.makeUint8Array(in: ctx, from: signatureBytes), forKeyedSubscript: "signature" as NSString)
-            result.setObject(Self.makeUint8Array(in: ctx, from: Data(signingInput.utf8)), forKeyedSubscript: "signingInput" as NSString)
+            result.setObject(Self.makeUint8Array(in: context, from: signatureBytes), forKeyedSubscript: "signature" as NSString)
+            result.setObject(Self.makeUint8Array(in: context, from: Data(signingInput.utf8)), forKeyedSubscript: "signingInput" as NSString)
             return result
         }
         let jwtEncodeBlock: @convention(block) (JSValue) -> JSValue = { spec in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard !spec.isUndefined, !spec.isNull else {
-                ctx.exception = JSValue(
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.jwt.encode: expected a spec object with {header, payload, signature?}",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
-            guard let headerSeg = Self.encodeJWTSegment(spec.objectForKeyedSubscript("header"), in: ctx) else {
-                ctx.exception = JSValue(
+            guard let headerSeg = Self.encodeJWTSegment(spec.objectForKeyedSubscript("header"), in: context) else {
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.jwt.encode: header must be an object, string, or Uint8Array",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
-            guard let payloadSeg = Self.encodeJWTSegment(spec.objectForKeyedSubscript("payload"), in: ctx) else {
-                ctx.exception = JSValue(
+            guard let payloadSeg = Self.encodeJWTSegment(spec.objectForKeyedSubscript("payload"), in: context) else {
+                context.exception = JSValue(
                     newErrorFromMessage: "Anywhere.jwt.encode: payload must be an object, string, or Uint8Array",
-                    in: ctx
+                    in: context
                 )
-                return JSValue(undefinedIn: ctx)
+                return JSValue(undefinedIn: context)
             }
             let signatureSeg: String
             let sigVal = spec.objectForKeyedSubscript("signature")
             if let sigVal, !sigVal.isUndefined, !sigVal.isNull {
-                guard let sigBytes = Self.bytesFromValue(sigVal, in: ctx) else {
-                    ctx.exception = JSValue(
+                guard let sigBytes = Self.bytesFromValue(sigVal, in: context) else {
+                    context.exception = JSValue(
                         newErrorFromMessage: "Anywhere.jwt.encode: signature must be a Uint8Array (the raw signature bytes)",
-                        in: ctx
+                        in: context
                     )
-                    return JSValue(undefinedIn: ctx)
+                    return JSValue(undefinedIn: context)
                 }
                 signatureSeg = Self.encodeBase64URL(sigBytes)
             } else {
                 signatureSeg = ""  // RFC 7515: trailing dot preserved so verifiers can split on count==3
             }
-            return JSValue(object: "\(headerSeg).\(payloadSeg).\(signatureSeg)", in: ctx)
+            return JSValue(object: "\(headerSeg).\(payloadSeg).\(signatureSeg)", in: context)
         }
         jwt.setObject(jwtDecodeBlock, forKeyedSubscript: "decode" as NSString)
         jwt.setObject(jwtEncodeBlock, forKeyedSubscript: "encode" as NSString)
@@ -1148,73 +1148,73 @@ final class MITMScriptEngine {
 
         // add: upsert — creates or overwrites; appends to arrays at index==length.
         let addBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
-            let ctx = JSContext.current()!
-            guard let v = Self.jsonValue(from: value, in: ctx) else {
+            let context = JSContext.current()!
+            guard let v = Self.jsonValue(from: value, in: context) else {
                 logger.warning("[MITM][JS] Anywhere.json.add: value is undefined; use delete() to remove a field. Body unchanged.")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
                 logger.warning("[MITM][JS] Anywhere.json.add: malformed path \"\(path)\"; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
-            return Self.runJSONOp(body, in: ctx) { root in
+            return Self.runJSONOp(body, in: context) { root in
                 root = MITMJSONPatch.applyAtPath(root, segments: segments, mode: .add, value: v)
             }
         }
 
         // replace: modify-in-place only; no-op if the path doesn't exist.
         let replaceBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
-            let ctx = JSContext.current()!
-            guard let v = Self.jsonValue(from: value, in: ctx) else {
+            let context = JSContext.current()!
+            guard let v = Self.jsonValue(from: value, in: context) else {
                 logger.warning("[MITM][JS] Anywhere.json.replace: value is undefined; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
                 logger.warning("[MITM][JS] Anywhere.json.replace: malformed path \"\(path)\"; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
-            return Self.runJSONOp(body, in: ctx) { root in
+            return Self.runJSONOp(body, in: context) { root in
                 root = MITMJSONPatch.applyAtPath(root, segments: segments, mode: .replace, value: v)
             }
         }
 
         // replaceRecursive: bare key name (not a path), overwrites at any depth.
         let replaceRecursiveBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, key, value in
-            let ctx = JSContext.current()!
-            guard let v = Self.jsonValue(from: value, in: ctx) else {
+            let context = JSContext.current()!
+            guard let v = Self.jsonValue(from: value, in: context) else {
                 logger.warning("[MITM][JS] Anywhere.json.replaceRecursive: value is undefined; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
-            return Self.runJSONOp(body, in: ctx) { root in
+            return Self.runJSONOp(body, in: context) { root in
                 MITMJSONPatch.replaceKeyRecursive(root, key: key, value: v)
             }
         }
 
         let deleteBlock: @convention(block) (JSValue, String) -> JSValue = { body, path in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
                 logger.warning("[MITM][JS] Anywhere.json.delete: malformed path \"\(path)\"; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
-            return Self.runJSONOp(body, in: ctx) { root in
+            return Self.runJSONOp(body, in: context) { root in
                 root = MITMJSONPatch.applyAtPath(root, segments: segments, mode: .delete, value: nil)
             }
         }
 
         let deleteRecursiveBlock: @convention(block) (JSValue, String) -> JSValue = { body, key in
-            let ctx = JSContext.current()!
-            return Self.runJSONOp(body, in: ctx) { root in
+            let context = JSContext.current()!
+            return Self.runJSONOp(body, in: context) { root in
                 MITMJSONPatch.deleteKeyRecursive(root, key: key)
             }
         }
 
         let removeWhereKeyExistsBlock: @convention(block) (JSValue, String, String) -> JSValue = { body, path, key in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
                 logger.warning("[MITM][JS] Anywhere.json.removeWhereKeyExists: malformed path \"\(path)\"; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
-            return Self.runJSONOp(body, in: ctx) { root in
+            return Self.runJSONOp(body, in: context) { root in
                 guard let array = MITMJSONPatch.resolveNode(root, segments: segments) as? NSMutableArray else { return }
                 let kept = array.filter { ($0 as? NSDictionary)?.object(forKey: key) == nil }
                 array.setArray(kept)
@@ -1222,13 +1222,13 @@ final class MITMScriptEngine {
         }
 
         let removeWhereFieldInBlock: @convention(block) (JSValue, String, String, JSValue) -> JSValue = { body, path, field, valuesVal in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let segments = MITMJSONPatch.parseJSONPath(path) else {
                 logger.warning("[MITM][JS] Anywhere.json.removeWhereFieldIn: malformed path \"\(path)\"; body unchanged")
-                return Self.jsonPassthrough(body, in: ctx)
+                return Self.jsonPassthrough(body, in: context)
             }
-            let needles = Self.jsonArrayValues(from: valuesVal, in: ctx)
-            return Self.runJSONOp(body, in: ctx) { root in
+            let needles = Self.jsonArrayValues(from: valuesVal, in: context)
+            return Self.runJSONOp(body, in: context) { root in
                 guard let array = MITMJSONPatch.resolveNode(root, segments: segments) as? NSMutableArray else { return }
                 let kept = array.filter { element in
                     guard let object = element as? NSDictionary,
@@ -1293,39 +1293,39 @@ final class MITMScriptEngine {
     private func installStoreGlobals(on anywhere: JSValue) {
         let store = JSValue(newObjectIn: context)!
         let storeGet: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let scope = self?.currentInvocation?.scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk)
-            else { return JSValue(undefinedIn: ctx) }
-            return Self.makeUint8Array(in: ctx, from: bytes)
+            else { return JSValue(undefinedIn: context) }
+            return Self.makeUint8Array(in: context, from: bytes)
         }
         let storeGetString: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let scope = self?.currentInvocation?.scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk),
-                  let str = String(data: bytes, encoding: .utf8)
-            else { return JSValue(undefinedIn: ctx) }
-            return JSValue(object: str, in: ctx)
+                  let string = String(data: bytes, encoding: .utf8)
+            else { return JSValue(undefinedIn: context) }
+            return JSValue(object: string, in: context)
         }
         let storeSet: @convention(block) (String, JSValue, Bool) -> Void = { [weak self] key, val, onDisk in
-            let ctx = JSContext.current()!
+            let context = JSContext.current()!
             guard let scope = self?.currentInvocation?.scope else { return }
-            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             do {
                 try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes, onDisk: onDisk)
             } catch MITMScriptStore.StoreError.capacityExceeded {
                 let cap = onDisk ? MITMScriptDiskStore.maxBytesPerScope : MITMScriptStore.maxBytesPerScope
-                let err = JSValue(
+                let error = JSValue(
                     newErrorFromMessage: "Anywhere.store: capacity exceeded (per-scope cap is \(cap) bytes)",
-                    in: ctx
+                    in: context
                 )
-                ctx.exception = err
+                context.exception = error
             } catch MITMScriptStore.StoreError.writeFailed {
-                let err = JSValue(newErrorFromMessage: "Anywhere.store: on-disk write failed", in: ctx)
-                ctx.exception = err
+                let error = JSValue(newErrorFromMessage: "Anywhere.store: on-disk write failed", in: context)
+                context.exception = error
             } catch {
-                let err = JSValue(newErrorFromMessage: "Anywhere.store: \(error)", in: ctx)
-                ctx.exception = err
+                let err = JSValue(newErrorFromMessage: "Anywhere.store: \(error)", in: context)
+                context.exception = err
             }
         }
         let storeDelete: @convention(block) (String, Bool) -> Void = { [weak self] key, onDisk in
@@ -1408,8 +1408,8 @@ final class MITMScriptEngine {
             let body: Data
             if let bodyVal = spec.objectForKeyedSubscript("body"),
                !bodyVal.isUndefined, !bodyVal.isNull {
-                let ctx = JSContext.current() ?? self.context
-                body = Self.bytesFromValue(bodyVal, in: ctx) ?? Data()
+                let context = JSContext.current() ?? self.context
+                body = Self.bytesFromValue(bodyVal, in: context) ?? Data()
             } else {
                 body = Data()
             }
@@ -1427,20 +1427,20 @@ final class MITMScriptEngine {
     private func installHTTPGlobals(on anywhere: JSValue) {
         let http = JSValue(newObjectIn: context)!
         let getBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
-            let ctx = JSContext.current()!
-            guard let self else { return Self.rejected("Anywhere.http: engine released", in: ctx) }
-            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal, in: ctx)
+            let context = JSContext.current()!
+            guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
+            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal, in: context)
         }
         let postBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
-            let ctx = JSContext.current()!
-            guard let self else { return Self.rejected("Anywhere.http: engine released", in: ctx) }
-            return self.startHTTP(defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal, in: ctx)
+            let context = JSContext.current()!
+            guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
+            return self.startHTTP(defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal, in: context)
         }
         let requestBlock: @convention(block) (JSValue) -> JSValue = { [weak self] specVal in
-            let ctx = JSContext.current()!
-            guard let self else { return Self.rejected("Anywhere.http: engine released", in: ctx) }
-            let urlVal: JSValue = specVal.objectForKeyedSubscript("url") ?? JSValue(undefinedIn: ctx)
-            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: specVal, in: ctx)
+            let context = JSContext.current()!
+            guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
+            let urlVal: JSValue = specVal.objectForKeyedSubscript("url") ?? JSValue(undefinedIn: context)
+            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: specVal, in: context)
         }
         http.setObject(getBlock, forKeyedSubscript: "get" as NSString)
         http.setObject(postBlock, forKeyedSubscript: "post" as NSString)
@@ -1582,13 +1582,13 @@ final class MITMScriptEngine {
     }
 
     private static func makeHTTPResponse(_ response: MITMScriptHTTPClient.Response, in ctx: JSContext) -> JSValue {
-        let obj = JSValue(newObjectIn: ctx)!
-        obj.setObject(response.status, forKeyedSubscript: "status" as NSString)
+        let object = JSValue(newObjectIn: ctx)!
+        object.setObject(response.status, forKeyedSubscript: "status" as NSString)
         let pairs: [[String]] = response.headers.map { [$0.name, $0.value] }
-        obj.setObject(pairs, forKeyedSubscript: "headers" as NSString)
-        obj.setObject(makeUint8Array(in: ctx, from: response.body), forKeyedSubscript: "body" as NSString)
-        obj.setObject(response.finalURL as Any, forKeyedSubscript: "url" as NSString)
-        return obj
+        object.setObject(pairs, forKeyedSubscript: "headers" as NSString)
+        object.setObject(makeUint8Array(in: ctx, from: response.body), forKeyedSubscript: "body" as NSString)
+        object.setObject(response.finalURL as Any, forKeyedSubscript: "url" as NSString)
+        return object
     }
 
     /// Parses request headers from `[[name, value], …]` or `{ name: value }`, applying forbiddenRequestHeaders to both forms.
@@ -1690,10 +1690,10 @@ final class MITMScriptEngine {
             ptr?.deallocate()
             if let ctx {
                 let box = ctx.assumingMemoryBound(to: Int.self)
-                let len = box.pointee
-                if len > 0 {
+                let length = box.pointee
+                if length > 0 {
                     mitmScriptTypedArrayLock.lock()
-                    mitmScriptTypedArrayBytes -= len
+                    mitmScriptTypedArrayBytes -= length
                     mitmScriptTypedArrayLock.unlock()
                 }
                 box.deinitialize(count: 1)
@@ -1741,27 +1741,27 @@ final class MITMScriptEngine {
         let kind = JSValueGetTypedArrayType(ctxRef, ref, &exception)
         if exception != nil { return nil }
         if kind == kJSTypedArrayTypeNone { return nil }
-        guard let obj = JSValueToObject(ctxRef, ref, &exception), exception == nil else {
+        guard let object = JSValueToObject(ctxRef, ref, &exception), exception == nil else {
             return nil
         }
         if kind == kJSTypedArrayTypeArrayBuffer {
-            let len = JSObjectGetArrayBufferByteLength(ctxRef, obj, &exception)
+            let length = JSObjectGetArrayBufferByteLength(ctxRef, object, &exception)
             guard exception == nil,
-                  let ptr = JSObjectGetArrayBufferBytesPtr(ctxRef, obj, &exception),
+                  let pointer = JSObjectGetArrayBufferBytesPtr(ctxRef, object, &exception),
                   exception == nil
             else { return nil }
-            return Data(bytes: ptr, count: len)
+            return Data(bytes: pointer, count: length)
         }
-        let len = JSObjectGetTypedArrayByteLength(ctxRef, obj, &exception)
+        let length = JSObjectGetTypedArrayByteLength(ctxRef, object, &exception)
         guard exception == nil else { return nil }
         // JSObjectGetTypedArrayBytesPtr points at the backing buffer, not the view;
         // add byteOffset so a subarray reads its own slice, not the buffer's head.
-        let offset = JSObjectGetTypedArrayByteOffset(ctxRef, obj, &exception)
+        let offset = JSObjectGetTypedArrayByteOffset(ctxRef, object, &exception)
         guard exception == nil,
-              let ptr = JSObjectGetTypedArrayBytesPtr(ctxRef, obj, &exception),
+              let pointer = JSObjectGetTypedArrayBytesPtr(ctxRef, object, &exception),
               exception == nil
         else { return nil }
-        return Data(bytes: ptr + offset, count: len)
+        return Data(bytes: pointer + offset, count: length)
     }
 
     private static func decodeHex(_ str: String) -> Data {
@@ -1814,17 +1814,17 @@ final class MITMScriptEngine {
         guard offset >= data.startIndex, offset <= data.endIndex else { return nil }
         var result: UInt64 = 0
         var shift: UInt64 = 0
-        var idx = offset
+        var index = offset
         var bytesRead = 0
         let end = data.endIndex
-        while idx < end {
+        while index < end {
             if bytesRead >= 10 { return nil }
-            let byte = data[idx]
+            let byte = data[index]
             result |= UInt64(byte & 0x7F) << shift
-            idx += 1
+            index += 1
             bytesRead += 1
             if byte & 0x80 == 0 {
-                return (result, idx)
+                return (result, index)
             }
             shift += 7
         }
@@ -1847,13 +1847,13 @@ final class MITMScriptEngine {
 
     fileprivate static func protobufDecodeWire(_ data: Data) throws -> [ProtobufEntry] {
         var entries: [ProtobufEntry] = []
-        var idx = data.startIndex
+        var index = data.startIndex
         let end = data.endIndex
-        while idx < end {
-            guard let (tag, next) = readVarint(data, from: idx) else {
-                throw ProtobufError(description: "truncated or oversized tag varint at offset \(idx - data.startIndex)")
+        while index < end {
+            guard let (tag, next) = readVarint(data, from: index) else {
+                throw ProtobufError(description: "truncated or oversized tag varint at offset \(index - data.startIndex)")
             }
-            idx = next
+            index = next
             let wire = UInt8(tag & 0x7)
             let fieldRaw = tag >> 3
             // Field 0 is reserved; max is 2^29-1 per the protobuf spec.
@@ -1863,36 +1863,36 @@ final class MITMScriptEngine {
             let field = UInt32(fieldRaw)
             switch wire {
             case 0:
-                guard let (v, n) = readVarint(data, from: idx) else {
+                guard let (v, n) = readVarint(data, from: index) else {
                     throw ProtobufError(description: "truncated varint for field \(field)")
                 }
-                idx = n
+                index = n
                 entries.append(ProtobufEntry(field: field, wire: 0, value: .varint(v)))
             case 1:
-                guard idx + 8 <= end else {
+                guard index + 8 <= end else {
                     throw ProtobufError(description: "truncated fixed64 for field \(field)")
                 }
-                entries.append(ProtobufEntry(field: field, wire: 1, value: .bytes(data.subdata(in: idx..<idx + 8))))
-                idx += 8
+                entries.append(ProtobufEntry(field: field, wire: 1, value: .bytes(data.subdata(in: index..<index + 8))))
+                index += 8
             case 2:
-                guard let (len, n) = readVarint(data, from: idx) else {
+                guard let (length, n) = readVarint(data, from: index) else {
                     throw ProtobufError(description: "truncated length for field \(field)")
                 }
-                idx = n
+                index = n
                 // Bound len in UInt64 space BEFORE narrowing: Int(len) traps for len ≥ 2^63 and
                 // `idx + needed` can overflow — either crashes the extension on crafted wire.
-                guard len <= UInt64(end - idx) else {
-                    throw ProtobufError(description: "length-delimited field \(field) (len=\(len)) exceeds message")
+                guard length <= UInt64(end - index) else {
+                    throw ProtobufError(description: "length-delimited field \(field) (len=\(length)) exceeds message")
                 }
-                let needed = Int(len)
-                entries.append(ProtobufEntry(field: field, wire: 2, value: .bytes(data.subdata(in: idx..<idx + needed))))
-                idx += needed
+                let needed = Int(length)
+                entries.append(ProtobufEntry(field: field, wire: 2, value: .bytes(data.subdata(in: index..<index + needed))))
+                index += needed
             case 5:
-                guard idx + 4 <= end else {
+                guard index + 4 <= end else {
                     throw ProtobufError(description: "truncated fixed32 for field \(field)")
                 }
-                entries.append(ProtobufEntry(field: field, wire: 5, value: .bytes(data.subdata(in: idx..<idx + 4))))
-                idx += 4
+                entries.append(ProtobufEntry(field: field, wire: 5, value: .bytes(data.subdata(in: index..<index + 4))))
+                index += 4
             case 3, 4:
                 throw ProtobufError(description: "deprecated group wire type \(wire) is not supported")
             default:
@@ -1929,50 +1929,50 @@ final class MITMScriptEngine {
         }
         var entries: [ProtobufEntry] = []
         entries.reserveCapacity(count)
-        for idx in 0..<count {
-            guard let entryVal = val.objectAtIndexedSubscript(idx),
+        for index in 0..<count {
+            guard let entryVal = val.objectAtIndexedSubscript(index),
                   !entryVal.isUndefined, !entryVal.isNull else {
-                throw ProtobufError(description: "entry \(idx) is null/undefined")
+                throw ProtobufError(description: "entry \(index) is null/undefined")
             }
             let fieldVal = entryVal.objectForKeyedSubscript("field")
             guard let fieldVal, fieldVal.isNumber else {
-                throw ProtobufError(description: "entry \(idx).field must be a Number")
+                throw ProtobufError(description: "entry \(index).field must be a Number")
             }
             let fieldNum = fieldVal.toInt32()
             guard fieldNum > 0, fieldNum <= 536_870_911 else {
-                throw ProtobufError(description: "entry \(idx).field \(fieldNum) out of range (1…2^29-1)")
+                throw ProtobufError(description: "entry \(index).field \(fieldNum) out of range (1…2^29-1)")
             }
             let wireVal = entryVal.objectForKeyedSubscript("wire")
             guard let wireVal, wireVal.isNumber else {
-                throw ProtobufError(description: "entry \(idx).wire must be a Number")
+                throw ProtobufError(description: "entry \(index).wire must be a Number")
             }
             let wireNum = UInt8(truncatingIfNeeded: wireVal.toInt32())
             let valueVal = entryVal.objectForKeyedSubscript("value")
             switch wireNum {
             case 0:
                 guard let v = valueVal.flatMap({ uint64FromJSValue($0) }) else {
-                    throw ProtobufError(description: "entry \(idx).value (wire 0) must be a non-negative integer Number or BigInt")
+                    throw ProtobufError(description: "entry \(index).value (wire 0) must be a non-negative integer Number or BigInt")
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 0, value: .varint(v)))
             case 1:
                 guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }), bytes.count == 8 else {
-                    throw ProtobufError(description: "entry \(idx).value (wire 1) must be a Uint8Array of length 8")
+                    throw ProtobufError(description: "entry \(index).value (wire 1) must be a Uint8Array of length 8")
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 1, value: .bytes(bytes)))
             case 2:
                 guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }) else {
-                    throw ProtobufError(description: "entry \(idx).value (wire 2) must be Uint8Array/ArrayBuffer/string")
+                    throw ProtobufError(description: "entry \(index).value (wire 2) must be Uint8Array/ArrayBuffer/string")
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 2, value: .bytes(bytes)))
             case 5:
                 guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }), bytes.count == 4 else {
-                    throw ProtobufError(description: "entry \(idx).value (wire 5) must be a Uint8Array of length 4")
+                    throw ProtobufError(description: "entry \(index).value (wire 5) must be a Uint8Array of length 4")
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 5, value: .bytes(bytes)))
             case 3, 4:
-                throw ProtobufError(description: "entry \(idx).wire = \(wireNum): deprecated group wire types not supported")
+                throw ProtobufError(description: "entry \(index).wire = \(wireNum): deprecated group wire types not supported")
             default:
-                throw ProtobufError(description: "entry \(idx).wire = \(wireNum): unknown wire type")
+                throw ProtobufError(description: "entry \(index).wire = \(wireNum): unknown wire type")
             }
         }
         return entries
@@ -1983,9 +1983,9 @@ final class MITMScriptEngine {
         let array = JSValue(newArrayIn: context)!
         let bigIntFn = context.objectForKeyedSubscript("BigInt")
         for (idx, entry) in entries.enumerated() {
-            let obj = JSValue(newObjectIn: context)!
-            obj.setObject(NSNumber(value: entry.field), forKeyedSubscript: "field" as NSString)
-            obj.setObject(NSNumber(value: entry.wire), forKeyedSubscript: "wire" as NSString)
+            let object = JSValue(newObjectIn: context)!
+            object.setObject(NSNumber(value: entry.field), forKeyedSubscript: "field" as NSString)
+            object.setObject(NSNumber(value: entry.wire), forKeyedSubscript: "wire" as NSString)
             let v: JSValue
             switch entry.value {
             case .varint(let u):
@@ -1993,8 +1993,8 @@ final class MITMScriptEngine {
             case .bytes(let d):
                 v = makeUint8Array(in: context, from: d)
             }
-            obj.setObject(v, forKeyedSubscript: "value" as NSString)
-            array.setObject(obj, atIndexedSubscript: idx)
+            object.setObject(v, forKeyedSubscript: "value" as NSString)
+            array.setObject(object, atIndexedSubscript: idx)
         }
         return array
     }
@@ -2015,8 +2015,8 @@ final class MITMScriptEngine {
             }
             return UInt64(d)
         }
-        guard let str = val.toString() else { return nil }
-        return UInt64(str)
+        guard let string = val.toString() else { return nil }
+        return UInt64(string)
     }
 
     // MARK: - Base64URL / JWT helpers
@@ -2062,10 +2062,10 @@ final class MITMScriptEngine {
         let json = context.objectForKeyedSubscript("JSON")
         guard let result = json?.invokeMethod("stringify", withArguments: [value]),
               !result.isUndefined,
-              let str = result.toString() else {
+              let string = result.toString() else {
             return nil
         }
-        return encodeBase64URL(Data(str.utf8))
+        return encodeBase64URL(Data(string.utf8))
     }
 }
 

@@ -118,8 +118,8 @@ nonisolated final class RawUDPSocket {
                 }
             }
 
-            let err = lastError ?? SocketError.connectionFailed("All addresses failed")
-            completionQueue.async { completion(err) }
+            let error = lastError ?? SocketError.connectionFailed("All addresses failed")
+            completionQueue.async { completion(error) }
         }
     }
 
@@ -147,9 +147,9 @@ nonisolated final class RawUDPSocket {
             Darwin.connect(fd, sa, len)
         }
         if rc != 0 {
-            let err = errno
+            let error = errno
             _ = Darwin.close(fd)
-            return .failure(.connectionFailed("connect() errno=\(err)"))
+            return .failure(.connectionFailed("connect() errno=\(error)"))
         }
 
         socketFD = fd
@@ -208,8 +208,8 @@ nonisolated final class RawUDPSocket {
                 }
             }
             if n < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
+                let error = errno
+                if error == EAGAIN || error == EWOULDBLOCK || error == EINTR { return }
                 // Terminal recv failure: stop the read source and surface the error once.
                 let errorHandler = self.receiveErrorHandler
                 let handlerQueue = self.receiveHandlerQueue
@@ -217,7 +217,7 @@ nonisolated final class RawUDPSocket {
                 self.readSource?.cancel()
                 self.readSource = nil
                 if let errorHandler {
-                    let socketError = SocketError.posixError(.receive, errno: err)
+                    let socketError = SocketError.posixError(.receive, errno: error)
                     if let handlerQueue {
                         handlerQueue.async { errorHandler(socketError) }
                     } else {
@@ -262,8 +262,8 @@ nonisolated final class RawUDPSocket {
     /// Datagram send with completion on the internal `ioQueue`.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         ioQueue.async { [weak self] in
-            let err = self?.performSend(data)
-            completion(err)
+            let error = self?.performSend(data)
+            completion(error)
         }
     }
 
@@ -280,12 +280,12 @@ nonisolated final class RawUDPSocket {
             }
         }
         if sent < 0 {
-            let err = errno
-            if err == EAGAIN || err == EWOULDBLOCK {
+            let error = errno
+            if error == EAGAIN || error == EWOULDBLOCK {
                 // Kernel TX buffer full; drop and let the upper layer retransmit.
                 return nil
             }
-            return SocketError.posixError(.send, errno: err)
+            return SocketError.posixError(.send, errno: error)
         }
         return nil
     }

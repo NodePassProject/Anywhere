@@ -237,12 +237,12 @@ nonisolated class ProxyClient {
                 let nextHop = chain[i + 1]
                 let downstreamCmd = commands[i + 1]
                 // Config-aware: a VLESS hop over XHTTP-h3 rides QUIC, so it needs .udp from below.
-                guard let req = nextHop.upstreamCommand(for: downstreamCmd) else {
+                guard let request = nextHop.upstreamCommand(for: downstreamCmd) else {
                     return .failure(ProxyError.protocolError(
                         "Chain hop \(nextHop.outboundProtocol.name) doesn't support \(downstreamCmd) downstream — needed by the hop above it"
                     ))
                 }
-                commands[i] = req
+                commands[i] = request
             }
         }
         return .success(commands)
@@ -1517,7 +1517,7 @@ nonisolated class ProxyClient {
             let client = TLSClient(configuration: h2TLS)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let conn): bringUp(TransportClosures(tls: conn), retaining: client)
+                case .success(let connection): bringUp(TransportClosures(tls: connection), retaining: client)
                 case .failure(let error): completion(.failure(error))
                 }
             }
@@ -1525,7 +1525,7 @@ nonisolated class ProxyClient {
             let client = RealityClient(configuration: realityConfig)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let conn): bringUp(TransportClosures(tls: conn), retaining: client)
+                case .success(let connection): bringUp(TransportClosures(tls: connection), retaining: client)
                 case .failure(let error): completion(.failure(error))
                 }
             }
@@ -1674,19 +1674,19 @@ nonisolated class ProxyClient {
             let key = "h1up|\(host)|\(port)|\(serverName)"
             let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: uploadXMUX) {
                 { connectionCompletion in
-                    ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec) { conn in
-                        connectionCompletion(conn)
+                    ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec) { connection in
+                        connectionCompletion(connection)
                     }
                 }
             }
             return { completion in
                 manager.acquire { lease in
-                    guard let lease, let conn = lease.connection as? XHTTPH1Multiplexer else {
+                    guard let lease, let connection = lease.connection as? XHTTPH1Multiplexer else {
                         completion(.failure(ProxyError.connectionFailed("xmux H1 upload acquisition failed")))
                         return
                     }
-                    conn.lease = lease
-                    completion(.success(conn.sessionClosures))
+                    connection.lease = lease
+                    completion(.success(connection.sessionClosures))
                 }
             }
         }
@@ -1724,9 +1724,9 @@ nonisolated class ProxyClient {
         completion: @escaping (XHTTPH1Multiplexer?) -> Void
     ) {
         func wrap(_ closures: TransportClosures, retaining object: AnyObject?) {
-            let conn = XHTTPH1Multiplexer(transport: closures)
-            if let object { conn.retain(object) }
-            completion(conn)
+            let connection = XHTTPH1Multiplexer(transport: closures)
+            if let object { connection.retain(object) }
+            completion(connection)
         }
         switch security {
         case .none:
@@ -1743,7 +1743,7 @@ nonisolated class ProxyClient {
             let client = TLSClient(configuration: h1TLS)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let conn): wrap(TransportClosures(tls: conn), retaining: client)
+                case .success(let connection): wrap(TransportClosures(tls: connection), retaining: client)
                 case .failure: completion(nil)
                 }
             }
@@ -1751,7 +1751,7 @@ nonisolated class ProxyClient {
             let client = RealityClient(configuration: realityConfig)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let conn): wrap(TransportClosures(tls: conn), retaining: client)
+                case .success(let connection): wrap(TransportClosures(tls: connection), retaining: client)
                 case .failure: completion(nil)
                 }
             }

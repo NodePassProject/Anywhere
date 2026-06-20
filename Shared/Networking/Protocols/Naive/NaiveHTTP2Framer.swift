@@ -21,8 +21,8 @@ enum NaiveHTTP2Error: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notReady: return "HTTP/2 connection not ready"
-        case .connectionFailed(let msg): return "HTTP/2 connection failed: \(msg)"
-        case .protocolError(let msg): return "HTTP/2 protocol error: \(msg)"
+        case .connectionFailed(let message): return "HTTP/2 connection failed: \(message)"
+        case .protocolError(let message): return "HTTP/2 protocol error: \(message)"
         case .tunnelFailed(let code): return "HTTP/2 CONNECT tunnel failed with status \(code)"
         case .authenticationRequired: return "HTTP/2 proxy authentication required (407)"
         case .goaway: return "HTTP/2 GOAWAY received"

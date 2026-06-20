@@ -69,13 +69,13 @@ final class MITMRequestLog {
     /// Queues bytes behind the newest in-flight record; no-op when the queue is empty (caller emits immediately).
     func attachSynthAfterLastHTTP1(_ bytes: Data) {
         guard !http1Queue.isEmpty else { return }
-        let idx = http1Queue.count - 1
-        let projected = http1Queue[idx].synthAfter.count + bytes.count
+        let index = http1Queue.count - 1
+        let projected = http1Queue[index].synthAfter.count + bytes.count
         if projected > Self.maxSynthAfterBytes {
             logger.warning("synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
             return
         }
-        http1Queue[idx].synthAfter.append(bytes)
+        http1Queue[index].synthAfter.append(bytes)
     }
 
     // MARK: - HTTP/2

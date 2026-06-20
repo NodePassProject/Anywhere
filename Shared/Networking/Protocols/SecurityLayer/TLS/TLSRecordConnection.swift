@@ -376,8 +376,8 @@ nonisolated class TLSRecordConnection {
             var contentType: UInt8 = 0
             var recordLen: UInt16 = 0
 
-            receiveBuffer.withUnsafeBytes { ptr in
-                let p = ptr.bindMemory(to: UInt8.self)
+            receiveBuffer.withUnsafeBytes { pointer in
+                let p = pointer.bindMemory(to: UInt8.self)
                 contentType = p[consumed]
                 recordLen = UInt16(p[consumed + 3]) << 8 | UInt16(p[consumed + 4])
             }
@@ -575,8 +575,8 @@ nonisolated class TLSRecordConnection {
 
     @inline(__always)
     func xorSeqIntoNonce(_ nonce: inout Data, seqNum: UInt64) {
-        nonce.withUnsafeMutableBytes { ptr in
-            let p = ptr.bindMemory(to: UInt8.self)
+        nonce.withUnsafeMutableBytes { pointer in
+            let p = pointer.bindMemory(to: UInt8.self)
             let base = p.count - 8
             for i in 0..<8 {
                 p[base + i] ^= UInt8((seqNum >> ((7 - i) * 8)) & 0xFF)

@@ -320,10 +320,10 @@ extension GRPCConnection {
     /// Builds an HTTP/2 frame per RFC 7540 §4.1.
     fileprivate func buildH2Frame(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) -> Data {
         var frame = Data(capacity: Self.h2FrameHeaderSize + payload.count)
-        let len = UInt32(payload.count)
-        frame.append(UInt8((len >> 16) & 0xFF))
-        frame.append(UInt8((len >> 8) & 0xFF))
-        frame.append(UInt8(len & 0xFF))
+        let length = UInt32(payload.count)
+        frame.append(UInt8((length >> 16) & 0xFF))
+        frame.append(UInt8((length >> 8) & 0xFF))
+        frame.append(UInt8(length & 0xFF))
         frame.append(type)
         frame.append(flags)
         let sid = streamId & 0x7FFFFFFF
@@ -666,11 +666,11 @@ extension GRPCConnection {
     fileprivate static func wrapGRPCMessage(_ message: Data) -> Data {
         var out = Data(capacity: 5 + message.count)
         out.append(0x00)
-        let len = UInt32(message.count)
-        out.append(UInt8((len >> 24) & 0xFF))
-        out.append(UInt8((len >> 16) & 0xFF))
-        out.append(UInt8((len >> 8) & 0xFF))
-        out.append(UInt8(len & 0xFF))
+        let length = UInt32(message.count)
+        out.append(UInt8((length >> 24) & 0xFF))
+        out.append(UInt8((length >> 16) & 0xFF))
+        out.append(UInt8((length >> 8) & 0xFF))
+        out.append(UInt8(length & 0xFF))
         out.append(message)
         return out
     }
@@ -1318,13 +1318,13 @@ extension GRPCConnection {
         let bytesStart = start + lenConsumed
         guard bytesStart + length <= data.endIndex else { return nil }
         let bytes = data.subdata(in: bytesStart ..< bytesStart + length)
-        let str: String
+        let string: String
         if isHuffman {
-            str = huffmanDecode(bytes) ?? ""
+            string = huffmanDecode(bytes) ?? ""
         } else {
-            str = String(data: bytes, encoding: .utf8) ?? ""
+            string = String(data: bytes, encoding: .utf8) ?? ""
         }
-        return (str, lenConsumed + length)
+        return (string, lenConsumed + length)
     }
 
     /// Static-table entry (RFC 7541 App. A); only entries expected in gRPC headers are returned.

@@ -48,10 +48,10 @@ enum TLSClientHelloParser {
 
     /// Parses a handshake fragment without the outer 5-byte record header.
     static func parseHandshakeBody(_ body: Data) throws -> TLSClientHelloParsed {
-        var cur = Cursor(body)
-        guard let msgType = cur.readU8() else { throw TLSClientHelloParserError.truncated }
+        var current = Cursor(body)
+        guard let msgType = current.readU8() else { throw TLSClientHelloParserError.truncated }
         guard msgType == TLSHandshakeType.clientHello else { throw TLSClientHelloParserError.notClientHello }
-        guard let bodyLen = cur.readU24(), let chBody = cur.readBytes(bodyLen) else {
+        guard let bodyLen = current.readU24(), let chBody = current.readBytes(bodyLen) else {
             throw TLSClientHelloParserError.truncated
         }
 
@@ -63,13 +63,13 @@ enum TLSClientHelloParser {
     // MARK: - Internals
 
     private static func parseClientHello(_ body: Data, handshakeMessage: Data) throws -> TLSClientHelloParsed {
-        var cur = Cursor(body)
-        guard let legacyVersion = cur.readU16() else { throw TLSClientHelloParserError.truncated }
-        guard let random = cur.readBytes(32) else { throw TLSClientHelloParserError.truncated }
-        guard let sidLen = cur.readU8(), sidLen <= 32, let sessionID = cur.readBytes(Int(sidLen)) else {
+        var current = Cursor(body)
+        guard let legacyVersion = current.readU16() else { throw TLSClientHelloParserError.truncated }
+        guard let random = current.readBytes(32) else { throw TLSClientHelloParserError.truncated }
+        guard let sidLen = current.readU8(), sidLen <= 32, let sessionID = current.readBytes(Int(sidLen)) else {
             throw TLSClientHelloParserError.truncated
         }
-        guard let csLen = cur.readU16(), let csData = cur.readBytes(csLen) else {
+        guard let csLen = current.readU16(), let csData = current.readBytes(csLen) else {
             throw TLSClientHelloParserError.truncated
         }
         var cipherSuites: [UInt16] = []
@@ -77,7 +77,7 @@ enum TLSClientHelloParser {
         var csCur = Cursor(csData)
         while let cs = csCur.readU16() { cipherSuites.append(UInt16(cs)) }
 
-        guard let cmLen = cur.readU8(), let cmData = cur.readBytes(Int(cmLen)) else {
+        guard let cmLen = current.readU8(), let cmData = current.readBytes(Int(cmLen)) else {
             throw TLSClientHelloParserError.truncated
         }
         var compressionMethods: [UInt8] = []
@@ -85,7 +85,7 @@ enum TLSClientHelloParser {
         var cmCur = Cursor(cmData)
         while let m = cmCur.readU8() { compressionMethods.append(m) }
 
-        guard let extLen = cur.readU16(), let extensions = cur.readBytes(extLen) else {
+        guard let extLen = current.readU16(), let extensions = current.readBytes(extLen) else {
             throw TLSClientHelloParserError.truncated
         }
 
@@ -126,11 +126,11 @@ enum TLSClientHelloParser {
     private static func parseExtensions(_ buf: Data) throws -> ParsedExtensions {
         var result = ParsedExtensions()
         var observedExtensionTypes = Set<UInt16>()
-        var cur = Cursor(buf)
-        while !cur.isAtEnd {
-            guard let extType = cur.readU16(),
-                  let extLen = cur.readU16(),
-                  let extData = cur.readBytes(extLen) else {
+        var current = Cursor(buf)
+        while !current.isAtEnd {
+            guard let extType = current.readU16(),
+                  let extLen = current.readU16(),
+                  let extData = current.readBytes(extLen) else {
                 throw TLSClientHelloParserError.truncated
             }
             let (inserted, _) = observedExtensionTypes.insert(UInt16(extType))
@@ -162,8 +162,8 @@ enum TLSClientHelloParser {
     }
 
     private static func parseServerName(_ buf: Data) -> String? {
-        var cur = Cursor(buf)
-        guard let listLen = cur.readU16(), let list = cur.readBytes(listLen) else { return nil }
+        var current = Cursor(buf)
+        guard let listLen = current.readU16(), let list = current.readBytes(listLen) else { return nil }
         var lc = Cursor(list)
         while !lc.isAtEnd {
             guard let nameType = lc.readU8(),
@@ -177,9 +177,9 @@ enum TLSClientHelloParser {
     }
 
     private static func parseSupportedVersionsClient(_ buf: Data) -> [UInt16] {
-        var cur = Cursor(buf)
-        guard let listLen = cur.readU8() else { return [] }
-        guard let list = cur.readBytes(Int(listLen)) else { return [] }
+        var current = Cursor(buf)
+        guard let listLen = current.readU8() else { return [] }
+        guard let list = current.readBytes(Int(listLen)) else { return [] }
         var versions: [UInt16] = []
         var lc = Cursor(list)
         while let v = lc.readU16() { versions.append(UInt16(v)) }
@@ -187,8 +187,8 @@ enum TLSClientHelloParser {
     }
 
     private static func parseUInt16List(_ buf: Data) -> [UInt16] {
-        var cur = Cursor(buf)
-        guard let listLen = cur.readU16(), let list = cur.readBytes(listLen) else { return [] }
+        var current = Cursor(buf)
+        guard let listLen = current.readU16(), let list = current.readBytes(listLen) else { return [] }
         var values: [UInt16] = []
         var lc = Cursor(list)
         while let v = lc.readU16() { values.append(UInt16(v)) }
@@ -196,8 +196,8 @@ enum TLSClientHelloParser {
     }
 
     private static func parseALPN(_ buf: Data) -> [String] {
-        var cur = Cursor(buf)
-        guard let listLen = cur.readU16(), let list = cur.readBytes(listLen) else { return [] }
+        var current = Cursor(buf)
+        guard let listLen = current.readU16(), let list = current.readBytes(listLen) else { return [] }
         var protocols: [String] = []
         var lc = Cursor(list)
         while !lc.isAtEnd {
@@ -209,8 +209,8 @@ enum TLSClientHelloParser {
 
     private static func parseKeyShares(_ buf: Data) -> [UInt16: Data] {
         var result: [UInt16: Data] = [:]
-        var cur = Cursor(buf)
-        guard let listLen = cur.readU16(), let list = cur.readBytes(listLen) else { return [:] }
+        var current = Cursor(buf)
+        guard let listLen = current.readU16(), let list = current.readBytes(listLen) else { return [:] }
         var lc = Cursor(list)
         while !lc.isAtEnd {
             guard let group = lc.readU16(),

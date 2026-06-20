@@ -233,8 +233,8 @@ enum X509Builder {
             return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
         }
         var byte: UInt8 = 0
-        for pos in positions {
-            byte |= UInt8(0x80 >> pos)
+        for position in positions {
+            byte |= UInt8(0x80 >> position)
         }
         let unused = UInt8(7 - highest)
         let bitString = ASN1.bitString(unusedBits: unused, content: Data([byte]))

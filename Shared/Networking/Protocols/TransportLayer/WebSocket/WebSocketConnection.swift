@@ -129,10 +129,10 @@ nonisolated class WebSocketConnection {
                     return nil
                 }
 
-                let hdr = Data(self.receiveBuffer[self.receiveBuffer.startIndex..<range.lowerBound])
+                let header = Data(self.receiveBuffer[self.receiveBuffer.startIndex..<range.lowerBound])
                 let leftover = self.receiveBuffer[range.upperBound...]
                 self.receiveBuffer = Data(leftover)
-                return hdr
+                return header
             }
 
             guard let headerData else {
@@ -255,8 +255,8 @@ nonisolated class WebSocketConnection {
         // XOR-masked payload — append then mask in-place to avoid a temporary copy
         let maskOffset = frame.count
         frame.append(payload)
-        frame.withUnsafeMutableBytes { ptr in
-            guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+        frame.withUnsafeMutableBytes { pointer in
+            guard let base = pointer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
             for i in 0..<length {
                 base[maskOffset + i] ^= maskKey[i & 3]
             }

@@ -773,15 +773,15 @@ class TCPConnection {
         )
         client.connect(to: host, port: port, initialData: nil) { [weak self] result in
             guard let self else {
-                if case .success(let conn) = result { conn.cancel() }
+                if case .success(let connection) = result { connection.cancel() }
                 client.cancel()
                 completion(.failure(SocketError.notConnected))
                 return
             }
             self.lwipQueue.async {
                 switch result {
-                case .success(let conn):
-                    completion(.success(MITMDialResult(connection: conn, proxyClient: client)))
+                case .success(let connection):
+                    completion(.success(MITMDialResult(connection: connection, proxyClient: client)))
                 case .failure(let error):
                     // onTeardown reports the failure; don't double-report.
                     completion(.failure(error))
@@ -846,9 +846,9 @@ class TCPConnection {
                 guard sndbuf > 0 else { break }
             }
             let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
-            let err = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
-            if err != 0 {
-                if err == -1 { break }  // ERR_MEM: transient
+            let error = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
+            if error != 0 {
+                if error == -1 { break }  // ERR_MEM: transient
                 return -1               // fatal error
             }
             offset += chunkSize
@@ -967,8 +967,8 @@ class TCPConnection {
         // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
         // length=2, level=2 (fatal), description=49 (access_denied)
         let alert: [UInt8] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31]
-        alert.withUnsafeBufferPointer { buf in
-            guard let base = buf.baseAddress else { return }
+        alert.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
             _ = feedLWIP(UnsafeRawPointer(base), count: alert.count, retryOnEmpty: true)
             lwip_bridge_tcp_output(pcb)
         }

@@ -161,7 +161,7 @@ nonisolated final class NowhereSession {
                 self.state = .ready
                 let callbacks = self.readyCallbacks
                 self.readyCallbacks.removeAll()
-                for cb in callbacks { cb(nil) }
+                for callback in callbacks { callback(nil) }
             }
         }
     }
@@ -177,8 +177,8 @@ nonisolated final class NowhereSession {
             return
         }
 
-        if let conn = tcpStreams[sid] {
-            conn.handleStreamData(data, fin: fin)
+        if let connection = tcpStreams[sid] {
+            connection.handleStreamData(data, fin: fin)
             return
         }
 
@@ -195,18 +195,18 @@ nonisolated final class NowhereSession {
             }
             return
         }
-        guard let conn = tcpStreams.removeValue(forKey: sid) else { return }
+        guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
         _poolLock.lock()
         _poolTCPCount = max(0, _poolTCPCount - 1)
         _poolLock.unlock()
         updateIdleCloseTimer()
-        conn.handleStreamTermination(error: error)
+        connection.handleStreamTermination(error: error)
     }
 
     private func handleDatagram(_ data: Data) {
-        guard let msg = NowhereProtocol.decodeUDPDatagram(data, protocolSpec: configuration.protocolSpec),
-              msg.type == NowhereProtocol.UDPType.response.rawValue else { return }
-        udpSessions[msg.flowID]?.handleIncomingDatagram(msg.payload)
+        guard let message = NowhereProtocol.decodeUDPDatagram(data, protocolSpec: configuration.protocolSpec),
+              message.type == NowhereProtocol.UDPType.response.rawValue else { return }
+        udpSessions[message.flowID]?.handleIncomingDatagram(message.payload)
     }
 
     func openTCPStream(for conn: NowhereConnection, completion: @escaping (Int64?, Error?) -> Void) {
@@ -372,7 +372,7 @@ nonisolated final class NowhereSession {
 
             let callbacks = self.readyCallbacks
             self.readyCallbacks.removeAll()
-            for cb in callbacks { cb(error) }
+            for callback in callbacks { callback(error) }
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()

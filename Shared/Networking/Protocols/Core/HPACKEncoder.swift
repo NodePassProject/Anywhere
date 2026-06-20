@@ -528,24 +528,24 @@ enum HPACKHuffman {
         var nodes = [Node()]
         for (sym, entry) in huffmanTable.enumerated() {
             let (code, bits) = entry
-            var idx = 0
+            var index = 0
             for bitPos in 0..<Int(bits) {
                 let bit = (code >> (31 - UInt32(bitPos))) & 1
                 if bit == 0 {
-                    if nodes[idx].left < 0 {
+                    if nodes[index].left < 0 {
                         nodes.append(Node())
-                        nodes[idx].left = Int32(nodes.count - 1)
+                        nodes[index].left = Int32(nodes.count - 1)
                     }
-                    idx = Int(nodes[idx].left)
+                    index = Int(nodes[index].left)
                 } else {
-                    if nodes[idx].right < 0 {
+                    if nodes[index].right < 0 {
                         nodes.append(Node())
-                        nodes[idx].right = Int32(nodes.count - 1)
+                        nodes[index].right = Int32(nodes.count - 1)
                     }
-                    idx = Int(nodes[idx].right)
+                    index = Int(nodes[index].right)
                 }
             }
-            nodes[idx].symbol = Int16(sym)
+            nodes[index].symbol = Int16(sym)
         }
         return nodes
     }()
@@ -743,7 +743,7 @@ enum HTTP2FrameWire {
     /// Trailing debug data is ignored.
     static func parseGoaway(_ payload: Data) -> (lastStreamID: UInt32, errorCode: UInt32)? {
         guard let last = readUInt32(payload, offset: 0),
-              let err = readUInt32(payload, offset: 4) else { return nil }
-        return (last & 0x7FFF_FFFF, err)
+              let error = readUInt32(payload, offset: 4) else { return nil }
+        return (last & 0x7FFF_FFFF, error)
     }
 }

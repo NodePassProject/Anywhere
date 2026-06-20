@@ -90,9 +90,9 @@ nonisolated final class NowhereConnection: ProxyConnection {
                 }
                 guard self.state == .handshaking else { return }
                 self.state = .ready
-                if let cb = self.openCompletion {
+                if let callback = self.openCompletion {
                     self.openCompletion = nil
-                    cb(nil)
+                    callback(nil)
                 }
                 self.deliverBufferedOrEOF(eof: self.readClosed)
             }
@@ -101,14 +101,14 @@ nonisolated final class NowhereConnection: ProxyConnection {
 
     func handleStreamData(_ data: Data, fin: Bool) {
         if state == .ready, receiveBuffer.isEmpty, !data.isEmpty,
-           let cb = pendingReceive {
+           let callback = pendingReceive {
             pendingReceive = nil
             let ackCount = pendingQuicBytes + data.count
             pendingQuicBytes = 0
             let out = Data(data)
             if fin { readClosed = true }
             session.extendStreamOffset(streamID, count: ackCount)
-            cb(out, nil)
+            callback(out, nil)
             return
         }
 
@@ -123,19 +123,19 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 
     private func deliverBufferedOrEOF(eof: Bool) {
-        if let cb = pendingReceive, !receiveBuffer.isEmpty {
+        if let callback = pendingReceive, !receiveBuffer.isEmpty {
             pendingReceive = nil
             let out = receiveBuffer
             receiveBuffer = Data()
             let ackCount = takePendingQuicBytes()
             session.extendStreamOffset(streamID, count: ackCount)
-            cb(out, nil)
+            callback(out, nil)
             return
         }
 
-        if eof, let cb = pendingReceive {
+        if eof, let callback = pendingReceive {
             pendingReceive = nil
-            cb(nil, nil)
+            callback(nil, nil)
         }
     }
 
@@ -165,9 +165,9 @@ nonisolated final class NowhereConnection: ProxyConnection {
         }
         readClosed = true
         state = .closed
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
-            cb(nil, nil)
+            callback(nil, nil)
         }
     }
 
@@ -175,13 +175,13 @@ nonisolated final class NowhereConnection: ProxyConnection {
         guard state != .closed else { return }
         state = .closed
 
-        if let cb = openCompletion {
+        if let callback = openCompletion {
             openCompletion = nil
-            cb(error)
+            callback(error)
         }
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
-            cb(nil, error)
+            callback(nil, error)
         }
     }
 
@@ -234,9 +234,9 @@ nonisolated final class NowhereConnection: ProxyConnection {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)
             }
-            if let cb = self.pendingReceive {
+            if let callback = self.pendingReceive {
                 self.pendingReceive = nil
-                cb(nil, NowhereError.streamClosed)
+                callback(nil, NowhereError.streamClosed)
             }
         }
     }

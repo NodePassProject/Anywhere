@@ -107,10 +107,10 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         // zero-byte datagram would close the flow.
         guard let payload = assembled, !payload.isEmpty else { return }
 
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
             // Hop so the completion never fires from ngtcp2's recv_datagram call stack.
-            session.queue.async { cb(payload, nil) }
+            session.queue.async { callback(payload, nil) }
             return
         }
         if packetQueue.count >= Self.maxQueuedPackets {
@@ -275,9 +275,9 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
                 return
             }
             // Surface any error stashed by a teardown between calls.
-            if let err = self.closureError {
+            if let error = self.closureError {
                 self.closureError = nil
-                completion(nil, err)
+                completion(nil, error)
                 return
             }
             // No buffered data, no stashed error, already closed → EOF.
@@ -299,11 +299,11 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
             guard let self, self.state != .closed else { return }
             self.state = .closed
             self.session.releaseUDPSession(self.sessionID)
-            let cb = self.pendingReceive
+            let callback = self.pendingReceive
             self.pendingReceive = nil
             self.packetQueue.removeAll()
             self.defragSlots.removeAll()
-            cb?(nil, HysteriaError.streamClosed)
+            callback?(nil, HysteriaError.streamClosed)
         }
     }
 
@@ -311,13 +311,13 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
-            let cb = self.pendingReceive
+            let callback = self.pendingReceive
             self.pendingReceive = nil
             // No pending receive: stash so the next `receiveRaw` surfaces it.
-            if cb == nil {
+            if callback == nil {
                 self.closureError = error
             }
-            cb?(nil, error)
+            callback?(nil, error)
         }
     }
 

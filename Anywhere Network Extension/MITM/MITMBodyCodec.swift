@@ -269,29 +269,29 @@ enum MITMBodyCodec {
             return .failure(.badMagic(b0, b1, b2))
         }
         let flags = data[data.index(offset, offsetBy: 3)]
-        var idx = data.index(offset, offsetBy: 10)
+        var index = data.index(offset, offsetBy: 10)
         if flags & 0x04 != 0 { // FEXTRA
-            guard data.distance(from: idx, to: end) >= 2 else { return .failure(.truncatedHeaderField("FEXTRA")) }
-            let xlen = Int(data[idx]) | (Int(data[data.index(idx, offsetBy: 1)]) << 8)
+            guard data.distance(from: index, to: end) >= 2 else { return .failure(.truncatedHeaderField("FEXTRA")) }
+            let xlen = Int(data[index]) | (Int(data[data.index(index, offsetBy: 1)]) << 8)
             // Distance-check first: index(_:offsetBy:) past end can trap.
-            guard data.distance(from: idx, to: end) >= 2 + xlen else { return .failure(.truncatedHeaderField("FEXTRA")) }
-            idx = data.index(idx, offsetBy: 2 + xlen)
+            guard data.distance(from: index, to: end) >= 2 + xlen else { return .failure(.truncatedHeaderField("FEXTRA")) }
+            index = data.index(index, offsetBy: 2 + xlen)
         }
         if flags & 0x08 != 0 { // FNAME (NUL-terminated)
-            while idx < end, data[idx] != 0 { idx = data.index(after: idx) }
-            guard idx < end else { return .failure(.truncatedHeaderField("FNAME")) }
-            idx = data.index(after: idx)
+            while index < end, data[index] != 0 { index = data.index(after: index) }
+            guard index < end else { return .failure(.truncatedHeaderField("FNAME")) }
+            index = data.index(after: index)
         }
         if flags & 0x10 != 0 { // FCOMMENT (NUL-terminated)
-            while idx < end, data[idx] != 0 { idx = data.index(after: idx) }
-            guard idx < end else { return .failure(.truncatedHeaderField("FCOMMENT")) }
-            idx = data.index(after: idx)
+            while index < end, data[index] != 0 { index = data.index(after: index) }
+            guard index < end else { return .failure(.truncatedHeaderField("FCOMMENT")) }
+            index = data.index(after: index)
         }
         if flags & 0x02 != 0 { // FHCRC
-            guard data.distance(from: idx, to: end) >= 2 else { return .failure(.truncatedHeaderField("FHCRC")) }
-            idx = data.index(idx, offsetBy: 2)
+            guard data.distance(from: index, to: end) >= 2 else { return .failure(.truncatedHeaderField("FHCRC")) }
+            index = data.index(index, offsetBy: 2)
         }
-        let deflateInput = data.subdata(in: idx..<end)
+        let deflateInput = data.subdata(in: index..<end)
         let decoded: Data
         let deflateConsumed: Int
         switch streamDecodeMember(deflateInput, algorithm: COMPRESSION_ZLIB, budgetUsed: producedSoFar) {
@@ -303,7 +303,7 @@ enum MITMBodyCodec {
         case .capExceeded:
             return .capExceeded
         }
-        let trailerStart = data.index(idx, offsetBy: deflateConsumed)
+        let trailerStart = data.index(index, offsetBy: deflateConsumed)
         let trailerAvailable = data.distance(from: trailerStart, to: end)
         // <8 trailer bytes: trailer truncated or swallowed by the raw-deflate
         // decoder (its consumed count can run into it). The payload is whole — accept.
@@ -506,8 +506,8 @@ enum MITMBodyCodec {
     private static func crc32(_ data: Data) -> UInt32 {
         var crc: UInt32 = 0xFFFF_FFFF
         for byte in data {
-            let idx = Int((crc ^ UInt32(byte)) & 0xFF)
-            crc = crc32Table[idx] ^ (crc >> 8)
+            let index = Int((crc ^ UInt32(byte)) & 0xFF)
+            crc = crc32Table[index] ^ (crc >> 8)
         }
         return crc ^ 0xFFFF_FFFF
     }

@@ -18,10 +18,10 @@ enum QUICCrypto {
 
 // MARK: - AEAD Encrypt Callback
 
-/// Writes ciphertext + 16-byte tag to `dest`. Inputs are non-owning `bytesNoCopy` views
+/// Writes ciphertext + 16-byte tag to `destination`. Inputs are non-owning `bytesNoCopy` views
 /// into ngtcp2's memory — safe because the callback is synchronous.
 private let aeadEncrypt: @convention(c) (
-    UnsafeMutablePointer<UInt8>?,    // dest
+    UnsafeMutablePointer<UInt8>?,    // destination
     UnsafePointer<UInt8>?,           // key
     Int,                              // keylen
     UnsafePointer<UInt8>?,           // nonce
@@ -31,8 +31,8 @@ private let aeadEncrypt: @convention(c) (
     UnsafePointer<UInt8>?,           // aad
     Int,                              // aadlen
     Int32                             // aead_type
-) -> Int32 = { dest, key, keylen, nonce, noncelen, plaintext, plaintextlen, aad, aadlen, aeadType in
-    guard let dest, let key, let nonce else { return -1 }
+) -> Int32 = { destination, key, keylen, nonce, noncelen, plaintext, plaintextlen, aad, aadlen, aeadType in
+    guard let destination, let key, let nonce else { return -1 }
 
     let symmetricKey = SymmetricKey(data: UnsafeBufferPointer(start: key, count: keylen))
     let nonceData = Data(
@@ -55,14 +55,14 @@ private let aeadEncrypt: @convention(c) (
             let sealed = try AES.GCM.seal(ptData, using: symmetricKey, nonce: gcmNonce,
                                           authenticating: aadData)
             let ctLen = sealed.ciphertext.count
-            sealed.ciphertext.withUnsafeBytes { buf in
-                if let base = buf.baseAddress, ctLen > 0 {
-                    memcpy(dest, base, ctLen)
+            sealed.ciphertext.withUnsafeBytes { buffer in
+                if let base = buffer.baseAddress, ctLen > 0 {
+                    memcpy(destination, base, ctLen)
                 }
             }
-            sealed.tag.withUnsafeBytes { buf in
-                if let base = buf.baseAddress {
-                    memcpy(dest.advanced(by: ctLen), base, buf.count)
+            sealed.tag.withUnsafeBytes { buffer in
+                if let base = buffer.baseAddress {
+                    memcpy(destination.advanced(by: ctLen), base, buffer.count)
                 }
             }
             return 0
@@ -72,14 +72,14 @@ private let aeadEncrypt: @convention(c) (
             let sealed = try ChaChaPoly.seal(ptData, using: symmetricKey, nonce: ccNonce,
                                             authenticating: aadData)
             let ctLen = sealed.ciphertext.count
-            sealed.ciphertext.withUnsafeBytes { buf in
-                if let base = buf.baseAddress, ctLen > 0 {
-                    memcpy(dest, base, ctLen)
+            sealed.ciphertext.withUnsafeBytes { buffer in
+                if let base = buffer.baseAddress, ctLen > 0 {
+                    memcpy(destination, base, ctLen)
                 }
             }
-            sealed.tag.withUnsafeBytes { buf in
-                if let base = buf.baseAddress {
-                    memcpy(dest.advanced(by: ctLen), base, buf.count)
+            sealed.tag.withUnsafeBytes { buffer in
+                if let base = buffer.baseAddress {
+                    memcpy(destination.advanced(by: ctLen), base, buffer.count)
                 }
             }
             return 0
@@ -94,9 +94,9 @@ private let aeadEncrypt: @convention(c) (
 
 // MARK: - AEAD Decrypt Callback
 
-/// Expects ciphertext + 16-byte tag, writes plaintext to `dest`.
+/// Expects ciphertext + 16-byte tag, writes plaintext to `destination`.
 private let aeadDecrypt: @convention(c) (
-    UnsafeMutablePointer<UInt8>?,    // dest
+    UnsafeMutablePointer<UInt8>?,    // destination
     UnsafePointer<UInt8>?,           // key
     Int,                              // keylen
     UnsafePointer<UInt8>?,           // nonce
@@ -106,8 +106,8 @@ private let aeadDecrypt: @convention(c) (
     UnsafePointer<UInt8>?,           // aad
     Int,                              // aadlen
     Int32                             // aead_type
-) -> Int32 = { dest, key, keylen, nonce, noncelen, ciphertext, ciphertextlen, aad, aadlen, aeadType in
-    guard let dest, let key, let nonce, let ciphertext else { return -1 }
+) -> Int32 = { destination, key, keylen, nonce, noncelen, ciphertext, ciphertextlen, aad, aadlen, aeadType in
+    guard let destination, let key, let nonce, let ciphertext else { return -1 }
 
     let tagLen = 16
     guard ciphertextlen >= tagLen else { return -1 }
@@ -138,9 +138,9 @@ private let aeadDecrypt: @convention(c) (
             let sealedBox = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ctData, tag: tagData)
             let plaintext = try AES.GCM.open(sealedBox, using: symmetricKey,
                                              authenticating: aadData)
-            plaintext.withUnsafeBytes { buf in
-                if let base = buf.baseAddress, buf.count > 0 {
-                    memcpy(dest, base, buf.count)
+            plaintext.withUnsafeBytes { buffer in
+                if let base = buffer.baseAddress, buffer.count > 0 {
+                    memcpy(destination, base, buffer.count)
                 }
             }
             return 0
@@ -150,9 +150,9 @@ private let aeadDecrypt: @convention(c) (
             let sealedBox = try ChaChaPoly.SealedBox(nonce: ccNonce, ciphertext: ctData, tag: tagData)
             let plaintext = try ChaChaPoly.open(sealedBox, using: symmetricKey,
                                                authenticating: aadData)
-            plaintext.withUnsafeBytes { buf in
-                if let base = buf.baseAddress, buf.count > 0 {
-                    memcpy(dest, base, buf.count)
+            plaintext.withUnsafeBytes { buffer in
+                if let base = buffer.baseAddress, buffer.count > 0 {
+                    memcpy(destination, base, buffer.count)
                 }
             }
             return 0

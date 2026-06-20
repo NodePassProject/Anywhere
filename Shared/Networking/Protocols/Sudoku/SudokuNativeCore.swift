@@ -368,7 +368,7 @@ private struct SudokuLayout {
     static func ascii() -> SudokuLayout {
         var padding = [UInt8](); for i in 0..<32 { padding.append(UInt8(0x20 + i)) }
         var encodeHint = Array(repeating: Array(repeating: UInt8(0), count: 16), count: 4)
-        for val in 0..<4 { for pos in 0..<16 { var b = UInt8(0x40 | (val << 4) | pos); if b == 0x7f { b = 0x0a }; encodeHint[val][pos] = b } }
+        for value in 0..<4 { for position in 0..<16 { var b = UInt8(0x40 | (value << 4) | position); if b == 0x7f { b = 0x0a }; encodeHint[value][position] = b } }
         var hint = Array(repeating: false, count: 256), groupValid = hint
         var decode = Array(repeating: UInt8(0), count: 256)
         for i in 0..<256 {
@@ -382,7 +382,7 @@ private struct SudokuLayout {
     static func entropy() -> SudokuLayout {
         var padding = [UInt8](); for i in 0..<8 { padding.append(UInt8(0x80 + i)); padding.append(UInt8(0x10 + i)) }
         var encodeHint = Array(repeating: Array(repeating: UInt8(0), count: 16), count: 4)
-        for val in 0..<4 { for pos in 0..<16 { encodeHint[val][pos] = UInt8((val << 5) | pos) } }
+        for value in 0..<4 { for position in 0..<16 { encodeHint[value][position] = UInt8((value << 5) | position) } }
         var hint = Array(repeating: false, count: 256), groupValid = hint
         var decode = Array(repeating: UInt8(0), count: 256)
         for i in 0..<256 {
@@ -407,7 +407,7 @@ private struct SudokuLayout {
         }
         guard xbits.count == 2, pbits.count == 2, vbits.count == 4 else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }
         var padding = [UInt8](); var encodeHint = Array(repeating: Array(repeating: UInt8(0), count: 16), count: 4)
-        for val in 0..<4 { for pos in 0..<16 { for i in 0..<2 { var out = UInt8((1 << xbits[0]) | (1 << xbits[1])); out &= ~UInt8(1 << xbits[i]); if (val & 2) != 0 { out |= UInt8(1 << pbits[0]) }; if (val & 1) != 0 { out |= UInt8(1 << pbits[1]) }; for group in 0..<4 where ((pos >> (3 - group)) & 1) != 0 { out |= UInt8(1 << vbits[group]) }; if out.nonzeroBitCount >= 5, !padding.contains(out) { padding.append(out) } } } }
+        for value in 0..<4 { for position in 0..<16 { for i in 0..<2 { var out = UInt8((1 << xbits[0]) | (1 << xbits[1])); out &= ~UInt8(1 << xbits[i]); if (value & 2) != 0 { out |= UInt8(1 << pbits[0]) }; if (value & 1) != 0 { out |= UInt8(1 << pbits[1]) }; for group in 0..<4 where ((position >> (3 - group)) & 1) != 0 { out |= UInt8(1 << vbits[group]) }; if out.nonzeroBitCount >= 5, !padding.contains(out) { padding.append(out) } } } }
         guard !padding.isEmpty else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }
         padding.sort()
         var hint = Array(repeating: false, count: 256), groupValid = hint
@@ -422,7 +422,7 @@ private struct SudokuLayout {
             for group in 0..<4 where (wire & UInt8(1 << vbits[group])) != 0 { posOut |= UInt8(1 << (3 - group)) }
             hint[i] = true; decode[i] = (valOut << 4) | posOut; groupValid[i] = true
         }
-        for val in 0..<4 { for pos in 0..<16 { var out = xmask; if (val & 2) != 0 { out |= UInt8(1 << pbits[0]) }; if (val & 1) != 0 { out |= UInt8(1 << pbits[1]) }; for group in 0..<4 where ((pos >> (3 - group)) & 1) != 0 { out |= UInt8(1 << vbits[group]) }; encodeHint[val][pos] = out } }
+        for value in 0..<4 { for position in 0..<16 { var out = xmask; if (value & 2) != 0 { out |= UInt8(1 << pbits[0]) }; if (value & 1) != 0 { out |= UInt8(1 << pbits[1]) }; for group in 0..<4 where ((position >> (3 - group)) & 1) != 0 { out |= UInt8(1 << vbits[group]) }; encodeHint[value][position] = out } }
         return SudokuLayout(name: "custom(\(cleaned))", padMarker: padding[0], paddingPool: padding, encodeHint: encodeHint, hintTable: hint, decodeGroup: decode, groupValid: groupValid)
     }
 }
@@ -815,6 +815,6 @@ enum SudokuKeyRecovery {
     static func recoverPublicKeyHex(_ keyHex: String) -> String? { guard let raw = Data(hexString: keyHex), raw.count == 32 || raw.count == 64 else { return nil }; if raw.count == 32 { return raw.hexEncodedString() }; let scalar = scalarAdd(Array(raw.prefix(32)), Array(raw.suffix(32))); return Data(scalarBasePublic(scalar)).hexEncodedString() }
     private static func scalarAdd(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] { var out = Array(repeating: UInt8(0), count: 32); var carry = 0; for i in 0..<32 { let sum = Int(a[i]) + Int(b[i]) + carry; out[i] = UInt8(truncatingIfNeeded: sum); carry = sum >> 8 }; if carry != 0 || scalarGteL(out) { scalarSubL(&out) }; return out }
     private static func scalarGteL(_ s: [UInt8]) -> Bool { for i in stride(from: 31, through: 0, by: -1) { if s[i] > l[i] { return true }; if s[i] < l[i] { return false } }; return true }
-    private static func scalarSubL(_ s: inout [UInt8]) { var borrow = 0; for i in 0..<32 { let sub = Int(l[i]) + borrow; let cur = Int(s[i]); s[i] = UInt8(truncatingIfNeeded: cur - sub); borrow = cur < sub ? 1 : 0 } }
+    private static func scalarSubL(_ s: inout [UInt8]) { var borrow = 0; for i in 0..<32 { let sub = Int(l[i]) + borrow; let current = Int(s[i]); s[i] = UInt8(truncatingIfNeeded: current - sub); borrow = current < sub ? 1 : 0 } }
     private static func scalarBasePublic(_ scalar: [UInt8]) -> [UInt8] { var result = SudokuEdPoint.identity; let base = SudokuEdPoint.base; for bit in stride(from: 255, through: 0, by: -1) { result = result.doubled(); if ((scalar[bit >> 3] >> UInt8(bit & 7)) & 1) != 0 { result = result.adding(base) } }; let zInv = result.z.inverted(); let x = result.x * zInv; let y = result.y * zInv; var out = y.toBytes(); if x.isOdd() { out[31] |= 0x80 } else { out[31] &= 0x7f }; return out }
 }

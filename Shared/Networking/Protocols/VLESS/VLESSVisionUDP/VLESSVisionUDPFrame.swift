@@ -46,30 +46,30 @@ struct VLESSVisionUDPFrameMetadata {
 
     /// Wire bytes excluding the 2-byte metadata_length prefix.
     func encode() -> Data {
-        var buf = Data()
+        var buffer = Data()
 
-        buf.append(UInt8(sessionID >> 8))
-        buf.append(UInt8(sessionID & 0xFF))
+        buffer.append(UInt8(sessionID >> 8))
+        buffer.append(UInt8(sessionID & 0xFF))
 
-        buf.append(status.rawValue)
-        buf.append(option.rawValue)
+        buffer.append(status.rawValue)
+        buffer.append(option.rawValue)
 
         if status == .new, let network, let host = targetHost, let port = targetPort {
-            buf.append(network.rawValue)
+            buffer.append(network.rawValue)
 
             // Port precedes address (port-first wire format)
-            buf.append(UInt8(port >> 8))
-            buf.append(UInt8(port & 0xFF))
+            buffer.append(UInt8(port >> 8))
+            buffer.append(UInt8(port & 0xFF))
 
-            encodeAddress(host, into: &buf)
+            encodeAddress(host, into: &buffer)
 
             // GlobalID: 8B, UDP only
             if network == .udp, let gid = globalID, gid.count == 8 {
-                buf.append(gid)
+                buffer.append(gid)
             }
         }
 
-        return buf
+        return buffer
     }
 
     /// Returns `(metadata, bytesConsumed)`, or `nil` if insufficient data.
@@ -138,34 +138,34 @@ struct VLESSVisionUDPFrameMetadata {
         let base = data.startIndex
         guard data.count > offset else { return nil }
         guard let addrType = MuxAddressType(rawValue: data[base + offset]) else { return nil }
-        var pos = 1
+        var position = 1
 
         switch addrType {
         case .ipv4:
-            guard data.count >= offset + pos + 4 else { return nil }
-            let a = data[base + offset + pos]
-            let b = data[base + offset + pos + 1]
-            let c = data[base + offset + pos + 2]
-            let d = data[base + offset + pos + 3]
-            return ("\(a).\(b).\(c).\(d)", pos + 4)
+            guard data.count >= offset + position + 4 else { return nil }
+            let a = data[base + offset + position]
+            let b = data[base + offset + position + 1]
+            let c = data[base + offset + position + 2]
+            let d = data[base + offset + position + 3]
+            return ("\(a).\(b).\(c).\(d)", position + 4)
 
         case .domain:
-            guard data.count >= offset + pos + 1 else { return nil }
-            let domainLen = Int(data[base + offset + pos])
-            pos += 1
-            guard data.count >= offset + pos + domainLen else { return nil }
-            let domain = String(data: data[(base + offset + pos)..<(base + offset + pos + domainLen)], encoding: .utf8) ?? ""
-            return (domain, pos + domainLen)
+            guard data.count >= offset + position + 1 else { return nil }
+            let domainLen = Int(data[base + offset + position])
+            position += 1
+            guard data.count >= offset + position + domainLen else { return nil }
+            let domain = String(data: data[(base + offset + position)..<(base + offset + position + domainLen)], encoding: .utf8) ?? ""
+            return (domain, position + domainLen)
 
         case .ipv6:
-            guard data.count >= offset + pos + 16 else { return nil }
-            var addr = in6_addr()
-            withUnsafeMutableBytes(of: &addr) { ptr in
-                for i in 0..<16 { ptr[i] = data[base + offset + pos + i] }
+            guard data.count >= offset + position + 16 else { return nil }
+            var address = in6_addr()
+            withUnsafeMutableBytes(of: &address) { pointer in
+                for i in 0..<16 { pointer[i] = data[base + offset + position + i] }
             }
-            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-            inet_ntop(AF_INET6, &addr, &buf, socklen_t(buf.count))
-            return (String(cString: buf), pos + 16)
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count))
+            return (String(cString: buffer), position + 16)
         }
     }
 

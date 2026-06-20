@@ -54,10 +54,10 @@ extension ProxyClient {
                                 throw error
                             }
                         } else {
-                            let mux = try client.openMux()
-                            let stream = try mux.dialTCP(host: destinationHost, port: destinationPort)
+                            let multiplexer = try client.openMux()
+                            let stream = try multiplexer.dialTCP(host: destinationHost, port: destinationPort)
                             try ProxyClient.sendSudokuInitialData(initialData, to: stream)
-                            connection = SudokuMuxTCPProxyConnection(client: mux, stream: stream)
+                            connection = SudokuMuxTCPProxyConnection(client: multiplexer, stream: stream)
                         }
                     } else {
                         let stream = try client.openTCP(host: destinationHost, port: destinationPort)
@@ -257,11 +257,11 @@ private final class SudokuSharedMuxClient {
     }
 
     func dialTCP(host: String, port: UInt16) throws -> (SudokuMuxClient, SudokuMuxStream) {
-        let mux = try getOrCreateMux()
+        let multiplexer = try getOrCreateMux()
         do {
-            return (mux, try mux.dialTCP(host: host, port: port))
+            return (multiplexer, try multiplexer.dialTCP(host: host, port: port))
         } catch {
-            reset(mux)
+            reset(multiplexer)
             let retry = try getOrCreateMux()
             return (retry, try retry.dialTCP(host: host, port: port))
         }

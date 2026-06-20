@@ -109,7 +109,7 @@ nonisolated final class HysteriaClient {
                 outcome = .failure(error)
             }
             Self.registryLock.unlock()
-            for cb in queued { cb(outcome) }
+            for callback in queued { callback(outcome) }
         }
     }
 
@@ -232,17 +232,17 @@ nonisolated final class HysteriaClient {
                     completion(.failure(error))
                 }
             case .success(let session):
-                let conn = HysteriaConnection(session: session, destination: destination)
-                conn.open { error in
+                let connection = HysteriaConnection(session: session, destination: destination)
+                connection.open { error in
                     if let error {
-                        conn.cancel()
+                        connection.cancel()
                         if retriesLeft > 0, Self.isStaleSessionError(error), let self {
                             self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                         } else {
                             completion(.failure(error))
                         }
                     } else {
-                        completion(.success(conn))
+                        completion(.success(connection))
                     }
                 }
             }
@@ -263,17 +263,17 @@ nonisolated final class HysteriaClient {
                     completion(.failure(error))
                 }
             case .success(let session):
-                let conn = HysteriaUDPConnection(session: session, destination: destination)
-                conn.open { error in
+                let connection = HysteriaUDPConnection(session: session, destination: destination)
+                connection.open { error in
                     if let error {
-                        conn.cancel()
+                        connection.cancel()
                         if retriesLeft > 0, Self.isStaleSessionError(error), let self {
                             self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                         } else {
                             completion(.failure(error))
                         }
                     } else {
-                        completion(.success(conn))
+                        completion(.success(connection))
                     }
                 }
             }

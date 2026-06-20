@@ -78,17 +78,17 @@ extension ProxyConfiguration {
 
         let (host, port) = try parseHostPort(hostPort)
 
-        let params = parseQueryParams(queryString)
+        let parameters = parseQueryParams(queryString)
 
-        let encryption = params["encryption"] ?? "none"
-        let flow = params["flow"]
-        let security = params["security"] ?? "none"
-        let transportStr = params["type"] ?? "tcp"
+        let encryption = parameters["encryption"] ?? "none"
+        let flow = parameters["flow"]
+        let security = parameters["security"] ?? "none"
+        let transportStr = parameters["type"] ?? "tcp"
 
         let securityLayer: SecurityLayer
         if security == "reality" {
             do {
-                if let realityConfig = try RealityConfiguration.parse(from: params) {
+                if let realityConfig = try RealityConfiguration.parse(from: parameters) {
                     securityLayer = .reality(realityConfig)
                 } else {
                     securityLayer = .none
@@ -98,7 +98,7 @@ extension ProxyConfiguration {
             }
         } else if security == "tls" {
             do {
-                if let tlsConfig = try TLSConfiguration.parse(from: params, serverAddress: host) {
+                if let tlsConfig = try TLSConfiguration.parse(from: parameters, serverAddress: host) {
                     securityLayer = .tls(tlsConfig)
                 } else {
                     securityLayer = .none
@@ -110,10 +110,10 @@ extension ProxyConfiguration {
             securityLayer = .none
         }
 
-        let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
+        let transportLayer = parseTransportLayer(from: parameters, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
 
-        let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
-        let xudpEnabled = params["xudp"].map { $0 != "false" && $0 != "0" } ?? true
+        let muxEnabled = parameters["mux"].map { $0 != "false" && $0 != "0" } ?? true
+        let xudpEnabled = parameters["xudp"].map { $0 != "false" && $0 != "0" } ?? true
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
@@ -163,21 +163,21 @@ extension ProxyConfiguration {
         let password = userInfo.removingPercentEncoding ?? userInfo
 
         let (host, port) = try parseHostPort(serverPart)
-        let params = parseQueryParams(queryString)
+        let parameters = parseQueryParams(queryString)
 
-        let sni = (params["sni"]?.isEmpty == false) ? params["sni"]! : host
+        let sni = (parameters["sni"]?.isEmpty == false) ? parameters["sni"]! : host
 
         // Presence of upmbps/downmbps selects Brutal; a link without either runs BBR.
-        let rawUp = params["upmbps"].flatMap { Int($0) }
-        let rawDown = params["downmbps"].flatMap { Int($0) }
+        let rawUp = parameters["upmbps"].flatMap { Int($0) }
+        let rawDown = parameters["downmbps"].flatMap { Int($0) }
         let congestionControl: HysteriaCongestionControl = (rawUp != nil || rawDown != nil) ? .brutal : .bbr
         let uploadMbps = HysteriaCongestionControl.clampUploadMbps(rawUp ?? HysteriaCongestionControl.uploadMbpsDefault)
         let downloadMbps = HysteriaCongestionControl.clampDownloadMbps(rawDown ?? HysteriaCongestionControl.downloadMbpsDefault)
 
         // Both `mport` (Hysteria links) and `ports` (Clash) name the hop range, by source.
-        let portsSpec = (params["mport"]?.isEmpty == false) ? params["mport"]
-            : ((params["ports"]?.isEmpty == false) ? params["ports"] : nil)
-        let hopInterval = (params["hop-interval"] ?? params["hopInterval"]).flatMap { Int($0) }
+        let portsSpec = (parameters["mport"]?.isEmpty == false) ? parameters["mport"]
+            : ((parameters["ports"]?.isEmpty == false) ? parameters["ports"] : nil)
+        let hopInterval = (parameters["hop-interval"] ?? parameters["hopInterval"]).flatMap { Int($0) }
         let portHopping = HysteriaPortHopping.make(spec: portsSpec, intervalSeconds: hopInterval)
 
         return ProxyConfiguration(
@@ -229,13 +229,13 @@ extension ProxyConfiguration {
         }
 
         let (host, port) = try parseHostPort(serverPart)
-        let params = parseQueryParams(queryString)
-        let spec = params["spec"].flatMap { $0.isEmpty ? nil : $0 }
-        let sni = (params["sni"]?.isEmpty == false ? params["sni"] : nil)
-            ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
+        let parameters = parseQueryParams(queryString)
+        let spec = parameters["spec"].flatMap { $0.isEmpty ? nil : $0 }
+        let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
+            ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
             ?? host
-        let alpn = params["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
-        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let alpn = parameters["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
+        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
         let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
 
         return ProxyConfiguration(
@@ -282,21 +282,21 @@ extension ProxyConfiguration {
         let password = userInfo.removingPercentEncoding ?? userInfo
 
         let (host, port) = try parseHostPort(serverPart)
-        let params = parseQueryParams(queryString)
+        let parameters = parseQueryParams(queryString)
 
-        let sni = (params["sni"]?.isEmpty == false ? params["sni"] : nil)
-            ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
+        let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
+            ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
             ?? host
 
         var alpn: [String]? = nil
-        if let alpnString = params["alpn"], !alpnString.isEmpty {
+        if let alpnString = parameters["alpn"], !alpnString.isEmpty {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fpString = params["fp"] ?? "chrome_120"
+        let fpString = parameters["fp"] ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
-        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
         let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
 
         return ProxyConfiguration(
@@ -339,25 +339,25 @@ extension ProxyConfiguration {
         let password = userInfo.removingPercentEncoding ?? userInfo
 
         let (host, port) = try parseHostPort(serverPart)
-        let params = parseQueryParams(queryString)
+        let parameters = parseQueryParams(queryString)
 
-        let sni = (params["sni"]?.isEmpty == false ? params["sni"] : nil)
-            ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
+        let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
+            ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
             ?? host
 
         var alpn: [String]? = nil
-        if let alpnString = params["alpn"], !alpnString.isEmpty {
+        if let alpnString = parameters["alpn"], !alpnString.isEmpty {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fpString = params["fp"] ?? "chrome_120"
+        let fpString = parameters["fp"] ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
-        let ici = params["ici"].flatMap { Int($0) } ?? 30
-        let it  = params["it"].flatMap  { Int($0) } ?? 30
-        let mis = params["mis"].flatMap { Int($0) } ?? 0
+        let ici = parameters["ici"].flatMap { Int($0) } ?? 30
+        let it  = parameters["it"].flatMap  { Int($0) } ?? 30
+        let mis = parameters["mis"].flatMap { Int($0) } ?? 0
 
-        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
         let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
 
         return ProxyConfiguration(
@@ -586,16 +586,16 @@ extension ProxyConfiguration {
 
     static func parseQueryParams(_ queryString: String?) -> [String: String] {
         guard let queryString else { return [:] }
-        var params: [String: String] = [:]
-        for param in queryString.split(separator: "&") {
-            let keyValue = param.split(separator: "=", maxSplits: 1)
+        var parameters: [String: String] = [:]
+        for parameter in queryString.split(separator: "&") {
+            let keyValue = parameter.split(separator: "=", maxSplits: 1)
             if keyValue.count == 2 {
                 let key = String(keyValue[0])
                 let value = String(keyValue[1]).removingPercentEncoding ?? String(keyValue[1])
-                params[key] = value
+                parameters[key] = value
             }
         }
-        return params
+        return parameters
     }
 
     private static func parseTransportLayer(

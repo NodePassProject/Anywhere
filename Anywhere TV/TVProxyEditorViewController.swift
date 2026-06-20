@@ -991,7 +991,7 @@ class TVProxyEditorViewController: UITableViewController {
         if vlessTransport == "xhttp" {
             let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
             let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
-            var params: [String: String] = ["host": host, "path": vlessXHTTPPath, "mode": mode.rawValue]
+            var parameters: [String: String] = ["host": host, "path": vlessXHTTPPath, "mode": mode.rawValue]
             // Merge advanced fields (vlessXHTTPExtra) with the detached download source so neither clobbers the other.
             var extra: [String: Any] = [:]
             if !vlessXHTTPExtra.isEmpty, let data = vlessXHTTPExtra.data(using: .utf8),
@@ -1004,9 +1004,9 @@ class TVProxyEditorViewController: UITableViewController {
             if !extra.isEmpty,
                let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
                let json = String(data: data, encoding: .utf8) {
-                params["extra"] = json
+                parameters["extra"] = json
             }
-            vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
+            vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: parameters, serverAddress: serverAddress)
         }
 
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")

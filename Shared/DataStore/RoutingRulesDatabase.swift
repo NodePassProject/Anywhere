@@ -78,9 +78,9 @@ final class RoutingRulesDatabase {
     func loadStringDictionary(_ key: String) -> [String: String] {
         guard let json = loadMetadata(key),
               let data = json.data(using: .utf8),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+              let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
             return [:]
         }
-        return dict
+        return dictionary
     }
 }

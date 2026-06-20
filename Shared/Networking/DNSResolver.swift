@@ -241,17 +241,17 @@ nonisolated final class DNSResolver {
         var current: UnsafeMutablePointer<addrinfo>? = res
         while let info = current {
             if info.pointee.ai_family == AF_INET {
-                var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
-                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                if inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
-                    let ip = String(cString: buf)
+                var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &address.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let ip = String(cString: buffer)
                     if !ipv4.contains(ip) { ipv4.append(ip) }
                 }
             } else if info.pointee.ai_family == AF_INET6 {
-                var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
-                var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-                if inet_ntop(AF_INET6, &addr.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil {
-                    let ip = String(cString: buf)
+                var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                if inet_ntop(AF_INET6, &address.sin6_addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil {
+                    let ip = String(cString: buffer)
                     if !ipv6.contains(ip) { ipv6.append(ip) }
                 }
             }

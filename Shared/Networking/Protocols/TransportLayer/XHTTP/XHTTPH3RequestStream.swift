@@ -161,9 +161,9 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
                 let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
                 multiplexer.shutdownStream(sid, code: code)
             }
-            if let cb = onResponse {
+            if let callback = onResponse {
                 onResponse = nil
-                cb(.failure(HTTP3Error.streamClosed))
+                callback(.failure(HTTP3Error.streamClosed))
             }
             if let pending = pendingReceive {
                 pendingReceive = nil
@@ -257,12 +257,12 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         headersReceived = true
         state = .open
 
-        if let cb = onResponse {
+        if let callback = onResponse {
             onResponse = nil
             if let status {
-                cb(.success(status))
+                callback(.success(status))
             } else {
-                cb(.failure(HTTP3Error.connectionFailed("Response missing :status")))
+                callback(.failure(HTTP3Error.connectionFailed("Response missing :status")))
             }
         }
     }
@@ -291,9 +291,9 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         guard state != .closed else { return }
         streamError = error
         closeAndShutdown(code: .internalError)
-        if let cb = onResponse {
+        if let callback = onResponse {
             onResponse = nil
-            cb(.failure(error))
+            callback(.failure(error))
         }
         if let pending = pendingReceive {
             pendingReceive = nil

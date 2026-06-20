@@ -469,7 +469,7 @@ class TunnelStack {
 
     /// Converts raw IP address bytes (4 for IPv4, 16 for IPv6) to a string.
     static func ipAddrToString(_ addr: UnsafeRawPointer, isIPv6: Bool) -> String {
-        var buf = (
+        var buffer = (
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0),
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0),
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0),
@@ -477,8 +477,8 @@ class TunnelStack {
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0),
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0)
         ) // 46 bytes = INET6_ADDRSTRLEN
-        return withUnsafeMutablePointer(to: &buf) { ptr in
-            let cStr = ptr.withMemoryRebound(to: CChar.self, capacity: 46) { charPtr in
+        return withUnsafeMutablePointer(to: &buffer) { pointer in
+            let cStr = pointer.withMemoryRebound(to: CChar.self, capacity: 46) { charPtr in
                 lwip_ip_to_string(addr, isIPv6 ? 1 : 0, charPtr, 46)
             }
             if let cStr {

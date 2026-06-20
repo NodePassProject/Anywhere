@@ -239,7 +239,7 @@ final class MITMCertificateStore {
         ) else {
             return nil
         }
-        let attrs: [String: Any] = [
+        let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
@@ -251,14 +251,14 @@ final class MITMCertificateStore {
             ]
         ]
         var err: Unmanaged<CFError>?
-        return SecKeyCreateRandomKey(attrs as CFDictionary, &err)
+        return SecKeyCreateRandomKey(attributes as CFDictionary, &err)
     }
 
     private func generateSoftwareKey() throws -> SecKey {
         // Fallback when the Secure Enclave is unavailable (simulator, older devices).
         // Non-extractable, non-synchronizable, ThisDeviceOnly: the CA key signs every
         // MITM leaf, so it must never leave the device.
-        let attrs: [String: Any] = [
+        let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecPrivateKeyAttrs as String: [
@@ -270,9 +270,9 @@ final class MITMCertificateStore {
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             ]
         ]
-        var err: Unmanaged<CFError>?
-        guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &err) else {
-            let message = (err?.takeRetainedValue()).flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+            let message = (error?.takeRetainedValue()).flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"
             throw MITMCertificateStoreError.keyGenerationFailed(message)
         }
         return key
@@ -307,7 +307,7 @@ final class MITMCertificateStore {
 
     private func writeCertificateUnlocked(_ data: Data) throws {
         deleteCertificate()
-        let attrs: [String: Any] = [
+        let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: Self.certAccount,
@@ -315,7 +315,7 @@ final class MITMCertificateStore {
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecAttrAccessGroup as String: accessGroup,
         ]
-        let status = SecItemAdd(attrs as CFDictionary, nil)
+        let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw MITMCertificateStoreError.keychainWriteFailed(status)
         }
@@ -365,8 +365,8 @@ final class MITMCertificateStore {
     private func randomSerial() -> Data {
         for _ in 0..<3 {
             var bytes = Data(count: 16)
-            let status = bytes.withUnsafeMutableBytes { ptr in
-                SecRandomCopyBytes(kSecRandomDefault, 16, ptr.baseAddress!)
+            let status = bytes.withUnsafeMutableBytes { pointer in
+                SecRandomCopyBytes(kSecRandomDefault, 16, pointer.baseAddress!)
             }
             if status == errSecSuccess {
                 return bytes

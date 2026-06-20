@@ -151,8 +151,8 @@ enum RealityError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingParameter(let param):
-            return "Missing Reality parameter: \(param)"
+        case .missingParameter(let parameter):
+            return "Missing Reality parameter: \(parameter)"
         case .invalidPublicKey:
             return "Invalid Reality public key"
         case .handshakeFailed(let reason):

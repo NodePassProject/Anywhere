@@ -34,11 +34,11 @@ enum UDPPacket {
     static func ipProtocol(of packet: Data) -> (isIPv6: Bool, proto: UInt8)? {
         packet.withUnsafeBytes { raw -> (Bool, UInt8)? in
             guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
-            let len = raw.count
-            guard len >= 1 else { return nil }
+            let length = raw.count
+            guard length >= 1 else { return nil }
             switch (p[0] >> 4) & 0x0F {
-            case 4: return len >= 20 ? (false, p[9]) : nil
-            case 6: return len >= 40 ? (true, p[6]) : nil
+            case 4: return length >= 20 ? (false, p[9]) : nil
+            case 6: return length >= 40 ? (true, p[6]) : nil
             default: return nil
             }
         }
@@ -50,25 +50,25 @@ enum UDPPacket {
     static func parse(_ packet: Data) -> Inbound? {
         packet.withUnsafeBytes { raw -> Inbound? in
             guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
-            let len = raw.count
-            guard len >= 1 else { return nil }
+            let length = raw.count
+            guard length >= 1 else { return nil }
 
             switch (p[0] >> 4) & 0x0F {
             case 4:
-                guard len >= 20 else { return nil }
+                guard length >= 20 else { return nil }
                 let ihl = Int(p[0] & 0x0F) * 4
-                guard ihl >= 20, len >= ihl + 8, p[9] == ipProtocolUDP else { return nil }
+                guard ihl >= 20, length >= ihl + 8, p[9] == ipProtocolUDP else { return nil }
                 // Drop fragments (MF set or non-zero offset); delivering a single
                 // fragment as a whole datagram would be wrong.
                 let fragWord = (UInt16(p[6]) << 8) | UInt16(p[7])
                 guard fragWord & 0x3FFF == 0 else { return nil }
-                return finish(p, len: len, headerLen: ihl, isIPv6: false,
+                return finish(p, len: length, headerLen: ihl, isIPv6: false,
                               srcOffset: 12, dstOffset: 16, addrLen: 4)
             case 6:
                 // Bare UDP only (next-header 17); extension headers, including the
                 // Fragment header (44), are dropped.
-                guard len >= 48, p[6] == ipProtocolUDP else { return nil }
-                return finish(p, len: len, headerLen: 40, isIPv6: true,
+                guard length >= 48, p[6] == ipProtocolUDP else { return nil }
+                return finish(p, len: length, headerLen: 40, isIPv6: true,
                               srcOffset: 8, dstOffset: 24, addrLen: 16)
             default:
                 return nil
@@ -111,8 +111,8 @@ enum UDPPacket {
         var v = SIMD16<UInt8>()
         let n = min(data.count, 16)
         guard n > 0 else { return v }
-        withUnsafeMutableBytes(of: &v) { dst in
-            data.withUnsafeBytes { src in dst.baseAddress!.copyMemory(from: src.baseAddress!, byteCount: n) }
+        withUnsafeMutableBytes(of: &v) { destination in
+            data.withUnsafeBytes { source in destination.baseAddress!.copyMemory(from: source.baseAddress!, byteCount: n) }
         }
         return v
     }
@@ -142,8 +142,8 @@ enum UDPPacket {
                                 dstIP: Data, dstPort: UInt16,
                                 payload: Data, udpLen: Int) -> Data {
         let total = 20 + udpLen
-        var pkt = Data(count: total)
-        pkt.withUnsafeMutableBytes { raw in
+        var packet = Data(count: total)
+        packet.withUnsafeMutableBytes { raw in
             let p = raw.bindMemory(to: UInt8.self).baseAddress!
 
             // --- IPv4 header ---
@@ -170,15 +170,15 @@ enum UDPPacket {
             if udpck == 0 { udpck = 0xFFFF }             // 0 means "no checksum"; send all-ones
             p[26] = UInt8(udpck >> 8); p[27] = UInt8(udpck & 0xFF)
         }
-        return pkt
+        return packet
     }
 
     private static func buildV6(srcIP: Data, srcPort: UInt16,
                                 dstIP: Data, dstPort: UInt16,
                                 payload: Data, udpLen: Int) -> Data {
         let total = 40 + udpLen
-        var pkt = Data(count: total)
-        pkt.withUnsafeMutableBytes { raw in
+        var packet = Data(count: total)
+        packet.withUnsafeMutableBytes { raw in
             let p = raw.bindMemory(to: UInt8.self).baseAddress!
 
             // --- IPv6 header (no header checksum in IPv6) ---
@@ -197,7 +197,7 @@ enum UDPPacket {
             if udpck == 0 { udpck = 0xFFFF }
             p[46] = UInt8(udpck >> 8); p[47] = UInt8(udpck & 0xFF)
         }
-        return pkt
+        return packet
     }
 
     /// Writes the UDP header with checksum zero; the caller patches it in.

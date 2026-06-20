@@ -99,9 +99,9 @@ struct TLSClientHelloSniffer {
 
     /// Handshake layer: [msg_type:1][length:3][body]
     private func parseHandshake(_ frag: Data) -> State {
-        var cur = Cursor(frag)
-        guard let msgType = cur.readU8(), msgType == 0x01 else { return .unavailable } // ClientHello
-        guard let bodyLen = cur.readU24(), let body = cur.readBytes(bodyLen) else { return .unavailable }
+        var current = Cursor(frag)
+        guard let msgType = current.readU8(), msgType == 0x01 else { return .unavailable } // ClientHello
+        guard let bodyLen = current.readU24(), let body = current.readBytes(bodyLen) else { return .unavailable }
         return parseClientHello(body)
     }
 
@@ -113,24 +113,24 @@ struct TLSClientHelloSniffer {
     ///   compression_methods    opaque<1..2^8-1>   (uint8  len + bytes)
     ///   extensions             Extension<8..2^16-1> (uint16 len + bytes)
     private func parseClientHello(_ body: Data) -> State {
-        var cur = Cursor(body)
+        var current = Cursor(body)
 
-        guard cur.skip(2 + 32) else { return .unavailable }
-        guard let sidLen = cur.readU8(), cur.skip(Int(sidLen)) else { return .unavailable }
-        guard let csLen = cur.readU16(), cur.skip(csLen) else { return .unavailable }
-        guard let cmLen = cur.readU8(), cur.skip(Int(cmLen)) else { return .unavailable }
-        guard let extLen = cur.readU16(), let extensions = cur.readBytes(extLen) else {
+        guard current.skip(2 + 32) else { return .unavailable }
+        guard let sidLen = current.readU8(), current.skip(Int(sidLen)) else { return .unavailable }
+        guard let csLen = current.readU16(), current.skip(csLen) else { return .unavailable }
+        guard let cmLen = current.readU8(), current.skip(Int(cmLen)) else { return .unavailable }
+        guard let extLen = current.readU16(), let extensions = current.readBytes(extLen) else {
             return .unavailable
         }
         return parseExtensions(extensions)
     }
 
     private func parseExtensions(_ buf: Data) -> State {
-        var cur = Cursor(buf)
-        while !cur.isAtEnd {
-            guard let extType = cur.readU16(),
-                  let extLen = cur.readU16(),
-                  let extData = cur.readBytes(extLen) else {
+        var current = Cursor(buf)
+        while !current.isAtEnd {
+            guard let extType = current.readU16(),
+                  let extLen = current.readU16(),
+                  let extData = current.readBytes(extLen) else {
                 return .unavailable
             }
             if extType == 0x0000 {
@@ -148,8 +148,8 @@ struct TLSClientHelloSniffer {
     ///   ServerName:     uint8 name_type + opaque<0..2^16-1>
     ///   name_type 0x00 = HostName (ASCII per RFC 6066)
     private func parseServerNameList(_ buf: Data) -> String? {
-        var cur = Cursor(buf)
-        guard let listLen = cur.readU16(), let list = cur.readBytes(listLen) else { return nil }
+        var current = Cursor(buf)
+        guard let listLen = current.readU16(), let list = current.readBytes(listLen) else { return nil }
         var lc = Cursor(list)
         while !lc.isAtEnd {
             guard let nameType = lc.readU8(),

@@ -239,14 +239,14 @@ nonisolated class XHTTPConnection {
         guard !encoded.isEmpty else { return [] }
         let key = configuration.uplinkDataKey
         // base64url output is ASCII, so chunking by Character == chunking by byte.
-        let chars = Array(encoded)
-        let chunkSize = configuration.uplinkChunkSize > 0 ? configuration.uplinkChunkSize : chars.count
+        let characters = Array(encoded)
+        let chunkSize = configuration.uplinkChunkSize > 0 ? configuration.uplinkChunkSize : characters.count
         var fields: [UplinkDataField] = []
         var start = 0
         var index = 0
-        while start < chars.count {
-            let end = min(start + chunkSize, chars.count)
-            let chunk = String(chars[start..<end])
+        while start < characters.count {
+            let end = min(start + chunkSize, characters.count)
+            let chunk = String(characters[start..<end])
             switch configuration.uplinkDataPlacement {
             case .header: fields.append(.header(name: "\(key)-\(index)", value: chunk))
             case .cookie: fields.append(.cookie(pair: "\(key)_\(index)=\(chunk)"))
@@ -742,11 +742,11 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
         var retiredIdle: [XHTTPXMUXMultiplexerPoolable] = []
         clients.removeAll { client in
             guard client.isRetired(now: now) else { return false }
-            if client.openUsage == 0, let conn = client.connection { retiredIdle.append(conn) }
+            if client.openUsage == 0, let connection = client.connection { retiredIdle.append(connection) }
             return true
         }
         lock.unlock()
-        for conn in retiredIdle { conn.poolClose() }
+        for connection in retiredIdle { connection.poolClose() }
 
         lock.lock()
         if let client = selectReusable() {
@@ -754,14 +754,14 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
             if client.leftUsage > 0 { client.leftUsage -= 1 }
             switch client.state {
             case .ready:
-                let conn = client.connection!
+                let connection = client.connection!
                 lock.unlock()
-                completion(makeLease(conn, client))
+                completion(makeLease(connection, client))
             case .dialing:
                 // Share this still-dialing connection once its dial resolves.
-                client.waiters.append { [weak self, weak client] conn in
-                    guard let self, let client, let conn else { completion(nil); return }
-                    completion(self.makeLease(conn, client))
+                client.waiters.append { [weak self, weak client] connection in
+                    guard let self, let client, let connection else { completion(nil); return }
+                    completion(self.makeLease(connection, client))
                 }
                 lock.unlock()
             case .failed:
@@ -784,17 +784,17 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
         clients.append(client)
         lock.unlock()
 
-        newConnection { [weak self, weak client] conn in
+        newConnection { [weak self, weak client] connection in
             guard let self, let client else { completion(nil); return }
             self.lock.lock()
             let waiters = client.waiters
             client.waiters.removeAll()
             var drained = false
-            if let conn {
-                client.connection = conn
+            if let connection {
+                client.connection = connection
                 client.state = .ready
                 self.lock.unlock()
-                completion(self.makeLease(conn, client))
+                completion(self.makeLease(connection, client))
             } else {
                 client.state = .failed
                 self.clients.removeAll { $0 === client }
@@ -802,7 +802,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
                 self.lock.unlock()
                 completion(nil)
             }
-            for waiter in waiters { waiter(conn) }
+            for waiter in waiters { waiter(connection) }
             // A failed first dial leaves an empty pool; evict the manager shell.
             if drained { self.registry?.evictIfEmpty(self) }
         }
@@ -1218,16 +1218,16 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
             return
         }
         var frames = Data()
-        var cur = offset
+        var current = offset
         var remainingWindow = window
-        while cur < data.count {
-            let chunk = min(data.count - cur, min(maxFrameSize, remainingWindow))
+        while current < data.count {
+            let chunk = min(data.count - current, min(maxFrameSize, remainingWindow))
             guard chunk > 0 else { break }
-            let isLast = (cur + chunk) >= data.count
+            let isLast = (current + chunk) >= data.count
             let flags: UInt8 = (isLast && endStream) ? XHTTPConnection.h2FlagEndStream : 0
             frames.append(frame(type: XHTTPConnection.h2FrameData, flags: flags, streamId: stream.streamId,
-                                payload: Data(data[data.startIndex + cur ..< data.startIndex + cur + chunk])))
-            cur += chunk
+                                payload: Data(data[data.startIndex + current ..< data.startIndex + current + chunk])))
+            current += chunk
             remainingWindow -= chunk
         }
         let sent = window - remainingWindow
@@ -1235,7 +1235,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         stream.sendWindow -= sent
         lock.unlock()
 
-        let nextOffset = cur
+        let nextOffset = current
         transportSend(frames) { [weak self] error in
             if let error { completion(error); return }
             if nextOffset < data.count {
@@ -1321,15 +1321,15 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         var o = payload.startIndex
         while o + 6 <= payload.endIndex {
             let id = (UInt16(payload[o]) << 8) | UInt16(payload[o + 1])
-            let val = (UInt32(payload[o + 2]) << 24) | (UInt32(payload[o + 3]) << 16)
+            let value = (UInt32(payload[o + 2]) << 24) | (UInt32(payload[o + 3]) << 16)
                     | (UInt32(payload[o + 4]) << 8) | UInt32(payload[o + 5])
             lock.lock()
             if id == 0x04 { // INITIAL_WINDOW_SIZE
-                let delta = Int(val) - peerInitialWindow
-                peerInitialWindow = Int(val)
+                let delta = Int(value) - peerInitialWindow
+                peerInitialWindow = Int(value)
                 for s in streams.values { s.sendWindow += delta }
             } else if id == 0x05 { // MAX_FRAME_SIZE
-                maxFrameSize = Int(val)
+                maxFrameSize = Int(value)
             }
             lock.unlock()
             o += 6

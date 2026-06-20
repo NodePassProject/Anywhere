@@ -66,8 +66,8 @@ extension TLSRecordConnection {
         }
 
         var innerContentType: UInt8 = 0
-        let contentLen: ssize_t = decrypted.withUnsafeBytes { ptr -> ssize_t in
-            let p = ptr.bindMemory(to: UInt8.self)
+        let contentLen: ssize_t = decrypted.withUnsafeBytes { pointer -> ssize_t in
+            let p = pointer.bindMemory(to: UInt8.self)
             var i = p.count - 1
             while i >= 0 && p[i] == 0 { i -= 1 }
             guard i >= 0 else { return -1 }
@@ -108,16 +108,16 @@ extension TLSRecordConnection {
         let end = messages.endIndex
         while i + 4 <= end {
             let type = messages[i]
-            let len = Int(messages[i + 1]) << 16 | Int(messages[i + 2]) << 8 | Int(messages[i + 3])
+            let length = Int(messages[i + 1]) << 16 | Int(messages[i + 2]) << 8 | Int(messages[i + 3])
             let bodyStart = i + 4
-            let bodyEnd = bodyStart + len
+            let bodyEnd = bodyStart + length
             guard bodyEnd <= end else { break }
 
             if type == TLSHandshakeType.keyUpdate {
                 // Peer switched its sending keys; advance ours for reading.
                 rekeyIngress()
                 // request_update == 1 ("update_requested") obliges us to KeyUpdate back.
-                let requestUpdate = len >= 1 ? messages[bodyStart] : 0
+                let requestUpdate = length >= 1 ? messages[bodyStart] : 0
                 if requestUpdate == 1 {
                     keyUpdateResponsePending = true
                 }

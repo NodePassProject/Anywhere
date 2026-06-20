@@ -18,20 +18,20 @@ enum ShadowsocksKeyDerivation {
         guard keySize > 0 else { return Data() }
         let passwordData = Array(password.utf8)
         var result = Data()
-        var prev = Data()
+        var previous = Data()
 
         while result.count < keySize {
             var input = Data()
-            input.append(prev)
+            input.append(previous)
             input.append(contentsOf: passwordData)
 
             var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-            input.withUnsafeBytes { ptr in
-                _ = CC_MD5(ptr.baseAddress, CC_LONG(input.count), &digest)
+            input.withUnsafeBytes { pointer in
+                _ = CC_MD5(pointer.baseAddress, CC_LONG(input.count), &digest)
             }
 
-            prev = Data(digest)
-            result.append(prev)
+            previous = Data(digest)
+            result.append(previous)
         }
 
         return Data(result.prefix(keySize))

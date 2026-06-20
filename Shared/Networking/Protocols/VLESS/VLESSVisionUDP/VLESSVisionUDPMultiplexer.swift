@@ -95,11 +95,11 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
                     self.connected = true
                     self.startReadLoop(connection)
                     self.resetIdleTimer()
-                    for cb in completions { cb(nil) }
+                    for callback in completions { callback(nil) }
 
                 case .failure(let error):
                     self.close(error: error)
-                    for cb in completions { cb(error) }
+                    for callback in completions { callback(error) }
                 }
             }
         }
@@ -334,8 +334,8 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
         let pendingCompletions = connectCompletions
         connectCompletions.removeAll()
         connecting = false
-        for cb in pendingCompletions {
-            cb(ProxyError.connectionFailed("Mux client closed"))
+        for callback in pendingCompletions {
+            callback(ProxyError.connectionFailed("Mux client closed"))
         }
     }
 }
