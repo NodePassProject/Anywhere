@@ -20,10 +20,8 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            if settings.experimentalEnabled {
-                Section {
-                    voyagerRow
-                }
+            Section {
+                voyagerRow
             }
             appSection
             vpnSection
