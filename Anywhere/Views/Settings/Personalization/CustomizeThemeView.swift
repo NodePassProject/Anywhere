@@ -153,8 +153,8 @@ struct CustomizeThemeView: View {
                 .overlay {
                     Image(systemName: "power")
                         .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.white)
                 }
+                .colorScheme(settings.homeColorScheme == .light ? .light : .dark)
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -29,7 +29,7 @@ struct MITMSettingsView: View {
         Form {
             Section {
                 Toggle(isOn: $ruleSetStore.enabled) {
-                    TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .indigo)
+                    SettingsItem.mitm.label
                 }
             }
 

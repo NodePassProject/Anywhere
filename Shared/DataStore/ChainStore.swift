@@ -65,6 +65,10 @@ class ChainStore {
 
     /// Keeps the VPN selection and routing-rule state consistent after any change to the chain list.
     private func coordinate() {
+        // Configurations load asynchronously; running against the not-yet-loaded (empty)
+        // list would let clearOrphans() strip every config-assigned rule set as "orphaned".
+        // ConfigurationStore.loadInitial() performs the full pass once its load completes.
+        guard ConfigurationStore.shared.isLoaded else { return }
         let configurations = ConfigurationStore.shared.configurations
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
         RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)

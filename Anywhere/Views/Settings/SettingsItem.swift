@@ -77,7 +77,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .trustedCertificates: .green
         case .purify: .blue
         case .reflection: .pink
-        case .mitm: .indigo
+        case .mitm: .mint
         }
     }
 

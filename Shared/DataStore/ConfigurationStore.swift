@@ -16,19 +16,28 @@ class ConfigurationStore {
 
     private(set) var configurations: [ProxyConfiguration] = []
     private var tombstones: [ProxyConfiguration] = []
-    
+
+    private(set) var isLoaded = false
+
     @ObservationIgnored private var loadedBlob: Data?
 
     private init() {
-        let data = JSONBlobStore.shared.load(.configurations)
-        loadedBlob = data
-        let split = Self.decodeSplit(from: data)
-        configurations = split.live
-        tombstones = split.tombstones
-        // Must stay deferred: coordinate() reads ChainStore.shared, and the two stores reference
-        // each other, so calling it synchronously here re-enters this type's `static let shared`
-        // dispatch_once and deadlocks. Running it after init lets dispatch_once finish first.
-        Task { @MainActor in self.coordinate() }
+        Task { @MainActor in await self.loadInitial() }
+    }
+
+    /// One-time initial load: decodes off the main actor, publishes the result, then coordinates.
+    private func loadInitial() async {
+        let outcome = await Task.detached(priority: .userInitiated) {
+            () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
+            let data = JSONBlobStore.shared.load(.configurations)
+            let split = Self.decodeSplit(from: data)
+            return (data, split.live, split.tombstones)
+        }.value
+        loadedBlob = outcome.data
+        configurations = outcome.live
+        tombstones = outcome.tombstones
+        isLoaded = true
+        coordinate()
     }
     
     func reload() async {

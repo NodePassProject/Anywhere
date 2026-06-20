@@ -17,11 +17,7 @@ final class VoyagerStore {
     static let productID = "nonconsumable.voyager"
     
     private(set) var product: Product?
-#if DEBUG
-    private(set) var isMember = true
-#else
     private(set) var isMember = false
-#endif
     private(set) var isLoadingProduct = false
     private(set) var purchaseInFlight = false
     
@@ -33,11 +29,15 @@ final class VoyagerStore {
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
 
     private init() {
+#if DEBUG
+        isMember = false
+#else
         updatesTask = listenForTransactions()
         Task {
             await loadProduct()
             await refreshEntitlement()
         }
+#endif
     }
 
     deinit {

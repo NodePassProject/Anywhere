@@ -19,6 +19,10 @@ struct HomeView: View {
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
+    
+    @State private var connectionEffectsEnabled = false
+    
+    private var isLoading: Bool { !configStore.isLoaded }
 
     private var isConnected: Bool {
         viewModel.vpnStatus == .connected
@@ -59,8 +63,11 @@ struct HomeView: View {
                         }
                     }
                     .padding(.horizontal, 20)
-                    .animation(.bouncy, value: isConnected)
-                    .sensoryFeedback(.impact, trigger: isConnected)
+                    .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
+                    .sensoryFeedback(trigger: isConnected) { _, _ in
+                        guard connectionEffectsEnabled else { return nil }
+                        return .impact
+                    }
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             }
@@ -83,6 +90,10 @@ struct HomeView: View {
         } message: {
             Text(viewModel.startError ?? "")
         }
+        .onChange(of: viewModel.isManagerReady, initial: true) { _, ready in
+            guard ready, !connectionEffectsEnabled else { return }
+            Task { @MainActor in connectionEffectsEnabled = true }
+        }
     }
 
     private var powerButton: some View {
@@ -90,9 +101,13 @@ struct HomeView: View {
             isConnected: isConnected,
             isTransitioning: isTransitioning,
             isCompact: isConnected && experimentalEnabled,
-            isDisabled: viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations)
-                && configStore.hasConfigurations
+            isLoading: isLoading,
+            isDisabled: isLoading
+                || (viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations)
+                    && configStore.hasConfigurations),
+            animatesChanges: connectionEffectsEnabled
         ) {
+            guard !isLoading else { return }
             if configStore.hasConfigurations {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
                     viewModel.toggleVPN()
@@ -152,7 +167,9 @@ private struct PowerButton: View {
     let isConnected: Bool
     let isTransitioning: Bool
     let isCompact: Bool
+    let isLoading: Bool
     let isDisabled: Bool
+    let animatesChanges: Bool
     let action: () -> Void
 
     var body: some View {
@@ -170,22 +187,20 @@ private struct PowerButton: View {
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
 
-                if isTransitioning {
+                if isTransitioning || isLoading {
                     ProgressView()
                         .controlSize(.large)
                         .tint(isConnected ? .white : .accentColor)
                 } else {
                     Image(systemName: "power")
                         .font(.system(size: isCompact ? 24 : 40, weight: .light))
-                        .foregroundStyle(isConnected ? .white : .accentColor)
                 }
             }
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
-        .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
-        .animation(.easeInOut(duration: 0.6), value: isConnected)
+        .animation(animatesChanges ? Animation.easeInOut(duration: 0.6) : nil, value: isConnected)
     }
 }
 
@@ -203,11 +218,13 @@ private struct ConfigurationCapsule: View {
     var body: some View {
         if let configuration = viewModel.selectedConfiguration {
             selectedCapsule(configuration)
-        } else {
+        } else if configStore.isLoaded {
             emptyCapsule
+        } else {
+            loadingCapsule
         }
     }
-    
+
     private func select(id: UUID) {
         if let chain = chainStore.chains.first(where: { $0.id == id }) {
             viewModel.selectChain(chain, configurations: configStore.configurations)
@@ -284,6 +301,18 @@ private struct ConfigurationCapsule: View {
             }
         }
         .buttonStyle(.plain)
+    }
+    
+    private var loadingCapsule: some View {
+        ProminentCapsule {
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Loading…")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
     }
 }
 
