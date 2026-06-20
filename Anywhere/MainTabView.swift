@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct MainTabView: View {
+    @Environment(VoyagerStore.self) private var voyagerStore
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
@@ -63,6 +64,13 @@ struct MainTabView: View {
             } message: {
                 let names = ruleSetStore.orphanedRuleSetNames.joined(separator: ", ")
                 Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
+            }
+            .fullScreenCover(isPresented: Binding(
+                get: { voyagerStore.isPresentingVoyager },
+                set: { voyagerStore.isPresentingVoyager = $0 }
+            )) {
+                AnywhereVoyagerView()
+                    .environment(voyagerStore)
             }
     }
 
