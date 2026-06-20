@@ -124,8 +124,8 @@ nonisolated final class ShadowsocksUDPSession {
         switch mode {
         case .ss2022AES(let cipher, let pskList):
             var sid: UInt64 = 0
-            _ = withUnsafeMutableBytes(of: &sid) { ptr in
-                SecRandomCopyBytes(kSecRandomDefault, 8, ptr.baseAddress!)
+            _ = withUnsafeMutableBytes(of: &sid) { pointer in
+                SecRandomCopyBytes(kSecRandomDefault, 8, pointer.baseAddress!)
             }
             self.sessionID = sid
             var sidBE = sid.bigEndian
@@ -143,8 +143,8 @@ nonisolated final class ShadowsocksUDPSession {
 
         case .ss2022ChaCha:
             var sid: UInt64 = 0
-            _ = withUnsafeMutableBytes(of: &sid) { ptr in
-                SecRandomCopyBytes(kSecRandomDefault, 8, ptr.baseAddress!)
+            _ = withUnsafeMutableBytes(of: &sid) { pointer in
+                SecRandomCopyBytes(kSecRandomDefault, 8, pointer.baseAddress!)
             }
             self.sessionID = sid
             self.pskHashes = []
@@ -278,8 +278,8 @@ nonisolated final class ShadowsocksUDPSession {
             // Receive on delegateQueue so handlers run on the same queue as state mutations.
             self.socket.startReceiving(queue: self.delegateQueue, handler: { [weak self] data in
                 self?.handleReceivedDatagram(data)
-            }, errorHandler: { [weak self] err in
-                self?.handleTransportError(err)
+            }, errorHandler: { [weak self] error in
+                self?.handleTransportError(error)
             })
 
             // Drain anything queued while connecting, preserving order.
@@ -313,8 +313,8 @@ nonisolated final class ShadowsocksUDPSession {
             let encrypted = try encryptPacket(payload: payload,
                                               dstHost: dstHost,
                                               dstPort: dstPort)
-            socket.send(data: encrypted) { err in
-                completion?(err)
+            socket.send(data: encrypted) { error in
+                completion?(error)
             }
         } catch {
             completion?(error)
@@ -511,8 +511,8 @@ nonisolated final class ShadowsocksUDPSession {
             let header = try ssAESECBDecryptBlock(key: pskList.last!, block: Data(data.prefix(16)))
 
             var sidBE: UInt64 = 0
-            _ = withUnsafeMutableBytes(of: &sidBE) { ptr in
-                header[0..<8].copyBytes(to: ptr)
+            _ = withUnsafeMutableBytes(of: &sidBE) { pointer in
+                header[0..<8].copyBytes(to: pointer)
             }
             let serverSession = UInt64(bigEndian: sidBE)
 
@@ -563,8 +563,8 @@ nonisolated final class ShadowsocksUDPSession {
         guard headerType == 1 else { throw ShadowsocksError.badHeaderType }
 
         var epochBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &epochBE) { ptr in
-            body[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &epochBE) { pointer in
+            body[offset..<offset+8].copyBytes(to: pointer)
         }
         let epoch = Int64(UInt64(bigEndian: epochBE))
         let now = Int64(Date().timeIntervalSince1970)
@@ -574,8 +574,8 @@ nonisolated final class ShadowsocksUDPSession {
         offset += 8
 
         var clientSidBE: UInt64 = 0
-        _ = withUnsafeMutableBytes(of: &clientSidBE) { ptr in
-            body[offset..<offset+8].copyBytes(to: ptr)
+        _ = withUnsafeMutableBytes(of: &clientSidBE) { pointer in
+            body[offset..<offset+8].copyBytes(to: pointer)
         }
         let clientSid = UInt64(bigEndian: clientSidBE)
         guard clientSid == sessionID else {

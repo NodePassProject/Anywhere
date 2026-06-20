@@ -17,7 +17,7 @@ enum TLSStreamError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .connectionFailed(let msg): return "TLS stream connection failed: \(msg)"
+        case .connectionFailed(let message): return "TLS stream connection failed: \(message)"
         case .notConnected: return "TLS stream not connected"
         }
     }

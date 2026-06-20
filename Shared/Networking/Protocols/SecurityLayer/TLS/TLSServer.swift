@@ -366,27 +366,27 @@ nonisolated final class TLSServer {
         kd: TLS13KeyDerivation,
         hsSecret: Data
     ) throws {
-        let buf = clientHandshakeMessages
-        var offset = buf.startIndex
+        let buffer = clientHandshakeMessages
+        var offset = buffer.startIndex
         defer {
-            clientHandshakeMessages = Data(buf[offset...])
+            clientHandshakeMessages = Data(buffer[offset...])
         }
-        while offset + 4 <= buf.endIndex {
-            let msgType = buf[offset]
-            let len = (Int(buf[offset + 1]) << 16)
-                    | (Int(buf[offset + 2]) << 8)
-                    | Int(buf[offset + 3])
+        while offset + 4 <= buffer.endIndex {
+            let msgType = buffer[offset]
+            let length = (Int(buffer[offset + 1]) << 16)
+                    | (Int(buffer[offset + 2]) << 8)
+                    | Int(buffer[offset + 3])
             // Length field is uint24; cap below 0xFFFF (not RFC-mandated) to bound allocations.
-            guard len <= 0xFFFF else {
+            guard length <= 0xFFFF else {
                 throw TLSError.handshakeFailed("handshake message too large")
             }
-            let total = 4 + len
-            guard offset + total <= buf.endIndex else { return }
+            let total = 4 + length
+            guard offset + total <= buffer.endIndex else { return }
 
-            let message = buf[offset..<(offset + total)]
+            let message = buffer[offset..<(offset + total)]
             switch msgType {
             case TLSHandshakeType.finished:
-                let received = Data(message.suffix(len))
+                let received = Data(message.suffix(length))
 
                 let expected = kd.clientFinishedPayload(
                     clientTrafficSecret: keys.clientTrafficSecret,
@@ -543,12 +543,12 @@ nonisolated final class TLSServer {
 
     func peekTLSRecord() throws -> Data? {
         guard rxBuffer.count >= 5 else { return nil }
-        let len = (Int(rxBuffer[rxBuffer.startIndex + 3]) << 8)
+        let length = (Int(rxBuffer[rxBuffer.startIndex + 3]) << 8)
                 | Int(rxBuffer[rxBuffer.startIndex + 4])
-        guard len <= 16384 + 256 else {
-            throw TLSError.handshakeFailed("record length \(len) out of bounds")
+        guard length <= 16384 + 256 else {
+            throw TLSError.handshakeFailed("record length \(length) out of bounds")
         }
-        let total = 5 + len
+        let total = 5 + length
         guard rxBuffer.count >= total else { return nil }
         return rxBuffer.subdata(in: rxBuffer.startIndex..<(rxBuffer.startIndex + total))
     }
@@ -571,17 +571,17 @@ nonisolated final class TLSServer {
             guard rxBuffer[h] == TLSContentType.handshake else {
                 throw TLSError.handshakeFailed("Expected handshake record")
             }
-            let len = (Int(rxBuffer[rxBuffer.index(h, offsetBy: 3)]) << 8)
+            let length = (Int(rxBuffer[rxBuffer.index(h, offsetBy: 3)]) << 8)
                     | Int(rxBuffer[rxBuffer.index(h, offsetBy: 4)])
             // Reject zero-length records: they never advance `messageLength`, so the per-message cap
             // never fires and a flood of them would grow rxBuffer without bound.
-            guard len > 0, len <= 16384 + 256 else {
-                throw TLSError.handshakeFailed("record length \(len) out of bounds")
+            guard length > 0, length <= 16384 + 256 else {
+                throw TLSError.handshakeFailed("record length \(length) out of bounds")
             }
-            let recordTotal = 5 + len
+            let recordTotal = 5 + length
             guard available - offset >= recordTotal else { return nil }
             let payloadStart = rxBuffer.index(h, offsetBy: 5)
-            let payloadEnd = rxBuffer.index(payloadStart, offsetBy: len)
+            let payloadEnd = rxBuffer.index(payloadStart, offsetBy: length)
             payload.append(rxBuffer.subdata(in: payloadStart..<payloadEnd))
             offset += recordTotal
             if messageLength == nil, payload.count >= 4 {

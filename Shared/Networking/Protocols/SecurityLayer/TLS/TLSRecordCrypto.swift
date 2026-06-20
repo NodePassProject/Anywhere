@@ -16,8 +16,8 @@ struct TLSRecordCrypto {
         var innerPlaintext = plaintext
         innerPlaintext.append(TLSContentType.handshake)
 
-        let len = UInt16(innerPlaintext.count + 16)
-        let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(len >> 8), UInt8(len & 0xFF)])
+        let length = UInt16(innerPlaintext.count + 16)
+        let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(length >> 8), UInt8(length & 0xFF)])
 
         let (ct, tag) = try sealAEAD(plaintext: innerPlaintext, key: key, nonce: nonce, aad: aad, cipherSuite: cipherSuite)
 

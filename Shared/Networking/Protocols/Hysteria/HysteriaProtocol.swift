@@ -175,15 +175,15 @@ enum HysteriaProtocol {
         guard data.count >= udpHeaderFixedSize else { return nil }
         var offset = 0
 
-        let sid = data.withUnsafeBytes { buf -> UInt32 in
+        let sid = data.withUnsafeBytes { buffer -> UInt32 in
             var v: UInt32 = 0
-            memcpy(&v, buf.baseAddress!.advanced(by: 0), 4)
+            memcpy(&v, buffer.baseAddress!.advanced(by: 0), 4)
             return UInt32(bigEndian: v)
         }
         offset += 4
-        let pid = data.withUnsafeBytes { buf -> UInt16 in
+        let pid = data.withUnsafeBytes { buffer -> UInt16 in
             var v: UInt16 = 0
-            memcpy(&v, buf.baseAddress!.advanced(by: 4), 2)
+            memcpy(&v, buffer.baseAddress!.advanced(by: 4), 2)
             return UInt16(bigEndian: v)
         }
         offset += 2
@@ -262,8 +262,8 @@ enum HysteriaProtocol {
         guard length > 0 else { return Data() }
         let alphabet: [UInt8] = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".utf8)
         var out = Data(count: length)
-        out.withUnsafeMutableBytes { buf in
-            guard let base = buf.baseAddress else { return }
+        out.withUnsafeMutableBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
             _ = SecRandomCopyBytes(kSecRandomDefault, length, base)
             let bytes = base.assumingMemoryBound(to: UInt8.self)
             for i in 0..<length {

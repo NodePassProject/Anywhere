@@ -200,7 +200,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
                 self.state = .ready
                 let callbacks = self.readyCallbacks
                 self.readyCallbacks.removeAll()
-                for cb in callbacks { cb(nil) }
+                for callback in callbacks { callback(nil) }
             }
         }
     }
@@ -260,10 +260,10 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             serverControlBuffer.append(data)
             processServerControlFrames()
         } else {
-            var buf = pendingServerStreams.removeValue(forKey: streamID) ?? Data()
-            buf.append(data)
-            guard !buf.isEmpty else { return }
-            let streamType = buf[buf.startIndex]
+            var buffer = pendingServerStreams.removeValue(forKey: streamID) ?? Data()
+            buffer.append(data)
+            guard !buffer.isEmpty else { return }
+            let streamType = buffer[buffer.startIndex]
             switch streamType {
             case 0x00: // Control stream (RFC 9114 §6.2.1)
                 guard serverControlStreamID == nil else {
@@ -272,7 +272,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
                     return
                 }
                 serverControlStreamID = streamID
-                serverControlBuffer = Data(buf.dropFirst())
+                serverControlBuffer = Data(buffer.dropFirst())
                 processServerControlFrames()
             case 0x01: // Push (RFC 9114 §6.2.2) — we never send MAX_PUSH_ID
                 failSession(HTTP3Error.connectionFailed("Server opened push stream without MAX_PUSH_ID"))
@@ -439,7 +439,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
 
         let callbacks = readyCallbacks
         readyCallbacks.removeAll()
-        for cb in callbacks { cb(error) }
+        for callback in callbacks { callback(error) }
 
         let activeStreams = Array(streams.values)
         streams.removeAll()

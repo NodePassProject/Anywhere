@@ -333,8 +333,8 @@ extension TLSClient {
         var preMasterSecret = Data(count: 48)
         preMasterSecret[0] = 0x03
         preMasterSecret[1] = 0x03
-        guard preMasterSecret.withUnsafeMutableBytes({ ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 46, ptr.baseAddress! + 2)
+        guard preMasterSecret.withUnsafeMutableBytes({ pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 46, pointer.baseAddress! + 2)
         }) == errSecSuccess else {
             throw TLSError.handshakeFailed("Failed to generate pre-master secret")
         }
@@ -346,8 +346,8 @@ extension TLSClient {
             preMasterSecret as CFData,
             &encryptError
         ) as Data? else {
-            let msg = encryptError?.takeRetainedValue().localizedDescription ?? "RSA encryption failed"
-            throw TLSError.handshakeFailed("RSA key exchange failed: \(msg)")
+            let message = encryptError?.takeRetainedValue().localizedDescription ?? "RSA encryption failed"
+            throw TLSError.handshakeFailed("RSA key exchange failed: \(message)")
         }
 
         var cke = Data()
@@ -502,8 +502,8 @@ extension TLSClient {
 
             if isChaCha {
                 var n = clientIV
-                n.withUnsafeMutableBytes { ptr in
-                    let p = ptr.bindMemory(to: UInt8.self)
+                n.withUnsafeMutableBytes { pointer in
+                    let p = pointer.bindMemory(to: UInt8.self)
                     let base = p.count - 8
                     for i in 0..<8 { p[base + i] ^= UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
                 }
@@ -756,8 +756,8 @@ extension TLSClient {
             let nonce: Data
             if isChaCha {
                 var n = serverIV
-                n.withUnsafeMutableBytes { ptr in
-                    let p = ptr.bindMemory(to: UInt8.self)
+                n.withUnsafeMutableBytes { pointer in
+                    let p = pointer.bindMemory(to: UInt8.self)
                     let base = p.count - 8
                     for i in 0..<8 { p[base + i] ^= UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
                 }

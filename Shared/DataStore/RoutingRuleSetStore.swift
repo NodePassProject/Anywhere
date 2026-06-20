@@ -369,10 +369,10 @@ class RoutingRuleSetStore {
     // MARK: - Persistence
 
     private func saveAssignments() {
-        let dict = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { rs in
+        let dictionary = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { rs in
             rs.assignedConfigurationId.map { (rs.id, $0) }
         })
-        AWCore.setRuleSetAssignments(dict)
+        AWCore.setRuleSetAssignments(dictionary)
     }
 
     /// `nonisolated` so the remote-change refresh can decode off the main actor (see `reload`).

@@ -89,10 +89,10 @@ nonisolated final class QUICSocket {
         }
         if gotLocal == 0 {
             if localStorage.ss_family == sa_family_t(AF_INET) {
-                withUnsafePointer(to: &localStorage) { src in
-                    src.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
-                        withUnsafeMutablePointer(to: &localAddr) { dst in
-                            dst.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { dsin in
+                withUnsafePointer(to: &localStorage) { source in
+                    source.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                        withUnsafeMutablePointer(to: &localAddr) { destination in
+                            destination.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { dsin in
                                 dsin.pointee.sin_port = sin.pointee.sin_port
                                 dsin.pointee.sin_addr = sin.pointee.sin_addr
                             }
@@ -100,10 +100,10 @@ nonisolated final class QUICSocket {
                     }
                 }
             } else if localStorage.ss_family == sa_family_t(AF_INET6) {
-                withUnsafePointer(to: &localStorage) { src in
-                    src.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
-                        withUnsafeMutablePointer(to: &localAddr) { dst in
-                            dst.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { dsin6 in
+                withUnsafePointer(to: &localStorage) { source in
+                    source.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                        withUnsafeMutablePointer(to: &localAddr) { destination in
+                            destination.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { dsin6 in
                                 dsin6.pointee.sin6_port = sin6.pointee.sin6_port
                                 dsin6.pointee.sin6_addr = sin6.pointee.sin6_addr
                             }
@@ -151,22 +151,22 @@ nonisolated final class QUICSocket {
     private func drainReads() {
         guard socketFD >= 0 else { return }
         while true {
-            let n = rxBuf.withUnsafeMutableBufferPointer { buf -> Int in
+            let n = rxBuf.withUnsafeMutableBufferPointer { buffer -> Int in
                 PerformanceMonitor.measure(.socketReceiveQUIC) {
-                    Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
+                    Darwin.recv(socketFD, buffer.baseAddress, buffer.count, 0)
                 }
             }
             if n < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
-                recvErrorHandler?(err)
+                let error = errno
+                if error == EAGAIN || error == EWOULDBLOCK || error == EINTR { return }
+                recvErrorHandler?(error)
                 return
             }
             if n == 0 { return }
             // Zero-copy view; the handler copies out before returning.
-            rxBuf.withUnsafeBufferPointer { buf in
+            rxBuf.withUnsafeBufferPointer { buffer in
                 let view = Data(
-                    bytesNoCopy: UnsafeMutableRawPointer(mutating: buf.baseAddress!),
+                    bytesNoCopy: UnsafeMutableRawPointer(mutating: buffer.baseAddress!),
                     count: n, deallocator: .none
                 )
                 packetHandler?(view)

@@ -876,21 +876,21 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             if endStream { releaseStream(clientID: clientID, resetOrigin: openRequestStreams.contains(clientID)) }
             return false
 
-        case .buffering(var buf):
+        case .buffering(var buffer):
             // We pull the whole body in to rewrite it (bounded by maxBufferedBodyBytes), so credit eagerly.
             ackUpstream(upstreamStreamID: sid, length: onWireLength)
-            buf.data.append(body)
-            if !endStream, buf.data.count > MITMBodyCodec.maxBufferedBodyBytes {
+            buffer.data.append(body)
+            if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
                 // Overflow: emit head + buffered prefix as passthrough, forward the rest. Stays
                 // eager-credited since the prefix already was.
-                sink?.deliverResponseHead(streamID: clientID, status: buf.status,
-                                          headers: buf.headers.filter { !$0.name.hasPrefix(":") }, endStream: false,
-                                          neverIndexed: buf.neverIndexed)
-                sink?.deliverResponseData(streamID: clientID, buf.data, endStream: false)
+                sink?.deliverResponseHead(streamID: clientID, status: buffer.status,
+                                          headers: buffer.headers.filter { !$0.name.hasPrefix(":") }, endStream: false,
+                                          neverIndexed: buffer.neverIndexed)
+                sink?.deliverResponseData(streamID: clientID, buffer.data, endStream: false)
                 responseStreams[clientID] = .passthrough
                 return false
             }
-            responseStreams[clientID] = .buffering(buf)
+            responseStreams[clientID] = .buffering(buffer)
             if endStream { return runResponseScripts(clientID) }
             return false
 
@@ -999,31 +999,31 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     // MARK: Buffered response rewrite
 
     private func runResponseScripts(_ streamID: UInt32, trailers: [(name: String, value: String)] = []) -> Bool {
-        guard case .buffering(let buf)? = responseStreams[streamID] else { return false }
+        guard case .buffering(let buffer)? = responseStreams[streamID] else { return false }
         // The body is complete (END_STREAM seen), so the stream is done once the script
         // delivers; release it now — the async completion delivers by client ID, not the maps.
         releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
         let plaintext: Data
-        if buf.codec.requiresDecompression {
-            guard let decoded = MITMBodyCodec.decompress(buf.data, plan: buf.codec, host: host) else {
+        if buffer.codec.requiresDecompression {
+            guard let decoded = MITMBodyCodec.decompress(buffer.data, plan: buffer.codec, host: host) else {
                 // Decompression failed: emit head (content-encoding intact) + raw body.
-                deliverFinalResponse(streamID: streamID, status: buf.status,
-                                     headers: buf.headers.filter { !$0.name.hasPrefix(":") }, body: buf.data,
-                                     trailers: trailers, neverIndexed: buf.neverIndexed)
+                deliverFinalResponse(streamID: streamID, status: buffer.status,
+                                     headers: buffer.headers.filter { !$0.name.hasPrefix(":") }, body: buffer.data,
+                                     trailers: trailers, neverIndexed: buffer.neverIndexed)
                 return false
             }
             plaintext = decoded
         } else {
-            plaintext = buf.data
+            plaintext = buffer.data
         }
-        let scriptedHeaders = buf.codec.requiresDecompression
-            ? buf.headers.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
-            : buf.headers
+        let scriptedHeaders = buffer.codec.requiresDecompression
+            ? buffer.headers.filter { !ASCII.equalsIgnoringCase($0.name, "content-encoding") }
+            : buffer.headers
         let message = HTTPMessage(
             phase: .httpResponse,
-            method: buf.originatingRequest?.method,
-            url: buf.originatingRequest?.url,
-            status: buf.status,
+            method: buffer.originatingRequest?.method,
+            url: buffer.originatingRequest?.url,
+            status: buffer.status,
             headers: scriptedHeaders.filter { !$0.name.hasPrefix(":") },
             body: plaintext,
             ruleSetID: rewriter.ruleSetID
@@ -1038,10 +1038,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
                     logger.warning("h2-upstream \(self.host) stream \(streamID): response grew over cap; using original body")
                     body = plaintext
                 }
-                self.deliverFinalResponse(streamID: streamID, status: buf.status, headers: regular, body: body, trailers: trailers, neverIndexed: buf.neverIndexed)
+                self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: body, trailers: trailers, neverIndexed: buffer.neverIndexed)
             case .synthesizedResponse:
                 // Anywhere.respond is request-phase only; ignore on response and emit original.
-                self.deliverFinalResponse(streamID: streamID, status: buf.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buf.neverIndexed)
+                self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buffer.neverIndexed)
             }
             // Non-blocking: the stream is already released and the pump kept running, so just
             // deliver. Out-of-order delivery is valid (h2 streams complete independently) and keeps
@@ -1069,7 +1069,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             deliverStreamingFrame(streamID: streamID, body: body, endStream: endStream, trailers: trailers)
             return false
         }
-        let ctx = MITMScriptEngine.FrameContext(
+        let context = MITMScriptEngine.FrameContext(
             phase: .httpResponse,
             method: st.originatingRequest?.method,
             url: st.originatingRequest?.url,
@@ -1082,7 +1082,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         MITMScriptTransform.applyFrame(
             body,
             rules: rewriter.rules(phase: .httpResponse),
-            frameContext: ctx,
+            frameContext: context,
             cursor: st.cursor,
             engineProvider: rewriter.scriptEngineProvider,
             resumeOn: lwipQueue

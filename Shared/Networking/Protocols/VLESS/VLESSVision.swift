@@ -81,8 +81,8 @@ private func reshapeData(_ data: Data) -> [Data] {
     }
 
     var splitIndex = data.count / 2
-    data.withUnsafeBytes { ptr in
-        let bytes = ptr.bindMemory(to: UInt8.self)
+    data.withUnsafeBytes { pointer in
+        let bytes = pointer.bindMemory(to: UInt8.self)
         for i in stride(from: bytes.count - 3, through: 0, by: -1) {
             if bytes[i] == 0x17 && bytes[i + 1] == 0x03 && bytes[i + 2] == 0x03 {
                 if i >= 21 && i <= reshapeThreshold {
@@ -126,8 +126,8 @@ private func visionPadding(data: Data?, command: VisionCommand, state: VisionTra
     let uuidLen = state.writeOnceUserUUID != nil ? 16 : 0
     let totalLen = uuidLen + 5 + Int(contentLen) + Int(paddingLen)
     var result = Data(count: totalLen)
-    result.withUnsafeMutableBytes { ptr in
-        let p = ptr.bindMemory(to: UInt8.self)
+    result.withUnsafeMutableBytes { pointer in
+        let p = pointer.bindMemory(to: UInt8.self)
         var offset = 0
 
         if let uuid = state.writeOnceUserUUID {

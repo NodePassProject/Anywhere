@@ -41,8 +41,8 @@ extension TunnelStack {
                     var a6 = in6_addr()
                     if inet_pton(AF_INET6, s, &a6) == 1 {
                         var bytes = SIMD16<UInt8>()
-                        withUnsafeBytes(of: &a6) { buf in
-                            for i in 0..<16 { bytes[i] = buf[i] }
+                        withUnsafeBytes(of: &a6) { buffer in
+                            for i in 0..<16 { bytes[i] = buffer[i] }
                         }
                         v6.append(bytes)
                     }
@@ -50,8 +50,8 @@ extension TunnelStack {
                     var a4 = in_addr()
                     if inet_pton(AF_INET, s, &a4) == 1 {
                         // in_addr is network byte order, matching the header.
-                        let packed: UInt32 = withUnsafeBytes(of: &a4) { buf in
-                            UInt32(buf[0]) << 24 | UInt32(buf[1]) << 16 | UInt32(buf[2]) << 8 | UInt32(buf[3])
+                        let packed: UInt32 = withUnsafeBytes(of: &a4) { buffer in
+                            UInt32(buffer[0]) << 24 | UInt32(buffer[1]) << 16 | UInt32(buffer[2]) << 8 | UInt32(buffer[3])
                         }
                         v4.append(packed)
                     }
@@ -70,13 +70,13 @@ extension TunnelStack {
                 switch (p[0] >> 4) & 0x0F {
                 case 4:
                     guard raw.count >= 20 else { return nil }
-                    let dst = UInt32(p[16]) << 24 | UInt32(p[17]) << 16 | UInt32(p[18]) << 8 | UInt32(p[19])
-                    return v4.contains(dst) ? false : nil
+                    let destination = UInt32(p[16]) << 24 | UInt32(p[17]) << 16 | UInt32(p[18]) << 8 | UInt32(p[19])
+                    return v4.contains(destination) ? false : nil
                 case 6:
                     guard raw.count >= 40 else { return nil }
-                    var dst = SIMD16<UInt8>()
-                    for i in 0..<16 { dst[i] = p[24 + i] }
-                    return v6.contains(dst) ? true : nil
+                    var destination = SIMD16<UInt8>()
+                    for i in 0..<16 { destination[i] = p[24 + i] }
+                    return v6.contains(destination) ? true : nil
                 default:
                     return nil
                 }

@@ -63,9 +63,9 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     func handleIncomingDatagram(_ payload: Data) {
         guard state != .closed, !payload.isEmpty else { return }
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
-            cb(payload, nil)
+            callback(payload, nil)
             return
         }
         if packetQueue.count >= Self.maxQueuedPackets {
@@ -135,9 +135,9 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 completion(packet, nil)
                 return
             }
-            if let err = self.closureError {
+            if let error = self.closureError {
                 self.closureError = nil
-                completion(nil, err)
+                completion(nil, error)
                 return
             }
             if self.state == .closed {
@@ -156,10 +156,10 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             self.state = .closed
             self.sendCloseFrame()
             self.session.releaseUDPSession(self.flowID)
-            let cb = self.pendingReceive
+            let callback = self.pendingReceive
             self.pendingReceive = nil
             self.packetQueue.removeAll()
-            cb?(nil, NowhereError.streamClosed)
+            callback?(nil, NowhereError.streamClosed)
         }
     }
 
@@ -181,12 +181,12 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
-            let cb = self.pendingReceive
+            let callback = self.pendingReceive
             self.pendingReceive = nil
-            if cb == nil {
+            if callback == nil {
                 self.closureError = error
             }
-            cb?(nil, error)
+            callback?(nil, error)
         }
     }
 }

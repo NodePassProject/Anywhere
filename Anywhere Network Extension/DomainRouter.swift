@@ -118,10 +118,10 @@ class DomainRouter {
                     // Standard AC failure: nearest ancestor-of-failure with a
                     // `byte` child (≠ v), else root. u.failure is nil only for root.
                     var f = u.failure
-                    while let cur = f, cur.children[byte] == nil, cur !== root {
-                        f = cur.failure
+                    while let current = f, current.children[byte] == nil, current !== root {
+                        f = current.failure
                     }
-                    if let cur = f, let next = cur.children[byte], next !== v {
+                    if let current = f, let next = current.children[byte], next !== v {
                         v.failure = next
                     } else {
                         v.failure = root
@@ -506,10 +506,10 @@ class DomainRouter {
         return PerformanceMonitor.measure(.routingIP) {
             routingLock.withLock { () -> RouteTarget? in
                 if ip.contains(":") {
-                    var addr = in6_addr()
-                    guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
+                    var address = in6_addr()
+                    guard inet_pton(AF_INET6, ip, &address) == 1 else { return nil }
                     // Pack to a 128-bit pair once; reuse across tiers.
-                    let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
+                    let (hi, lo) = withUnsafeBytes(of: &address) { raw -> (UInt64, UInt64) in
                         CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
                     }
                     for i in tiers.indices {
@@ -579,10 +579,10 @@ class DomainRouter {
               let prefixLen = Int(parts[1]),
               prefixLen >= 0, prefixLen <= 128 else { return nil }
 
-        var addr = in6_addr()
-        guard inet_pton(AF_INET6, String(parts[0]), &addr) == 1 else { return nil }
+        var address = in6_addr()
+        guard inet_pton(AF_INET6, String(parts[0]), &address) == 1 else { return nil }
 
-        var network = withUnsafeBytes(of: &addr) { Array($0.bindMemory(to: UInt8.self)) }
+        var network = withUnsafeBytes(of: &address) { Array($0.bindMemory(to: UInt8.self)) }
         // Zero host bits
         for i in 0..<16 {
             let bitPos = i * 8
@@ -629,9 +629,9 @@ fileprivate struct ActionTable {
         case Self.directID: return .direct
         case Self.rejectID: return .reject
         default:
-            let idx = Int(id) - Int(Self.firstProxyID)
-            guard idx >= 0, idx < proxyUUIDs.count else { return nil }
-            return .proxy(proxyUUIDs[idx])
+            let index = Int(id) - Int(Self.firstProxyID)
+            guard index >= 0, index < proxyUUIDs.count else { return nil }
+            return .proxy(proxyUUIDs[index])
         }
     }
 }
@@ -657,9 +657,9 @@ struct CIDRv4Trie {
 
     /// More-specific prefixes win at lookup; duplicate prefixes overwrite.
     mutating func insert(network: UInt32, prefixLen: Int, actionID: Int16) {
-        let len = UInt8(prefixLen)
-        let bits = Self.maskTop(network, len)
-        insertCore(bits: bits, bitLen: len, actionID: actionID)
+        let length = UInt8(prefixLen)
+        let bits = Self.maskTop(network, length)
+        insertCore(bits: bits, bitLen: length, actionID: actionID)
     }
 
     // MARK: - Lookup
@@ -667,18 +667,18 @@ struct CIDRv4Trie {
     /// Deepest action along the path, or `ActionTable.noneID`. Reads each child once
     /// into a local to avoid bounds-checked subscripts on the hot path.
     func lookup(_ ip: UInt32) -> Int16 {
-        nodes.withUnsafeBufferPointer { buf in
+        nodes.withUnsafeBufferPointer { buffer in
             var bits = ip
             var remaining: UInt8 = 32
             var nodeID = 0
-            var deepest = buf[0].actionID
+            var deepest = buffer[0].actionID
 
             while remaining > 0 {
                 let firstBit = bits >> 31
-                let childID = (firstBit == 0) ? buf[nodeID].left : buf[nodeID].right
+                let childID = (firstBit == 0) ? buffer[nodeID].left : buffer[nodeID].right
                 if childID < 0 { return deepest }
 
-                let child = buf[Int(childID)]
+                let child = buffer[Int(childID)]
                 let lcp = Self.lcp(bits, child.bits, cap: min(remaining, child.bitLen))
                 if lcp < child.bitLen { return deepest }
 
@@ -810,28 +810,28 @@ struct CIDRv6Trie {
 
     mutating func insert(network: [UInt8], prefixLen: Int, actionID: Int16) {
         let (hi, lo) = network.withUnsafeBufferPointer { Self.pack16($0) }
-        let len = UInt8(prefixLen)
-        let (mHi, mLo) = Self.maskTop(hi, lo, len)
-        insertCore(bitsHi: mHi, bitsLo: mLo, bitLen: len, actionID: actionID)
+        let length = UInt8(prefixLen)
+        let (mHi, mLo) = Self.maskTop(hi, lo, length)
+        insertCore(bitsHi: mHi, bitsLo: mLo, bitLen: length, actionID: actionID)
     }
 
     // MARK: - Lookup
 
     /// Deepest action along the path for a packed 128-bit address, or `ActionTable.noneID`.
     func lookup(hi hi0: UInt64, lo lo0: UInt64) -> Int16 {
-        nodes.withUnsafeBufferPointer { buf in
+        nodes.withUnsafeBufferPointer { buffer in
             var hi = hi0
             var lo = lo0
             var remaining: UInt8 = 128
             var nodeID = 0
-            var deepest = buf[0].actionID
+            var deepest = buffer[0].actionID
 
             while remaining > 0 {
                 let firstBit = hi >> 63
-                let childID = (firstBit == 0) ? buf[nodeID].left : buf[nodeID].right
+                let childID = (firstBit == 0) ? buffer[nodeID].left : buffer[nodeID].right
                 if childID < 0 { return deepest }
 
-                let child = buf[Int(childID)]
+                let child = buffer[Int(childID)]
                 let lcp = Self.lcp(
                     aHi: hi, aLo: lo, aLen: remaining,
                     bHi: child.bitsHi, bLo: child.bitsLo, bLen: child.bitLen

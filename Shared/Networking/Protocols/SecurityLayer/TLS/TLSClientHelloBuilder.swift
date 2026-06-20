@@ -271,9 +271,9 @@ struct TLSClientHelloBuilder {
         let shuffleable = (0..<exts.count).filter { !fixed.contains($0) }
         guard shuffleable.count > 1 else { return }
 
-        var seed: UInt64 = random.withUnsafeBytes { buf in
-            guard buf.count >= 32 else { return 0 }
-            return buf.load(fromByteOffset: 24, as: UInt64.self)
+        var seed: UInt64 = random.withUnsafeBytes { buffer in
+            guard buffer.count >= 32 else { return 0 }
+            return buffer.load(fromByteOffset: 24, as: UInt64.self)
         }
 
         for i in stride(from: shuffleable.count - 1, through: 1, by: -1) {
@@ -1263,26 +1263,26 @@ struct TLSClientHelloBuilder {
         let bytes = [UInt8](clientHello)
         guard bytes.count >= 4, bytes[0] == 0x01 else { return clientHello }
 
-        var pos = 4 + 2 + 32                                          // hs header + legacy_version + random
-        guard pos < bytes.count else { return clientHello }
-        let sidLen = Int(bytes[pos]); pos += 1 + sidLen
-        guard pos + 2 <= bytes.count else { return clientHello }
-        let csLen = (Int(bytes[pos]) << 8) | Int(bytes[pos + 1])
-        pos += 2 + csLen
-        guard pos < bytes.count else { return clientHello }
-        let cmLen = Int(bytes[pos]); pos += 1 + cmLen
-        guard pos + 2 <= bytes.count else { return clientHello }
-        let extsLenOffset = pos
-        let extsLen = (Int(bytes[pos]) << 8) | Int(bytes[pos + 1]); pos += 2
-        let extsStart = pos
-        let extsEnd = pos + extsLen
+        var position = 4 + 2 + 32                                          // hs header + legacy_version + random
+        guard position < bytes.count else { return clientHello }
+        let sidLen = Int(bytes[position]); position += 1 + sidLen
+        guard position + 2 <= bytes.count else { return clientHello }
+        let csLen = (Int(bytes[position]) << 8) | Int(bytes[position + 1])
+        position += 2 + csLen
+        guard position < bytes.count else { return clientHello }
+        let cmLen = Int(bytes[position]); position += 1 + cmLen
+        guard position + 2 <= bytes.count else { return clientHello }
+        let extsLenOffset = position
+        let extsLen = (Int(bytes[position]) << 8) | Int(bytes[position + 1]); position += 2
+        let extsStart = position
+        let extsEnd = position + extsLen
         guard extsEnd <= bytes.count else { return clientHello }
 
-        var cur = extsStart
-        while cur + 4 <= extsEnd {
-            let extType = (UInt16(bytes[cur]) << 8) | UInt16(bytes[cur + 1])
-            let extDataLen = (Int(bytes[cur + 2]) << 8) | Int(bytes[cur + 3])
-            let dataStart = cur + 4
+        var current = extsStart
+        while current + 4 <= extsEnd {
+            let extType = (UInt16(bytes[current]) << 8) | UInt16(bytes[current + 1])
+            let extDataLen = (Int(bytes[current + 2]) << 8) | Int(bytes[current + 3])
+            let dataStart = current + 4
             let dataEnd = dataStart + extDataLen
             guard dataEnd <= extsEnd else { return clientHello }
 
@@ -1305,13 +1305,13 @@ struct TLSClientHelloBuilder {
 
                 var newPayload = Data()
                 newPayload.append(UInt8(filtered.count * 2))
-                for val in filtered {
-                    newPayload.append(UInt8((val >> 8) & 0xFF))
-                    newPayload.append(UInt8(val & 0xFF))
+                for value in filtered {
+                    newPayload.append(UInt8((value >> 8) & 0xFF))
+                    newPayload.append(UInt8(value & 0xFF))
                 }
 
                 var result = Data()
-                result.append(Data(bytes[0..<(cur + 2)]))
+                result.append(Data(bytes[0..<(current + 2)]))
                 result.append(UInt8((newPayload.count >> 8) & 0xFF))
                 result.append(UInt8(newPayload.count & 0xFF))
                 result.append(newPayload)
@@ -1331,7 +1331,7 @@ struct TLSClientHelloBuilder {
                 return result
             }
 
-            cur = dataEnd
+            current = dataEnd
         }
 
         return clientHello

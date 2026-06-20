@@ -261,8 +261,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         var count = mach_msg_type_number_t(
             MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
         )
-        let kr = withUnsafeMutablePointer(to: &info) { ptr in
-            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+        let kr = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
                 task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
             }
         }
@@ -518,9 +518,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// settings; returns nil for IP literals or on failure.
     private static func resolveEncryptedDNSHostname(_ hostname: String, includeIPv6: Bool) -> [String]? {
         // Skip resolution for IP literals — they can be used directly as servers
-        var addr = in_addr()
+        var address = in_addr()
         var addr6 = in6_addr()
-        if inet_pton(AF_INET, hostname, &addr) == 1 || inet_pton(AF_INET6, hostname, &addr6) == 1 {
+        if inet_pton(AF_INET, hostname, &address) == 1 || inet_pton(AF_INET6, hostname, &addr6) == 1 {
             return nil
         }
 
@@ -539,18 +539,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         while let info = current {
             switch info.pointee.ai_family {
             case AF_INET:
-                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ptr in
-                    var sinAddr = ptr.pointee.sin_addr
-                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                    inet_ntop(AF_INET, &sinAddr, &buf, socklen_t(INET_ADDRSTRLEN))
-                    ips.append(String(cString: buf))
+                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { pointer in
+                    var sinAddr = pointer.pointee.sin_addr
+                    var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    inet_ntop(AF_INET, &sinAddr, &buffer, socklen_t(INET_ADDRSTRLEN))
+                    ips.append(String(cString: buffer))
                 }
             case AF_INET6:
-                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { ptr in
-                    var sin6Addr = ptr.pointee.sin6_addr
-                    var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-                    inet_ntop(AF_INET6, &sin6Addr, &buf, socklen_t(INET6_ADDRSTRLEN))
-                    ips.append(String(cString: buf))
+                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { pointer in
+                    var sin6Addr = pointer.pointee.sin6_addr
+                    var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                    inet_ntop(AF_INET6, &sin6Addr, &buffer, socklen_t(INET6_ADDRSTRLEN))
+                    ips.append(String(cString: buffer))
                 }
             default:
                 break

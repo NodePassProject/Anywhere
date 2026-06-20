@@ -24,7 +24,7 @@ struct MITMCaptureTemplate: Equatable {
         var tokens: [Token] = []
         var literal = ""
         var refsCaptures = false
-        let chars = Array(raw)
+        let characters = Array(raw)
         var i = 0
 
         func flushLiteral() {
@@ -39,14 +39,14 @@ struct MITMCaptureTemplate: Equatable {
             refsCaptures = true
         }
 
-        while i < chars.count {
-            let c = chars[i]
+        while i < characters.count {
+            let c = characters[i]
             guard c == "$" else {
                 literal.append(c)
                 i += 1
                 continue
             }
-            let next = i + 1 < chars.count ? chars[i + 1] : nil
+            let next = i + 1 < characters.count ? characters[i + 1] : nil
             switch next {
             case "$":
                 literal.append("$")
@@ -57,12 +57,12 @@ struct MITMCaptureTemplate: Equatable {
             case "{":
                 var j = i + 2
                 var digits = ""
-                while j < chars.count, chars[j].isASCII, chars[j].isNumber {
-                    digits.append(chars[j])
+                while j < characters.count, characters[j].isASCII, characters[j].isNumber {
+                    digits.append(characters[j])
                     j += 1
                 }
-                if !digits.isEmpty, j < chars.count, chars[j] == "}", let idx = Int(digits) {
-                    appendGroup(idx)
+                if !digits.isEmpty, j < characters.count, characters[j] == "}", let index = Int(digits) {
+                    appendGroup(index)
                     i = j + 1
                 } else {
                     literal.append("$")
@@ -88,8 +88,8 @@ struct MITMCaptureTemplate: Equatable {
             switch token {
             case .literal(let s):
                 out += s
-            case .group(let idx):
-                if let value = group(idx) { out += value }
+            case .group(let index):
+                if let value = group(index) { out += value }
             }
         }
         return out
@@ -97,14 +97,14 @@ struct MITMCaptureTemplate: Equatable {
 
     /// Expands against an array of capture strings (index 0 = whole match).
     func expand(captures: [String?]) -> String {
-        expand { idx in (idx >= 0 && idx < captures.count) ? captures[idx] : nil }
+        expand { index in (index >= 0 && index < captures.count) ? captures[index] : nil }
     }
 
     /// Expands against a Swift `Regex` match's output (index 0 = whole match).
     func expand(output: AnyRegexOutput) -> String {
-        expand { idx in
-            guard idx >= 0, idx < output.count else { return nil }
-            return output[idx].substring.map(String.init)
+        expand { index in
+            guard index >= 0, index < output.count else { return nil }
+            return output[index].substring.map(String.init)
         }
     }
 

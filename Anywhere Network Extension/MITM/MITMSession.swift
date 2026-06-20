@@ -86,11 +86,11 @@ final class MITMSession {
         func forceCancel() {
             lock.lock()
             closed = true
-            let cb = pending
+            let callback = pending
             pending = nil
             buffer = Data()
             lock.unlock()
-            cb?(nil, true, nil)
+            callback?(nil, true, nil)
         }
 
         // MARK: External Inputs
@@ -101,10 +101,10 @@ final class MITMSession {
                 lock.unlock()
                 return
             }
-            if let cb = pending {
+            if let callback = pending {
                 pending = nil
                 lock.unlock()
-                cb(data, false, nil)
+                callback(data, false, nil)
                 return
             }
             buffer.append(data)
@@ -114,16 +114,16 @@ final class MITMSession {
         func endOfClient() {
             lock.lock()
             closed = true
-            let cb = pending
+            let callback = pending
             pending = nil
             let pendingBuffer = buffer
             buffer = Data()
             lock.unlock()
-            if let cb {
+            if let callback {
                 if pendingBuffer.isEmpty {
-                    cb(nil, true, nil)
+                    callback(nil, true, nil)
                 } else {
-                    cb(pendingBuffer, true, nil)
+                    callback(pendingBuffer, true, nil)
                 }
             }
         }

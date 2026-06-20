@@ -104,12 +104,12 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         // Fast path: handshake done, nothing buffered, receiver waiting —
         // deliver inline so the flow-control credit rides read_pkt's tail-flush.
         if responseParsed, receiveBuffer.isEmpty, !data.isEmpty,
-           let cb = pendingReceive {
+           let callback = pendingReceive {
             pendingReceive = nil
             let ackCount = pendingQuicBytes + data.count
             pendingQuicBytes = 0
             session.extendStreamOffset(streamID, count: ackCount)
-            cb(Data(data), nil)
+            callback(Data(data), nil)
             if fin { readClosed = true }
             return
         }
@@ -146,9 +146,9 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         }
 
         state = .ready
-        if let cb = openCompletion {
+        if let callback = openCompletion {
             openCompletion = nil
-            cb(nil)
+            callback(nil)
         }
     }
 
@@ -157,19 +157,19 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         // FIN, setting it only in the eof branch would lose the EOF and hang the caller.
         if eof { readClosed = true }
 
-        if let cb = pendingReceive, !receiveBuffer.isEmpty {
+        if let callback = pendingReceive, !receiveBuffer.isEmpty {
             pendingReceive = nil
             let out = receiveBuffer
             receiveBuffer = Data()
             ackConsumedBytes()
-            cb(out, nil)
+            callback(out, nil)
             return
         }
 
         if eof {
-            if let cb = pendingReceive {
+            if let callback = pendingReceive {
                 pendingReceive = nil
-                cb(nil, nil)
+                callback(nil, nil)
             }
         }
     }
@@ -205,9 +205,9 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         }
         readClosed = true
         state = .closed
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
-            cb(nil, nil)
+            callback(nil, nil)
         }
     }
 
@@ -215,13 +215,13 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         guard state != .closed else { return }
         state = .closed
 
-        if let cb = openCompletion {
+        if let callback = openCompletion {
             openCompletion = nil
-            cb(error)
+            callback(error)
         }
-        if let cb = pendingReceive {
+        if let callback = pendingReceive {
             pendingReceive = nil
-            cb(nil, error)
+            callback(nil, error)
         }
     }
 
@@ -272,9 +272,9 @@ nonisolated final class HysteriaConnection: ProxyConnection {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)
             }
-            if let cb = self.pendingReceive {
+            if let callback = self.pendingReceive {
                 self.pendingReceive = nil
-                cb(nil, HysteriaError.streamClosed)
+                callback(nil, HysteriaError.streamClosed)
             }
         }
     }

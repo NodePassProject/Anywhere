@@ -363,8 +363,8 @@ nonisolated final class VLESSEncryptionClient {
 
     private func generateIV() throws -> Data {
         var iv = Data(count: 16)
-        let status = iv.withUnsafeMutableBytes { ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 16, ptr.baseAddress!)
+        let status = iv.withUnsafeMutableBytes { pointer in
+            SecRandomCopyBytes(kSecRandomDefault, 16, pointer.baseAddress!)
         }
         guard status == errSecSuccess else {
             throw VLESSEncryptionError.handshakeFailed("rng failure")
@@ -925,9 +925,9 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                 output.append(header)
                 output.append(sealed)
                 if willRekey {
-                    var ctx = header
-                    ctx.append(sealed)
-                    self.writeAEAD = VLESSEncryptionAEAD(context: ctx, key: self.unitedKey, useAES: self.useAES)
+                    var context = header
+                    context.append(sealed)
+                    self.writeAEAD = VLESSEncryptionAEAD(context: context, key: self.unitedKey, useAES: self.useAES)
                 }
                 offset += chunkSize
             }
@@ -1091,9 +1091,9 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             let plaintext = try aead!.open(Data(sealedPayload), additionalData: header)
             firstRecordSeen = true
             if willRekey {
-                var ctx = Data(header)
-                ctx.append(Data(sealedPayload))
-                let newAEAD = VLESSEncryptionAEAD(context: ctx, key: unitedKey, useAES: useAES)
+                var context = Data(header)
+                context.append(Data(sealedPayload))
+                let newAEAD = VLESSEncryptionAEAD(context: context, key: unitedKey, useAES: useAES)
                 recvLock.withLock { self.readAEAD = newAEAD }
             }
             completion(plaintext, nil)

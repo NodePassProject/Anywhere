@@ -52,8 +52,8 @@ nonisolated enum SocketHelpers {
                            reliefPriority priority: FDReliefPriority) -> Int32 {
         var fd = socket(family, type, proto)
         if fd < 0 {
-            let err = errno
-            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: priority) {
+            let error = errno
+            if FDPressureRelief.isFDExhaustion(error), FDPressureRelief.relieve(for: priority) {
                 fd = socket(family, type, proto)
             }
         }

@@ -101,8 +101,8 @@ final class AnyTLSPaddingScheme {
         let span = UInt64(hi - lo)
         guard span > 0 else { return lo }
         var raw: UInt64 = 0
-        let status = withUnsafeMutableBytes(of: &raw) { buf -> Int32 in
-            SecRandomCopyBytes(kSecRandomDefault, buf.count, buf.baseAddress!)
+        let status = withUnsafeMutableBytes(of: &raw) { buffer -> Int32 in
+            SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
         }
         if status != errSecSuccess {
             // Fallback keeps padding non-deterministic without aborting the connection.
@@ -114,8 +114,8 @@ final class AnyTLSPaddingScheme {
     /// MD5 is required for wire compatibility (`padding-md5` check), not security.
     private static func md5Hex(of data: Data) -> String {
         var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-        data.withUnsafeBytes { ptr in
-            if let base = ptr.baseAddress {
+        data.withUnsafeBytes { pointer in
+            if let base = pointer.baseAddress {
                 _ = CC_MD5(base, CC_LONG(data.count), &digest)
             }
         }
