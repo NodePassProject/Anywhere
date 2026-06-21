@@ -174,11 +174,27 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
+//                if #available(iOS 27.0, *) {
+//                    Circle()
+//                        .fill(.clear)
+//                        .frame(width: isCompact ? 50 : 140)
+//                        .glassEffect(.regular, in: .circle)
+//                } else if #available(iOS 26.0, *) {
+//                    Circle()
+//                        .fill(.clear)
+//                        .frame(width: isCompact ? 50 : 140)
+//                        .glassEffect(.clear, in: .circle)
+//                } else {
+//                    Circle()
+//                        .fill(.white.opacity(0.2))
+//                        .frame(width: isCompact ? 50 : 140)
+//                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
+//                }
                 if #available(iOS 26.0, *) {
                     Circle()
                         .fill(.clear)
                         .frame(width: isCompact ? 50 : 140)
-                        .glassEffect(.regular, in: .circle)
+                        .glassEffect(.clear, in: .circle)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
@@ -323,12 +339,26 @@ private struct ProminentCapsule<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 27.0, *) {
-            content
-                .padding(16)
-                .contentShape(Capsule())
-                .glassEffect(.regular.interactive(), in: .capsule)
-        } else if #available(iOS 26.0, *) {
+//        if #available(iOS 27.0, *) {
+//            content
+//                .padding(16)
+//                .contentShape(Capsule())
+//                .glassEffect(.regular.interactive(), in: .capsule)
+//        } else if #available(iOS 26.0, *) {
+//            content
+//                .padding(16)
+//                .contentShape(Capsule())
+//                .glassEffect(.clear.interactive(), in: .capsule)
+//        } else {
+//            content
+//                .padding(16)
+//                .contentShape(Capsule())
+//                .background(
+//                    Capsule()
+//                        .fill(.white.opacity(0.2))
+//                )
+//        }
+        if #available(iOS 26.0, *) {
             content
                 .padding(16)
                 .contentShape(Capsule())

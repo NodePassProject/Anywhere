@@ -378,6 +378,12 @@ class DomainRouter {
         let owner: DomainRouter
         private var cursor = 0
         private var count: Int { bytes.count }
+        
+        init(bytes: UnsafeBufferPointer<UInt8>, data: Data, owner: DomainRouter) {
+            self.bytes = bytes
+            self.data = data
+            self.owner = owner
+        }
 
         mutating func run() throws {
             try expectMagic()
