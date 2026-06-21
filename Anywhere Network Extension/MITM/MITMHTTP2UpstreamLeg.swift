@@ -727,8 +727,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         }
 
         // RFC 9113 §8.2.1/§8.1.1: a response field with an illegal name octet (uppercase / control /
-        // SP / DEL), or CR/LF/NUL / edge-whitespace in its value, is malformed. Stream error (HPACK
-        // table stayed in sync); never re-encode the bytes to the client.
+        // SP / DEL), or CR/LF/NUL in its value, is malformed. Stream error (HPACK table stayed in
+        // sync); never re-encode the bytes to the client.
         if let bad = HTTPHeader.firstInvalidOctet(decoded) {
             logger.warning("h2-upstream \(host) stream \(clientID): response header rejected — \(bad.reason) on \"\(HTTPHeader.escapedForLog(bad.name))\"; resetting stream")
             sink?.deliverResponseReset(streamID: clientID)
