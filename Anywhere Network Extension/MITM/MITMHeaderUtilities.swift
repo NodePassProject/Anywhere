@@ -118,14 +118,9 @@ enum HTTPHeader {
     }
 
     /// RFC 9113 §8.2.1: an empty value is permitted; a non-empty value MUST NOT carry NUL/LF/CR at any
-    /// position, nor begin or end with an ASCII whitespace character (SP 0x20 or HTAB 0x09). Returns nil
-    /// when conformant; a non-nil reason names the failing octet only, never the value text.
+    /// position — the request-/response-splitting primitive once these octets reach the HTTP/1.1 wire.
     private static func valueInvalidReason(_ value: String) -> String? {
-        let bytes = value.utf8
-        guard let first = bytes.first else { return nil }
-        if first == 0x20 || first == 0x09 { return "leading whitespace \(hexByte(first))" }
-        if let last = bytes.last, last == 0x20 || last == 0x09 { return "trailing whitespace \(hexByte(last))" }
-        for (i, c) in bytes.enumerated() {
+        for (i, c) in value.utf8.enumerated() {
             if c == 0x00 || c == 0x0A || c == 0x0D { return "NUL/LF/CR \(hexByte(c)) at \(i)" }
         }
         return nil
