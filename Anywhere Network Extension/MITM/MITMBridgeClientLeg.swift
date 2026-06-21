@@ -440,8 +440,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
 
-        // RFC 9113 §8.2.1: an illegal field-name octet or CR/LF/NUL/edge-whitespace in a value is a
-        // request-splitting vector once re-serialized to HTTP/1.1 (HPACK only checks UTF-8). RST.
+        // RFC 9113 §8.2.1: an illegal field-name octet or CR/LF/NUL in a value is a request-splitting
+        // vector once re-serialized to HTTP/1.1 (HPACK only checks UTF-8).
         if let bad = HTTPHeader.firstInvalidOctet(decoded) {
             logger.warning("bridge \(host) stream \(streamID): header rejected — \(bad.reason) on \"\(HTTPHeader.escapedForLog(bad.name))\"; RST")
             rstToClient(streamID, errorCode: Codec.ErrorCode.protocolError,
