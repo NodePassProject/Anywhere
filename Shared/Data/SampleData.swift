@@ -13,26 +13,24 @@ enum SampleData {
 
     static let subscriptionId = UUID()
 
-    private static let dummyReality = SecurityLayer.reality(
+    private static let dummyReality = XraySecurityLayer.reality(
         RealityConfiguration(serverName: "example.com", publicKey: Data(repeating: 0, count: 32), shortId: Data())
     )
-    private static let dummyTLS = SecurityLayer.tls(
+    private static let dummyTLS = XraySecurityLayer.tls(
         TLSConfiguration(serverName: "example.com")
     )
 
     private static func sampleVLESS(
         flow: String? = nil,
-        transport: TransportLayer = .tcp,
-        security: SecurityLayer
+        transport: XrayTransportLayer = .tcp,
+        security: XraySecurityLayer
     ) -> Outbound {
         .vless(
             uuid: UUID(),
             encryption: "none",
             flow: flow,
             transport: transport,
-            security: security,
-            muxEnabled: true,
-            xudpEnabled: true
+            security: security
         )
     }
 

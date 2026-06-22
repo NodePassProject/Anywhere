@@ -46,7 +46,7 @@ extension ProxyConfiguration {
     }
 
     private func toVLESSURL() -> String {
-        guard case .vless(let uuid, let encryption, let flow, let transport, let security, _, _) = outbound else {
+        guard case .vless(let uuid, let encryption, let flow, let transport, let security) = outbound else {
             return ""
         }
         var parameters: [String] = []
@@ -89,15 +89,7 @@ extension ProxyConfiguration {
         }
         
         appendTransportParams(to: &parameters)
-        
-        if !muxEnabled {
-            parameters.append("mux=false")
-        }
-        
-        if !xudpEnabled {
-            parameters.append("xudp=false")
-        }
-        
+
         let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "vless://\(uuid.uuidString.lowercased())@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
@@ -260,7 +252,7 @@ extension ProxyConfiguration {
     }
 
     private func appendTransportParams(to params: inout [String]) {
-        switch transportLayer {
+        switch xrayTransportLayer {
         case .ws(let ws):
             if ws.host != serverAddress {
                 params.append("host=\(ws.host)")

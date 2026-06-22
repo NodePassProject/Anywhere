@@ -552,7 +552,7 @@ nonisolated class ProxyClient {
 
         // Only VLESS reaches this point; Vision needs a TLS-record-like layer
         // (VLESS Encryption, or a raw TCP transport carrying TLS/Reality).
-        switch configuration.transportLayer {
+        switch configuration.xrayTransportLayer {
         case .ws:
             connectWithWebSocket(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .httpUpgrade:
@@ -562,7 +562,7 @@ nonisolated class ProxyClient {
         case .xhttp:
             connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .tcp:
-            switch configuration.securityLayer {
+            switch configuration.xraySecurityLayer {
             case .tls(let tlsConfig):
                 connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
             case .reality(let realityConfig):
@@ -699,12 +699,12 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .ws(let wsConfig) = configuration.transportLayer else {
+        guard case .ws(let wsConfig) = configuration.xrayTransportLayer else {
             completion(.failure(ProxyError.connectionFailed("WebSocket transport specified but no WebSocket configuration")))
             return
         }
 
-        if case .tls(let baseTLSConfig) = configuration.securityLayer {
+        if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
             let wsTlsConfig = TLSConfiguration(
                 serverName: baseTLSConfig.serverName,
                 alpn: ["http/1.1"],
@@ -805,12 +805,12 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .httpUpgrade(let huConfig) = configuration.transportLayer else {
+        guard case .httpUpgrade(let huConfig) = configuration.xrayTransportLayer else {
             completion(.failure(ProxyError.connectionFailed("HTTP upgrade transport specified but no configuration")))
             return
         }
 
-        if case .tls(let tlsConfiguration) = configuration.securityLayer {
+        if case .tls(let tlsConfiguration) = configuration.xraySecurityLayer {
             let tlsClient = TLSClient(configuration: tlsConfiguration)
             self.tlsClient = tlsClient
 
@@ -915,17 +915,17 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .grpc(let grpcConfig) = configuration.transportLayer else {
+        guard case .grpc(let grpcConfig) = configuration.xrayTransportLayer else {
             completion(.failure(ProxyError.connectionFailed("gRPC transport specified but no gRPC configuration")))
             return
         }
 
         // The :authority falls back to the TLS/Reality SNI when no override is configured.
         let tlsServerName: String?
-        if case .tls(let tls) = configuration.securityLayer { tlsServerName = tls.serverName }
+        if case .tls(let tls) = configuration.xraySecurityLayer { tlsServerName = tls.serverName }
         else { tlsServerName = nil }
         let realityServerName: String?
-        if case .reality(let reality) = configuration.securityLayer { realityServerName = reality.serverName }
+        if case .reality(let reality) = configuration.xraySecurityLayer { realityServerName = reality.serverName }
         else { realityServerName = nil }
         let authority = grpcConfig.resolvedAuthority(
             tlsServerName: tlsServerName,
@@ -933,7 +933,7 @@ nonisolated class ProxyClient {
             serverAddress: configuration.serverAddress
         )
 
-        if case .reality(let realityConfig) = configuration.securityLayer {
+        if case .reality(let realityConfig) = configuration.xraySecurityLayer {
             // Reality handles its own ALPN internally; layer gRPC on top.
             let realityClient = RealityClient(configuration: realityConfig)
             self.realityClient = realityClient
@@ -968,7 +968,7 @@ nonisolated class ProxyClient {
             return
         }
 
-        if case .tls(let baseTLSConfig) = configuration.securityLayer {
+        if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
             let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
             let tlsClient = TLSClient(configuration: grpcTLSConfig)
             self.tlsClient = tlsClient
@@ -1078,8 +1078,8 @@ nonisolated class ProxyClient {
     }
 
     /// Selects the XHTTP HTTP version: Reality forces h2; plain TCP is http/1.1; otherwise per TLS ALPN.
-    private func decideXHTTPHTTPVersion(for securityLayer: SecurityLayer? = nil) -> XHTTPHTTPVersion {
-        let security = securityLayer ?? configuration.securityLayer
+    private func decideXHTTPHTTPVersion(for xraySecurityLayer: XraySecurityLayer? = nil) -> XHTTPHTTPVersion {
+        let security = xraySecurityLayer ?? configuration.xraySecurityLayer
         if case .reality = security {
             return .http2
         }
@@ -1147,7 +1147,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .xhttp(let xhttpConfig) = configuration.transportLayer else {
+        guard case .xhttp(let xhttpConfig) = configuration.xrayTransportLayer else {
             completion(.failure(ProxyError.connectionFailed("XHTTP transport specified but no XHTTP configuration")))
             return
         }
@@ -1156,7 +1156,7 @@ nonisolated class ProxyClient {
 
         var resolvedMode: XHTTPMode
         if xhttpConfig.mode == .auto {
-            if case .reality = configuration.securityLayer {
+            if case .reality = configuration.xraySecurityLayer {
                 resolvedMode = .streamOne
             } else {
                 resolvedMode = .packetUp
@@ -1169,7 +1169,7 @@ nonisolated class ProxyClient {
         // session ID; stream-one can't split, so promote it to stream-up.
         if let downloadSettings = xhttpConfig.downloadSettings {
             if resolvedMode == .streamOne { resolvedMode = .streamUp }
-            let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.securityLayer)
+            let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.xraySecurityLayer)
             connectXHTTPDetached(
                 xhttpConfig: xhttpConfig, downloadSettings: downloadSettings,
                 mode: resolvedMode, sessionId: xhttpConfig.generateSessionID(),
@@ -1206,7 +1206,7 @@ nonisolated class ProxyClient {
         let route = consumeMainXHTTPRoute()
         let needsUploadFactory = httpVersion == .http11 && (mode == .packetUp || mode == .streamUp)
         let uploadFactory = needsUploadFactory
-            ? makeXHTTPUploadFactory(security: configuration.securityLayer, httpVersion: httpVersion,
+            ? makeXHTTPUploadFactory(security: configuration.xraySecurityLayer, httpVersion: httpVersion,
                                      mode: mode, xmux: xhttpConfig.effectiveXMUX)
             : nil
         dialXHTTPLeg(
@@ -1326,7 +1326,7 @@ nonisolated class ProxyClient {
         /// SNI / HTTP/3 server name.
         let serverName: String
         let port: UInt16
-        let security: SecurityLayer
+        let security: XraySecurityLayer
     }
 
     private enum XHTTPLegRoute {
@@ -1344,9 +1344,9 @@ nonisolated class ProxyClient {
         XHTTPEndpoint(
             directHost: directDialHost,
             chainHost: configuration.serverAddress,
-            serverName: configuration.securityLayer.serverName(fallback: configuration.serverAddress),
+            serverName: configuration.xraySecurityLayer.serverName(fallback: configuration.serverAddress),
             port: configuration.serverPort,
-            security: configuration.securityLayer
+            security: configuration.xraySecurityLayer
         )
     }
 
@@ -1354,9 +1354,9 @@ nonisolated class ProxyClient {
         XHTTPEndpoint(
             directHost: downloadSettings.serverAddress,
             chainHost: downloadSettings.serverAddress,
-            serverName: downloadSettings.securityLayer.serverName(fallback: downloadSettings.serverAddress),
+            serverName: downloadSettings.xraySecurityLayer.serverName(fallback: downloadSettings.serverAddress),
             port: downloadSettings.serverPort,
-            security: downloadSettings.securityLayer
+            security: downloadSettings.xraySecurityLayer
         )
     }
 
@@ -1505,7 +1505,7 @@ nonisolated class ProxyClient {
     private static func dialSharedH2(
         host: String,
         port: UInt16,
-        security: SecurityLayer,
+        security: XraySecurityLayer,
         completion: @escaping (Result<XHTTPH2Multiplexer, Error>) -> Void
     ) {
         func bringUp(_ closures: TransportClosures, retaining object: AnyObject?) {
@@ -1587,7 +1587,7 @@ nonisolated class ProxyClient {
     private func dialXHTTPByteStream(
         host: String,
         port: UInt16,
-        security: SecurityLayer,
+        security: XraySecurityLayer,
         httpVersion: XHTTPHTTPVersion,
         overTunnel: ProxyConnection?,
         completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
@@ -1667,7 +1667,7 @@ nonisolated class ProxyClient {
     /// Upload-connection factory for combined HTTP/1.1 sessions; the download leg already
     /// consumed any inbound tunnel, so this routes direct or through a fresh chain.
     private func makeXHTTPUploadFactory(
-        security: SecurityLayer,
+        security: XraySecurityLayer,
         httpVersion: XHTTPHTTPVersion,
         mode: XHTTPMode,
         xmux: XHTTPXMUXMultiplexerConfiguration
@@ -1734,7 +1734,7 @@ nonisolated class ProxyClient {
     private static func dialH1UploadConnection(
         host: String,
         port: UInt16,
-        security: SecurityLayer,
+        security: XraySecurityLayer,
         completion: @escaping (XHTTPH1Multiplexer?) -> Void
     ) {
         func wrap(_ closures: TransportClosures, retaining object: AnyObject?) {

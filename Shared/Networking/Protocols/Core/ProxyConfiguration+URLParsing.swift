@@ -85,13 +85,13 @@ extension ProxyConfiguration {
         let security = parameters["security"] ?? "none"
         let transportStr = parameters["type"] ?? "tcp"
 
-        let securityLayer: SecurityLayer
+        let xraySecurityLayer: XraySecurityLayer
         if security == "reality" {
             do {
                 if let realityConfig = try RealityConfiguration.parse(from: parameters) {
-                    securityLayer = .reality(realityConfig)
+                    xraySecurityLayer = .reality(realityConfig)
                 } else {
-                    securityLayer = .none
+                    xraySecurityLayer = .none
                 }
             } catch {
                 throw ProxyError.invalidURL("Reality configuration error: \(error.localizedDescription)")
@@ -99,21 +99,18 @@ extension ProxyConfiguration {
         } else if security == "tls" {
             do {
                 if let tlsConfig = try TLSConfiguration.parse(from: parameters, serverAddress: host) {
-                    securityLayer = .tls(tlsConfig)
+                    xraySecurityLayer = .tls(tlsConfig)
                 } else {
-                    securityLayer = .none
+                    xraySecurityLayer = .none
                 }
             } catch {
                 throw ProxyError.invalidURL("TLS configuration error: \(error.localizedDescription)")
             }
         } else {
-            securityLayer = .none
+            xraySecurityLayer = .none
         }
 
-        let transportLayer = parseTransportLayer(from: parameters, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
-
-        let muxEnabled = parameters["mux"].map { $0 != "false" && $0 != "0" } ?? true
-        let xudpEnabled = parameters["xudp"].map { $0 != "false" && $0 != "0" } ?? true
+        let xrayTransportLayer = parseXrayTransportLayer(from: parameters, transport: transportStr, serverAddress: host, xraySecurityLayer: xraySecurityLayer)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
@@ -123,10 +120,8 @@ extension ProxyConfiguration {
                 uuid: uuid,
                 encryption: encryption,
                 flow: flow,
-                transport: transportLayer,
-                security: securityLayer,
-                muxEnabled: muxEnabled,
-                xudpEnabled: xudpEnabled
+                transport: xrayTransportLayer,
+                security: xraySecurityLayer
             )
         )
     }
@@ -618,12 +613,12 @@ extension ProxyConfiguration {
         return parameters
     }
 
-    private static func parseTransportLayer(
+    private static func parseXrayTransportLayer(
         from params: [String: String],
         transport: String,
         serverAddress: String,
-        securityLayer: SecurityLayer
-    ) -> TransportLayer {
+        xraySecurityLayer: XraySecurityLayer
+    ) -> XrayTransportLayer {
         switch transport {
         case "ws":
             if let configuration = WebSocketConfiguration.parse(from: params, serverAddress: serverAddress) {
@@ -642,10 +637,10 @@ extension ProxyConfiguration {
             return .tcp
         case "xhttp":
             let tlsServerName: String?
-            if case .tls(let tls) = securityLayer { tlsServerName = tls.serverName }
+            if case .tls(let tls) = xraySecurityLayer { tlsServerName = tls.serverName }
             else { tlsServerName = nil }
             let realityServerName: String?
-            if case .reality(let reality) = securityLayer { realityServerName = reality.serverName }
+            if case .reality(let reality) = xraySecurityLayer { realityServerName = reality.serverName }
             else { realityServerName = nil }
             if let configuration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName) {
                 return .xhttp(configuration)

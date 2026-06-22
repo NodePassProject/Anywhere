@@ -172,14 +172,14 @@ struct ClashProxyParser {
         let alpn = getStringSequence(node, key: "alpn")
         let fingerprint = parseFingerprint(node)
 
-        let securityLayer: SecurityLayer
+        let xraySecurityLayer: XraySecurityLayer
         if hasReality {
             let pubKeyStr = getString(realityOpts, key: "public-key") ?? ""
             let shortIdStr = getString(realityOpts, key: "short-id") ?? ""
             guard let publicKey = Data(base64URLEncoded: pubKeyStr), publicKey.count == 32 else {
                 return nil
             }
-            securityLayer = .reality(RealityConfiguration(
+            xraySecurityLayer = .reality(RealityConfiguration(
                 serverName: serverName,
                 publicKey: publicKey,
                 shortId: Data(hexString: shortIdStr) ?? Data(),
@@ -187,7 +187,7 @@ struct ClashProxyParser {
             ))
         } else if tlsEnabled {
             let ech = echSettings(node)
-            securityLayer = .tls(TLSConfiguration(
+            xraySecurityLayer = .tls(TLSConfiguration(
                 serverName: serverName,
                 alpn: alpn,
                 echEnabled: ech.enabled,
@@ -195,14 +195,14 @@ struct ClashProxyParser {
                 fingerprint: fingerprint
             ))
         } else {
-            securityLayer = .none
+            xraySecurityLayer = .none
         }
 
-        let transportLayer: TransportLayer
+        let xrayTransportLayer: XrayTransportLayer
         if transport == "ws" {
-            transportLayer = parseWSTransportLayer(from: node, server: basics.server)
+            xrayTransportLayer = parseWSXrayTransportLayer(from: node, server: basics.server)
         } else {
-            transportLayer = .tcp
+            xrayTransportLayer = .tcp
         }
 
         return ProxyConfiguration(
@@ -213,10 +213,8 @@ struct ClashProxyParser {
                 uuid: uuid,
                 encryption: encryption,
                 flow: flow,
-                transport: transportLayer,
-                security: securityLayer,
-                muxEnabled: true,
-                xudpEnabled: true
+                transport: xrayTransportLayer,
+                security: xraySecurityLayer
             )
         )
     }
@@ -462,7 +460,7 @@ struct ClashProxyParser {
         return Int(leading) ?? def
     }
 
-    private static func parseWSTransportLayer(from node: YAML.Node, server: String) -> TransportLayer {
+    private static func parseWSXrayTransportLayer(from node: YAML.Node, server: String) -> XrayTransportLayer {
         var wsPath = "/"
         var wsHost = server
         var wsHeaders: [String: String] = [:]

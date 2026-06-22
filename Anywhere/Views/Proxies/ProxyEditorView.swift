@@ -22,8 +22,6 @@ struct ProxyEditorView: View {
     @State private var vlessEncryption = "none"
     @State private var vlessFlow = ""
     @State private var vlessTransport = "tcp"
-    @State private var vlessMuxEnabled = true
-    @State private var vlessXUDPEnabled = true
 
     @State private var vlessWebSocketHost = ""
     @State private var vlessWebSocketPath = "/"
@@ -257,8 +255,12 @@ struct ProxyEditorView: View {
                 
                 transportSettings
                 
-                securityLayerSettings
-                
+                if isVLESS {
+                    xraySecurityLayerSettings
+                } else {
+                    securityLayerSettings
+                }
+
                 extraSettings
             }
             .navigationTitle(configuration != nil ? "Edit Configuration" : "Add Configuration")
@@ -544,21 +546,6 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Transport", comment: "Transport for VLESS protocol", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
                 }
-                if vlessTransport == "tcp" {
-                    Toggle(isOn: $vlessMuxEnabled) {
-                        TextWithColorfulIcon(title: "Mux", comment: "Mux for VLESS protocol TCP transport", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
-                    }
-                    .onChange(of: vlessMuxEnabled) {
-                        if vlessMuxEnabled == false {
-                            vlessXUDPEnabled = false
-                        }
-                    }
-                    if vlessMuxEnabled {
-                        Toggle(isOn: $vlessXUDPEnabled) {
-                            TextWithColorfulIcon(title: "XUDP", comment: "XUDP for VLESS protocol TCP transport", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
-                        }
-                    }
-                }
                 if vlessTransport == "ws" {
                     LabeledContent {
                         TextField("Host", text: $vlessWebSocketHost)
@@ -695,91 +682,94 @@ struct ProxyEditorView: View {
     }
     
     @ViewBuilder
-    private var securityLayerSettings: some View {
-        if isVLESS {
-            Section((vlessTransport == "xhttp" && vlessXHTTPDownloadEnabled) ? String(localized: "TLS (Upload)") : String(localized: "TLS")) {
-                Picker(selection: $vlessSecurity) {
-                    Text("None").tag("none")
-                    Text("TLS").tag("tls")
-                    Text("Reality").tag("reality")
+    private var xraySecurityLayerSettings: some View {
+        Section((vlessTransport == "xhttp" && vlessXHTTPDownloadEnabled) ? String(localized: "TLS (Upload)") : String(localized: "TLS")) {
+            Picker(selection: $vlessSecurity) {
+                Text("None").tag("none")
+                Text("TLS").tag("tls")
+                Text("Reality").tag("reality")
+            } label: {
+                TextWithColorfulIcon(title: "Security", comment: "Security for VLESS protocol", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
+            }
+            if isVLESSTLS {
+                LabeledContent {
+                    TextField("SNI", text: $vlessTLSSNI)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "Security", comment: "Security for VLESS protocol", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
+                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                 }
-                if isVLESSTLS {
+                LabeledContent {
+                    TextField("h2,http/1.1", text: $vlessTLSALPN)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
+                }
+                Toggle(isOn: $vlessTLSECHEnabled) {
+                    TextWithColorfulIcon(title: "Enable ECH", comment: nil, systemName: "lock.fill", foregroundColor: .white, backgroundColor: .green)
+                }
+                if vlessTLSECHEnabled {
                     LabeledContent {
-                        TextField("SNI", text: $vlessTLSSNI)
-                            .keyboardType(.URL)
+                        TextField("Base64", text: $vlessTLSECHConfig)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    LabeledContent {
-                        TextField("h2,http/1.1", text: $vlessTLSALPN)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    Toggle(isOn: $vlessTLSECHEnabled) {
-                        TextWithColorfulIcon(title: "Enable ECH", comment: nil, systemName: "lock.fill", foregroundColor: .white, backgroundColor: .green)
-                    }
-                    if vlessTLSECHEnabled {
-                        LabeledContent {
-                            TextField("Base64", text: $vlessTLSECHConfig)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(title: "ECH Config", comment: nil, systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .green)
-                        }
-                    }
-                    Picker(selection: $vlessFingerprint) {
-                        ForEach(TLSFingerprint.allCases, id: \.self) { fp in
-                            Text(fp.displayName).tag(fp)
-                        }
-                    } label: {
-                        TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                        TextWithColorfulIcon(title: "ECH Config", comment: nil, systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .green)
                     }
                 }
-                if isVLESSReality {
-                    LabeledContent {
-                        TextField("SNI", text: $vlessRealitySNI)
-                            .keyboardType(.URL)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                Picker(selection: $vlessFingerprint) {
+                    ForEach(TLSFingerprint.allCases, id: \.self) { fp in
+                        Text(fp.displayName).tag(fp)
                     }
-                    LabeledContent {
-                        TextField("Public Key", text: $vlessRealityPublicKey)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Public Key", comment: "Public Key for Reality security layer", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
-                    }
-                    LabeledContent {
-                        TextField("Short ID", text: $vlessRealityShortId)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Short ID", comment: "Short ID for Reality security layer", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
-                    }
-                    Picker(selection: $vlessFingerprint) {
-                        ForEach(TLSFingerprint.allCases, id: \.self) { fp in
-                            Text(fp.displayName).tag(fp)
-                        }
-                    } label: {
-                        TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
-                    }
+                } label: {
+                    TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
                 }
             }
-        } else if isNowhere {
+            if isVLESSReality {
+                LabeledContent {
+                    TextField("SNI", text: $vlessRealitySNI)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                }
+                LabeledContent {
+                    TextField("Public Key", text: $vlessRealityPublicKey)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Public Key", comment: "Public Key for Reality security layer", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
+                }
+                LabeledContent {
+                    TextField("Short ID", text: $vlessRealityShortId)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Short ID", comment: "Short ID for Reality security layer", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
+                }
+                Picker(selection: $vlessFingerprint) {
+                    ForEach(TLSFingerprint.allCases, id: \.self) { fp in
+                        Text(fp.displayName).tag(fp)
+                    }
+                } label: {
+                    TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var securityLayerSettings: some View {
+        if isNowhere {
             Section("TLS") {
                 LabeledContent {
                     TextField("SNI", text: $nowhereSNI)
@@ -1059,7 +1049,7 @@ struct ProxyEditorView: View {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _, _, _) = configuration.outbound {
+        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _) = configuration.outbound {
             self.vlessUUID = vlessUUID.uuidString
             self.vlessEncryption = vlessEncryption
             self.vlessFlow = vlessFlow ?? ""
@@ -1069,27 +1059,27 @@ struct ProxyEditorView: View {
             vlessFlow = ""
         }
         if isVLESS {
-            vlessTransport = configuration.transportLayer.tag
-            vlessSecurity = configuration.securityLayer.tag
+            vlessTransport = configuration.xrayTransportLayer.tag
+            vlessSecurity = configuration.xraySecurityLayer.tag
 
-            if case .ws(let ws) = configuration.transportLayer {
+            if case .ws(let ws) = configuration.xrayTransportLayer {
                 vlessWebSocketHost = ws.host
                 vlessWebSocketPath = ws.path
             }
 
-            if case .httpUpgrade(let httpUpgrade) = configuration.transportLayer {
+            if case .httpUpgrade(let httpUpgrade) = configuration.xrayTransportLayer {
                 vlessHTTPUpgradeHost = httpUpgrade.host
                 vlessHTTPUpgradePath = httpUpgrade.path
             }
         
-            if case .grpc(let grpc) = configuration.transportLayer {
+            if case .grpc(let grpc) = configuration.xrayTransportLayer {
                 vlessGRPCServiceName = grpc.serviceName
                 vlessGRPCAuthority = grpc.authority
                 vlessGRPCMode = grpc.multiMode ? "multi" : "gun"
                 vlessGRPCUserAgent = grpc.userAgent
             }
 
-            if case .xhttp(let xhttp) = configuration.transportLayer {
+            if case .xhttp(let xhttp) = configuration.xrayTransportLayer {
                 vlessXHTTPHost = xhttp.host
                 vlessXHTTPPath = xhttp.path
                 vlessXHTTPMode = xhttp.mode.rawValue
@@ -1115,10 +1105,7 @@ struct ProxyEditorView: View {
                 }
             }
 
-            vlessMuxEnabled = configuration.muxEnabled
-            vlessXUDPEnabled = configuration.xudpEnabled
-
-            if case .tls(let tls) = configuration.securityLayer {
+            if case .tls(let tls) = configuration.xraySecurityLayer {
                 vlessTLSSNI = tls.serverName
                 vlessTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
                 vlessTLSECHEnabled = tls.echEnabled
@@ -1126,7 +1113,7 @@ struct ProxyEditorView: View {
                 vlessFingerprint = tls.fingerprint
             }
 
-            if case .reality(let reality) = configuration.securityLayer {
+            if case .reality(let reality) = configuration.xraySecurityLayer {
                 vlessRealitySNI = reality.serverName
                 vlessRealityPublicKey = reality.publicKey.base64URLEncodedString()
                 vlessRealityShortId = reality.shortId.hexEncodedString()
@@ -1322,26 +1309,24 @@ struct ProxyEditorView: View {
         let outbound: Outbound
         switch selectedProtocol {
         case .vless:
-            let vlessTransportLayer: TransportLayer
-            if let vlessWebSocketConfiguration { vlessTransportLayer = .ws(vlessWebSocketConfiguration) }
-            else if let vlessHTTPUpgradeConfiguration { vlessTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
-            else if let vlessXHTTPConfiguration { vlessTransportLayer = .xhttp(vlessXHTTPConfiguration) }
-            else if let vlessGRPCConfiguration { vlessTransportLayer = .grpc(vlessGRPCConfiguration) }
-            else { vlessTransportLayer = .tcp }
+            let vlessXrayTransportLayer: XrayTransportLayer
+            if let vlessWebSocketConfiguration { vlessXrayTransportLayer = .ws(vlessWebSocketConfiguration) }
+            else if let vlessHTTPUpgradeConfiguration { vlessXrayTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
+            else if let vlessXHTTPConfiguration { vlessXrayTransportLayer = .xhttp(vlessXHTTPConfiguration) }
+            else if let vlessGRPCConfiguration { vlessXrayTransportLayer = .grpc(vlessGRPCConfiguration) }
+            else { vlessXrayTransportLayer = .tcp }
 
-            let vlessSecurityLayer: SecurityLayer
-            if let vlessRealityConfiguration { vlessSecurityLayer = .reality(vlessRealityConfiguration) }
-            else if let vlessTLSConfiguration { vlessSecurityLayer = .tls(vlessTLSConfiguration) }
-            else { vlessSecurityLayer = .none }
+            let vlessXraySecurityLayer: XraySecurityLayer
+            if let vlessRealityConfiguration { vlessXraySecurityLayer = .reality(vlessRealityConfiguration) }
+            else if let vlessTLSConfiguration { vlessXraySecurityLayer = .tls(vlessTLSConfiguration) }
+            else { vlessXraySecurityLayer = .none }
 
             outbound = .vless(
                 uuid: parsedUUID,
                 encryption: vlessEncryption,
                 flow: vlessFlow.isEmpty ? nil : vlessFlow,
-                transport: vlessTransportLayer,
-                security: vlessSecurityLayer,
-                muxEnabled: vlessMuxEnabled,
-                xudpEnabled: vlessXUDPEnabled
+                transport: vlessXrayTransportLayer,
+                security: vlessXraySecurityLayer
             )
         case .hysteria:
             let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
