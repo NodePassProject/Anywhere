@@ -90,6 +90,11 @@ enum TunnelConstants {
     /// Max bytes buffered while parsing a ClientHello for SNI; post-quantum key shares push ~4 KB.
     static let tlsSnifferBufferLimit = 8192
 
+    // MARK: - HTTP Sniffer
+
+    /// Max bytes buffered while parsing a cleartext HTTP request head.
+    static let httpSnifferBufferLimit = 64 * 1024
+
     // MARK: - Fake-IP Pool
 
     /// Base IPv4 address for the fake-IP pool (198.18.0.0 in 198.18.0.0/15).

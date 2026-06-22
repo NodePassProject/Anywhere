@@ -1,16 +1,17 @@
 # MITM Rewrite System — Developer Guide
 
-Anywhere can terminate TLS for selected domains, inspect and rewrite the
-HTTP traffic inside, and re-encrypt it to the upstream — a man-in-the-middle
-(MITM) on traffic you control. This guide covers everything needed to author
-rules and scripts. It is reference-level and assumes you are comfortable with
-HTTP, regular expressions, and JavaScript. It does **not** cover the settings
-UI.
+Anywhere can intercept the HTTP traffic of selected domains — terminating TLS
+for HTTPS, or reading plain HTTP directly — then inspect, rewrite, and forward
+it to the upstream: a man-in-the-middle (MITM) on traffic you control. This
+guide covers everything needed to author rules and scripts. It is
+reference-level and assumes you are comfortable with HTTP, regular expressions,
+and JavaScript. It does **not** cover the settings UI.
 
-> **Prerequisite.** Interception only works for clients that trust Anywhere's
-> generated root CA. Install and trust it first. Apps that pin certificates
-> cannot be intercepted (their TLS handshake to the minted leaf certificate
-> will fail) — this is expected, not a bug.
+> **Prerequisite (HTTPS only).** Intercepting **HTTPS** works only for clients
+> that trust Anywhere's generated root CA. Install and trust it first. Apps that
+> pin certificates cannot be intercepted (their TLS handshake to the minted leaf
+> certificate will fail) — this is expected, not a bug. Plain **HTTP** carries no
+> certificate, so it needs no CA trust.
 
 ## Contents
 
@@ -31,8 +32,8 @@ UI.
 
 ## How it works
 
-A connection is intercepted when its TLS ClientHello SNI host matches a
-configured rule set. Anywhere then:
+An **HTTPS** connection is intercepted when its TLS ClientHello SNI host matches
+a configured rule set. Anywhere then:
 
 1. Mints a leaf certificate for the requested host (cached) and completes the
    **inner** TLS handshake with the client, negotiating ALPN from the client's
@@ -47,6 +48,14 @@ configured rule set. Anywhere then:
    speaks — HTTP/2 directly, or HTTP/1.1 with on-the-fly translation.
 4. Decrypts each direction, runs the matching rules, and re-encrypts to the
    opposite leg.
+
+**Plain HTTP** (no TLS) is intercepted the same way, gated on the request host
+instead of the SNI. When a connection isn't TLS, Anywhere reads the first
+request's authority — the DNS-resolved name for a fake-IP route, otherwise the
+`Host` header — and intercepts it when that matches a rule set. No certificate is
+minted and neither leg runs a handshake (the upstream is dialed in cleartext
+too); otherwise the rewrite pipeline is identical, and `ctx.url` simply carries an
+`http://` scheme. Cleartext is always treated as HTTP/1.1 — h2c is not intercepted.
 
 Traffic is processed in two **phases**:
 
@@ -185,7 +194,9 @@ semantics) tested against the **whole request URL** — e.g.
 `https://api.example.com/login?token=abc`. It is purely a gate (the replace
 operations carry their own `search` regex); it does **not** see the method or
 HTTP version. Use `.*` to match every request, or anchor on the scheme/host
-(`^https://api\.example\.com/`) to scope by origin. The rule fires only when the
+(`^https://api\.example\.com/`) to scope by origin — but note an intercepted
+**plain-HTTP** request's URL has an `http://` scheme, so anchor on `^https?://`
+(or just the host) when a rule set also covers cleartext. The rule fires only when the
 URL pattern matches. The **host** is matched case-insensitively — it is
 lowercased before the test, so write hosts in lowercase — while the path and
 query keep their case.

@@ -134,8 +134,11 @@ final class MITMSession {
     private let dstHost: String
     private let dstPort: UInt16
     private let lwipQueue: DispatchQueue
+    
+    private let isPlaintext: Bool
 
-    private let leafCache: MITMLeafCertCache
+    /// nil for a plaintext session; cleartext presents no certificate.
+    private let leafCache: MITMLeafCertCache?
     private let policy: MITMRewritePolicy
 
     private let dialer: MITMDialer
@@ -181,9 +184,9 @@ final class MITMSession {
 
     private let innerTransport: InnerTransport
 
-    /// Post-handshake record connections; decrypted plaintext stays inside the session.
-    private var innerRecord: TLSRecordConnection?
-    private var outerRecord: TLSRecordConnection?
+    /// Post-handshake byte legs; decrypted/cleartext plaintext stays inside the session.
+    private var innerRecord: (any MITMByteLeg)?
+    private var outerRecord: (any MITMByteLeg)?
 
     /// HTTP/1.1 stream rewriters, one per direction.
     private let requestStream: MITMHTTP1Stream
@@ -317,10 +320,11 @@ final class MITMSession {
         dstHost: String,
         dstPort: UInt16,
         clientHello: Data,
-        leafCache: MITMLeafCertCache,
+        leafCache: MITMLeafCertCache?,
         policy: MITMRewritePolicy,
         dialer: @escaping MITMDialer,
-        lwipQueue: DispatchQueue
+        lwipQueue: DispatchQueue,
+        isPlaintext: Bool = false
     ) {
         self.dstHost = dstHost
         self.dstPort = dstPort
@@ -329,12 +333,16 @@ final class MITMSession {
         self.policy = policy
         self.dialer = dialer
         self.lwipQueue = lwipQueue
+        self.isPlaintext = isPlaintext
         self.innerTransport = InnerTransport(queue: lwipQueue)
+        // Cleartext requests carry an http:// URL; rule gates and script `request.url` must reflect it.
+        let scheme = isPlaintext ? "http" : "https"
         // Scope keyed by matched set id to line up with the Anywhere.store scope.
         self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
         // effectiveAuthority is late-bound by a transparent rewrite on the first request.
         self.requestStream = MITMHTTP1Stream(
             host: dstHost,
+            scheme: scheme,
             phase: .httpRequest,
             policy: policy,
             effectiveAuthority: nil,
@@ -344,6 +352,7 @@ final class MITMSession {
         )
         self.responseStream = MITMHTTP1Stream(
             host: dstHost,
+            scheme: scheme,
             phase: .httpResponse,
             policy: policy,
             effectiveAuthority: nil, // Host headers do not apply on responses.
@@ -362,9 +371,26 @@ final class MITMSession {
 
     // MARK: - Lifecycle
 
-    /// Starts the inner-leg TLS handshake; the upstream dial is deferred until
-    /// the first request resolves the destination. Must be called on lwipQueue.
+    /// Starts the inner leg — a TLS handshake for HTTPS, or a direct cleartext leg for plain HTTP —
+    /// and defers the upstream dial until the first request resolves the destination.
     func start(sni: String) {
+        installStreamHandlers()
+        guard !isPlaintext else {
+            startPlaintext()
+            return
+        }
+        let parsed = parseClientHello(pendingClientBytes)
+        let clientALPNs = parsed?.alpnProtocols ?? []
+        // Unparseable ClientHello fails closed to TLS 1.2; any 1.3-capable client also speaks 1.2.
+        clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? false
+        startInnerHandshakeFromClientOffer(
+            sni: sni,
+            clientALPNs: clientALPNs,
+            clientSupportsTLS13: clientSupportsTLS13
+        )
+    }
+
+    private func installStreamHandlers() {
         responseStream.onProtocolUpgrade = { [weak self] in
             self?.handleResponseUpgrade()
         }
@@ -385,15 +411,16 @@ final class MITMSession {
         }
         requestStream.onHardClose = hardClose
         responseStream.onHardClose = hardClose
-        let parsed = parseClientHello(pendingClientBytes)
-        let clientALPNs = parsed?.alpnProtocols ?? []
-        // Unparseable ClientHello fails closed to TLS 1.2; any 1.3-capable client also speaks 1.2.
-        clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? false
-        startInnerHandshakeFromClientOffer(
-            sni: sni,
-            clientALPNs: clientALPNs,
-            clientSupportsTLS13: clientSupportsTLS13
-        )
+    }
+
+    private func startPlaintext() {
+        let inner = PlaintextLeg(transport: innerTransport)
+        if !pendingClientBytes.isEmpty {
+            inner.prependToReceiveBuffer(pendingClientBytes)
+            pendingClientBytes.removeAll(keepingCapacity: false)
+        }
+        innerRecord = inner
+        startInboundPump(inner: inner)
     }
 
     func feedClientBytes(_ data: Data) {
@@ -473,6 +500,8 @@ final class MITMSession {
     // MARK: - Inner Handshake
 
     private func startInnerHandshake(sni: String, alpns: [String], tlsVersions: Set<UInt16>) {
+        // Never reached for a plaintext session, so the cache is always present.
+        guard let leafCache else { cancel(error: nil); return }
         do {
             let leaf = try leafCache.leaf(for: sni)
             let server = TLSServer(
@@ -508,6 +537,14 @@ final class MITMSession {
     }
 
     // MARK: - Outer Handshake (deferred)
+
+    /// Cleartext upstream leg: no TLS handshake — wrap the dialed connection in a `PlaintextLeg` and shuttle h1↔h1.
+    private func startCleartextUpstream(over connection: ProxyConnection) {
+        guard !torn, let inner = innerRecord else { connection.cancel(); return }
+        let outer = PlaintextLeg(transport: TunneledTransport(tunnel: connection))
+        outerRecord = outer
+        finishDialAndShuttle(inner: inner, outer: outer)
+    }
 
     /// Outer handshake for an HTTP/1.1 *inner* leg (h2 inner uses the decoupled bridge dial).
     /// Offers http/1.1; on success shuttles h1↔h1.
@@ -587,7 +624,7 @@ final class MITMSession {
     // MARK: - Shuttle
 
     /// Completes the h1↔h1 dial: flushes the buffered first request, starts the outbound pump.
-    private func finishDialAndShuttle(inner: TLSRecordConnection, outer: TLSRecordConnection) {
+    private func finishDialAndShuttle(inner: any MITMByteLeg, outer: any MITMByteLeg) {
         // Flush the buffered first request before the inbound pump forwards new ones.
         let buffered = pendingUpstreamBytes
         pendingUpstreamBytes = Data()
@@ -615,7 +652,7 @@ final class MITMSession {
     /// Serializes per-leg sends so concurrent callers can't interleave bytes mid-frame. Must be called on lwipQueue.
     private func sendChunked(
         _ data: Data,
-        via record: TLSRecordConnection,
+        via record: any MITMByteLeg,
         completion: @escaping (Error?) -> Void
     ) {
         let key = ObjectIdentifier(record)
@@ -632,13 +669,13 @@ final class MITMSession {
     /// Drains one enqueued blob to completion before the next so concurrent writers
     /// can't split a frame mid-payload. All methods must run on queue.
     private final class LegSendSerializer {
-        private let record: TLSRecordConnection
+        private let record: any MITMByteLeg
         private let queue: DispatchQueue
         private let chunkSize: Int
         private var pending: [(data: Data, completion: (Error?) -> Void)] = []
         private var sending = false
 
-        init(record: TLSRecordConnection, queue: DispatchQueue, chunkSize: Int) {
+        init(record: any MITMByteLeg, queue: DispatchQueue, chunkSize: Int) {
             self.record = record
             self.queue = queue
             self.chunkSize = chunkSize
@@ -693,7 +730,7 @@ final class MITMSession {
     }
 
     /// Pumps client plaintext upstream, or drains synthesized responses back to the client.
-    private func startInboundPump(inner: TLSRecordConnection) {
+    private func startInboundPump(inner: any MITMByteLeg) {
         inner.receive { [weak self] data, error in
             guard let self else { return }
             self.lwipQueue.async {
@@ -750,7 +787,7 @@ final class MITMSession {
     }
 
     /// Buffers upstream-bound bytes and kicks off the deferred dial; mid-dial calls only buffer.
-    private func bufferUpstreamAndDial(_ transformed: Data, inner: TLSRecordConnection) {
+    private func bufferUpstreamAndDial(_ transformed: Data, inner: any MITMByteLeg) {
         pendingUpstreamBytes.append(transformed)
         // Backstop only — `resumeOrPauseInboundPreDial` backpressures at the high-water mark, so this
         // trips only on a pathological single oversized rewrite, not a large streamed upload.
@@ -790,7 +827,11 @@ final class MITMSession {
             case .success(let dial):
                 self.proxyClient = dial.proxyClient
                 self.outerConnection = dial.connection
-                self.startOuterHandshakeAfterDial(over: dial.connection, host: host, innerALPN: innerALPN)
+                if self.isPlaintext {
+                    self.startCleartextUpstream(over: dial.connection)
+                } else {
+                    self.startOuterHandshakeAfterDial(over: dial.connection, host: host, innerALPN: innerALPN)
+                }
             case .failure(let error):
                 self.failInnerLegWith502("upstream connect failed: \(error)")
             }
@@ -801,7 +842,7 @@ final class MITMSession {
     /// While the dial is in flight, keep reading client bytes until the upstream-bound buffer reaches
     /// the high-water mark, then pause — filling the client's TCP window so a fast local uploader is
     /// throttled instead of buffering an unbounded first-request body. lwipQueue only.
-    private func resumeOrPauseInboundPreDial(inner: TLSRecordConnection) {
+    private func resumeOrPauseInboundPreDial(inner: any MITMByteLeg) {
         if pendingUpstreamBytes.count >= Self.maxPendingClientBytes {
             inboundReadPaused = true
         } else {
@@ -837,7 +878,7 @@ final class MITMSession {
     /// Closes the confirmed-idle outer h1 leg and dials a fresh one for a request that resolved a
     /// different upstream host, keeping the inner (client) leg up so the client sees no drop or retry.
     /// Precondition: ``canReconnectOuterLeg`` returned true. lwipQueue only.
-    private func reconnectOuterLeg(with transformed: Data, inner: TLSRecordConnection) {
+    private func reconnectOuterLeg(with transformed: Data, inner: any MITMByteLeg) {
         logger.info("\(dstHost): later request resolved a new upstream; reconnecting the idle outer leg instead of tearing down")
         // Detach before cancelling: the old outbound pump's `outerRecord === outer` guard then sees a
         // non-matching (nil) record and no-ops its EOF, so cancelling here can't recurse into a full
@@ -920,7 +961,7 @@ final class MITMSession {
         }
     }
 
-    private func startOutboundPump(inner: TLSRecordConnection, outer: TLSRecordConnection) {
+    private func startOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) {
         outer.receive { [weak self] data, error in
             guard let self else { return }
             self.lwipQueue.async {

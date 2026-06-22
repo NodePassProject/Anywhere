@@ -56,14 +56,21 @@ class TCPConnection {
     // MARK: MITM
 
     private var mitmEnabled = false
-    /// SNI captured at MITM-decision time; inner TLS server name and rewrite-match host.
+    private var mitmPlaintext = false
+    /// SNI (TLS) or resolved authority (cleartext) captured at MITM-decision time; the inner server
+    /// name and rewrite-match host.
     private var mitmSNI: String?
     private var mitmSession: MITMSession?
 
-    // MARK: SNI Sniffing
+    /// True when `dstHost` is a DNS-resolved domain (fake-IP), false when it is a raw IP (real-IP).
+    private let hostIsResolvedDomain: Bool
 
-    /// Non-nil during the sniff phase; inbound bytes buffer in `pendingData` until the route commits.
+    // MARK: SNI / HTTP Sniffing
+
+    /// Non-nil during the TLS sniff phase; inbound bytes buffer in `pendingData` until the route commits.
     private var sniffer: TLSClientHelloSniffer?
+    /// Non-nil during the cleartext HTTP sniff phase; resolves the authority that gates plain-HTTP interception.
+    private var httpSniffer: HTTPRequestSniffer?
 
     // MARK: Backpressure State
 
@@ -112,6 +119,7 @@ class TCPConnection {
          configuration: ProxyConfiguration, routeTarget: RouteTarget,
          viaDefault: Bool,
          sniffSNI: Bool = false,
+         hostIsResolvedDomain: Bool = false,
          lwipQueue: DispatchQueue) {
         self.pcb = pcb
         self.dstHost = dstHost
@@ -120,6 +128,7 @@ class TCPConnection {
         self.lwipQueue = lwipQueue
         self.routeTarget = routeTarget
         self.acceptedViaDefault = viaDefault
+        self.hostIsResolvedDomain = hostIsResolvedDomain
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
@@ -128,7 +137,7 @@ class TCPConnection {
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
             if self.isEstablishing {
-                let phase = self.sniffer != nil ? "TLS ClientHello sniff" : "proxy dial"
+                let phase = self.isSniffing ? "protocol sniff" : "proxy dial"
                 self.failureReporter.report(
                     operation: "Handshake",
                     endpoint: self.endpointDescription,
@@ -146,8 +155,9 @@ class TCPConnection {
             // Server-speaks-first protocols (SSH, SMTP, FTP) never send client
             // bytes; commit the IP-based route at the deadline.
             let deadline = DispatchWorkItem { [weak self] in
-                guard let self, !self.closed, self.sniffer != nil else { return }
+                guard let self, !self.closed, self.isSniffing else { return }
                 self.sniffer = nil
+                self.httpSniffer = nil
                 self.beginConnecting()
             }
             sniffDeadline = deadline
@@ -175,9 +185,17 @@ class TCPConnection {
         return true
     }
 
-    /// Still waiting for SNI bytes or dialing the proxy; drives the handshake timer.
+    /// Still sniffing or dialing the proxy; drives the handshake timer.
     private var isEstablishing: Bool {
-        proxyConnecting || sniffer != nil
+        proxyConnecting || isSniffing
+    }
+
+    private var isSniffing: Bool {
+        sniffer != nil || httpSniffer != nil
+    }
+
+    private var mitmCanInterceptPlaintext: Bool {
+        TunnelStack.shared?.mitmEnabled == true
     }
 
     // MARK: - lwIP Callbacks (called on lwipQueue)
@@ -205,13 +223,34 @@ class TCPConnection {
                     guard !closed else { return }  // rule may have rejected
                     beginConnecting()
                     return
-                case .notTLS, .unavailable:
+                case .notTLS:
+                    sniffer = nil
+                    if mitmCanInterceptPlaintext {
+                        var http = HTTPRequestSniffer()
+                        let httpState = http.feed(pendingData)
+                        httpSniffer = http
+                        handleHTTPSniff(httpState)
+                    } else {
+                        cancelSniffDeadline()
+                        beginConnecting()
+                    }
+                    return
+                case .unavailable:
                     sniffer = nil
                     cancelSniffDeadline()
                     beginConnecting()
                     return
                 }
             }
+        }
+
+        if httpSniffer != nil {
+            let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: ptr), count: count, deallocator: .none)
+            guard appendPendingData(bytes: bytePtr, count: count) else { return }
+            if let state = httpSniffer?.feed(data) {
+                handleHTTPSniff(state)
+            }
+            return
         }
 
         if proxyConnecting {
@@ -346,8 +385,9 @@ class TCPConnection {
 
         // Client FIN'd mid-sniff: nothing buffered → drop; otherwise commit
         // the IP-based route and forward what we have.
-        if sniffer != nil {
+        if isSniffing {
             sniffer = nil
+            httpSniffer = nil
             cancelSniffDeadline()
             if pendingData.isEmpty {
                 close()
@@ -477,6 +517,35 @@ class TCPConnection {
         }
     }
 
+    /// Resolves a cleartext HTTP sniff: starts a plaintext MITM session when a rule matches the
+    /// request authority, otherwise commits the plain (non-intercepted) route.
+    private func handleHTTPSniff(_ state: HTTPRequestSniffer.State) {
+        switch state {
+        case .needMore:
+            return
+        case .found(let authority):
+            httpSniffer = nil
+            cancelSniffDeadline()
+            applyHTTPMITM(authority: authority)
+            guard !closed else { return }
+            beginConnecting()
+        case .notHTTP:
+            httpSniffer = nil
+            cancelSniffDeadline()
+            beginConnecting()
+        }
+    }
+
+    /// Enables plaintext MITM when a rewrite rule matches the request's authority.
+    private func applyHTTPMITM(authority: String?) {
+        guard let stack = TunnelStack.shared, stack.mitmEnabled else { return }
+        let matchHost = hostIsResolvedDomain ? dstHost : authority
+        guard let matchHost, stack.mitmPolicy.matches(matchHost) else { return }
+        mitmEnabled = true
+        mitmPlaintext = true
+        mitmSNI = matchHost
+    }
+
     // MARK: - Direct Connection (bypass)
 
     private func connectDirect() {
@@ -591,14 +660,14 @@ class TCPConnection {
 
     // MARK: - MITM Session
 
-    /// Starts a deferred-dial MITM session: the inner TLS handshake runs first and
-    /// the upstream dial waits until the first request resolves the destination.
     private func startMITMSession() {
         guard let stack = TunnelStack.shared else { abort(); return }
         let sni = mitmSNI ?? dstHost
-
-        let cache: MITMLeafCertCache
-        if let existing = stack.mitmLeafCache {
+        
+        let cache: MITMLeafCertCache?
+        if mitmPlaintext {
+            cache = nil
+        } else if let existing = stack.mitmLeafCache {
             cache = existing
         } else {
             do {
@@ -625,7 +694,7 @@ class TCPConnection {
         let initialClientHello = pendingData
         pendingData.removeAll(keepingCapacity: true)
 
-        // Pass the SNI, not the IP-derived host, so rewrite rules match by hostname.
+        // Pass the SNI/authority, not the IP-derived host, so rewrite rules match by hostname.
         let session = MITMSession(
             dstHost: sni,
             dstPort: dstPort,
@@ -633,9 +702,10 @@ class TCPConnection {
             leafCache: cache,
             policy: stack.mitmPolicy,
             dialer: makeMITMDialer(),
-            lwipQueue: lwipQueue
+            lwipQueue: lwipQueue,
+            isPlaintext: mitmPlaintext
         )
-        // Inner-leg downlink: inner TLS server output goes straight to lwIP.
+        // Inner-leg downlink: inner-leg output (TLS records or cleartext) goes straight to lwIP.
         session.onSendToClient = { [weak self] data, completion in
             guard let self else { completion?(SocketError.notConnected); return }
             self.lwipQueue.async {
