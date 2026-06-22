@@ -692,10 +692,10 @@ struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
     }
 
     /// The download leg's security layer reconstructed from the flattened fields.
-    var securityLayer: SecurityLayer {
+    var xraySecurityLayer: XraySecurityLayer {
         switch security {
-        case "tls":     return tls.map(SecurityLayer.tls) ?? .none
-        case "reality": return reality.map(SecurityLayer.reality) ?? .none
+        case "tls":     return tls.map(XraySecurityLayer.tls) ?? .none
+        case "reality": return reality.map(XraySecurityLayer.reality) ?? .none
         default:        return .none
         }
     }

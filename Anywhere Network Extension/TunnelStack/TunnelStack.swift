@@ -396,12 +396,9 @@ class TunnelStack {
 
         publishUDPConfig()
         publishReflector()
-
-        // udpMultiplexerPool is udpQueue-owned, so build it there (a restart-time miss
-        // is fine — restart resets flows).
-        let useMux = configuration.usesVisionMux
+        
         udpQueue.async { [self] in
-            if useMux {
+            if configuration.outboundProtocol == .vless {
                 udpMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
             } else {
                 udpMultiplexerPool = nil

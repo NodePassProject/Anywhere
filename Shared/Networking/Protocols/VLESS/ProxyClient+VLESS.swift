@@ -15,12 +15,12 @@ extension ProxyClient {
     fileprivate static let visionFlow = "xtls-rprx-vision"
 
     var isVisionFlow: Bool {
-        guard case .vless(_, _, let flow, _, _, _, _) = configuration.outbound else { return false }
+        guard case .vless(_, _, let flow, _, _) = configuration.outbound else { return false }
         return flow == Self.visionFlow
     }
 
     var hasVLESSEncryption: Bool {
-        guard case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound else { return false }
+        guard case .vless(_, let encryption, _, _, _) = configuration.outbound else { return false }
         return !encryption.isEmpty && encryption != "none"
     }
 
@@ -28,7 +28,7 @@ extension ProxyClient {
     /// transport; otherwise only raw TCP carrying TLS/REALITY qualifies.
     var transportSupportsVision: Bool {
         if hasVLESSEncryption { return true }
-        if case .tcp = configuration.transportLayer { return true }
+        if case .tcp = configuration.xrayTransportLayer { return true }
         return false
     }
 
@@ -48,7 +48,7 @@ extension ProxyClient {
         // A nil config means "none"/empty → plaintext VLESS. On iOS < 26 the encrypted
         // scheme must refuse, not silently downgrade and expose the plaintext UUID.
         let vlessEncryption: String
-        if case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound {
+        if case .vless(_, let encryption, _, _, _) = configuration.outbound {
             vlessEncryption = encryption
         } else {
             vlessEncryption = "none"
@@ -122,7 +122,7 @@ extension ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let vlessUUID: UUID
-        if case .vless(let uuid, _, _, _, _, _, _) = configuration.outbound {
+        if case .vless(let uuid, _, _, _, _) = configuration.outbound {
             vlessUUID = uuid
         } else {
             vlessUUID = configuration.id
@@ -199,7 +199,7 @@ extension ProxyClient {
 
     fileprivate func wrapWithVision(_ connection: ProxyConnection) -> VLESSVisionConnection {
         let vlessUUID: UUID
-        if case .vless(let uuid, _, _, _, _, _, _) = configuration.outbound {
+        if case .vless(let uuid, _, _, _, _) = configuration.outbound {
             vlessUUID = uuid
         } else {
             vlessUUID = configuration.id

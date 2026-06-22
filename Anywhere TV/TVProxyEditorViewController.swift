@@ -23,8 +23,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var vlessEncryption = "none"
     private var vlessFlow = ""
     private var vlessTransport = "tcp"
-    private var vlessMuxEnabled = true
-    private var vlessXUDPEnabled = true
 
     private var vlessWebSocketHost = ""
     private var vlessWebSocketPath = "/"
@@ -144,7 +142,6 @@ class TVProxyEditorViewController: UITableViewController {
         case name, address, port
         case outboundProtocol
         case vlessUUID, vlessEncryption, vlessTransport, vlessFlow, vlessSecurity
-        case vlessMux, vlessXUDP
         case vlessWebSocketHost, vlessWebSocketPath
         case vlessHTTPUpgradeHost, vlessHTTPUpgradePath
         case vlessGRPCServiceName, vlessGRPCAuthority, vlessGRPCMode, vlessGRPCUserAgent
@@ -258,12 +255,6 @@ class TVProxyEditorViewController: UITableViewController {
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
                 ], key: .vlessTransport),
             ]
-            if vlessTransport == "tcp" {
-                transportRows.append(.toggle(label: String(localized: "Mux", comment: "Mux for VLESS protocol TCP transport"), isOn: vlessMuxEnabled, key: .vlessMux))
-                if vlessMuxEnabled {
-                    transportRows.append(.toggle(label: String(localized: "XUDP", comment: "XUDP for VLESS protocol TCP transport"), isOn: vlessXUDPEnabled, key: .vlessXUDP))
-                }
-            }
             if vlessTransport == "ws" {
                 transportRows.append(.text(label: String(localized: "Host"), value: vlessWebSocketHost, placeholder: String(localized: "Host"), key: .vlessWebSocketHost))
                 transportRows.append(.text(label: String(localized: "Path"), value: vlessWebSocketPath, placeholder: String(localized: "Path"), key: .vlessWebSocketPath))
@@ -698,10 +689,6 @@ class TVProxyEditorViewController: UITableViewController {
         case .vlessTransport: vlessTransport = value
         case .vlessFlow: vlessFlow = value
         case .vlessSecurity: vlessSecurity = value
-        case .vlessMux:
-            vlessMuxEnabled = value == "true"
-            if !vlessMuxEnabled { vlessXUDPEnabled = false }
-        case .vlessXUDP: vlessXUDPEnabled = value == "true"
         case .vlessWebSocketHost: vlessWebSocketHost = value
         case .vlessWebSocketPath: vlessWebSocketPath = value
         case .vlessHTTPUpgradeHost: vlessHTTPUpgradeHost = value
@@ -809,7 +796,7 @@ class TVProxyEditorViewController: UITableViewController {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _, _, _) = configuration.outbound {
+        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _) = configuration.outbound {
             self.vlessUUID = vlessUUID.uuidString
             self.vlessEncryption = vlessEncryption
             self.vlessFlow = vlessFlow ?? ""
@@ -819,26 +806,24 @@ class TVProxyEditorViewController: UITableViewController {
             vlessFlow = ""
         }
         if isVLESS {
-            vlessTransport = configuration.transportLayer.tag
-            vlessSecurity = configuration.securityLayer.tag
-            vlessMuxEnabled = configuration.muxEnabled
-            vlessXUDPEnabled = configuration.xudpEnabled
+            vlessTransport = configuration.xrayTransportLayer.tag
+            vlessSecurity = configuration.xraySecurityLayer.tag
 
-            if case .ws(let ws) = configuration.transportLayer {
+            if case .ws(let ws) = configuration.xrayTransportLayer {
                 vlessWebSocketHost = ws.host
                 vlessWebSocketPath = ws.path
             }
-            if case .httpUpgrade(let httpUpgrade) = configuration.transportLayer {
+            if case .httpUpgrade(let httpUpgrade) = configuration.xrayTransportLayer {
                 vlessHTTPUpgradeHost = httpUpgrade.host
                 vlessHTTPUpgradePath = httpUpgrade.path
             }
-            if case .grpc(let grpc) = configuration.transportLayer {
+            if case .grpc(let grpc) = configuration.xrayTransportLayer {
                 vlessGRPCServiceName = grpc.serviceName
                 vlessGRPCAuthority = grpc.authority
                 vlessGRPCMode = grpc.multiMode ? "multi" : "gun"
                 vlessGRPCUserAgent = grpc.userAgent
             }
-            if case .xhttp(let xhttp) = configuration.transportLayer {
+            if case .xhttp(let xhttp) = configuration.xrayTransportLayer {
                 vlessXHTTPHost = xhttp.host
                 vlessXHTTPPath = xhttp.path
                 vlessXHTTPMode = xhttp.mode.rawValue
@@ -863,14 +848,14 @@ class TVProxyEditorViewController: UITableViewController {
                     vlessXHTTPDownloadPath = download.xhttp.path
                 }
             }
-            if case .tls(let tls) = configuration.securityLayer {
+            if case .tls(let tls) = configuration.xraySecurityLayer {
                 vlessTLSSNI = tls.serverName
                 vlessTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
                 vlessFingerprint = tls.fingerprint
                 vlessTLSECHEnabled = tls.echEnabled
                 vlessTLSECH = tls.echConfig ?? ""
             }
-            if case .reality(let reality) = configuration.securityLayer {
+            if case .reality(let reality) = configuration.xraySecurityLayer {
                 vlessRealitySNI = reality.serverName
                 vlessRealityPublicKey = reality.publicKey.base64URLEncodedString()
                 vlessRealityShortId = reality.shortId.hexEncodedString()
@@ -1061,26 +1046,24 @@ class TVProxyEditorViewController: UITableViewController {
         let outbound: Outbound
         switch selectedProtocol {
         case .vless:
-            let vlessTransportLayer: TransportLayer
-            if let vlessWebSocketConfiguration { vlessTransportLayer = .ws(vlessWebSocketConfiguration) }
-            else if let vlessHTTPUpgradeConfiguration { vlessTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
-            else if let vlessGRPCConfiguration { vlessTransportLayer = .grpc(vlessGRPCConfiguration) }
-            else if let vlessXHTTPConfiguration { vlessTransportLayer = .xhttp(vlessXHTTPConfiguration) }
-            else { vlessTransportLayer = .tcp }
+            let vlessXrayTransportLayer: XrayTransportLayer
+            if let vlessWebSocketConfiguration { vlessXrayTransportLayer = .ws(vlessWebSocketConfiguration) }
+            else if let vlessHTTPUpgradeConfiguration { vlessXrayTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
+            else if let vlessGRPCConfiguration { vlessXrayTransportLayer = .grpc(vlessGRPCConfiguration) }
+            else if let vlessXHTTPConfiguration { vlessXrayTransportLayer = .xhttp(vlessXHTTPConfiguration) }
+            else { vlessXrayTransportLayer = .tcp }
 
-            let vlessSecurityLayer: SecurityLayer
-            if let vlessRealityConfiguration { vlessSecurityLayer = .reality(vlessRealityConfiguration) }
-            else if let vlessTLSConfiguration { vlessSecurityLayer = .tls(vlessTLSConfiguration) }
-            else { vlessSecurityLayer = .none }
+            let vlessXraySecurityLayer: XraySecurityLayer
+            if let vlessRealityConfiguration { vlessXraySecurityLayer = .reality(vlessRealityConfiguration) }
+            else if let vlessTLSConfiguration { vlessXraySecurityLayer = .tls(vlessTLSConfiguration) }
+            else { vlessXraySecurityLayer = .none }
 
             outbound = .vless(
                 uuid: parsedUUID,
                 encryption: vlessEncryption,
                 flow: vlessFlow.isEmpty ? nil : vlessFlow,
-                transport: vlessTransportLayer,
-                security: vlessSecurityLayer,
-                muxEnabled: vlessMuxEnabled,
-                xudpEnabled: vlessXUDPEnabled
+                transport: vlessXrayTransportLayer,
+                security: vlessXraySecurityLayer
             )
         case .hysteria:
             let uploadMbps = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)

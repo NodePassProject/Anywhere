@@ -96,10 +96,8 @@ enum Outbound: Hashable {
         uuid: UUID,
         encryption: String,
         flow: String?,
-        transport: TransportLayer,
-        security: SecurityLayer,
-        muxEnabled: Bool,
-        xudpEnabled: Bool
+        transport: XrayTransportLayer,
+        security: XraySecurityLayer
     )
     /// Hysteria2 over QUIC. SNI is always populated; the Mbps values are clamped
     /// and only take effect with `.brutal` congestion control. `portHopping` is `nil`
@@ -139,9 +137,9 @@ enum Outbound: Hashable {
     case http3(username: String, password: String)
 }
 
-// MARK: - Transport Layer Configuration
+// MARK: - Xray Transport Layer Configuration
 
-enum TransportLayer: Hashable {
+enum XrayTransportLayer: Hashable {
     case tcp
     case ws(WebSocketConfiguration)
     case httpUpgrade(HTTPUpgradeConfiguration)
@@ -160,14 +158,13 @@ enum TransportLayer: Hashable {
     }
 }
 
-// MARK: - Security Layer Configuration
+// MARK: - Xray Security Layer Configuration
 
-enum SecurityLayer: Hashable {
+enum XraySecurityLayer: Hashable {
     case none
     case tls(TLSConfiguration)
     case reality(RealityConfiguration)
-
-    /// Wire tag used in the flat JSON schema and `vless://` query params.
+    
     var tag: String {
         switch self {
         case .none:     "none"
@@ -175,13 +172,26 @@ enum SecurityLayer: Hashable {
         case .reality:  "reality"
         }
     }
-
-    /// SNI / server name carried by this layer; `fallback` when unsecured.
+    
     func serverName(fallback: String) -> String {
         switch self {
         case .tls(let tls): return tls.serverName
         case .reality(let reality): return reality.serverName
         case .none: return fallback
+        }
+    }
+}
+
+// MARK: - Generic Transport Layer Configuration
+
+enum GenericTransportLayer: Hashable {
+    case tls(TLSConfiguration)
+    case none
+    
+    var tag: String {
+        switch self {
+        case .tls:  "tls"
+        case .none: "none"
         }
     }
 }
@@ -219,16 +229,51 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .http3:        .http3
         }
     }
+    
+    var genericTransportLayer: GenericTransportLayer {
+        switch outbound {
+        case .trojan(_, let tls):           .tls(tls)
+        case .anytls(_, _, _, _, let tls):  .tls(tls)
+        case .nowhere(_, _, _, _, let tls): .tls(tls)
+        default:                            .none
+        }
+    }
 
-    // MARK: - VLESS-specific computed accessors
+    var displayTransportTag: String? {
+        guard outboundProtocol == .vless else { return nil }
+        let tag = xrayTransportLayer.tag
+        return tag.isEmpty ? nil : tag.uppercased()
+    }
 
-    var transportLayer: TransportLayer {
-        if case .vless(_, _, _, let t, _, _, _) = outbound { return t }
+    var displaySecurityTag: String? {
+        let tag = (outboundProtocol == .vless
+            ? xraySecurityLayer.tag
+            : genericTransportLayer.tag).uppercased()
+        return tag == "NONE" ? nil : tag
+    }
+    
+    var hasVisionFlow: Bool {
+        if case .vless(_, _, let flow?, _, _) = outbound {
+            return flow.uppercased().contains("VISION")
+        }
+        return false
+    }
+
+    var xrayTransportLayer: XrayTransportLayer {
+        if case .vless(_, _, _, let t, _) = outbound { return t }
         return .tcp
     }
-    var securityLayer: SecurityLayer {
-        if case .vless(_, _, _, _, let s, _, _) = outbound { return s }
+    
+    var xraySecurityLayer: XraySecurityLayer {
+        if case .vless(_, _, _, _, let s) = outbound { return s }
         return .none
+    }
+    
+    var isXHTTPOverHTTP3: Bool {
+        guard case .xhttp = xrayTransportLayer else { return false }
+        guard case .tls(let tls) = xraySecurityLayer else { return false }
+        let alpn = tls.alpn ?? []
+        return alpn.count == 1 && alpn[0].caseInsensitiveCompare("h3") == .orderedSame
     }
 
     var nowhereNetwork: NowhereNetwork {
@@ -240,49 +285,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         if case .nowhere(_, _, _, let pool, _) = outbound { return pool }
         return 0
     }
-    /// Only meaningful for VLESS+TCP with Vision flow.
-    var muxEnabled: Bool {
-        if case .vless(_, _, _, _, _, let m, _) = outbound { return m }
-        return false
-    }
-    /// GlobalID-based flow identification for muxed UDP.
-    var xudpEnabled: Bool {
-        if case .vless(_, _, _, _, _, _, let x) = outbound { return x }
-        return false
-    }
-
-    var usesVisionMux: Bool {
-        guard case .vless(_, _, let flow, _, _, let muxEnabled, _) = outbound else { return false }
-        return muxEnabled && flow == "xtls-rprx-vision"
-    }
-
-    var displayTransportTag: String? {
-        guard outboundProtocol == .vless else { return nil }
-        let tag = transportLayer.tag
-        return tag.isEmpty ? nil : tag.uppercased()
-    }
-
-    var displaySecurityTag: String? {
-        let tag = securityLayer.tag.uppercased()
-        return tag == "NONE" ? nil : tag
-    }
-
-    /// Loose substring match, so variants like `xtls-rprx-vision-udp443` also count.
-    var hasVisionFlow: Bool {
-        if case .vless(_, _, let flow?, _, _, _, _) = outbound {
-            return flow.uppercased().contains("VISION")
-        }
-        return false
-    }
-
-    var isXHTTPOverHTTP3: Bool {
-        guard case .xhttp = transportLayer else { return false }
-        guard case .tls(let tls) = securityLayer else { return false }
-        let alpn = tls.alpn ?? []
-        return alpn.count == 1 && alpn[0].caseInsensitiveCompare("h3") == .orderedSame
-    }
-
-    /// XHTTP-over-HTTP/3 always needs `.udp` (rides QUIC); otherwise defers to the protocol rule.
+    
     func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
         if isXHTTPOverHTTP3 { return .udp }
         if outboundProtocol == .nowhere {
@@ -349,7 +352,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case outboundProtocol, uuid, encryption, flow
         case transport, websocket, httpUpgrade, grpc, xhttp
         case security, tls, reality
-        case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
         case hysteriaPorts, hysteriaHopInterval
         case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN, nowhereTLS, net, pool
@@ -365,7 +367,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case deletedAt
     }
 
-    /// Folds the flat JSON transport/security/mux/xudp keys into `.vless` associated values.
+    /// Folds the flat JSON transport/security keys into `.vless` associated values.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -381,7 +383,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         switch proto {
         case .vless:
             let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
-            let transport: TransportLayer
+            let transport: XrayTransportLayer
             switch transportStr {
             case "ws":
                 transport = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
@@ -395,7 +397,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 transport = .tcp
             }
             let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
-            let security: SecurityLayer
+            let security: XraySecurityLayer
             switch securityStr {
             case "tls":
                 security = (try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)).map { .tls($0) } ?? .none
@@ -409,9 +411,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 encryption: try container.decode(String.self, forKey: .encryption),
                 flow: try container.decodeIfPresent(String.self, forKey: .flow),
                 transport: transport,
-                security: security,
-                muxEnabled: try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true,
-                xudpEnabled: try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true
+                security: security
             )
 
         case .hysteria:
@@ -556,7 +556,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
         try container.encode(outboundProtocol, forKey: .outboundProtocol)
         switch outbound {
-        case .vless(let uuid, let encryption, let flow, let transport, let security, let muxEnabled, let xudpEnabled):
+        case .vless(let uuid, let encryption, let flow, let transport, let security):
             try container.encode(uuid, forKey: .uuid)
             try container.encode(encryption, forKey: .encryption)
             try container.encodeIfPresent(flow, forKey: .flow)
@@ -576,9 +576,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             case .tls(let config): try container.encode(config, forKey: .tls)
             case .reality(let config): try container.encode(config, forKey: .reality)
             }
-
-            try container.encode(muxEnabled, forKey: .muxEnabled)
-            try container.encode(xudpEnabled, forKey: .xudpEnabled)
 
         case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
             try container.encode(id, forKey: .uuid)

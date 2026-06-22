@@ -254,9 +254,8 @@ class UDPFlow {
     // MARK: - Connection Strategies
 
     private func connectViaMultiplexer(udpMultiplexerPool: VLESSVisionUDPMultiplexerPool) {
-        // Stable per-source globalID lets the server pin one upstream session
-        // (Full Cone NAT); nil keeps sessions per-datagram (Symmetric NAT).
-        let globalID = configuration.xudpEnabled ? VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)") : nil
+        // Stable per-source globalID lets the server pin one upstream session (Full Cone NAT).
+        let globalID = VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)")
         udpMultiplexerPool.acquireStream(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
             guard let self else { return }
 

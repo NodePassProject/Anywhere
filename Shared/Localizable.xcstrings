@@ -3212,6 +3212,58 @@
         }
       }
     },
+    "Boost" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تسريع"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Boost"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Acelerar"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "شتاب"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ускорение"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hızlandırma"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tăng tốc"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加速"
+          }
+        }
+      }
+    },
     "Bottom" : {
       "localizations" : {
         "ar" : {
@@ -9384,10 +9436,6 @@
         }
       }
     },
-    "Mux" : {
-      "comment" : "Mux for VLESS protocol TCP transport",
-      "shouldTranslate" : false
-    },
     "Name" : {
       "localizations" : {
         "ar" : {
@@ -10959,58 +11007,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "端口"
-          }
-        }
-      }
-    },
-    "Boost" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "تسريع"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Boost"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Acelerar"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "شتاب"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ускорение"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hızlandırma"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tăng tốc"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "加速"
           }
         }
       }
@@ -17284,10 +17280,6 @@
       "shouldTranslate" : false
     },
     "XHTTP" : {
-      "shouldTranslate" : false
-    },
-    "XUDP" : {
-      "comment" : "XUDP for VLESS protocol TCP transport",
       "shouldTranslate" : false
     },
     "You" : {

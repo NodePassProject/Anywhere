@@ -40,7 +40,7 @@ extension TunnelStack {
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
             startReadingPackets()
-            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), mux=\(configuration.usesVisionMux), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -156,14 +156,11 @@ extension TunnelStack {
     }
 
     /// Reclaims the udpQueue-owned per-tunnel transports (Vision mux, SS UDP
-    /// sessions, per-flow UDP connections). Must be called on `lwipQueue`; the
-    /// sync hop onto `udpQueue` is deadlock-free — no udpQueue work sync-waits
-    /// back on lwipQueue. `rebuildMultiplexerPool` rebuilds the Vision mux after teardown
-    /// (network recovery) vs. leaving it `nil` (suspend/stop).
+    /// sessions, per-flow UDP connections). Must be called on `lwipQueue`.
     private func reclaimInstanceTransports(rebuildMultiplexerPool: Bool) {
         // Build the replacement mux on lwipQueue, which owns `configuration`.
         let rebuiltMultiplexerPool: VLESSVisionUDPMultiplexerPool?
-        if rebuildMultiplexerPool, let configuration, configuration.usesVisionMux {
+        if rebuildMultiplexerPool, let configuration, configuration.outboundProtocol == .vless {
             rebuiltMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
         } else {
             rebuiltMultiplexerPool = nil
@@ -252,7 +249,7 @@ extension TunnelStack {
         lwip_bridge_init()
         startTimeoutTimer()
         startUDPCleanupTimer()
-        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(configuration.usesVisionMux), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
