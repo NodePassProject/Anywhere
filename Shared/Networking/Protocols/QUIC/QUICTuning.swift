@@ -124,16 +124,21 @@ extension QUICTuning {
         }
     }
 
+    /// Nowhere's auth and TCP streams are client-initiated, so `bidiLocal`
+    /// controls the server-to-client download window. Per-stream and connection
+    /// limits retain auto-tuning headroom for concurrent traffic; they advertise
+    /// flow-control credit rather than eagerly allocating the full capacity.
+    /// The Portal never initiates application streams, so its stream credit is 0.
     static let nowhere = QUICTuning(
         cc: .bbr,
-        maxStreamWindow: 16 * 1024 * 1024,
-        maxWindow: 32 * 1024 * 1024,
-        initialMaxData: 8 * 1024 * 1024,
-        initialMaxStreamDataBidiLocal: 2 * 1024 * 1024,
-        initialMaxStreamDataBidiRemote: 2 * 1024 * 1024,
-        initialMaxStreamDataUni: 2 * 1024 * 1024,
-        initialMaxStreamsBidi: 1024,
-        initialMaxStreamsUni: 16,
+        maxStreamWindow: 64 * 1024 * 1024,
+        maxWindow: 128 * 1024 * 1024,
+        initialMaxData: 64 * 1024 * 1024,
+        initialMaxStreamDataBidiLocal: 32 * 1024 * 1024,
+        initialMaxStreamDataBidiRemote: 0,
+        initialMaxStreamDataUni: 0,
+        initialMaxStreamsBidi: 0,
+        initialMaxStreamsUni: 0,
         maxIdleTimeout: 30 * 1_000_000_000,
         handshakeTimeout: 10 * 1_000_000_000,
         keepAliveTimeout: 10 * 1_000_000_000,
