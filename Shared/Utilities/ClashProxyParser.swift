@@ -286,7 +286,7 @@ struct ClashProxyParser {
 
         let ech = echSettings(node)
 
-        let tls = TLSConfiguration(
+        let tlsConfiguration = TLSConfiguration(
             serverName: parseSNI(node, server: basics.server),
             alpn: getStringSequence(node, key: "alpn"),
             echEnabled: ech.enabled,
@@ -298,7 +298,7 @@ struct ClashProxyParser {
             name: basics.name,
             serverAddress: basics.server,
             serverPort: basics.port,
-            outbound: .trojan(password: password, tls: tls)
+            outbound: .trojan(password: password, securityLayer: .tls(tlsConfiguration))
         )
     }
 
@@ -316,7 +316,7 @@ struct ClashProxyParser {
 
         let ech = echSettings(node)
 
-        let tls = TLSConfiguration(
+        let tlsConfiguration = TLSConfiguration(
             serverName: parseSNI(node, server: basics.server),
             alpn: getStringSequence(node, key: "alpn"),
             echEnabled: ech.enabled,
@@ -333,7 +333,7 @@ struct ClashProxyParser {
                 idleCheckInterval: idleCheckInterval,
                 idleTimeout: idleTimeout,
                 minIdleSession: minIdleSession,
-                tls: tls
+                securityLayer: .tls(tlsConfiguration)
             )
         )
     }

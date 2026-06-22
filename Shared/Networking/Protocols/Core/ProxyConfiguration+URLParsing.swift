@@ -249,7 +249,7 @@ extension ProxyConfiguration {
             ?? host
         let alpn = parameters["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
         let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
+        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Nowhere",
@@ -260,7 +260,7 @@ extension ProxyConfiguration {
                 spec: spec,
                 net: network,
                 pool: pool,
-                tls: tls
+                securityLayer: .tls(tlsConfiguration)
             )
         )
     }
@@ -312,13 +312,13 @@ extension ProxyConfiguration {
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
         let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            outbound: .trojan(password: password, tls: tls)
+            outbound: .trojan(password: password, securityLayer: .tls(tlsConfiguration))
         )
     }
 
@@ -373,7 +373,7 @@ extension ProxyConfiguration {
         let minIdleSession = parameters["mis"].flatMap { Int($0) } ?? 0
 
         let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
@@ -384,7 +384,7 @@ extension ProxyConfiguration {
                 idleCheckInterval: idleCheckInterval,
                 idleTimeout: idleTimeout,
                 minIdleSession: minIdleSession,
-                tls: tls
+                securityLayer: .tls(tlsConfiguration)
             )
         )
     }

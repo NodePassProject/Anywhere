@@ -120,7 +120,8 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let spec, let net, let pool, let tls) = outbound else {
+        guard case .nowhere(let key, let spec, let net, let pool, let securityLayer) = outbound,
+              let tls = securityLayer.tlsConfiguration else {
             return ""
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
@@ -143,7 +144,8 @@ extension ProxyConfiguration {
     }
 
     private func toTrojanURL() -> String {
-        guard case .trojan(let password, let tls) = outbound else { return "" }
+        guard case .trojan(let password, let securityLayer) = outbound,
+              let tls = securityLayer.tlsConfiguration else { return "" }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var parameters: [String] = []
@@ -165,7 +167,8 @@ extension ProxyConfiguration {
     }
 
     private func toAnyTLSURL() -> String {
-        guard case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let tls) = outbound else { return "" }
+        guard case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let securityLayer) = outbound,
+              let tls = securityLayer.tlsConfiguration else { return "" }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var parameters: [String] = []

@@ -874,7 +874,8 @@ class TVProxyEditorViewController: UITableViewController {
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let net, let pool, let tls):
+        case .nowhere(let key, let spec, let net, let pool, let securityLayer):
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             nowhereKey = key
             nowhereSpec = spec ?? ""
             nowhereNetwork = net
@@ -882,14 +883,16 @@ class TVProxyEditorViewController: UITableViewController {
             if pool > 0 { nowhereLastPool = pool }
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
-        case .trojan(let password, let tls):
+        case .trojan(let password, let securityLayer):
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             trojanPassword = password
             trojanSNI = tls.serverName
             trojanALPN = tls.alpn?.joined(separator: ",") ?? ""
             trojanECHEnabled = tls.echEnabled
             trojanECH = tls.echConfig ?? ""
             trojanFingerprint = tls.fingerprint
-        case .anytls(let password, _, _, _, let tls):
+        case .anytls(let password, _, _, _, let securityLayer):
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             anytlsPassword = password
             anytlsSNI = tls.serverName
             anytlsALPN = tls.alpn?.joined(separator: ",") ?? ""
@@ -1090,7 +1093,7 @@ class TVProxyEditorViewController: UITableViewController {
                 spec: spec,
                 net: nowhereNetwork,
                 pool: nowherePool,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn)
+                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
             )
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI
@@ -1098,7 +1101,7 @@ class TVProxyEditorViewController: UITableViewController {
             let ech = trojanECH.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .trojan(
                 password: trojanPassword,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: trojanECHEnabled, echConfig: trojanECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: trojanFingerprint)
+                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: trojanECHEnabled, echConfig: trojanECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: trojanFingerprint))
             )
         case .anytls:
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
@@ -1117,7 +1120,7 @@ class TVProxyEditorViewController: UITableViewController {
                 idleCheckInterval: idleCheckInterval,
                 idleTimeout: idleTimeout,
                 minIdleSession: minIdleSession,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint)
+                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint))
             )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)

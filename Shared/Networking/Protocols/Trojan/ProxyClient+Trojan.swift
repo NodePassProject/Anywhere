@@ -16,7 +16,8 @@ extension ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .trojan(let password, let tlsConfig) = configuration.outbound, !password.isEmpty else {
+        guard case .trojan(let password, let securityLayer) = configuration.outbound, !password.isEmpty,
+              let tlsConfig = securityLayer.tlsConfiguration else {
             completion(.failure(ProxyError.protocolError("Trojan password not set")))
             return
         }

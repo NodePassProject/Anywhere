@@ -17,7 +17,8 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .nowhere(let key, let spec, let net, let pool, let tls) = configuration.outbound else {
+        guard case .nowhere(let key, let spec, let net, let pool, let securityLayer) = configuration.outbound,
+              let tls = securityLayer.tlsConfiguration else {
             completion(.failure(ProxyError.protocolError("Nowhere key not set")))
             return
         }

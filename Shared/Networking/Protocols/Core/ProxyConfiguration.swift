@@ -111,9 +111,9 @@ enum Outbound: Hashable {
         sni: String
     )
     /// Nowhere runs over QUIC/UDP or TLS/TCP with a shared-key auth frame.
-    case nowhere(key: String, spec: String?, net: NowhereNetwork, pool: Int, tls: TLSConfiguration)
+    case nowhere(key: String, spec: String?, net: NowhereNetwork, pool: Int, securityLayer: GenericSecurityLayer)
     /// Trojan: SHA224(password)+CRLF+request over mandatory TLS. No plaintext variant.
-    case trojan(password: String, tls: TLSConfiguration)
+    case trojan(password: String, securityLayer: GenericSecurityLayer)
     /// AnyTLS: stream multiplexer over pooled TLS sessions, authenticated with SHA256(password);
     /// `idleCheckInterval`/`idleTimeout` (seconds) and `minIdleSession` tune the warm pool.
     case anytls(
@@ -121,7 +121,7 @@ enum Outbound: Hashable {
         idleCheckInterval: Int,
         idleTimeout: Int,
         minIdleSession: Int,
-        tls: TLSConfiguration
+        securityLayer: GenericSecurityLayer
     )
     /// Shadowsocks runs over bare TCP with AEAD / 2022 wire encryption.
     case shadowsocks(password: String, method: String)
@@ -182,9 +182,9 @@ enum XraySecurityLayer: Hashable {
     }
 }
 
-// MARK: - Generic Transport Layer Configuration
+// MARK: - Generic Security Layer Configuration
 
-enum GenericTransportLayer: Hashable {
+enum GenericSecurityLayer: Hashable {
     case tls(TLSConfiguration)
     case none
     
@@ -193,6 +193,12 @@ enum GenericTransportLayer: Hashable {
         case .tls:  "tls"
         case .none: "none"
         }
+    }
+
+    /// The TLS configuration when secured; `nil` for `.none`.
+    var tlsConfiguration: TLSConfiguration? {
+        if case .tls(let tls) = self { return tls }
+        return nil
     }
 }
 
@@ -230,12 +236,12 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         }
     }
     
-    var genericTransportLayer: GenericTransportLayer {
+    var genericSecurityLayer: GenericSecurityLayer {
         switch outbound {
-        case .trojan(_, let tls):           .tls(tls)
-        case .anytls(_, _, _, _, let tls):  .tls(tls)
-        case .nowhere(_, _, _, _, let tls): .tls(tls)
-        default:                            .none
+        case .trojan(_, let security):           security
+        case .anytls(_, _, _, _, let security):  security
+        case .nowhere(_, _, _, _, let security): security
+        default:                                 .none
         }
     }
 
@@ -248,7 +254,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     var displaySecurityTag: String? {
         let tag = (outboundProtocol == .vless
             ? xraySecurityLayer.tag
-            : genericTransportLayer.tag).uppercased()
+            : genericSecurityLayer.tag).uppercased()
         return tag == "NONE" ? nil : tag
     }
     
@@ -479,20 +485,20 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 spec: try container.decodeIfPresent(String.self, forKey: .nowhereSpec),
                 net: network,
                 pool: pool,
-                tls: TLSConfiguration(
+                securityLayer: .tls(TLSConfiguration(
                     serverName: (explicitSNI?.isEmpty == false ? explicitSNI : nil)
                         ?? legacyTLS?.serverName
                         ?? serverAddress,
                     alpn: alpn
-                )
+                ))
             )
 
         case .trojan:
             let password = try container.decodeIfPresent(String.self, forKey: .trojanPassword) ?? ""
             // TLS is mandatory; fall back to SNI=serverAddress so partial configs decode cleanly.
-            let tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .trojanTLS)
+            let tlsConfiguration = try container.decodeIfPresent(TLSConfiguration.self, forKey: .trojanTLS)
                 ?? TLSConfiguration(serverName: serverAddress)
-            outbound = .trojan(password: password, tls: tls)
+            outbound = .trojan(password: password, securityLayer: .tls(tlsConfiguration))
 
         case .anytls:
             let password = try container.decodeIfPresent(String.self, forKey: .anytlsPassword) ?? ""
@@ -500,14 +506,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let idleCheckInterval = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
             let idleTimeout  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
             let minIdleSession = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0
-            let tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .anytlsTLS)
+            let tlsConfiguration = try container.decodeIfPresent(TLSConfiguration.self, forKey: .anytlsTLS)
                 ?? TLSConfiguration(serverName: serverAddress)
             outbound = .anytls(
                 password: password,
                 idleCheckInterval: idleCheckInterval,
                 idleTimeout: idleTimeout,
                 minIdleSession: minIdleSession,
-                tls: tls
+                securityLayer: .tls(tlsConfiguration)
             )
 
         case .shadowsocks:
@@ -589,7 +595,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 try container.encode(portHopping.intervalSeconds, forKey: .hysteriaHopInterval)
             }
             try container.encode(sni, forKey: .hysteriaSNI)
-        case .nowhere(let key, let spec, let net, let pool, let tls):
+        case .nowhere(let key, let spec, let net, let pool, let securityLayer):
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: serverAddress)
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(key, forKey: .nowhereKey)
@@ -600,12 +607,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             if let alpn = tls.alpn?.first, !alpn.isEmpty {
                 try container.encode(alpn, forKey: .nowhereALPN)
             }
-        case .trojan(let password, let tls):
+        case .trojan(let password, let securityLayer):
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: serverAddress)
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .trojanPassword)
             try container.encode(tls, forKey: .trojanTLS)
-        case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let tls):
+        case .anytls(let password, let idleCheckInterval, let idleTimeout, let minIdleSession, let securityLayer):
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: serverAddress)
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .anytlsPassword)

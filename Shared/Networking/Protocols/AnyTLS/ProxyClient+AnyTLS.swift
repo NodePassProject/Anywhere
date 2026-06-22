@@ -21,7 +21,8 @@ extension ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         logger.debug("[AnyTLS] connect cmd=\(command) dest=\(destinationHost):\(destinationPort) initialData=\(initialData?.count ?? 0)B chained=\(tunnel != nil)")
-        guard case .anytls(let password, _, _, _, let tlsConfig) = configuration.outbound, !password.isEmpty else {
+        guard case .anytls(let password, _, _, _, let securityLayer) = configuration.outbound, !password.isEmpty,
+              let tlsConfig = securityLayer.tlsConfiguration else {
             logger.debug("[AnyTLS] reject: password not set")
             completion(.failure(ProxyError.protocolError("AnyTLS password not set")))
             return
