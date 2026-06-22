@@ -146,6 +146,7 @@ struct CustomRuleSetDetailView: View {
                 .minimumScaleFactor(0.5)
                 .truncationMode(.middle)
                 .lineLimit(3)
+                .textSelection(.enabled)
             Button {
                 refresh()
             } label: {
