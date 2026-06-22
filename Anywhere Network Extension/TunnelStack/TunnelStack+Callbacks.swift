@@ -121,6 +121,8 @@ extension TunnelStack {
             let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
 
             var dstHost = dstIPString
+            // Plaintext MITM trusts a DNS-resolved (fake-IP) host over the spoofable `Host` header.
+            var hostIsResolvedDomain = false
             var connectionConfiguration = defaultConfiguration
             // Committed routing identity; drives the dial path and accounting.
             var routeTarget = shared.defaultRouteTarget
@@ -154,6 +156,7 @@ extension TunnelStack {
                 sniffSNI = true
             case .resolved(let domain, let target, let configuration):
                 dstHost = domain
+                hostIsResolvedDomain = true
                 // `target == nil` → no domain rule matched; keep the default route.
                 switch target {
                 case .direct:
@@ -184,8 +187,7 @@ extension TunnelStack {
                 viaDefault: viaDefault
             )
 
-            // Fake-IP MITM: the domain is known, but TLSServer still needs the
-            // ClientHello bytes — force sniffing on so they get buffered.
+            // MITM needs the buffered ClientHello, so force sniffing even for a known fake-IP domain.
             if shared.mitmEnabled && shared.mitmPolicy.matches(dstHost) {
                 sniffSNI = true
             }
@@ -198,6 +200,7 @@ extension TunnelStack {
                 routeTarget: routeTarget,
                 viaDefault: viaDefault,
                 sniffSNI: sniffSNI,
+                hostIsResolvedDomain: hostIsResolvedDomain,
                 lwipQueue: shared.lwipQueue
             )
             return Unmanaged.passRetained(connection).toOpaque()

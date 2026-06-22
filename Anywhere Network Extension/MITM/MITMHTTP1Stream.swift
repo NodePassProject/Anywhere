@@ -40,6 +40,9 @@ final class MITMHTTP1Stream {
     private static let maxSynthesizedResponseBodyBytes: Int = MITMBodyCodec.maxBufferedBodyBytes
 
     private let host: String
+    /// Scheme for the absolute request URL (rule gating and script `request.url`):
+    /// "https" for a TLS leg, "http" for a cleartext leg.
+    private let scheme: String
     private let phase: MITMPhase
     /// Phase-filtered rules for this host, resolved once at init (one trie walk).
     private let rules: [CompiledMITMRule]
@@ -78,6 +81,7 @@ final class MITMHTTP1Stream {
 
     init(
         host: String,
+        scheme: String = "https",
         phase: MITMPhase,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
@@ -86,6 +90,7 @@ final class MITMHTTP1Stream {
         lwipQueue: DispatchQueue
     ) {
         self.host = host
+        self.scheme = scheme
         self.phase = phase
         let matchedSet = policy.set(for: host)
         self.rules = matchedSet?.rules.filter { $0.phase == phase } ?? []
@@ -1200,7 +1205,7 @@ final class MITMHTTP1Stream {
         case .httpRequest:
             let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             guard parts.count >= 2 else { return nil }
-            return "https://\(host)\(String(parts[1]))"
+            return "\(scheme)://\(host)\(String(parts[1]))"
         case .httpResponse:
             return streaming.originatingRequest?.url
         }
@@ -1986,7 +1991,7 @@ final class MITMHTTP1Stream {
         for rule in rules {
             guard case .rewrite = rule.operation else { continue }
             // Resolves the gate match and expands any `$1`-style target template in one step.
-            guard let resolved = rule.resolvedRewriteAction(for: "https://\(host)\(target)") else { continue }
+            guard let resolved = rule.resolvedRewriteAction(for: "\(scheme)://\(host)\(target)") else { continue }
             switch resolved {
             case .transparent(let replacement):
                 // Re-validate at use time as a backstop (validated at load/resolve time too).
@@ -2056,7 +2061,7 @@ final class MITMHTTP1Stream {
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             guard parts.count >= 2 else { return nil }
             let target = String(parts[1])
-            return target == "*" ? nil : "https://\(host)\(target)" // asterisk-form: no match
+            return target == "*" ? nil : "\(scheme)://\(host)\(target)" // asterisk-form: no match
         case .httpResponse:
             return originatingRequest?.url
         }
@@ -2078,7 +2083,7 @@ final class MITMHTTP1Stream {
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2 {
                 method = String(parts[0])
-                url = "https://\(host)\(String(parts[1]))"
+                url = "\(scheme)://\(host)\(String(parts[1]))"
             }
         case .httpResponse:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
@@ -2194,7 +2199,7 @@ final class MITMHTTP1Stream {
         }
         let method = String(parts[0])
         let target = String(parts[1])
-        let url = "https://\(host)\(target)"
+        let url = "\(scheme)://\(host)\(target)"
         requestLog.recordHTTP1(method: method, url: url)
     }
 }
