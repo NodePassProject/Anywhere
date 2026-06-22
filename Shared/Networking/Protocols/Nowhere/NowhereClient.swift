@@ -14,6 +14,7 @@ nonisolated final class NowhereClient {
         let port: UInt16
         let key: String
         let spec: String?
+        let net: NowhereNetwork
         let sni: String
         let alpn: String
         let chainSignature: String
@@ -29,6 +30,7 @@ nonisolated final class NowhereClient {
             port: configuration.proxyPort,
             key: configuration.key,
             spec: configuration.spec,
+            net: configuration.net,
             sni: configuration.tls.serverName,
             alpn: configuration.protocolSpec.effectiveALPN,
             chainSignature: ""
@@ -69,6 +71,7 @@ nonisolated final class NowhereClient {
             port: configuration.proxyPort,
             key: configuration.key,
             spec: configuration.spec,
+            net: configuration.net,
             sni: configuration.tls.serverName,
             alpn: configuration.protocolSpec.effectiveALPN,
             chainSignature: chainSignature
@@ -309,6 +312,9 @@ nonisolated final class NowhereClient {
 extension NowhereClient {
     static let pool: TransportPool = Pool()
     private final class Pool: TransportPool {
-        func reclaim() { NowhereClient.closeAll() }
+        func reclaim() {
+            NowhereClient.closeAll()
+            NowhereTCPConnectionPoolRegistry.shared.closeAll()
+        }
     }
 }

@@ -241,3 +241,357 @@ nonisolated final class NowhereConnection: ProxyConnection {
         }
     }
 }
+
+nonisolated final class NowhereTCPConnection: ProxyConnection {
+
+    private enum State { case idle, connecting, authenticating, prepared, requesting, ready, closed }
+
+    private let configuration: NowhereConfiguration
+    private let connectHost: String
+    private let tunnel: ProxyConnection?
+
+    private var state: State = .idle
+    private var tlsClient: TLSClient?
+    private var inner: TLSProxyConnection?
+    private var openCompletion: ((Error?) -> Void)?
+    private var receiveBuffer = Data()
+    private var pendingReceive: ((Data?, Error?) -> Void)?
+    private var terminalError: Error?
+    private var preparedCloseHandler: (() -> Void)?
+    private var transportReadInFlight = false
+
+    init(
+        configuration: NowhereConfiguration,
+        connectHost: String,
+        tunnel: ProxyConnection?
+    ) {
+        self.configuration = configuration
+        self.connectHost = connectHost
+        self.tunnel = tunnel
+        super.init()
+    }
+
+    override var isConnected: Bool {
+        lock.withLock { state == .ready && inner?.isConnected == true }
+    }
+
+    override var outerTLSVersion: TLSVersion? {
+        lock.withLock { inner?.outerTLSVersion }
+    }
+
+    var isPrepared: Bool {
+        lock.withLock { state == .prepared && inner?.isConnected == true }
+    }
+
+    func setPreparedCloseHandler(_ handler: (() -> Void)?) {
+        lock.withLock { preparedCloseHandler = handler }
+    }
+
+    func prepare(completion: @escaping (Error?) -> Void) {
+        let auth: Data
+        do {
+            auth = try NowhereProtocol.makeAuthFrame(
+                key: configuration.key,
+                protocolSpec: configuration.protocolSpec
+            )
+        } catch {
+            completion(error)
+            return
+        }
+
+        connectAndSend(payload: auth, successState: .prepared, completion: completion)
+    }
+
+    func openFresh(destination: String, completion: @escaping (Error?) -> Void) {
+        let bootstrap: Data
+        do {
+            bootstrap = try NowhereProtocol.makeAuthFrame(
+                key: configuration.key,
+                protocolSpec: configuration.protocolSpec
+            ) + NowhereProtocol.encodeTCPRequest(
+                address: destination,
+                protocolSpec: configuration.protocolSpec
+            )
+        } catch {
+            completion(error)
+            return
+        }
+
+        connectAndSend(payload: bootstrap, successState: .ready, completion: completion)
+    }
+
+    func activate(destination: String, completion: @escaping (Error?) -> Void) {
+        let request: Data
+        do {
+            request = try NowhereProtocol.encodeTCPRequest(
+                address: destination,
+                protocolSpec: configuration.protocolSpec
+            )
+        } catch {
+            completion(error)
+            return
+        }
+
+        let connection: TLSProxyConnection? = lock.withLock {
+            guard state == .prepared, let inner else { return nil }
+            state = .requesting
+            preparedCloseHandler = nil
+            openCompletion = completion
+            return inner
+        }
+        guard let connection else {
+            completion(NowhereError.streamClosed)
+            return
+        }
+
+        connection.sendRaw(data: request) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.fail(error)
+                return
+            }
+            let callback: ((Error?) -> Void)? = self.lock.withLock {
+                guard self.state == .requesting else { return nil }
+                self.state = .ready
+                let callback = self.openCompletion
+                self.openCompletion = nil
+                return callback
+            }
+            callback?(nil)
+            self.deliverPendingReceive()
+        }
+    }
+
+    private func connectAndSend(
+        payload: Data,
+        successState: State,
+        completion: @escaping (Error?) -> Void
+    ) {
+        let canOpen = lock.withLock {
+            guard state == .idle else { return false }
+            state = .connecting
+            openCompletion = completion
+            return true
+        }
+        guard canOpen else {
+            completion(NowhereError.notReady)
+            return
+        }
+
+        let baseTLS = configuration.tls
+        let tlsConfiguration = TLSConfiguration(
+            serverName: baseTLS.serverName,
+            alpn: [configuration.protocolSpec.effectiveALPN],
+            minVersion: .tls13,
+            maxVersion: .tls13,
+            echEnabled: baseTLS.echEnabled,
+            echConfig: baseTLS.echConfig,
+            fingerprint: baseTLS.fingerprint
+        )
+        let client = TLSClient(configuration: tlsConfiguration)
+        lock.withLock { tlsClient = client }
+
+        let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+                self.fail(error)
+            case .success(let tlsConnection):
+                let proxy = TLSProxyConnection(tlsConnection: tlsConnection)
+                let shouldSend = self.lock.withLock {
+                    guard self.state == .connecting else { return false }
+                    self.state = .authenticating
+                    self.tlsClient = nil
+                    self.inner = proxy
+                    return true
+                }
+                guard shouldSend else {
+                    proxy.cancel()
+                    return
+                }
+                proxy.sendRaw(data: payload) { [weak self] error in
+                    guard let self else { return }
+                    if let error {
+                        self.fail(error)
+                        return
+                    }
+                    let callback: ((Error?) -> Void)? = self.lock.withLock {
+                        guard self.state == .authenticating else { return nil }
+                        self.state = successState
+                        let callback = self.openCompletion
+                        self.openCompletion = nil
+                        return callback
+                    }
+                    callback?(nil)
+                    self.armTransportRead(on: proxy)
+                }
+            }
+        }
+
+        if let tunnel {
+            client.connect(overTunnel: tunnel, completion: handleResult)
+        } else {
+            client.connect(host: connectHost, port: configuration.proxyPort, completion: handleResult)
+        }
+    }
+
+    private func armTransportRead(on connection: TLSProxyConnection) {
+        let shouldRead: Bool = lock.withLock {
+            guard inner === connection, state != .closed, !transportReadInFlight else {
+                return false
+            }
+            guard state == .prepared || state == .requesting || (state == .ready && pendingReceive != nil) else {
+                return false
+            }
+            transportReadInFlight = true
+            return true
+        }
+        guard shouldRead else { return }
+        connection.receiveRaw { [weak self, weak connection] data, error in
+            guard let self, let connection else { return }
+            self.handleTransportRead(connection: connection, data: data, error: error)
+        }
+    }
+
+    private func handleTransportRead(
+        connection: TLSProxyConnection,
+        data: Data?,
+        error: Error?
+    ) {
+        var delivery: ((Data?, Error?) -> Void)?
+        var deliveredData: Data?
+        var closeHandler: (() -> Void)?
+        var continueReading = false
+        var openCallback: ((Error?) -> Void)?
+        let terminal = error != nil || data == nil || data?.isEmpty == true
+
+        lock.lock()
+        guard inner === connection, state != .closed else {
+            lock.unlock()
+            return
+        }
+        transportReadInFlight = false
+        if terminal {
+            let wasPrepared = state == .prepared
+            state = .closed
+            terminalError = error
+            inner = nil
+            closeHandler = wasPrepared ? preparedCloseHandler : nil
+            preparedCloseHandler = nil
+            openCallback = openCompletion
+            openCompletion = nil
+            delivery = pendingReceive
+            pendingReceive = nil
+        } else if let data, !data.isEmpty {
+            if state == .ready, receiveBuffer.isEmpty, let callback = pendingReceive {
+                pendingReceive = nil
+                delivery = callback
+                deliveredData = data
+            } else {
+                receiveBuffer.append(data)
+            }
+            continueReading = true
+        }
+        lock.unlock()
+
+        openCallback?(error ?? NowhereError.streamClosed)
+        delivery?(deliveredData, error)
+        closeHandler?()
+        if terminal {
+            connection.cancel()
+        } else if continueReading {
+            armTransportRead(on: connection)
+        }
+    }
+
+    private func deliverPendingReceive() {
+        var callback: ((Data?, Error?) -> Void)?
+        var data: Data?
+        lock.lock()
+        if state == .ready, !receiveBuffer.isEmpty, let pending = pendingReceive {
+            callback = pending
+            pendingReceive = nil
+            data = receiveBuffer
+            receiveBuffer.removeAll(keepingCapacity: true)
+        }
+        lock.unlock()
+        callback?(data, nil)
+    }
+
+    private func fail(_ error: Error) {
+        let resources: (TLSClient?, TLSProxyConnection?, ((Error?) -> Void)?, ((Data?, Error?) -> Void)?, (() -> Void)?) = lock.withLock {
+            guard state != .closed else { return (nil, nil, nil, nil, nil) }
+            let wasPrepared = state == .prepared
+            state = .closed
+            terminalError = error
+            let result = (tlsClient, inner, openCompletion, pendingReceive, wasPrepared ? preparedCloseHandler : nil)
+            tlsClient = nil
+            inner = nil
+            openCompletion = nil
+            pendingReceive = nil
+            preparedCloseHandler = nil
+            return result
+        }
+        resources.0?.cancel()
+        resources.1?.cancel()
+        resources.2?(error)
+        resources.3?(nil, error)
+        resources.4?()
+    }
+
+    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+        let connection = lock.withLock { state == .ready ? inner : nil }
+        guard let connection else {
+            completion(NowhereError.streamClosed)
+            return
+        }
+        connection.sendRaw(data: data, completion: completion)
+    }
+
+    override func sendRaw(data: Data) {
+        let connection = lock.withLock { state == .ready ? inner : nil }
+        connection?.sendRaw(data: data)
+    }
+
+    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+        var result: (Data?, Error?)?
+        lock.lock()
+        if state == .ready, !receiveBuffer.isEmpty {
+            let data = receiveBuffer
+            receiveBuffer.removeAll(keepingCapacity: true)
+            result = (data, nil)
+        } else if state == .closed {
+            result = (nil, terminalError)
+        } else if state == .ready {
+            pendingReceive = completion
+        } else {
+            result = (nil, NowhereError.notReady)
+        }
+        lock.unlock()
+        if let result { completion(result.0, result.1) }
+        else if let connection = lock.withLock({ state == .ready ? inner : nil }) {
+            armTransportRead(on: connection)
+        }
+    }
+
+    override func cancel() {
+        let resources: (TLSClient?, TLSProxyConnection?, ((Error?) -> Void)?, ((Data?, Error?) -> Void)?, (() -> Void)?) = lock.withLock {
+            guard state != .closed else { return (nil, nil, nil, nil, nil) }
+            let wasPrepared = state == .prepared
+            state = .closed
+            terminalError = NowhereError.streamClosed
+            let result = (tlsClient, inner, openCompletion, pendingReceive, wasPrepared ? preparedCloseHandler : nil)
+            tlsClient = nil
+            inner = nil
+            openCompletion = nil
+            pendingReceive = nil
+            preparedCloseHandler = nil
+            return result
+        }
+        resources.0?.cancel()
+        resources.1?.cancel()
+        resources.2?(NowhereError.streamClosed)
+        resources.3?(nil, NowhereError.streamClosed)
+        resources.4?()
+    }
+}

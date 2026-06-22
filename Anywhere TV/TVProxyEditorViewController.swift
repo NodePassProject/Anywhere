@@ -77,6 +77,9 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var nowhereKey = ""
     private var nowhereSpec = ""
+    private var nowhereNetwork: NowhereNetwork = .udp
+    private var nowherePool = 0
+    private var nowhereLastPool = NowherePool.enabledDefault
     private var nowhereSNI = ""
     private var nowhereALPN = ""
 
@@ -133,8 +136,8 @@ class TVProxyEditorViewController: UITableViewController {
 
     private enum RowType {
         case text(label: String, value: String, placeholder: String, key: FieldKey, secure: Bool = false)
-        case selection(label: String, value: String, options: [(display: String, value: String)], key: FieldKey)
-        case toggle(label: String, isOn: Bool, key: FieldKey)
+        case selection(label: String, value: String, options: [(display: String, value: String)], key: FieldKey, systemImage: String? = nil)
+        case toggle(label: String, isOn: Bool, key: FieldKey, systemImage: String? = nil)
     }
 
     private enum FieldKey {
@@ -155,7 +158,7 @@ class TVProxyEditorViewController: UITableViewController {
              vlessXHTTPDownloadRealityShortId
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps,
              hysteriaPorts, hysteriaHopInterval, hysteriaSNI
-        case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN
+        case nowhereKey, nowhereSpec, nowhereNetwork, nowherePoolEnabled, nowherePool, nowhereSNI, nowhereALPN
         case trojanPassword, trojanSNI, trojanALPN, trojanECHEnabled, trojanECH, trojanFingerprint
         case anytlsPassword, anytlsSNI, anytlsALPN, anytlsECHEnabled, anytlsECH, anytlsFingerprint
         case ssPassword, ssMethod
@@ -295,6 +298,28 @@ class TVProxyEditorViewController: UITableViewController {
                 ], key: .vlessFlow),
             ]))
             sections.append((String(localized: "Transport"), transportRows))
+        } else if isNowhere {
+            var transportRows: [RowType] = [
+                .selection(
+                    label: String(localized: "Network"),
+                    value: nowhereNetwork.rawValue.uppercased(),
+                    options: [("TCP", "tcp"), ("UDP", "udp")],
+                    key: .nowhereNetwork,
+                    systemImage: "globe"
+                ),
+            ]
+            if nowhereNetwork == .tcp {
+                transportRows.append(.toggle(label: String(localized: "Boost"), isOn: nowherePool > 0, key: .nowherePoolEnabled, systemImage: "speedometer"))
+                if nowherePool > 0 {
+                    transportRows.append(.selection(
+                        label: String(localized: "Boost"),
+                        value: String(nowherePool),
+                        options: NowherePool.sliderRange.map { (String($0), String($0)) },
+                        key: .nowherePool
+                    ))
+                }
+            }
+            sections.append((String(localized: "Network"), transportRows))
         }
 
         if isVLESS {
@@ -560,11 +585,10 @@ class TVProxyEditorViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let row = formSections[indexPath.section].rows[indexPath.row]
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
         cell.accessoryType = .none
         cell.accessoryView = nil
-
-        let row = formSections[indexPath.section].rows[indexPath.row]
 
         switch row {
         case .text(let label, let value, let placeholder, _, let secure):
@@ -580,20 +604,23 @@ class TVProxyEditorViewController: UITableViewController {
             cell.contentConfiguration = content
             cell.accessoryType = .disclosureIndicator
 
-        case .selection(let label, let value, _, _):
+        case .selection(let label, let value, _, _, let systemImage):
             var content = cell.defaultContentConfiguration()
             content.text = label
+            content.image = systemImage.flatMap(UIImage.init(systemName:))
             content.secondaryText = value
             content.secondaryTextProperties.color = .systemBlue
             cell.contentConfiguration = content
             cell.accessoryType = .disclosureIndicator
 
-        case .toggle(let label, let isOn, _):
+        case .toggle(let label, let isOn, _, let systemImage):
             var content = cell.defaultContentConfiguration()
             content.text = label
+            content.image = systemImage.flatMap(UIImage.init(systemName:))
             content.secondaryText = isOn ? String(localized: "On") : String(localized: "Off")
             content.secondaryTextProperties.color = isOn ? .systemGreen : .secondaryLabel
             cell.contentConfiguration = content
+
         }
 
         return cell
@@ -635,7 +662,7 @@ class TVProxyEditorViewController: UITableViewController {
             nav.modalPresentationStyle = .fullScreen
             present(nav, animated: true)
 
-        case .selection(_, _, let options, let key):
+        case .selection(_, _, let options, let key, _):
             let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
             for (display, value) in options {
                 alert.addAction(UIAlertAction(title: display, style: .default) { [weak self] _ in
@@ -647,10 +674,11 @@ class TVProxyEditorViewController: UITableViewController {
             alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
             present(alert, animated: true)
 
-        case .toggle(_, let isOn, let key):
+        case .toggle(_, let isOn, let key, _):
             updateField(key, value: isOn ? "false" : "true")
             tableView.reloadData()
             updateSaveButton()
+
         }
     }
 
@@ -717,6 +745,21 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteriaSNI: hysteriaSNI = value
         case .nowhereKey: nowhereKey = value
         case .nowhereSpec: nowhereSpec = value
+        case .nowhereNetwork:
+            if let network = NowhereNetwork(rawValue: value) { nowhereNetwork = network }
+        case .nowherePoolEnabled:
+            if value == "true" {
+                nowherePool = NowherePool.sliderRange.contains(nowhereLastPool)
+                    ? nowhereLastPool : NowherePool.enabledDefault
+            } else {
+                if nowherePool > 0 { nowhereLastPool = nowherePool }
+                nowherePool = 0
+            }
+        case .nowherePool:
+            if let count = Int(value), NowherePool.sliderRange.contains(count) {
+                nowherePool = count
+                nowhereLastPool = count
+            }
         case .nowhereSNI: nowhereSNI = value
         case .nowhereALPN: nowhereALPN = value
         case .trojanPassword: trojanPassword = value
@@ -846,9 +889,12 @@ class TVProxyEditorViewController: UITableViewController {
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let tls):
+        case .nowhere(let key, let spec, let net, let pool, let tls):
             nowhereKey = key
             nowhereSpec = spec ?? ""
+            nowhereNetwork = net
+            nowherePool = pool
+            if pool > 0 { nowhereLastPool = pool }
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
         case .trojan(let password, let tls):
@@ -1059,6 +1105,8 @@ class TVProxyEditorViewController: UITableViewController {
             outbound = .nowhere(
                 key: nowhereKey,
                 spec: spec,
+                net: nowhereNetwork,
+                pool: nowherePool,
                 tls: TLSConfiguration(serverName: sni, alpn: alpn)
             )
         case .trojan:

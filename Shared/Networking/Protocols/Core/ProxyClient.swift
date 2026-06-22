@@ -79,13 +79,13 @@ nonisolated class ProxyClient {
     
     var isQUICTransport: Bool {
         configuration.outboundProtocol == .hysteria
-            || configuration.outboundProtocol == .nowhere
+            || (configuration.outboundProtocol == .nowhere && configuration.nowhereNetwork == .udp)
             || configuration.isXHTTPOverHTTP3
     }
     
     private var poolsQUICSession: Bool {
         configuration.outboundProtocol == .hysteria
-            || configuration.outboundProtocol == .nowhere
+            || (configuration.outboundProtocol == .nowhere && configuration.nowhereNetwork == .udp)
     }
     
     private func handshakeTimed(
@@ -149,6 +149,13 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        if configuration.outboundProtocol == .nowhere,
+           configuration.nowhereNetwork == .tcp,
+           command == .udp {
+            completion(.failure(ProxyError.dropped))
+            return
+        }
+
         guard let chain = configuration.chain, !chain.isEmpty, tunnel == nil else {
             connectWithCommand(
                 command: command,
@@ -171,8 +178,15 @@ nonisolated class ProxyClient {
             return
         }
 
+        guard let lastDeliver = configuration.upstreamCommand(for: command) else {
+            completion(.failure(ProxyError.protocolError(
+                "\(configuration.outboundProtocol.name) doesn't support \(command)"
+            )))
+            return
+        }
+
         let hopCommands: [ProxyCommand]
-        switch Self.computeChainHopCommands(chain: chain, outerProtocol: configuration.outboundProtocol, outerCommand: command) {
+        switch Self.computeChainHopCommands(chain: chain, lastDeliver: lastDeliver) {
         case .success(let computed):
             hopCommands = computed
         case .failure(let error):

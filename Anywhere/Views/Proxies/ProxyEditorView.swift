@@ -75,6 +75,9 @@ struct ProxyEditorView: View {
 
     @State private var nowhereKey = ""
     @State private var nowhereSpec = ""
+    @State private var nowhereNetwork: NowhereNetwork = .udp
+    @State private var nowherePool = 0
+    @State private var nowhereLastPool = NowherePool.enabledDefault
     @State private var nowhereSNI = ""
     @State private var nowhereALPN = ""
 
@@ -126,6 +129,43 @@ struct ProxyEditorView: View {
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isSudoku: Bool { selectedProtocol == .sudoku }
     private var isNaive: Bool { selectedProtocol.isNaive }
+
+    private var nowherePoolEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { nowherePool > 0 },
+            set: { enabled in
+                if enabled {
+                    nowherePool = NowherePool.sliderRange.contains(nowhereLastPool)
+                        ? nowhereLastPool : NowherePool.enabledDefault
+                } else {
+                    if nowherePool > 0 { nowhereLastPool = nowherePool }
+                    nowherePool = 0
+                }
+            }
+        )
+    }
+
+    private var nowherePoolSliderBinding: Binding<Double> {
+        Binding(
+            get: { Double(max(NowherePool.sliderRange.lowerBound, nowherePool)) },
+            set: { value in
+                let count = min(
+                    NowherePool.sliderRange.upperBound,
+                    max(NowherePool.sliderRange.lowerBound, Int(value.rounded()))
+                )
+                nowherePool = count
+                nowhereLastPool = count
+            }
+        )
+    }
+
+    private var nowherePoolLevel: Int {
+        switch nowherePool {
+        case 1...3: 0
+        case 4...6: 1
+        default: 2
+        }
+    }
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
@@ -618,6 +658,39 @@ struct ProxyEditorView: View {
                     }
                 }
             }
+        } else if isNowhere {
+            Section("Network") {
+                Picker(selection: $nowhereNetwork) {
+                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
+                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
+                } label: {
+                    TextWithColorfulIcon(title: "Network", comment: nil, systemName: "globe", foregroundColor: .white, backgroundColor: .indigo)
+                }
+                if nowhereNetwork == .tcp {
+                    Toggle(isOn: nowherePoolEnabledBinding) {
+                        TextWithColorfulIcon(title: "Boost", comment: nil, systemName: "speedometer", foregroundColor: .white, backgroundColor: .orange)
+                    }
+                    if nowherePool > 0 {
+                        VStack(spacing: 8) {
+                            Slider(
+                                value: nowherePoolSliderBinding,
+                                in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound),
+                                step: 1
+                            )
+                            .accessibilityLabel(Text("Boost"))
+                            .accessibilityValue(Text(verbatim: "\(nowherePool)"))
+                            HStack {
+                                ForEach(Array(["gauge.with.dots.needle.0percent", "gauge.with.dots.needle.50percent", "gauge.with.dots.needle.100percent"].enumerated()), id: \.offset) { index, symbol in
+                                    Image(systemName: symbol)
+                                        .foregroundStyle(index == nowherePoolLevel ? Color.accentColor : Color.secondary.opacity(0.45))
+                                    if index < 2 { Spacer() }
+                                }
+                            }
+                            .accessibilityHidden(true)
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -1072,9 +1145,12 @@ struct ProxyEditorView: View {
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let tls):
+        case .nowhere(let key, let spec, let net, let pool, let tls):
             nowhereKey = key
             nowhereSpec = spec ?? ""
+            nowhereNetwork = net
+            nowherePool = pool
+            if pool > 0 { nowhereLastPool = pool }
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
         case .trojan(let password, let tls):
@@ -1290,6 +1366,8 @@ struct ProxyEditorView: View {
             outbound = .nowhere(
                 key: nowhereKey,
                 spec: spec,
+                net: nowhereNetwork,
+                pool: nowherePool,
                 tls: TLSConfiguration(serverName: sni, alpn: alpn)
             )
         case .trojan:

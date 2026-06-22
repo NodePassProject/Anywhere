@@ -195,7 +195,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parses `nowhere://<key>@host:port?spec=...&sni=...&alpn=...#name`.
+    /// Parses `nowhere://<key>@host:port?net=udp|tcp&spec=...&sni=...&alpn=...#name`.
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let rawPrefix = "nowhere://"
         var remaining = String(url.dropFirst(rawPrefix.count))
@@ -231,6 +231,24 @@ extension ProxyConfiguration {
         let (host, port) = try parseHostPort(serverPart)
         let parameters = parseQueryParams(queryString)
         let spec = parameters["spec"].flatMap { $0.isEmpty ? nil : $0 }
+        let rawNetwork = parameters["net"] ?? ""
+        let network: NowhereNetwork
+        if rawNetwork.isEmpty {
+            network = .udp
+        } else if let parsed = NowhereNetwork(rawValue: rawNetwork) {
+            network = parsed
+        } else {
+            throw ProxyError.invalidURL("Invalid Nowhere net value")
+        }
+        let rawPool = parameters["pool"] ?? ""
+        let pool: Int
+        if rawPool.isEmpty {
+            pool = 0
+        } else if let parsed = Int(rawPool), NowherePool.validRange.contains(parsed) {
+            pool = parsed
+        } else {
+            throw ProxyError.invalidURL("Invalid Nowhere pool value")
+        }
         let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
             ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
             ?? host
@@ -245,6 +263,8 @@ extension ProxyConfiguration {
             outbound: .nowhere(
                 key: key,
                 spec: spec,
+                net: network,
+                pool: pool,
                 tls: tls
             )
         )
