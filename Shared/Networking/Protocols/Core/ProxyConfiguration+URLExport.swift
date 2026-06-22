@@ -128,12 +128,12 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let spec, let tls) = outbound else {
+        guard case .nowhere(let key, let spec, let net, let pool, let tls) = outbound else {
             return ""
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var parameters: [String] = []
+        var parameters: [String] = ["net=\(net.rawValue)", "pool=\(pool)"]
         if let spec, !spec.isEmpty {
             parameters.append("spec=\(encodedQueryValue(spec))")
         }

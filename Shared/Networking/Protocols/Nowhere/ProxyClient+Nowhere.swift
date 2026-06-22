@@ -17,7 +17,7 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .nowhere(let key, let spec, let tls) = configuration.outbound else {
+        guard case .nowhere(let key, let spec, let net, let pool, let tls) = configuration.outbound else {
             completion(.failure(ProxyError.protocolError("Nowhere key not set")))
             return
         }
@@ -29,6 +29,8 @@ extension ProxyClient {
                 proxyPort: configuration.serverPort,
                 key: key,
                 spec: spec,
+                net: net,
+                pool: pool,
                 tls: tls
             )
         } catch {
@@ -38,6 +40,43 @@ extension ProxyClient {
 
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
+
+        if net != .tcp || pool == 0 || tunnel != nil {
+            NowhereTCPConnectionPoolRegistry.shared.disable(configurationID: configuration.id)
+        }
+
+        if net == .tcp {
+            guard command == .tcp else {
+                completion(.failure(ProxyError.dropped))
+                return
+            }
+            if pool > 0, tunnel == nil {
+                NowhereTCPConnectionPoolRegistry.shared.acquire(
+                    configurationID: configuration.id,
+                    configuration: nwConfig,
+                    connectHost: directDialHost,
+                    destination: destination,
+                    completion: completion
+                )
+                return
+            }
+
+            let connection = NowhereTCPConnection(
+                configuration: nwConfig,
+                connectHost: directDialHost,
+                tunnel: tunnel
+            )
+            tunnel = nil
+            connection.openFresh(destination: destination) { error in
+                if let error {
+                    connection.cancel()
+                    completion(.failure(error))
+                } else {
+                    completion(.success(connection))
+                }
+            }
+            return
+        }
 
         if let chainTunnel = tunnel {
             let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)

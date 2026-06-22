@@ -112,8 +112,8 @@ enum Outbound: Hashable {
         portHopping: HysteriaPortHopping?,
         sni: String
     )
-    /// Nowhere runs over QUIC with a shared-key auth frame and spec-shaped TLS ALPN.
-    case nowhere(key: String, spec: String?, tls: TLSConfiguration)
+    /// Nowhere runs over QUIC/UDP or TLS/TCP with a shared-key auth frame.
+    case nowhere(key: String, spec: String?, net: NowhereNetwork, pool: Int, tls: TLSConfiguration)
     /// Trojan: SHA224(password)+CRLF+request over mandatory TLS. No plaintext variant.
     case trojan(password: String, tls: TLSConfiguration)
     /// AnyTLS: stream multiplexer over pooled TLS sessions, authenticated with SHA256(password);
@@ -230,6 +230,16 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         if case .vless(_, _, _, _, let s, _, _) = outbound { return s }
         return .none
     }
+
+    var nowhereNetwork: NowhereNetwork {
+        if case .nowhere(_, _, let net, _, _) = outbound { return net }
+        return .udp
+    }
+
+    var nowherePool: Int {
+        if case .nowhere(_, _, _, let pool, _) = outbound { return pool }
+        return 0
+    }
     /// Only meaningful for VLESS+TCP with Vision flow.
     var muxEnabled: Bool {
         if case .vless(_, _, _, _, _, let m, _) = outbound { return m }
@@ -275,6 +285,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// XHTTP-over-HTTP/3 always needs `.udp` (rides QUIC); otherwise defers to the protocol rule.
     func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
         if isXHTTPOverHTTP3 { return .udp }
+        if outboundProtocol == .nowhere {
+            switch nowhereNetwork {
+            case .udp:
+                return .udp
+            case .tcp:
+                return downstreamCommand == .tcp ? .tcp : nil
+            }
+        }
         return outboundProtocol.upstreamCommand(for: downstreamCommand)
     }
 
@@ -334,7 +352,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
         case hysteriaPorts, hysteriaHopInterval
-        case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN, nowhereTLS
+        case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN, nowhereTLS, net, pool
         case trojanPassword, trojanTLS
         case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
         case ssPassword, ssMethod
@@ -420,9 +438,47 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let explicitSNI = try container.decodeIfPresent(String.self, forKey: .nowhereSNI)
             let alpnString = try container.decodeIfPresent(String.self, forKey: .nowhereALPN)
             let alpn = alpnString.flatMap { $0.isEmpty ? nil : [$0] } ?? legacyTLS?.alpn
+            let rawNetwork = try container.decodeIfPresent(String.self, forKey: .net)
+            let network: NowhereNetwork
+            if rawNetwork?.isEmpty != false {
+                network = .udp
+            } else if let parsed = rawNetwork.flatMap(NowhereNetwork.init(rawValue:)) {
+                network = parsed
+            } else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .net,
+                    in: container,
+                    debugDescription: "Invalid Nowhere net value"
+                )
+            }
+            let pool: Int
+            if !container.contains(.pool) {
+                pool = 0
+            } else if try container.decodeNil(forKey: .pool) {
+                pool = 0
+            } else if let value = try? container.decode(Int.self, forKey: .pool) {
+                pool = value
+            } else if let raw = try? container.decode(String.self, forKey: .pool), raw.isEmpty {
+                pool = 0
+            } else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .pool,
+                    in: container,
+                    debugDescription: "Invalid Nowhere pool value"
+                )
+            }
+            guard NowherePool.validRange.contains(pool) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .pool,
+                    in: container,
+                    debugDescription: "Invalid Nowhere pool value"
+                )
+            }
             outbound = .nowhere(
                 key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? "",
                 spec: try container.decodeIfPresent(String.self, forKey: .nowhereSpec),
+                net: network,
+                pool: pool,
                 tls: TLSConfiguration(
                     serverName: (explicitSNI?.isEmpty == false ? explicitSNI : nil)
                         ?? legacyTLS?.serverName
@@ -536,11 +592,13 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 try container.encode(portHopping.intervalSeconds, forKey: .hysteriaHopInterval)
             }
             try container.encode(sni, forKey: .hysteriaSNI)
-        case .nowhere(let key, let spec, let tls):
+        case .nowhere(let key, let spec, let net, let pool, let tls):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(key, forKey: .nowhereKey)
             try container.encodeIfPresent(spec, forKey: .nowhereSpec)
+            try container.encode(net.rawValue, forKey: .net)
+            try container.encode(pool, forKey: .pool)
             try container.encode(tls.serverName, forKey: .nowhereSNI)
             if let alpn = tls.alpn?.first, !alpn.isEmpty {
                 try container.encode(alpn, forKey: .nowhereALPN)
