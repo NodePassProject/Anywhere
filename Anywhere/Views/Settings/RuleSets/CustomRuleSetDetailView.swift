@@ -140,13 +140,7 @@ struct CustomRuleSetDetailView: View {
     @ViewBuilder
     private func subscriptionSection(url: URL) -> some View {
         Section("Subscription") {
-            Text(url.absoluteString)
-                .font(.system(size: 14).monospaced())
-                .foregroundStyle(.secondary)
-                .minimumScaleFactor(0.5)
-                .truncationMode(.middle)
-                .lineLimit(3)
-                .textSelection(.enabled)
+            URLText(urlString: url.absoluteString)
             Button {
                 refresh()
             } label: {
