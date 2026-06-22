@@ -174,23 +174,12 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-//                if #available(iOS 27.0, *) {
-//                    Circle()
-//                        .fill(.clear)
-//                        .frame(width: isCompact ? 50 : 140)
-//                        .glassEffect(.regular, in: .circle)
-//                } else if #available(iOS 26.0, *) {
-//                    Circle()
-//                        .fill(.clear)
-//                        .frame(width: isCompact ? 50 : 140)
-//                        .glassEffect(.clear, in: .circle)
-//                } else {
-//                    Circle()
-//                        .fill(.white.opacity(0.2))
-//                        .frame(width: isCompact ? 50 : 140)
-//                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
-//                }
-                if #available(iOS 26.0, *) {
+                if #available(iOS 27.0, *) {
+                    Circle()
+                        .fill(.clear)
+                        .frame(width: isCompact ? 50 : 140)
+                        .glassEffect(.regular, in: .circle)
+                } else if #available(iOS 26.0, *) {
                     Circle()
                         .fill(.clear)
                         .frame(width: isCompact ? 50 : 140)
@@ -201,6 +190,17 @@ private struct PowerButton: View {
                         .frame(width: isCompact ? 50 : 140)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
+//                if #available(iOS 26.0, *) {
+//                    Circle()
+//                        .fill(.clear)
+//                        .frame(width: isCompact ? 50 : 140)
+//                        .glassEffect(.clear, in: .circle)
+//                } else {
+//                    Circle()
+//                        .fill(.white.opacity(0.2))
+//                        .frame(width: isCompact ? 50 : 140)
+//                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
+//                }
 
                 if isTransitioning || isLoading {
                     ProgressView()
