@@ -157,7 +157,7 @@ class TVProxyEditorViewController: UITableViewController {
         case vlessXHTTPDownloadSecurity, vlessXHTTPDownloadTLSSNI, vlessXHTTPDownloadTLSALPN, vlessXHTTPDownloadFingerprint
         case vlessXHTTPDownloadRealitySNI, vlessXHTTPDownloadRealityPublicKey,
              vlessXHTTPDownloadRealityShortId
-        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbp
+        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
         case hysteriaPorts, hysteriaHopInterval
         case hysteriaObfuscationType, hysteriaObfuscationPassword, hysteriaObfuscationMin, hysteriaObfuscationMax
         case hysteriaSNI
