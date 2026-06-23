@@ -251,6 +251,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     }
 
     var displaySecurityTag: String? {
+        guard outboundProtocol != .nowhere else { return nil }
         let tag = (outboundProtocol == .vless
             ? xraySecurityLayer.tag
             : genericSecurityLayer.tag).uppercased()
