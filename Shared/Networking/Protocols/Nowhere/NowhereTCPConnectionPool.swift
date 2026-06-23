@@ -189,10 +189,13 @@ nonisolated private final class NowhereTCPConnectionPool {
 
         if let selected {
             selected.setPreparedCloseHandler(nil)
-            selected.activate(destination: destination) { [weak self, weak selected] error in
-                guard let self, let selected else { return }
+            selected.activate(destination: destination) { [weak self] error in
                 if error != nil {
                     selected.cancel()
+                    guard let self else {
+                        completion(.failure(ProxyError.connectionFailed("Nowhere TCP pool closed during acquire")))
+                        return
+                    }
                     self.openFresh(destination: destination, completion: completion)
                 } else {
                     completion(.success(selected))
