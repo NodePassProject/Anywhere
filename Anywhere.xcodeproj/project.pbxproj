@@ -183,6 +183,8 @@
 				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,
 				Networking/Protocols/Core/UDPFraming.swift,
+				Networking/Protocols/Crypto/BLAKE2/blake2b.c,
+				Networking/Protocols/Crypto/BLAKE2bHasher.swift,
 				Networking/Protocols/Crypto/BLAKE3/blake3_dispatch.c,
 				Networking/Protocols/Crypto/BLAKE3/blake3_portable.c,
 				Networking/Protocols/Crypto/BLAKE3/blake3.c,
@@ -197,6 +199,8 @@
 				Networking/Protocols/Hysteria/HysteriaCongestionControl.swift,
 				Networking/Protocols/Hysteria/HysteriaConnection.swift,
 				Networking/Protocols/Hysteria/HysteriaHTTP3Codec.swift,
+				Networking/Protocols/Hysteria/HysteriaObfuscation.swift,
+				Networking/Protocols/Hysteria/HysteriaObfuscator.swift,
 				Networking/Protocols/Hysteria/HysteriaPortHopping.swift,
 				Networking/Protocols/Hysteria/HysteriaProtocol.swift,
 				Networking/Protocols/Hysteria/HysteriaSession.swift,
@@ -803,6 +807,7 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/Shared/Networking/ngtcp2",
+					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
 					"$(SRCROOT)/Shared/Utilities/libyaml/include",
 				);
@@ -845,6 +850,7 @@
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/Shared/Networking/ngtcp2",
+					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
 					"$(SRCROOT)/Shared/Utilities/libyaml/include",
 				);
@@ -1017,6 +1023,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
 				);
@@ -1073,6 +1080,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
 				);
@@ -1128,6 +1136,7 @@
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
@@ -1179,6 +1188,7 @@
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
@@ -1229,6 +1239,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
 				);
@@ -1280,6 +1291,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Shared/Networking/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
 					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
 				);

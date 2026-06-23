@@ -175,6 +175,19 @@ extension ProxyConfiguration {
         let hopInterval = (parameters["hop-interval"] ?? parameters["hopInterval"]).flatMap { Int($0) }
         let portHopping = HysteriaPortHopping.make(spec: portsSpec, intervalSeconds: hopInterval)
 
+        let obfuscation: HysteriaObfuscation?
+        if let obfsType = parameters["obfs"], !obfsType.isEmpty {
+            let obfsMin = parameters["obfs-min-packet-size"].flatMap { Int($0) }
+            let obfsMax = parameters["obfs-max-packet-size"].flatMap { Int($0) }
+            guard let parsed = HysteriaObfuscation.make(type: obfsType, password: parameters["obfs-password"],
+                                                        geckoMinPacketSize: obfsMin, geckoMaxPacketSize: obfsMax) else {
+                throw ProxyError.invalidURL("Unsupported Hysteria obfs type: \(obfsType)")
+            }
+            obfuscation = parsed
+        } else {
+            obfuscation = nil
+        }
+
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
@@ -185,6 +198,7 @@ extension ProxyConfiguration {
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
                 portHopping: portHopping,
+                obfuscation: obfuscation,
                 sni: sni
             )
         )

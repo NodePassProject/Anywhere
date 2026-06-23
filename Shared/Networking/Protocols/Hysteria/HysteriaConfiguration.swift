@@ -40,7 +40,10 @@ struct HysteriaConfiguration {
     /// Port-hopping settings, or `nil` for a fixed single port. Honored only on the direct
     /// kernel-socket path; ignored when Hysteria is a chain link riding a relay transport.
     let portHopping: HysteriaPortHopping?
-    
+
+    /// Packet obfuscation, or `nil` for none. Applied on both the direct socket and a chained relay transport.
+    let obfuscation: HysteriaObfuscation?
+
     /// TLS SNI; callers default to `proxyHost` when there is no explicit override.
     let sni: String
 }

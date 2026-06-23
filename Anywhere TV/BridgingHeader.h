@@ -9,6 +9,7 @@
 #define BridgingHeader_h
 
 #include "ngtcp2_bridge.h"
+#include "blake2.h"
 #include "blake3.h"
 #include "yaml.h"
 

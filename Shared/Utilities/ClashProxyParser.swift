@@ -221,11 +221,24 @@ struct ClashProxyParser {
     
     // MARK: - Hysteria2
 
-    /// Obfuscated nodes are skipped — our Hysteria client lacks Salamander obfuscation.
+    /// Salamander and Gecko obfuscation are supported; a node declaring any other `obfs` type is
+    /// skipped rather than silently connected without it (the server would reject the handshake).
     private static func parseHysteria2Proxy(_ node: YAML.Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
-        if let obfs = getString(node, key: "obfs"), !obfs.isEmpty { return nil }
+        let obfuscation: HysteriaObfuscation?
+        if let obfsType = getString(node, key: "obfs"), !obfsType.isEmpty {
+            let obfsPassword = getString(node, key: "obfs-password") ?? getString(node, key: "obfs_password")
+            let obfsMin = getInt(node, key: "obfs-min-packet-size") ?? getInt(node, key: "obfs_min_packet_size")
+            let obfsMax = getInt(node, key: "obfs-max-packet-size") ?? getInt(node, key: "obfs_max_packet_size")
+            guard let parsed = HysteriaObfuscation.make(type: obfsType, password: obfsPassword,
+                                                        geckoMinPacketSize: obfsMin, geckoMaxPacketSize: obfsMax) else {
+                return nil
+            }
+            obfuscation = parsed
+        } else {
+            obfuscation = nil
+        }
 
         let portHopping: HysteriaPortHopping?
         if let ports = getString(node, key: "ports"), !ports.isEmpty {
@@ -261,6 +274,7 @@ struct ClashProxyParser {
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
                 portHopping: portHopping,
+                obfuscation: obfuscation,
                 sni: sni
             )
         )

@@ -1,5 +1,5 @@
 //
-//  TVProxyEditorViewController.swift
+//  ProxyEditorView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/19/26.
@@ -71,6 +71,10 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
     private var hysteriaPortsSpec = ""
     private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
+    private var hysteriaObfuscationType = "none"
+    private var hysteriaObfuscationPassword = ""
+    private var hysteriaObfuscationMinText = String(HysteriaObfuscation.geckoMinPacketSizeDefault)
+    private var hysteriaObfuscationMaxText = String(HysteriaObfuscation.geckoMaxPacketSizeDefault)
     private var hysteriaSNI = ""
 
     private var nowhereKey = ""
@@ -153,8 +157,10 @@ class TVProxyEditorViewController: UITableViewController {
         case vlessXHTTPDownloadSecurity, vlessXHTTPDownloadTLSSNI, vlessXHTTPDownloadTLSALPN, vlessXHTTPDownloadFingerprint
         case vlessXHTTPDownloadRealitySNI, vlessXHTTPDownloadRealityPublicKey,
              vlessXHTTPDownloadRealityShortId
-        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps,
-             hysteriaPorts, hysteriaHopInterval, hysteriaSNI
+        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbp
+        case hysteriaPorts, hysteriaHopInterval
+        case hysteriaObfuscationType, hysteriaObfuscationPassword, hysteriaObfuscationMin, hysteriaObfuscationMax
+        case hysteriaSNI
         case nowhereKey, nowhereSpec, nowhereNetwork, nowherePoolEnabled, nowherePool, nowhereSNI, nowhereALPN
         case trojanPassword, trojanSNI, trojanALPN, trojanECHEnabled, trojanECH, trojanFingerprint
         case anytlsPassword, anytlsSNI, anytlsALPN, anytlsECHEnabled, anytlsECH, anytlsFingerprint
@@ -204,14 +210,17 @@ class TVProxyEditorViewController: UITableViewController {
             }
         } else if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
-            serverRows.append(.selection(label: String(localized: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol"), value: hysteriaCC.displayName, options: HysteriaCongestionControl.allCases.map { ($0.displayName, $0.rawValue) }, key: .hysteriaCC))
-            if hysteriaCC == .brutal {
-                serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
-                serverRows.append(.text(label: String(localized: "Download Speed", comment: "Download Speed for Hysteria protocol"), value: hysteriaDownloadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaDownloadMbps))
+            serverRows.append(.selection(label: String(localized: "Obfuscation", comment: "Obfuscation for Hysteria protocol"), value: hysteriaObfuscationDisplayValue, options: [
+                (String(localized: "None"), "none"),
+                ("Salamander", "salamander"),
+                ("Gecko", "gecko"),
+            ], key: .hysteriaObfuscationType))
+            if hysteriaObfuscationType != "none" {
+                serverRows.append(.text(label: String(localized: "Password"), value: hysteriaObfuscationPassword, placeholder: String(localized: "Password"), key: .hysteriaObfuscationPassword, secure: true))
             }
-            serverRows.append(.text(label: String(localized: "Port Hopping", comment: "Port Hopping for Hysteria protocol"), value: hysteriaPortsSpec, placeholder: String("443,5000-6000"), key: .hysteriaPorts))
-            if !hysteriaPortsSpec.isEmpty {
-                serverRows.append(.text(label: String(localized: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol"), value: hysteriaHopIntervalText, placeholder: String(localized: "Seconds"), key: .hysteriaHopInterval))
+            if hysteriaObfuscationType == "gecko" {
+                serverRows.append(.text(label: String(localized: "Minimum Packet Size", comment: "Minimum Packet Size for Hysteria protocol Gecko obfuscation"), value: hysteriaObfuscationMinText, placeholder: String(HysteriaObfuscation.geckoMinPacketSizeDefault), key: .hysteriaObfuscationMin))
+                serverRows.append(.text(label: String(localized: "Maximum Packet Size", comment: "Maximum Packet Size for Hysteria protocol Gecko obfuscation"), value: hysteriaObfuscationMaxText, placeholder: String(HysteriaObfuscation.geckoMaxPacketSizeDefault), key: .hysteriaObfuscationMax))
             }
         } else if isNowhere {
             serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
@@ -311,6 +320,19 @@ class TVProxyEditorViewController: UITableViewController {
                 }
             }
             sections.append((String(localized: "Network"), transportRows))
+        } else if isHysteria {
+            var hysteriaNetworkRows: [RowType] = [
+                .selection(label: String(localized: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol"), value: hysteriaCC.displayName, options: HysteriaCongestionControl.allCases.map { ($0.displayName, $0.rawValue) }, key: .hysteriaCC),
+            ]
+            if hysteriaCC == .brutal {
+                hysteriaNetworkRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
+                hysteriaNetworkRows.append(.text(label: String(localized: "Download Speed", comment: "Download Speed for Hysteria protocol"), value: hysteriaDownloadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaDownloadMbps))
+            }
+            hysteriaNetworkRows.append(.text(label: String(localized: "Port Hopping", comment: "Port Hopping for Hysteria protocol"), value: hysteriaPortsSpec, placeholder: String("443,5000-6000"), key: .hysteriaPorts))
+            if !hysteriaPortsSpec.isEmpty {
+                hysteriaNetworkRows.append(.text(label: String(localized: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol"), value: hysteriaHopIntervalText, placeholder: String(localized: "Seconds"), key: .hysteriaHopInterval))
+            }
+            sections.append((nil, hysteriaNetworkRows))
         }
 
         if isVLESS {
@@ -368,10 +390,9 @@ class TVProxyEditorViewController: UITableViewController {
             anytlsRows.append(.selection(label: String(localized: "Fingerprint"), value: anytlsFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .anytlsFingerprint))
             sections.append((String(localized: "TLS"), anytlsRows))
         } else if isHysteria {
-            var hysteriaRows: [RowType] = [
+            sections.append((String(localized: "TLS"), [
                 .text(label: String(localized: "SNI"), value: hysteriaSNI, placeholder: String(localized: "SNI"), key: .hysteriaSNI),
-            ]
-            sections.append((nil, hysteriaRows))
+            ]))
         }
 
         if isVLESS && vlessTransport == "xhttp" {
@@ -491,6 +512,25 @@ class TVProxyEditorViewController: UITableViewController {
         case "reality": "Reality"
         default: vlessXHTTPDownloadSecurity
         }
+    }
+
+    private var hysteriaObfuscationDisplayValue: String {
+        switch hysteriaObfuscationType {
+        case "salamander": "Salamander"
+        case "gecko": "Gecko"
+        default: String(localized: "None")
+        }
+    }
+
+    /// Rebuilds the obfuscation enum from the decomposed fields; `make` returns nil for the "none"
+    /// type and normalizes the gecko packet-size bounds.
+    private var hysteriaObfuscationValue: HysteriaObfuscation? {
+        HysteriaObfuscation.make(
+            type: hysteriaObfuscationType == "none" ? nil : hysteriaObfuscationType,
+            password: hysteriaObfuscationPassword,
+            geckoMinPacketSize: Int(hysteriaObfuscationMinText),
+            geckoMaxPacketSize: Int(hysteriaObfuscationMaxText)
+        )
     }
 
     private var isValid: Bool {
@@ -730,6 +770,10 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteriaPorts: hysteriaPortsSpec = value
         case .hysteriaHopInterval: hysteriaHopIntervalText = value
         case .hysteriaSNI: hysteriaSNI = value
+        case .hysteriaObfuscationType: hysteriaObfuscationType = value
+        case .hysteriaObfuscationPassword: hysteriaObfuscationPassword = value
+        case .hysteriaObfuscationMin: hysteriaObfuscationMinText = value
+        case .hysteriaObfuscationMax: hysteriaObfuscationMaxText = value
         case .nowhereKey: nowhereKey = value
         case .nowhereSpec: nowhereSpec = value
         case .nowhereNetwork:
@@ -866,13 +910,21 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let obfuscation, let sni):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
+            if let obfuscation {
+                hysteriaObfuscationType = obfuscation.typeTag
+                hysteriaObfuscationPassword = obfuscation.password
+                if case .gecko(_, let minPacketSize, let maxPacketSize) = obfuscation {
+                    hysteriaObfuscationMinText = String(minPacketSize)
+                    hysteriaObfuscationMaxText = String(maxPacketSize)
+                }
+            }
             hysteriaSNI = sni
         case .nowhere(let key, let spec, let net, let pool, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
@@ -1082,6 +1134,7 @@ class TVProxyEditorViewController: UITableViewController {
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
                 portHopping: portHopping,
+                obfuscation: hysteriaObfuscationValue,
                 sni: sni
             )
         case .nowhere:

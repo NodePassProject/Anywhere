@@ -122,6 +122,16 @@ nonisolated final class HysteriaSession {
         } else {
             hopping = nil
         }
+        // Obfuscation applies on both carriers, so build it regardless of `transport`.
+        let obfuscator: QUICPacketObfuscator?
+        switch configuration.obfuscation {
+        case .salamander(let password):
+            obfuscator = SalamanderObfuscator(password: password)
+        case .gecko(let password, let minPacketSize, let maxPacketSize):
+            obfuscator = GeckoObfuscator(password: password, minPacketSize: minPacketSize, maxPacketSize: maxPacketSize)
+        case nil:
+            obfuscator = nil
+        }
         self.quic = QUICConnection(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
@@ -130,6 +140,7 @@ nonisolated final class HysteriaSession {
             datagramsEnabled: true,
             tuning: .hysteria(congestionControl: configuration.congestionControl, uploadMbps: configuration.uploadMbps),
             portHopping: hopping,
+            obfuscator: obfuscator,
             transport: transport
         )
     }

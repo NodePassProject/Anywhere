@@ -10,19 +10,19 @@ import SwiftUI
 struct ProxyEditorView: View {
     let configuration: ProxyConfiguration?
     let onSave: (ProxyConfiguration) -> Void
-
+    
     @Environment(\.dismiss) private var dismiss
-
+    
     @State private var selectedProtocol: OutboundProtocol = .vless
     @State private var name = ""
     @State private var serverAddress = ""
     @State private var serverPort = ""
-
+    
     @State private var vlessUUID = ""
     @State private var vlessEncryption = "none"
     @State private var vlessFlow = ""
     @State private var vlessTransport = "tcp"
-
+    
     @State private var vlessWebSocketHost = ""
     @State private var vlessWebSocketPath = "/"
     
@@ -62,15 +62,19 @@ struct ProxyEditorView: View {
     @State private var vlessXHTTPDownloadRealityPublicKey = ""
     @State private var vlessXHTTPDownloadRealityShortId = ""
     @State private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome120
-
+    
     @State private var hysteriaPassword = ""
     @State private var hysteriaCC: HysteriaCongestionControl = .brutal
     @State private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
     @State private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
     @State private var hysteriaPortsSpec = ""
     @State private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
+    @State private var hysteriaObfuscationType = "none"
+    @State private var hysteriaObfuscationPassword = ""
+    @State private var hysteriaObfuscationMinText = String(HysteriaObfuscation.geckoMinPacketSizeDefault)
+    @State private var hysteriaObfuscationMaxText = String(HysteriaObfuscation.geckoMaxPacketSizeDefault)
     @State private var hysteriaSNI = ""
-
+    
     @State private var nowhereKey = ""
     @State private var nowhereSpec = ""
     @State private var nowhereNetwork: NowhereNetwork = .udp
@@ -78,27 +82,27 @@ struct ProxyEditorView: View {
     @State private var nowhereLastPool = NowherePool.enabledDefault
     @State private var nowhereSNI = ""
     @State private var nowhereALPN = ""
-
+    
     @State private var trojanPassword = ""
     @State private var trojanSNI = ""
     @State private var trojanALPN = ""
     @State private var trojanECHEnabled = false
     @State private var trojanECHConfig = ""
     @State private var trojanFingerprint: TLSFingerprint = .chrome120
-
+    
     @State private var anytlsPassword = ""
     @State private var anytlsSNI = ""
     @State private var anytlsALPN = ""
     @State private var anytlsECHEnabled = false
     @State private var anytlsECHConfig = ""
     @State private var anytlsFingerprint: TLSFingerprint = .chrome120
-
+    
     @State private var ssPassword = ""
     @State private var ssMethod = "aes-128-gcm"
-
+    
     @State private var socks5Username = ""
     @State private var socks5Password = ""
-
+    
     @State private var sudokuKey = ""
     @State private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
     @State private var sudokuPaddingMinText = "5"
@@ -112,10 +116,10 @@ struct ProxyEditorView: View {
     @State private var sudokuHTTPMaskHost = ""
     @State private var sudokuHTTPMaskPathRoot = ""
     @State private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
-
+    
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
-
+    
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isVLESSReality: Bool { vlessSecurity == "reality" }
     private var isVLESSTLS: Bool { vlessSecurity == "tls" }
@@ -127,14 +131,14 @@ struct ProxyEditorView: View {
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isSudoku: Bool { selectedProtocol == .sudoku }
     private var isNaive: Bool { selectedProtocol.isNaive }
-
+    
     private var nowherePoolEnabledBinding: Binding<Bool> {
         Binding(
             get: { nowherePool > 0 },
             set: { enabled in
                 if enabled {
                     nowherePool = NowherePool.sliderRange.contains(nowhereLastPool)
-                        ? nowhereLastPool : NowherePool.enabledDefault
+                    ? nowhereLastPool : NowherePool.enabledDefault
                 } else {
                     if nowherePool > 0 { nowhereLastPool = nowherePool }
                     nowherePool = 0
@@ -142,7 +146,7 @@ struct ProxyEditorView: View {
             }
         )
     }
-
+    
     private var nowherePoolSliderBinding: Binding<Double> {
         Binding(
             get: { Double(max(NowherePool.sliderRange.lowerBound, nowherePool)) },
@@ -156,7 +160,7 @@ struct ProxyEditorView: View {
             }
         )
     }
-
+    
     private var nowherePoolLevel: Int {
         switch nowherePool {
         case 1...3: 0
@@ -164,7 +168,7 @@ struct ProxyEditorView: View {
         default: 2
         }
     }
-
+    
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
         if isVLESS {
@@ -187,9 +191,9 @@ struct ProxyEditorView: View {
         }
         if isNowhere {
             return !nowhereKey.isEmpty
-                && nowhereKey.utf8.count <= 255
-                && nowhereSpec.utf8.count <= 255
-                && nowhereALPN.utf8.count <= 255
+            && nowhereKey.utf8.count <= 255
+            && nowhereSpec.utf8.count <= 255
+            && nowhereALPN.utf8.count <= 255
         }
         if isTrojan {
             return !trojanPassword.isEmpty
@@ -213,12 +217,12 @@ struct ProxyEditorView: View {
         }
         return false
     }
-
+    
     init(configuration: ProxyConfiguration? = nil, onSave: @escaping (ProxyConfiguration) -> Void) {
         self.configuration = configuration
         self.onSave = onSave
     }
-
+    
     var body: some View {
         NavigationStack {
             Form {
@@ -253,15 +257,15 @@ struct ProxyEditorView: View {
                 
                 serverSettings
                 
-                transportSettings
+                networkSettings
                 
                 if isVLESS {
                     xraySecurityLayerSettings
                 } else {
                     securityLayerSettings
                 }
-
-                extraSettings
+                
+                moreSettings
             }
             .navigationTitle(configuration != nil ? "Edit Configuration" : "Add Configuration")
             .navigationBarTitleDisplayMode(.inline)
@@ -343,45 +347,38 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                 }
-                if !hysteriaPortsSpec.isEmpty {
-                    LabeledContent {
-                        TextField("Seconds", text: $hysteriaHopIntervalText)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol", systemName: "timer", foregroundColor: .white, backgroundColor: .green)
-                    }
-                }
-                Picker(selection: $hysteriaCC) {
-                    ForEach(HysteriaCongestionControl.allCases, id: \.self) { cc in
-                        Text(cc.displayName).tag(cc)
-                    }
+                Picker(selection: $hysteriaObfuscationType) {
+                    Text("None").tag("none")
+                    Text(String("Salamander")).tag("salamander")
+                    Text(String("Gecko")).tag("gecko")
                 } label: {
-                    TextWithColorfulIcon(title: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol", systemName: "speedometer", foregroundColor: .white, backgroundColor: .blue)
+                    TextWithColorfulIcon(title: "Obfuscation", comment: "Obfuscation for Hysteria protocol", systemName: "theatermasks.fill", foregroundColor: .white, backgroundColor: .purple)
                 }
-                if hysteriaCC == .brutal {
+                if hysteriaObfuscationType != "none" {
                     LabeledContent {
-                        TextField("Mbps", text: $hysteriaUploadMbpsText)
+                        SecureField("Password", text: $hysteriaObfuscationPassword)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                    }
+                }
+                if hysteriaObfuscationType == "gecko" {
+                    LabeledContent {
+                        TextField(String(HysteriaObfuscation.geckoMinPacketSizeDefault), text: $hysteriaObfuscationMinText)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIcon(title: "Minimum Packet Size", comment: "Minimum Packet Size for Hysteria protocol Gecko obfuscation", systemName: "minus.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     LabeledContent {
-                        TextField("Mbps", text: $hysteriaDownloadMbpsText)
+                        TextField(String(HysteriaObfuscation.geckoMaxPacketSizeDefault), text: $hysteriaObfuscationMaxText)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Download Speed", comment: "Download Speed for Hysteria protocol", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIcon(title: "Maximum Packet Size", comment: "Maximum Packet Size for Hysteria protocol Gecko obfuscation", systemName: "plus.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
-                }
-                LabeledContent {
-                    TextField(String("443,5000-6000"), text: $hysteriaPortsSpec)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Port Hopping", comment: "Port Hopping for Hysteria protocol", systemName: "arrowshape.bounce.forward.fill", foregroundColor: .white, backgroundColor: .cyan)
                 }
             } else if isNowhere {
                 LabeledContent {
@@ -525,7 +522,7 @@ struct ProxyEditorView: View {
     }
     
     @ViewBuilder
-    private var transportSettings: some View {
+    private var networkSettings: some View {
         if isVLESS {
             Section {
                 Picker(selection: $vlessFlow) {
@@ -642,6 +639,49 @@ struct ProxyEditorView: View {
                         Text(String("Stream One")).tag("stream-one")
                     } label: {
                         TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
+                    }
+                }
+            }
+        } else if isHysteria {
+            Section {
+                Picker(selection: $hysteriaCC) {
+                    ForEach(HysteriaCongestionControl.allCases, id: \.self) { cc in
+                        Text(cc.displayName).tag(cc)
+                    }
+                } label: {
+                    TextWithColorfulIcon(title: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol", systemName: "speedometer", foregroundColor: .white, backgroundColor: .blue)
+                }
+                if hysteriaCC == .brutal {
+                    LabeledContent {
+                        TextField("Mbps", text: $hysteriaUploadMbpsText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                    LabeledContent {
+                        TextField("Mbps", text: $hysteriaDownloadMbpsText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Download Speed", comment: "Download Speed for Hysteria protocol", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                }
+                LabeledContent {
+                    TextField(String("443,5000-6000"), text: $hysteriaPortsSpec)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Port Hopping", comment: "Port Hopping for Hysteria protocol", systemName: "arrowshape.bounce.forward.fill", foregroundColor: .white, backgroundColor: .cyan)
+                }
+                if !hysteriaPortsSpec.isEmpty {
+                    LabeledContent {
+                        TextField("Seconds", text: $hysteriaHopIntervalText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol", systemName: "timer", foregroundColor: .white, backgroundColor: .green)
                     }
                 }
             }
@@ -766,7 +806,7 @@ struct ProxyEditorView: View {
             }
         }
     }
-
+    
     @ViewBuilder
     private var securityLayerSettings: some View {
         if isNowhere {
@@ -870,7 +910,7 @@ struct ProxyEditorView: View {
                 }
             }
         } else if isHysteria {
-            Section {
+            Section("TLS") {
                 LabeledContent {
                     TextField("SNI", text: $hysteriaSNI)
                         .keyboardType(.URL)
@@ -881,52 +921,11 @@ struct ProxyEditorView: View {
                     TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                 }
             }
-        } else if isSudoku {
-            Section(String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol")) {
-                Toggle(isOn: $sudokuHTTPMaskDisable) {
-                    TextWithColorfulIcon(title: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol", systemName: "xmark.circle.fill", foregroundColor: .white, backgroundColor: .gray)
-                }
-                if !sudokuHTTPMaskDisable {
-                    Picker(selection: $sudokuHTTPMaskMode) {
-                        ForEach(SudokuHTTPMaskMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    } label: {
-                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "network.badge.shield.half.filled", foregroundColor: .white, backgroundColor: .purple)
-                    }
-                    Toggle(isOn: $sudokuHTTPMaskTLS) {
-                        TextWithColorfulIcon(title: "TLS", comment: nil, systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    LabeledContent {
-                        TextField("Host", text: $sudokuHTTPMaskHost)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    LabeledContent {
-                        TextField("Path Root", text: $sudokuHTTPMaskPathRoot)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    Picker(selection: $sudokuHTTPMaskMultiplex) {
-                        ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    } label: {
-                        TextWithColorfulIcon(title: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
-                    }
-                }
-            }
         }
     }
     
     @ViewBuilder
-    private var extraSettings: some View {
+    private var moreSettings: some View {
         if isVLESS && vlessTransport == "xhttp" {
             Section {
                 Toggle(isOn: $vlessXHTTPDownloadEnabled) {
@@ -1041,8 +1040,51 @@ struct ProxyEditorView: View {
                 }
             }
         }
+        
+        if isSudoku {
+            Section(String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol")) {
+                Toggle(isOn: $sudokuHTTPMaskDisable) {
+                    TextWithColorfulIcon(title: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol", systemName: "xmark.circle.fill", foregroundColor: .white, backgroundColor: .gray)
+                }
+                if !sudokuHTTPMaskDisable {
+                    Picker(selection: $sudokuHTTPMaskMode) {
+                        ForEach(SudokuHTTPMaskMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    } label: {
+                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
+                    }
+                    Toggle(isOn: $sudokuHTTPMaskTLS) {
+                        TextWithColorfulIcon(title: "TLS", comment: nil, systemName: "lock.badge.checkmark.fill", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                    LabeledContent {
+                        TextField("Host", text: $sudokuHTTPMaskHost)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                    LabeledContent {
+                        TextField("Path Root", text: $sudokuHTTPMaskPathRoot)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                    Picker(selection: $sudokuHTTPMaskMultiplex) {
+                        ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    } label: {
+                        TextWithColorfulIcon(title: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
+                    }
+                }
+            }
+        }
     }
-
+    
     private func populateFromExisting() {
         guard let configuration else { return }
         selectedProtocol = configuration.outboundProtocol
@@ -1061,24 +1103,24 @@ struct ProxyEditorView: View {
         if isVLESS {
             vlessTransport = configuration.xrayTransportLayer.tag
             vlessSecurity = configuration.xraySecurityLayer.tag
-
+            
             if case .ws(let ws) = configuration.xrayTransportLayer {
                 vlessWebSocketHost = ws.host
                 vlessWebSocketPath = ws.path
             }
-
+            
             if case .httpUpgrade(let httpUpgrade) = configuration.xrayTransportLayer {
                 vlessHTTPUpgradeHost = httpUpgrade.host
                 vlessHTTPUpgradePath = httpUpgrade.path
             }
-        
+            
             if case .grpc(let grpc) = configuration.xrayTransportLayer {
                 vlessGRPCServiceName = grpc.serviceName
                 vlessGRPCAuthority = grpc.authority
                 vlessGRPCMode = grpc.multiMode ? "multi" : "gun"
                 vlessGRPCUserAgent = grpc.userAgent
             }
-
+            
             if case .xhttp(let xhttp) = configuration.xrayTransportLayer {
                 vlessXHTTPHost = xhttp.host
                 vlessXHTTPPath = xhttp.path
@@ -1104,7 +1146,7 @@ struct ProxyEditorView: View {
                     vlessXHTTPDownloadPath = download.xhttp.path
                 }
             }
-
+            
             if case .tls(let tls) = configuration.xraySecurityLayer {
                 vlessTLSSNI = tls.serverName
                 vlessTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
@@ -1112,7 +1154,7 @@ struct ProxyEditorView: View {
                 vlessTLSECHConfig = tls.echConfig ?? ""
                 vlessFingerprint = tls.fingerprint
             }
-
+            
             if case .reality(let reality) = configuration.xraySecurityLayer {
                 vlessRealitySNI = reality.serverName
                 vlessRealityPublicKey = reality.publicKey.base64URLEncodedString()
@@ -1120,17 +1162,25 @@ struct ProxyEditorView: View {
                 vlessFingerprint = reality.fingerprint
             }
         }
-
+        
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let obfuscation, let sni):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
+            if let obfuscation {
+                hysteriaObfuscationType = obfuscation.typeTag
+                hysteriaObfuscationPassword = obfuscation.password
+                if case .gecko(_, let minPacketSize, let maxPacketSize) = obfuscation {
+                    hysteriaObfuscationMinText = String(minPacketSize)
+                    hysteriaObfuscationMaxText = String(maxPacketSize)
+                }
+            }
             hysteriaSNI = sni
         case .nowhere(let key, let spec, let net, let pool, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
@@ -1182,7 +1232,7 @@ struct ProxyEditorView: View {
             naivePassword = pass
         }
     }
-
+    
     /// Keys must match what `XHTTPConfiguration.parse` reads back. Returns nil when the split is off or address/port are missing.
     private func xhttpDownloadSettingsDict() -> [String: Any]? {
         guard vlessXHTTPDownloadEnabled,
@@ -1219,7 +1269,18 @@ struct ProxyEditorView: View {
         if !xhttpSettings.isEmpty { download["xhttpSettings"] = xhttpSettings }
         return download
     }
-
+    
+    /// Rebuilds the obfuscation enum from the decomposed fields; `make` returns nil for the "none"
+    /// type and normalizes the gecko packet-size bounds.
+    private var hysteriaObfuscationValue: HysteriaObfuscation? {
+        HysteriaObfuscation.make(
+            type: hysteriaObfuscationType == "none" ? nil : hysteriaObfuscationType,
+            password: hysteriaObfuscationPassword,
+            geckoMinPacketSize: Int(hysteriaObfuscationMinText),
+            geckoMaxPacketSize: Int(hysteriaObfuscationMaxText)
+        )
+    }
+    
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
@@ -1255,19 +1316,19 @@ struct ProxyEditorView: View {
                 fingerprint: vlessFingerprint
             )
         }
-
+        
         var vlessWebSocketConfiguration: WebSocketConfiguration?
         if vlessTransport == "ws" {
             let host = vlessWebSocketHost.isEmpty ? serverAddress : vlessWebSocketHost
             let path = vlessWebSocketPath.isEmpty ? "/" : vlessWebSocketPath
             vlessWebSocketConfiguration = WebSocketConfiguration(host: host, path: path)
         }
-
+        
         var vlessHTTPUpgradeConfiguration: HTTPUpgradeConfiguration?
         if vlessTransport == "httpupgrade" {
             vlessHTTPUpgradeConfiguration = HTTPUpgradeConfiguration(host: vlessHTTPUpgradeHost.isEmpty ? serverAddress : vlessHTTPUpgradeHost, path: vlessHTTPUpgradePath.isEmpty ? "/" : vlessHTTPUpgradePath)
         }
-
+        
         var vlessXHTTPConfiguration: XHTTPConfiguration?
         if vlessTransport == "xhttp" {
             let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
@@ -1293,7 +1354,7 @@ struct ProxyEditorView: View {
             }
             vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: parameters, serverAddress: serverAddress)
         }
-
+        
         var vlessGRPCConfiguration: GRPCConfiguration?
         if vlessTransport == "grpc" {
             vlessGRPCConfiguration = GRPCConfiguration(
@@ -1303,12 +1364,12 @@ struct ProxyEditorView: View {
                 userAgent: vlessGRPCUserAgent
             )
         }
-
+        
         // Strip brackets from IPv6 addresses (e.g. "[::1]" → "::1")
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")
-            ? String(serverAddress.dropFirst().dropLast())
-            : serverAddress
-
+        ? String(serverAddress.dropFirst().dropLast())
+        : serverAddress
+        
         let outbound: Outbound
         switch selectedProtocol {
         case .vless:
@@ -1318,12 +1379,12 @@ struct ProxyEditorView: View {
             else if let vlessXHTTPConfiguration { vlessXrayTransportLayer = .xhttp(vlessXHTTPConfiguration) }
             else if let vlessGRPCConfiguration { vlessXrayTransportLayer = .grpc(vlessGRPCConfiguration) }
             else { vlessXrayTransportLayer = .tcp }
-
+            
             let vlessXraySecurityLayer: XraySecurityLayer
             if let vlessRealityConfiguration { vlessXraySecurityLayer = .reality(vlessRealityConfiguration) }
             else if let vlessTLSConfiguration { vlessXraySecurityLayer = .tls(vlessTLSConfiguration) }
             else { vlessXraySecurityLayer = .none }
-
+            
             outbound = .vless(
                 uuid: parsedUUID,
                 encryption: vlessEncryption,
@@ -1345,6 +1406,7 @@ struct ProxyEditorView: View {
                 uploadMbps: up,
                 downloadMbps: down,
                 portHopping: portHopping,
+                obfuscation: hysteriaObfuscationValue,
                 sni: sni
             )
         case .nowhere:
@@ -1421,7 +1483,7 @@ struct ProxyEditorView: View {
         case .http3:
             outbound = .http3(username: naiveUsername, password: naivePassword)
         }
-
+        
         let configuration = ProxyConfiguration(
             id: self.configuration?.id ?? UUID(),
             name: name,
@@ -1430,7 +1492,7 @@ struct ProxyEditorView: View {
             subscriptionId: self.configuration?.subscriptionId,
             outbound: outbound
         )
-
+        
         onSave(configuration)
         dismiss()
     }

@@ -39,6 +39,21 @@ struct QUICPortHopping {
     }
 }
 
+// MARK: - QUICPacketObfuscator
+
+/// Transforms whole QUIC datagrams at the wire boundary (below ngtcp2, above the socket or chained
+/// transport), so the same obfuscation applies on both carriers. Methods are called only on
+/// `QUICConnection.queue`, so implementations need no internal locking.
+protocol QUICPacketObfuscator: AnyObject {
+    /// Transforms one outgoing QUIC datagram into one or more wire datagrams (Gecko may fragment a
+    /// handshake packet into several).
+    func seal(_ packet: UnsafeRawBufferPointer) -> [Data]
+
+    /// Transforms one received wire datagram into a complete QUIC datagram, or `nil` when it yields
+    /// none (a Gecko fragment awaiting reassembly, or a malformed packet).
+    func open(_ datagram: Data) -> Data?
+}
+
 // MARK: - QUICConnection
 
 nonisolated class QUICConnection {
@@ -88,6 +103,9 @@ nonisolated class QUICConnection {
 
     /// When set, ngtcp2 rides this instead of a kernel socket (QUIC through a proxy chain's UDP relay).
     private let transport: QUICDatagramTransport?
+
+    /// Obfuscates datagrams at the wire boundary (Hysteria Salamander/Gecko); `nil` sends them raw.
+    private let obfuscator: QUICPacketObfuscator?
 
     fileprivate var state: State = .idle
     let queue: DispatchQueue
@@ -209,6 +227,7 @@ nonisolated class QUICConnection {
     init(host: String, port: UInt16, serverName: String? = nil, alpn: [String],
          datagramsEnabled: Bool = false, tuning: QUICTuning,
          portHopping: QUICPortHopping? = nil,
+         obfuscator: QUICPacketObfuscator? = nil,
          transport: QUICDatagramTransport? = nil) {
         self.host = host
         self.port = port
@@ -218,6 +237,7 @@ nonisolated class QUICConnection {
         self.tuning = tuning
         // Port hopping needs a kernel socket whose destination we control; a chained transport has none.
         self.portHopping = transport == nil ? portHopping : nil
+        self.obfuscator = obfuscator
         self.transport = transport
         self.queue = DispatchQueue(label: AWCore.Identifier.quicQueue, qos: .userInitiated)
         queue.setSpecific(key: Self.queueKey, value: true)
@@ -861,6 +881,13 @@ nonisolated class QUICConnection {
     /// Sends `length` bytes from `txBuffer`. Drop-on-error; ngtcp2 handles retransmit.
     private func sendTxBuf(length: Int) {
         guard length > 0 else { return }
+        if let obfuscator {
+            let datagrams = txBuffer.withUnsafeBytes { raw in
+                obfuscator.seal(UnsafeRawBufferPointer(rebasing: raw[0..<length]))
+            }
+            for datagram in datagrams { sendDatagram(datagram) }
+            return
+        }
         if let transport {
             // Copy out before the next ngtcp2 write reuses txBuffer.
             let datagram = txBuffer.withUnsafeBufferPointer { buffer -> Data in
@@ -873,6 +900,19 @@ nonisolated class QUICConnection {
         txBuffer.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
             quicSocket.send(base, length: length)
+        }
+    }
+
+    /// Routes one ready-to-send wire datagram to the active carrier (chained transport or socket).
+    private func sendDatagram(_ datagram: Data) {
+        if let transport {
+            transport.sendDatagram(datagram)
+            return
+        }
+        guard let quicSocket else { return }
+        datagram.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            quicSocket.send(base, length: datagram.count)
         }
     }
 
@@ -1022,6 +1062,17 @@ nonisolated class QUICConnection {
 
     fileprivate func handleReceivedPacket(_ data: Data) {
         guard let connectionOpaquePointer else { return }
+
+        // Deobfuscate first; a `nil` result is an incomplete fragment or malformed packet — nothing
+        // to feed ngtcp2 yet.
+        let packet: Data
+        if let obfuscator {
+            guard let opened = obfuscator.open(data) else { return }
+            packet = opened
+        } else {
+            packet = data
+        }
+
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
 
@@ -1031,7 +1082,7 @@ nonisolated class QUICConnection {
         // Guard close() from freeing `conn` while ngtcp2 is still on the stack.
         let prevBusy = ngtcp2Busy
         ngtcp2Busy = true
-        let rv: Int32 = data.withUnsafeBytes { raw in
+        let rv: Int32 = packet.withUnsafeBytes { raw in
             guard let pointer = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
             var path = ngtcp2_path()
             withUnsafeMutablePointer(to: &localAddr) { local in
@@ -1044,7 +1095,7 @@ nonisolated class QUICConnection {
                         addrlen: ngtcp2_socklen(addrLen))
                 }
             }
-            return ngtcp2_swift_conn_read_pkt(connectionOpaquePointer, &path, &pi, pointer, data.count, ts)
+            return ngtcp2_swift_conn_read_pkt(connectionOpaquePointer, &path, &pi, pointer, packet.count, ts)
         }
         ngtcp2Busy = prevBusy
 

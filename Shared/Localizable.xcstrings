@@ -8954,6 +8954,9 @@
         }
       }
     },
+    "Maximum Packet Size" : {
+
+    },
     "Mbps" : {
       "shouldTranslate" : false
     },
@@ -9113,6 +9116,9 @@
           }
         }
       }
+    },
+    "Minimum Packet Size" : {
+
     },
     "MITM" : {
       "shouldTranslate" : false
@@ -10319,6 +10325,9 @@
           }
         }
       }
+    },
+    "Obfuscation" : {
+      "comment" : "Obfuscation for Hysteria protocol"
     },
     "Off" : {
       "localizations" : {
