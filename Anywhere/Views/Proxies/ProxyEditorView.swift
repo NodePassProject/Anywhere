@@ -669,22 +669,17 @@ struct ProxyEditorView: View {
                         TextWithColorfulIcon(title: "Boost", comment: nil, systemName: "speedometer", foregroundColor: .white, backgroundColor: .orange)
                     }
                     if nowherePoolEnabled {
-                        VStack(spacing: 8) {
-                            Slider(
-                                value: $nowherePoolSliderValue,
-                                in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound),
-                                step: 1
-                            )
-                            .accessibilityLabel(Text("Boost"))
-                            .accessibilityValue(Text(verbatim: "\(Int(nowherePoolSliderValue.rounded()))"))
-                            HStack {
-                                ForEach(Array(["gauge.with.dots.needle.0percent", "gauge.with.dots.needle.50percent", "gauge.with.dots.needle.100percent"].enumerated()), id: \.offset) { index, symbol in
-                                    Image(systemName: symbol)
-                                        .foregroundStyle(index == nowherePoolLevel ? Color.accentColor : Color.secondary.opacity(0.45))
-                                    if index < 2 { Spacer() }
-                                }
-                            }
-                            .accessibilityHidden(true)
+                        Slider(
+                            value: $nowherePoolSliderValue,
+                            in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
+                        ) {
+                            EmptyView()
+                        } minimumValueLabel: {
+                            Image(systemName: "gauge.with.dots.needle.0percent")
+                                .foregroundStyle(.secondary)
+                        } maximumValueLabel: {
+                            Image(systemName: "gauge.with.dots.needle.100percent")
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
