@@ -343,15 +343,20 @@ extension TunnelStack {
             
             let baseProxyMode = AWCore.getProxyMode()
             let trustedSSIDs = Set(AWCore.getTrustedSSIDs())
+            let alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
             let alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
             // Keep the inputs current even when the effective mode is unchanged, so a
             // later network transition derives the mode from fresh settings.
             self.baseProxyMode = baseProxyMode
             self.trustedSSIDs = trustedSSIDs
+            self.alwaysTrustCellular = alwaysTrustCellular
             self.alwaysUntrustCellular = alwaysUntrustCellular
-            let effectiveProxyMode = computeEffectiveProxyMode(base: baseProxyMode,
-                                                               trusted: trustedSSIDs,
-                                                               untrustCellular: alwaysUntrustCellular)
+            let effectiveProxyMode = computeEffectiveProxyMode(
+                base: baseProxyMode,
+                trusted: trustedSSIDs,
+                trustCellular: alwaysTrustCellular,
+                untrustCellular: alwaysUntrustCellular
+            )
             let hideVPNIcon = AWCore.getHideVPNIcon()
             let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
             let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()

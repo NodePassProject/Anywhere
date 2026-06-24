@@ -101,6 +101,7 @@ class TunnelStack {
     /// The user's configured mode, before the trusted-network policy is layered on.
     var baseProxyMode: ProxyMode = .rule
     var trustedSSIDs: Set<String> = []
+    var alwaysTrustCellular: Bool = false
     var alwaysUntrustCellular: Bool = false
     /// Current egress identity, owned by ``lwipQueue``.
     var currentNetworkIsWiFi: Bool = false
@@ -448,6 +449,7 @@ class TunnelStack {
     private func reloadProxyModeSettings() {
         baseProxyMode = AWCore.getProxyMode()
         trustedSSIDs = Set(AWCore.getTrustedSSIDs())
+        alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         proxyMode = computeEffectiveProxyMode()
     }
@@ -455,11 +457,15 @@ class TunnelStack {
     func computeEffectiveProxyMode() -> ProxyMode {
         computeEffectiveProxyMode(base: baseProxyMode,
                                   trusted: trustedSSIDs,
+                                  trustCellular: alwaysTrustCellular,
                                   untrustCellular: alwaysUntrustCellular)
     }
 
-    func computeEffectiveProxyMode(base: ProxyMode, trusted: Set<String>, untrustCellular: Bool) -> ProxyMode {
+    func computeEffectiveProxyMode(base: ProxyMode, trusted: Set<String>, trustCellular: Bool, untrustCellular: Bool) -> ProxyMode {
         if currentNetworkIsWiFi, let ssid = currentSSID, trusted.contains(ssid) {
+            return .direct
+        }
+        if currentNetworkIsCellular, trustCellular {
             return .direct
         }
         if currentNetworkIsCellular, untrustCellular {

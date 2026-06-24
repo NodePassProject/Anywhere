@@ -31,6 +31,12 @@ struct TrustedNetworkSettingsView: View {
         @Bindable var settings = AppSettings.shared
         Form {
             Section {
+                Toggle("Always Trust Cellular", isOn: $settings.alwaysTrustCellular)
+            } footer: {
+                Text("When using cellular data, enable Direct Mode.")
+            }
+
+            Section {
                 Toggle("Always Untrust Cellular", isOn: $settings.alwaysUntrustCellular)
             } footer: {
                 Text("When using cellular data, enable Global Mode.")

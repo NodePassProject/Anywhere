@@ -2147,6 +2147,58 @@
         }
       }
     },
+    "Always Trust Cellular" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الثقة بالشبكة الخلوية دائمًا"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Always Trust Cellular"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Confiar siempre en los datos móviles"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "همیشه به شبکه تلفن همراه اعتماد کن"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Всегда доверять сотовой сети"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hücresel Ağa Her Zaman Güven"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Luôn tin cậy dữ liệu di động"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "始终信任蜂窝网络"
+          }
+        }
+      }
+    },
     "Always Untrust Cellular" : {
       "localizations" : {
         "ar" : {
@@ -17905,6 +17957,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "连接到受信任的 SSID 时，启用直连模式。"
+          }
+        }
+      }
+    },
+    "When using cellular data, enable Direct Mode." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عند استخدام البيانات الخلوية، يتم تفعيل الوضع المباشر."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When using cellular data, enable Direct Mode."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cuando se usan datos móviles, se activa el Modo directo."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "هنگام استفاده از داده تلفن همراه، حالت مستقیم فعال می‌شود."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "При использовании сотовых данных включается Прямой режим."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hücresel veri kullanılırken Doğrudan Mod etkinleştirilir."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Khi sử dụng dữ liệu di động, bật Chế độ trực tiếp."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用蜂窝数据时，启用直连模式。"
           }
         }
       }

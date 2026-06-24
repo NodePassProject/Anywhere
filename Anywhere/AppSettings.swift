@@ -60,9 +60,22 @@ final class AppSettings {
         }
     }
 
+    var alwaysTrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
+            if alwaysTrustCellular, alwaysUntrustCellular {
+                alwaysUntrustCellular = false
+            }
+            AWCore.notifyTunnelSettingsChanged()
+        }
+    }
+
     var alwaysUntrustCellular: Bool {
         didSet {
             AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
+            if alwaysUntrustCellular, alwaysTrustCellular {
+                alwaysTrustCellular = false
+            }
             AWCore.notifyTunnelSettingsChanged()
         }
     }
@@ -218,6 +231,7 @@ final class AppSettings {
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
 
         advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
+        alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockWebRTC = AWCore.getBlockWebRTC()
         encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()

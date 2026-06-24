@@ -82,6 +82,7 @@ nonisolated final class AWCore {
         static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
+        static let alwaysTrustCellular = "alwaysTrustCellular"
         static let alwaysUntrustCellular = "alwaysUntrustCellular"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
@@ -274,6 +275,14 @@ nonisolated final class AWCore {
 
     static func setTrustedSSIDs(_ ssids: [String]) {
         userDefaults.set(ssids, forKey: UserDefaultsKey.trustedSSIDs)
+    }
+
+    static func getAlwaysTrustCellular() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.alwaysTrustCellular)
+    }
+
+    static func setAlwaysTrustCellular(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.alwaysTrustCellular)
     }
 
     static func getAlwaysUntrustCellular() -> Bool {
