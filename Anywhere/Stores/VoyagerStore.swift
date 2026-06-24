@@ -15,7 +15,7 @@ final class VoyagerStore {
     static let shared = VoyagerStore()
     
     static let productID = "nonconsumable.voyager"
-    
+
     private(set) var product: Product?
     private(set) var isMember = false
     private(set) var isLoadingProduct = false
@@ -29,15 +29,12 @@ final class VoyagerStore {
     @ObservationIgnored private var updatesTask: Task<Void, Never>?
 
     private init() {
-#if DEBUG
-        isMember = false
-#else
+        isMember = AWCore.getVoyagerMembership()
         updatesTask = listenForTransactions()
         Task {
             await loadProduct()
             await refreshEntitlement()
         }
-#endif
     }
 
     deinit {
@@ -56,15 +53,17 @@ final class VoyagerStore {
     // MARK: - Entitlement
     
     func refreshEntitlement() async {
-        for await result in Transaction.currentEntitlements {
-            if case .verified(let transaction) = result,
-               transaction.productID == Self.productID,
-               transaction.revocationDate == nil {
-                isMember = true
-                return
-            }
+        guard let result = await Transaction.latest(for: Self.productID),
+              case .verified(let transaction) = result,
+              transaction.productID == Self.productID else {
+            return
         }
-        isMember = false
+        setMember(transaction.revocationDate == nil)
+    }
+    
+    private func setMember(_ value: Bool) {
+        isMember = value
+        AWCore.setVoyagerMembership(value)
     }
     
     func verificationToken() async -> String? {
@@ -93,7 +92,7 @@ final class VoyagerStore {
         case .success(let verification):
             let transaction = try checkVerified(verification)
             await transaction.finish()
-            isMember = true
+            setMember(true)
             return true
         case .userCancelled, .pending:
             return false

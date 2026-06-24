@@ -110,6 +110,7 @@ nonisolated final class AWCore {
         static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
         static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
+        static let voyagerMembership = "voyagerMembership"
     }
 
     static func migrateToAppGroup(fileName: String) {
@@ -147,7 +148,16 @@ nonisolated final class AWCore {
     static func setICloudSyncEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.iCloudSyncEnabled)
     }
-    
+
+    // Voyager
+    static func getVoyagerMembership() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.voyagerMembership)
+    }
+
+    static func setVoyagerMembership(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.voyagerMembership)
+    }
+
     enum ThemeColorSlot: String {
         case connectedBackgroundStart
         case connectedBackgroundEnd
