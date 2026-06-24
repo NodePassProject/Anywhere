@@ -66,6 +66,17 @@ final class VoyagerStore {
         }
         isMember = false
     }
+    
+    func verificationToken() async -> String? {
+        for await result in Transaction.currentEntitlements {
+            if case .verified(let transaction) = result,
+               transaction.productID == Self.productID,
+               transaction.revocationDate == nil {
+                return result.jwsRepresentation
+            }
+        }
+        return nil
+    }
 
     // MARK: - Purchase
     
