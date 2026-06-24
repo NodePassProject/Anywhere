@@ -245,6 +245,9 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     }
 
     var displayTransportTag: String? {
+        if outboundProtocol == .nowhere {
+            return nowhereNetwork.rawValue.uppercased()
+        }
         guard outboundProtocol == .vless else { return nil }
         let tag = xrayTransportLayer.tag
         return tag.isEmpty ? nil : tag.uppercased()
