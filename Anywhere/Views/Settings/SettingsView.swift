@@ -89,7 +89,9 @@ struct SettingsView: View {
     }
 
     private var showSecuritySection: Bool {
-        settings.isVisible(.allowInsecure) || settings.isVisible(.trustedCertificates)
+        settings.isVisible(.allowInsecure)
+        || settings.isVisible(.trustedCertificates)
+        || settings.isVisible(.trustedNetwork)
     }
 
     private var showUtilitiesSection: Bool {
@@ -202,6 +204,13 @@ struct SettingsView: View {
                         TrustedCertificatesView()
                     } label: {
                         SettingsItem.trustedCertificates.label
+                    }
+                }
+                if settings.isVisible(.trustedNetwork) {
+                    NavigationLink {
+                        TrustedNetworkSettingsView()
+                    } label: {
+                        SettingsItem.trustedNetwork.label
                     }
                 }
             }

@@ -1718,6 +1718,58 @@
         }
       }
     },
+    "Add SSID “%@”" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إضافة SSID “%@”"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add SSID “%@”"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agregar SSID “%@”"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افزودن SSID «%@»"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить SSID «%@»"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@” SSID’sini ekle"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm SSID “%@”"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加 SSID “%@”"
+          }
+        }
+      }
+    },
     "Address" : {
       "localizations" : {
         "ar" : {
@@ -2091,6 +2143,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "始终开启"
+          }
+        }
+      }
+    },
+    "Always Untrust Cellular" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عدم الثقة بالشبكة الخلوية دائمًا"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Always Untrust Cellular"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desconfiar siempre de los datos móviles"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "هرگز به شبکه تلفن همراه اعتماد نکن"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Всегда не доверять сотовой сети"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hücresel Ağa Asla Güvenme"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Luôn không tin cậy dữ liệu di động"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "始终不信任蜂窝网络"
           }
         }
       }
@@ -10166,6 +10270,58 @@
         }
       }
     },
+    "No trusted SSIDs" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لا توجد SSID موثوقة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No trusted SSIDs"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No hay SSID de confianza"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSID مورد اعتمادی وجود ندارد"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет доверенных SSID"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Güvenilir SSID yok"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không có SSID tin cậy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无受信任的 SSID"
+          }
+        }
+      }
+    },
     "No valid configurations found in subscription." : {
       "localizations" : {
         "ar" : {
@@ -14637,6 +14793,9 @@
     "Spec" : {
       "shouldTranslate" : false
     },
+    "SSID" : {
+      "shouldTranslate" : false
+    },
     "Start Journey" : {
       "localizations" : {
         "ar" : {
@@ -16216,6 +16375,110 @@
         }
       }
     },
+    "Trusted Network" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الشبكة الموثوقة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trusted Network"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Red de confianza"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "شبکه مورد اعتماد"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доверенная сеть"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Güvenilir Ağ"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mạng tin cậy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任的网络"
+          }
+        }
+      }
+    },
+    "Trusted SSIDs" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSID الموثوقة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trusted SSIDs"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSID de confianza"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSIDهای مورد اعتماد"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доверенные SSID"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Güvenilir SSID’ler"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSID tin cậy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任的 SSID"
+          }
+        }
+      }
+    },
     "Tunnel" : {
       "localizations" : {
         "ar" : {
@@ -17437,6 +17700,110 @@
     },
     "WebSocket" : {
       "shouldTranslate" : false
+    },
+    "When connected to a trusted SSID, enable Direct Mode." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عند الاتصال بشبكة SSID موثوقة، يتم تفعيل الوضع المباشر."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When connected to a trusted SSID, enable Direct Mode."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cuando se conecta a un SSID de confianza, se activa el Modo directo."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "هنگام اتصال به یک SSID مورد اعتماد، حالت مستقیم فعال می‌شود."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "При подключении к доверенному SSID включается Прямой режим."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Güvenilir bir SSID’ye bağlanıldığında Doğrudan Mod etkinleştirilir."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Khi kết nối với SSID tin cậy, bật Chế độ trực tiếp."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接到受信任的 SSID 时，启用直连模式。"
+          }
+        }
+      }
+    },
+    "When using cellular data, enable Global Mode." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عند استخدام البيانات الخلوية، يتم تفعيل الوضع العام."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When using cellular data, enable Global Mode."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cuando se usan datos móviles, se activa el Modo global."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "هنگام استفاده از داده تلفن همراه، حالت سراسری فعال می‌شود."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "При использовании сотовых данных включается Глобальный режим."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hücresel veri kullanılırken Küresel Mod etkinleştirilir."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Khi sử dụng dữ liệu di động, bật Chế độ toàn cục."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用蜂窝数据时，启用全局模式。"
+          }
+        }
+      }
     },
     "XHTTP" : {
       "shouldTranslate" : false

@@ -17,6 +17,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
     case routingRules
     case allowInsecure
     case trustedCertificates
+    case trustedNetwork
     case purify
     case reflection
     case mitm
@@ -34,6 +35,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .routingRules: "Routing Rules"
         case .allowInsecure: "Allow Insecure"
         case .trustedCertificates: "Trusted Certificates"
+        case .trustedNetwork: "Trusted Network"
         case .purify: "Purify"
         case .reflection: "Reflection"
         case .mitm: "MITM"
@@ -51,6 +53,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .routingRules: "arrow.triangle.branch"
         case .allowInsecure: "exclamationmark.shield.fill"
         case .trustedCertificates: "checkmark.seal.fill"
+        case .trustedNetwork: "wifi"
         case .purify: "drop.fill"
         case .reflection: "arrow.turn.up.left"
         case .mitm: "key.horizontal.fill"
@@ -75,6 +78,7 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .routingRules: .purple
         case .allowInsecure: .red
         case .trustedCertificates: .green
+        case .trustedNetwork: .blue
         case .purify: .blue
         case .reflection: .pink
         case .mitm: .mint

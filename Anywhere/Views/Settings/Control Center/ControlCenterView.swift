@@ -36,6 +36,7 @@ struct ControlCenterView: View {
             Section("Security") {
                 row(.allowInsecure)
                 row(.trustedCertificates)
+                row(.trustedNetwork)
             }
 
             Section("Utilities") {

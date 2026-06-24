@@ -10,4 +10,5 @@ import Foundation
 enum ProxyMode: String, CaseIterable {
     case rule
     case global
+    case direct
 }

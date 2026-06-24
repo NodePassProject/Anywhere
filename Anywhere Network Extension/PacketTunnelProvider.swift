@@ -298,6 +298,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastPathSnapshot = nil
     }
 
+    /// Resolves the current Wi-Fi SSID (iOS only) and hands the egress identity to
+    /// the stack, which applies the trusted-network policy.
+    private func resolveAndUpdateNetworkContext(_ snapshot: PathSnapshot) {
+        let isWiFi = snapshot.primaryInterface?.type == .wifi
+        let isCellular = snapshot.primaryInterface?.type == .cellular
+#if os(iOS)
+        if isWiFi {
+            // Requires the "Access WiFi Information" entitlement; otherwise `ssid`
+            // is nil and the network is treated as untrusted.
+            NEHotspotNetwork.fetchCurrent { [weak self] network in
+                self?.tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: network?.ssid)
+            }
+            return
+        }
+#endif
+        tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
+    }
+
     private enum SatisfiedChange {
         /// Nothing connection-relevant changed.
         case unchanged
@@ -313,6 +331,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let snapshot = Self.makePathSnapshot(from: path)
         let previous = lastPathSnapshot
         lastPathSnapshot = snapshot
+
+        if snapshot.status == .satisfied {
+            resolveAndUpdateNetworkContext(snapshot)
+        }
 
         // First update after start: just record the baseline.
         guard let previous else {

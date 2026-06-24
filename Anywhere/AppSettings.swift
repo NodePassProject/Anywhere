@@ -60,6 +60,13 @@ final class AppSettings {
         }
     }
 
+    var alwaysUntrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
+            AWCore.notifyTunnelSettingsChanged()
+        }
+    }
+
     var blockWebRTC: Bool {
         didSet {
             AWCore.setBlockWebRTC(blockWebRTC)
@@ -128,6 +135,13 @@ final class AppSettings {
     var reflectionEnabled: Bool {
         didSet {
             AWCore.setReflectionEnabled(reflectionEnabled)
+            AWCore.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var trustedSSIDs: [String] {
+        didSet {
+            AWCore.setTrustedSSIDs(trustedSSIDs)
             AWCore.notifyTunnelSettingsChanged()
         }
     }
@@ -204,6 +218,7 @@ final class AppSettings {
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
 
         advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
+        alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockWebRTC = AWCore.getBlockWebRTC()
         encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
         encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
@@ -213,6 +228,7 @@ final class AppSettings {
         quicPolicy = AWCore.getQUICPolicy()
         reflectionAddresses = AWCore.getReflectionAddresses()
         reflectionEnabled = AWCore.getReflectionEnabled()
+        trustedSSIDs = AWCore.getTrustedSSIDs()
 
         allowInsecure = AWCore.getAllowInsecure()
 

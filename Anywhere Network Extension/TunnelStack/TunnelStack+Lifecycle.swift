@@ -126,6 +126,27 @@ extension TunnelStack {
         }
     }
 
+    /// Caches the egress identity and re-derives the effective mode. A change in
+    /// effective mode restarts the stack so new connections use the new outbound.
+    func updateNetworkContext(isWiFi: Bool, isCellular: Bool, ssid: String?) {
+        lwipQueue.async { [self] in
+            guard running, let configuration else { return }
+
+            let unchanged = isWiFi == currentNetworkIsWiFi
+                && isCellular == currentNetworkIsCellular
+                && ssid == currentSSID
+            currentNetworkIsWiFi = isWiFi
+            currentNetworkIsCellular = isCellular
+            currentSSID = ssid
+            guard !unchanged else { return }
+
+            let newEffective = computeEffectiveProxyMode()
+            guard newEffective != proxyMode else { return }
+            logger.info("[VPN] Trusted-network policy: effective mode \(proxyMode.rawValue) → \(newEffective.rawValue) (Wi-Fi=\(isWiFi), cellular=\(isCellular), SSID=\(ssid ?? "—"))")
+            restartStack(configuration: configuration, revalidateMode: true)
+        }
+    }
+
     /// Runs the recovery and stamps the debounce clock. Must be called on `lwipQueue`.
     private func performNetworkRecovery(summary: String) {
         pendingNetworkRecovery?.cancel()
@@ -211,7 +232,11 @@ extension TunnelStack {
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
     /// Throttled to once per restartThrottleInterval; only the last deferred request runs.
-    private func restartStack(configuration: ProxyConfiguration) {
+    private func restartStack(configuration: ProxyConfiguration, revalidateMode: Bool = false) {
+        // A trusted-network restart is redundant when one is already pending — that
+        // restart re-derives the effective mode from the current egress when it runs.
+        if revalidateMode, deferredRestart != nil { return }
+
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastRestartTime
 
@@ -221,6 +246,9 @@ extension TunnelStack {
             let work = DispatchWorkItem { [self] in
                 deferredRestart = nil
                 guard running else { return }
+                // The egress (and effective mode) may have reverted within the
+                // throttle window; skip the teardown when it already matches.
+                if revalidateMode, computeEffectiveProxyMode() == proxyMode { return }
                 restartStackNow(configuration: configuration)
             }
             deferredRestart = work
@@ -313,7 +341,17 @@ extension TunnelStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
             
-            let proxyMode = AWCore.getProxyMode()
+            let baseProxyMode = AWCore.getProxyMode()
+            let trustedSSIDs = Set(AWCore.getTrustedSSIDs())
+            let alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
+            // Keep the inputs current even when the effective mode is unchanged, so a
+            // later network transition derives the mode from fresh settings.
+            self.baseProxyMode = baseProxyMode
+            self.trustedSSIDs = trustedSSIDs
+            self.alwaysUntrustCellular = alwaysUntrustCellular
+            let effectiveProxyMode = computeEffectiveProxyMode(base: baseProxyMode,
+                                                               trusted: trustedSSIDs,
+                                                               untrustCellular: alwaysUntrustCellular)
             let hideVPNIcon = AWCore.getHideVPNIcon()
             let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
             let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
@@ -351,7 +389,7 @@ extension TunnelStack {
                 publishReflector()
             }
 
-            let proxyModeChanged = proxyMode != self.proxyMode
+            let proxyModeChanged = effectiveProxyMode != self.proxyMode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
             let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
@@ -375,11 +413,12 @@ extension TunnelStack {
     }
 
     /// Reloads the routing rules in place — no restart; routing binds at
-    /// connection accept, so active flows stay valid. No-op in global mode.
+    /// connection accept, so active flows stay valid. No-op unless in rule mode
+    /// (global and trusted-network direct reset the router and ignore rules).
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
             guard running else { return }
-            guard proxyMode != .global else { return }
+            guard proxyMode == .rule else { return }
             logger.info("[VPN] Routing changed; reloading rules in place")
             domainRouter.loadRoutingConfiguration()
         }

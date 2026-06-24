@@ -73,6 +73,7 @@ nonisolated final class AWCore {
         UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
         UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
         UserDefaultsKey.trustedCertificateSHA256s: [],
+        UserDefaultsKey.trustedSSIDs: [],
     ]
 
     // MARK: - UserDefaults Keys
@@ -81,6 +82,7 @@ nonisolated final class AWCore {
         static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
+        static let alwaysUntrustCellular = "alwaysUntrustCellular"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let encryptedDNSEnabled = "encryptedDNSEnabled"
@@ -103,6 +105,7 @@ nonisolated final class AWCore {
         static let selectedChainId = "selectedChainId"
         static let selectedConfigurationId = "selectedConfigurationId"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
+        static let trustedSSIDs = "trustedSSIDs"
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
         static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
@@ -254,7 +257,23 @@ nonisolated final class AWCore {
     static func setTrustedCertificateFingerprints(_ fingerprints: [String]) {
         userDefaults.set(fingerprints, forKey: UserDefaultsKey.trustedCertificateSHA256s)
     }
-    
+
+    static func getTrustedSSIDs() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.trustedSSIDs) ?? []
+    }
+
+    static func setTrustedSSIDs(_ ssids: [String]) {
+        userDefaults.set(ssids, forKey: UserDefaultsKey.trustedSSIDs)
+    }
+
+    static func getAlwaysUntrustCellular() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.alwaysUntrustCellular)
+    }
+
+    static func setAlwaysUntrustCellular(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.alwaysUntrustCellular)
+    }
+
     static func getExperimentalEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.experimentalEnabled)
     }

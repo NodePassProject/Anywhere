@@ -95,7 +95,17 @@ class TunnelStack {
 
     // Settings read from App Group UserDefaults at start/restart and
     // live-reloaded via Darwin notification.
+    /// Effective mode applied by the data plane; equals ``baseProxyMode`` unless
+    /// the trusted-network policy overrides it for the current egress.
     var proxyMode: ProxyMode = .rule
+    /// The user's configured mode, before the trusted-network policy is layered on.
+    var baseProxyMode: ProxyMode = .rule
+    var trustedSSIDs: Set<String> = []
+    var alwaysUntrustCellular: Bool = false
+    /// Current egress identity, owned by ``lwipQueue``.
+    var currentNetworkIsWiFi: Bool = false
+    var currentNetworkIsCellular: Bool = false
+    var currentSSID: String?
     var hideVPNIcon: Bool = false
     var quicPolicy: QUICPolicy = .blocked
     var blockWebRTC: Bool = true
@@ -379,15 +389,22 @@ class TunnelStack {
     // MARK: - Runtime Configuration
 
     func configureRuntime(for configuration: ProxyConfiguration) {
-        // Prefer the app's persisted selection — never a composited chain's throwaway id.
-        defaultRouteTarget = AWCore.getSelectedChainId().map(RouteTarget.proxy)
-            ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
-            ?? .proxy(configuration.id)
+        reloadProxyModeSettings()
+
+        if proxyMode == .direct {
+            // Router is reset below, so every connection falls through to this
+            // direct default, bypassing all proxies and rules.
+            defaultRouteTarget = .direct
+        } else {
+            // Prefer the app's persisted selection — never a composited chain's throwaway id.
+            defaultRouteTarget = AWCore.getSelectedChainId().map(RouteTarget.proxy)
+                ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
+                ?? .proxy(configuration.id)
+        }
 
         loadIPv6Settings()
         loadBypassCountry()
         loadEncryptedDNSSetting()
-        loadProxyModeSetting()
         loadHideVPNIconSetting()
         loadQUICPolicySetting()
         loadBlockWebRTCSetting()
@@ -405,7 +422,9 @@ class TunnelStack {
             }
         }
 
-        if proxyMode != .global {
+        // Only rule mode consults the router; global and direct reset it and
+        // rely on the default outbound.
+        if proxyMode == .rule {
             domainRouter.loadRoutingConfiguration()
         } else {
             domainRouter.reset()
@@ -426,8 +445,27 @@ class TunnelStack {
         encryptedDNSServer = AWCore.getEncryptedDNSServer()
     }
 
-    private func loadProxyModeSetting() {
-        proxyMode = AWCore.getProxyMode()
+    private func reloadProxyModeSettings() {
+        baseProxyMode = AWCore.getProxyMode()
+        trustedSSIDs = Set(AWCore.getTrustedSSIDs())
+        alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
+        proxyMode = computeEffectiveProxyMode()
+    }
+
+    func computeEffectiveProxyMode() -> ProxyMode {
+        computeEffectiveProxyMode(base: baseProxyMode,
+                                  trusted: trustedSSIDs,
+                                  untrustCellular: alwaysUntrustCellular)
+    }
+
+    func computeEffectiveProxyMode(base: ProxyMode, trusted: Set<String>, untrustCellular: Bool) -> ProxyMode {
+        if currentNetworkIsWiFi, let ssid = currentSSID, trusted.contains(ssid) {
+            return .direct
+        }
+        if currentNetworkIsCellular, untrustCellular {
+            return .global
+        }
+        return base
     }
 
     private func loadHideVPNIconSetting() {
