@@ -246,7 +246,7 @@ struct StatCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(titleKey, systemImage: systemImage)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(.primary.opacity(0.7))
             content
         }
         .padding()
@@ -265,7 +265,6 @@ struct StatValue: View {
     var body: some View {
         Text(text)
             .font(.system(size: 28, design: .rounded))
-            .foregroundStyle(.white)
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .contentTransition(.numericText())
@@ -280,10 +279,9 @@ private struct StatDetailRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(.primary.opacity(0.6))
             Spacer()
             Text(value)
-                .foregroundStyle(.white)
                 .contentTransition(.numericText())
                 .animation(.default, value: value)
         }
@@ -299,7 +297,7 @@ private struct PressureGauge: View {
         Gauge(value: value, in: 0...ceiling) {
             Text("Pressure")
                 .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(.primary.opacity(0.6))
         }
         .gaugeStyle(AnywhereLinearGaugeStyle())
     }
@@ -311,7 +309,7 @@ private struct StatCardChrome: ViewModifier {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.white.opacity(0.1))
+                    .fill(.primary.opacity(0.1))
             )
     }
 }
@@ -353,13 +351,13 @@ private struct LegendRow: View {
                 .frame(width: 10, height: 10)
             Text(verbatim: label)
                 .font(.caption.weight(.medium))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(.primary.opacity(0.85))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
             Text(verbatim: value)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(.primary.opacity(0.6))
                 .monospacedDigit()
         }
     }
@@ -490,13 +488,12 @@ struct AnywhereLinearGaugeStyle: GaugeStyle {
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading) {
             configuration.label
-                .foregroundStyle(.white)
             GeometryReader { proxy in
                 let fraction = min(max(configuration.value, 0), 1)
                 let fillWidth = fraction == 0 ? 0 : max(proxy.size.width * fraction, proxy.size.height)
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .foregroundStyle(.white.opacity(0.2))
+                        .foregroundStyle(.primary.opacity(0.2))
                     Capsule()
                         .foregroundStyle(color)
                         .frame(width: fillWidth)
@@ -514,7 +511,7 @@ struct AnywhereRingGaugeStyle: GaugeStyle {
     func makeBody(configuration: Configuration) -> some View {
         ZStack {
             Circle()
-                .stroke(Color.white.opacity(0.2), lineWidth: 15)
+                .stroke(Color.primary.opacity(0.2), lineWidth: 15)
 
             Circle()
                 .trim(from: 0, to: configuration.value)
@@ -524,7 +521,6 @@ struct AnywhereRingGaugeStyle: GaugeStyle {
                 .animation(.easeOut, value: configuration.value)
 
             configuration.label
-                .foregroundStyle(.white)
         }
     }
 }
