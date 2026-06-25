@@ -242,28 +242,11 @@ struct ProxyEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    if #available(iOS 26.0, *) {
-                        Button(role: .cancel) {
-                            dismiss()
-                        } label: {
-                            Label("Cancel", systemImage: "xmark")
-                        }
-                    } else {
-                        Button("Cancel") { dismiss() }
-                    }
+                    CancelButton("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if #available(iOS 26.0, *) {
-                        Button {
-                            save()
-                        } label: {
-                            Label("Save", systemImage: "checkmark")
-                        }
+                    ConfirmButton("Save") { save() }
                         .disabled(!isValid)
-                    } else {
-                        Button("Save") { save() }
-                            .disabled(!isValid)
-                    }
                 }
             }
         }
@@ -298,16 +281,13 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "UUID", comment: "UUID for VLESS protocol", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                 }
-                // mlkem768x25519plus encryption needs CryptoKit ML-KEM-768 (26+ only).
-                if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
-                    LabeledContent {
-                        TextField(String("none"), text: $vlessEncryption)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
-                    }
+                LabeledContent {
+                    TextField(String("none"), text: $vlessEncryption)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
                 }
             } else if isHysteria {
                 LabeledContent {
