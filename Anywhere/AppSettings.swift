@@ -87,27 +87,6 @@ final class AppSettings {
         }
     }
 
-    var encryptedDNSEnabled: Bool {
-        didSet {
-            AWCore.setEncryptedDNSEnabled(encryptedDNSEnabled)
-            AWCore.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var encryptedDNSProtocol: String {
-        didSet {
-            AWCore.setEncryptedDNSProtocol(encryptedDNSProtocol)
-            AWCore.notifyTunnelSettingsChanged()
-        }
-    }
-    
-    var encryptedDNSServer: String {
-        didSet {
-            AWCore.setEncryptedDNSServer(encryptedDNSServer)
-            AWCore.notifyTunnelSettingsChanged()
-        }
-    }
-    
     var hideVPNIcon: Bool {
         didSet {
             AWCore.setHideVPNIcon(hideVPNIcon)
@@ -234,9 +213,6 @@ final class AppSettings {
         alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockWebRTC = AWCore.getBlockWebRTC()
-        encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
-        encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
-        encryptedDNSServer = AWCore.getEncryptedDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()

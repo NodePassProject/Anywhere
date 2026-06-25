@@ -59,9 +59,9 @@ extension TunnelStack {
         let domain = parsed.domain.lowercased()
         let qtype = parsed.qtype
 
-        // Block DDR (RFC 9462) when encrypted DNS is off — otherwise the system
-        // auto-upgrades to DoH/DoT and bypasses port-53 interception.
-        if !encryptedDNSEnabled, domain == "_dns.resolver.arpa" {
+        // Block DDR (RFC 9462) — otherwise the system auto-upgrades to DoH/DoT
+        // and bypasses the port-53 interception this tunnel relies on.
+        if domain == "_dns.resolver.arpa" {
             return sendNODATA(
                 payload: payload,
                 srcIP: srcIP,

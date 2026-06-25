@@ -40,7 +40,7 @@ extension TunnelStack {
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
             startReadingPackets()
-            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -277,7 +277,7 @@ extension TunnelStack {
         lwip_bridge_init()
         startTimeoutTimer()
         startUDPCleanupTimer()
-        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
@@ -359,9 +359,6 @@ extension TunnelStack {
             )
             let hideVPNIcon = AWCore.getHideVPNIcon()
             let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
-            let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
-            let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
-            let encryptedDNSServer = AWCore.getEncryptedDNSServer()
 
             // QUIC policy only drives the per-datagram UDP/443 decision —
             // reload in place rather than dropping every connection.
@@ -397,11 +394,8 @@ extension TunnelStack {
             let proxyModeChanged = effectiveProxyMode != self.proxyMode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
             let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
-            let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
-            let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
-            let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
 
-            guard proxyModeChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
+            guard proxyModeChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged else {
                 return
             }
             
@@ -409,7 +403,7 @@ extension TunnelStack {
 
             // These toggles change tunnel network settings (routes/DNS);
             // re-apply them before restarting the stack.
-            if advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || hideVPNIconChanged {
+            if advertiseIPv6ToAppsChanged || hideVPNIconChanged {
                 onTunnelSettingsNeedReapply?()
             }
 

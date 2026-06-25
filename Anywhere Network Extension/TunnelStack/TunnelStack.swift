@@ -111,9 +111,6 @@ class TunnelStack {
     var quicPolicy: QUICPolicy = .blocked
     var blockWebRTC: Bool = true
     var advertiseIPv6ToApps: Bool = false
-    var encryptedDNSEnabled: Bool = false
-    var encryptedDNSProtocol: String = "doh"
-    var encryptedDNSServer: String = ""
 
     // Reflection settings; owned by ``lwipQueue``, published as the
     // ``reflector()`` snapshot, live-reloaded in place.
@@ -405,7 +402,6 @@ class TunnelStack {
 
         loadIPv6Settings()
         loadBypassCountry()
-        loadEncryptedDNSSetting()
         loadHideVPNIconSetting()
         loadQUICPolicySetting()
         loadBlockWebRTCSetting()
@@ -438,12 +434,6 @@ class TunnelStack {
 
     private func loadBypassCountry() {
         bypassCountryCode = AWCore.getBypassCountryCode()
-    }
-
-    private func loadEncryptedDNSSetting() {
-        encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
-        encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
-        encryptedDNSServer = AWCore.getEncryptedDNSServer()
     }
 
     private func reloadProxyModeSettings() {

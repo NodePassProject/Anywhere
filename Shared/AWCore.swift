@@ -66,8 +66,6 @@ nonisolated final class AWCore {
     private static let registeredDefaults: [String: Any] = [
         UserDefaultsKey.blockWebRTC: true,
         UserDefaultsKey.bypassCountryCode: "",
-        UserDefaultsKey.encryptedDNSProtocol: "doh",
-        UserDefaultsKey.encryptedDNSServer: "https://cloudflare-dns.com/dns-query",
         UserDefaultsKey.identifier: UUID().uuidString,
         UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
         UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
@@ -86,9 +84,6 @@ nonisolated final class AWCore {
         static let alwaysUntrustCellular = "alwaysUntrustCellular"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
-        static let encryptedDNSEnabled = "encryptedDNSEnabled"
-        static let encryptedDNSProtocol = "encryptedDNSProtocol"
-        static let encryptedDNSServer = "encryptedDNSServer"
         static let experimentalEnabled = "experimentalEnabled"
         static let hiddenSettingsItems = "hiddenSettingsItems"
         static let hideVPNIcon = "hideVPNIcon"
@@ -357,30 +352,6 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.advertiseIPv6ToApps)
     }
 
-    static func getEncryptedDNSEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.encryptedDNSEnabled)
-    }
-    
-    static func setEncryptedDNSEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSEnabled)
-    }
-    
-    static func getEncryptedDNSProtocol() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSProtocol)!
-    }
-    
-    static func setEncryptedDNSProtocol(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSProtocol)
-    }
-    
-    static func getEncryptedDNSServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSServer)!
-    }
-    
-    static func setEncryptedDNSServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSServer)
-    }
-    
     static func getRemnawaveHWIDEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.remnawaveHWIDEnabled)
     }

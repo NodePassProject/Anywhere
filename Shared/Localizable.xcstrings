@@ -5203,64 +5203,6 @@
         }
       }
     },
-    "DNS over HTTPS" : {
-      "shouldTranslate" : false
-    },
-    "DNS over TLS" : {
-      "shouldTranslate" : false
-    },
-    "DNS Server" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "خادم DNS"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS Server"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Servidor DNS"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "سرور DNS"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS-сервер"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS Sunucusu"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Máy chủ DNS"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS 服务器"
-          }
-        }
-      }
-    },
     "Domain Keyword" : {
       "localizations" : {
         "ar" : {
@@ -6097,58 +6039,6 @@
         }
       }
     },
-    "Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "سيؤدي تفعيل DNS المشفّر إلى زيادة وقت انتظار الاتصال ومنع قواعد التوجيه من العمل."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Activar el DNS cifrado aumentará el tiempo de espera de conexión e impedirá que las reglas de enrutamiento funcionen."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "فعال‌سازی DNS رمزنگاری‌شده زمان انتظار اتصال را افزایش می‌دهد و مانع عملکرد قوانین مسیریابی می‌شود."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Включение зашифрованного DNS увеличит время ожидания подключения и помешает работе правил маршрутизации."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifreli DNS'i etkinleştirmek bağlantı bekleme süresini artırır ve yönlendirme kurallarının çalışmasını engeller."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bật DNS mã hóa sẽ tăng thời gian chờ kết nối và ngăn các quy tắc định tuyến hoạt động."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "启用加密 DNS 将增加连接等待时间，并导致路由规则无法生效。"
-          }
-        }
-      }
-    },
     "Enabling Hide VPN Icon may cause connection instability and will disable IPv6." : {
       "localizations" : {
         "ar" : {
@@ -6197,58 +6087,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用隐藏 VPN 图标可能导致连接不稳定，并将禁用 IPv6。"
-          }
-        }
-      }
-    },
-    "Encrypted DNS" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS مشفّر"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Encrypted DNS"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS cifrado"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS رمزنگاری‌شده"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Зашифрованный DNS"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifreli DNS"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS mã hóa"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "加密 DNS"
           }
         }
       }
@@ -8797,58 +8635,6 @@
     "Key" : {
       "comment" : "Key for Sudoku protocol",
       "shouldTranslate" : false
-    },
-    "Leave empty to automatically discover and upgrade to encrypted DNS servers." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اتركه فارغًا لاكتشاف خوادم DNS المشفّرة والترقية إليها تلقائيًا."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Leave empty to automatically discover and upgrade to encrypted DNS servers."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dejar vacío para descubrir y actualizar automáticamente a servidores DNS cifrados."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "برای کشف و ارتقاء خودکار به سرورهای DNS رمزنگاری‌شده، خالی بگذارید."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Оставьте пустым для автоматического обнаружения и перехода на зашифрованные DNS-серверы."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifreli DNS sunucularını otomatik olarak keşfetmek ve yükseltmek için boş bırakın."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Để trống để tự động phát hiện và nâng cấp lên máy chủ DNS mã hóa."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "留空以自动发现并升级到加密 DNS 服务器。"
-          }
-        }
-      }
     },
     "Lifetime Access" : {
       "localizations" : {

@@ -161,34 +161,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             plainDNSServers = ["10.8.0.1"]
         }
 
-        // Fallback when the encrypted-DNS hostname fails to resolve; the OS dials
-        // these IPs directly, so they must speak DoT/DoH.
-        let encryptedDNSFallbackServers = TunnelConstants.fallbackDNSServers(includeIPv6: advertiseIPv6ToApps)
-
-        let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
-        let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
-        let encryptedDNSServer = AWCore.getEncryptedDNSServer()
-
-        if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
-            if encryptedDNSProtocol == "dot" {
-                let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: advertiseIPv6ToApps)
-                let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? encryptedDNSFallbackServers)
-                dnsSettings.serverName = encryptedDNSServer
-                settings.dnsSettings = dnsSettings
-                logger.info("[VPN] DNS: DoT \(encryptedDNSServer)")
-            } else if let serverURL = URL(string: encryptedDNSServer) {
-                let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: advertiseIPv6ToApps) }
-                let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? encryptedDNSFallbackServers)
-                dnsSettings.serverURL = serverURL
-                settings.dnsSettings = dnsSettings
-                logger.info("[VPN] DNS: DoH \(encryptedDNSServer)")
-            } else {
-                settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
-                logger.warning("[VPN] Invalid DoH URL, falling back to plain DNS")
-            }
-        } else {
-            settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
-        }
+        settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
         settings.mtu = 1500
 
         return settings
@@ -534,52 +507,4 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         )
     }
 
-    // MARK: - Encrypted DNS Hostname Resolution
-
-    /// Resolves a hostname via getaddrinfo for the `servers` list of DoH/DoT
-    /// settings; returns nil for IP literals or on failure.
-    private static func resolveEncryptedDNSHostname(_ hostname: String, includeIPv6: Bool) -> [String]? {
-        // Skip resolution for IP literals — they can be used directly as servers
-        var address = in_addr()
-        var addr6 = in6_addr()
-        if inet_pton(AF_INET, hostname, &address) == 1 || inet_pton(AF_INET6, hostname, &addr6) == 1 {
-            return nil
-        }
-
-        var hints = addrinfo()
-        hints.ai_family = includeIPv6 ? AF_UNSPEC : AF_INET
-        hints.ai_socktype = SOCK_STREAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(hostname, nil, &hints, &result) == 0, let res = result else {
-            logger.warning("[VPN] Failed to resolve encrypted DNS server: \(hostname)")
-            return nil
-        }
-        defer { freeaddrinfo(res) }
-
-        var ips: [String] = []
-        var current: UnsafeMutablePointer<addrinfo>? = res
-        while let info = current {
-            switch info.pointee.ai_family {
-            case AF_INET:
-                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { pointer in
-                    var sinAddr = pointer.pointee.sin_addr
-                    var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                    inet_ntop(AF_INET, &sinAddr, &buffer, socklen_t(INET_ADDRSTRLEN))
-                    ips.append(String(cString: buffer))
-                }
-            case AF_INET6:
-                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { pointer in
-                    var sin6Addr = pointer.pointee.sin6_addr
-                    var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-                    inet_ntop(AF_INET6, &sin6Addr, &buffer, socklen_t(INET6_ADDRSTRLEN))
-                    ips.append(String(cString: buffer))
-                }
-            default:
-                break
-            }
-            current = info.pointee.ai_next
-        }
-
-        return ips.isEmpty ? nil : ips
-    }
 }

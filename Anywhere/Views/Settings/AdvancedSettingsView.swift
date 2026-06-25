@@ -42,9 +42,6 @@ struct AdvancedSettingsView: View {
                 NavigationLink("IPv6") {
                     IPv6SettingsView()
                 }
-                NavigationLink("Encrypted DNS") {
-                    EncryptedDNSSettingsView()
-                }
             }
 
             Section("Other") {
