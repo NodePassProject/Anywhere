@@ -19,6 +19,9 @@ extension ProxyConfiguration {
 
     /// Parses a proxy share link; per-scheme formats are documented on the private parsers.
     static func parse(url: String) throws -> ProxyConfiguration {
+        if url.hasPrefix("vless://") {
+            return try parseVLESS(url: url)
+        }
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
         }
@@ -40,46 +43,20 @@ extension ProxyConfiguration {
         if url.hasPrefix("sudoku://") {
             return try parseSudoku(url: url)
         }
-        guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, hysteria2://, nowhere://, trojan://, anytls://, ss://, socks5://, or sudoku://")
+        throw ProxyError.invalidURL("URL must start with vless://, hysteria2://, nowhere://, trojan://, anytls://, ss://, socks5://, or sudoku://")
+    }
+
+    // MARK: - Per-Scheme Parsers
+
+    /// Parses `vless://uuid@host:port?type=…&security=…#name`.
+    private static func parseVLESS(url: String) throws -> ProxyConfiguration {
+        let body = try splitLinkBody(url, scheme: "vless://", label: "vless", allowBase64Body: true)
+
+        guard let uuid = UUID(uuidString: body.userInfo) else {
+            throw ProxyError.invalidURL("Invalid UUID: \(body.userInfo)")
         }
 
-        var urlWithoutScheme = String(url.dropFirst("vless://".count))
-
-        var fragmentName: String?
-        if let hashIndex = urlWithoutScheme.lastIndex(of: "#") {
-            fragmentName = String(urlWithoutScheme[urlWithoutScheme.index(after: hashIndex)...])
-                .removingPercentEncoding
-            urlWithoutScheme = String(urlWithoutScheme[..<hashIndex])
-        }
-        DeviceCensorship.deCensor(&fragmentName)
-
-        guard let atIndex = urlWithoutScheme.firstIndex(of: "@") else {
-            throw ProxyError.invalidURL("Missing @ separator")
-        }
-
-        let uuidString = String(urlWithoutScheme[..<atIndex])
-        let serverPart = String(urlWithoutScheme[urlWithoutScheme.index(after: atIndex)...])
-
-        guard let uuid = UUID(uuidString: uuidString) else {
-            throw ProxyError.invalidURL("Invalid UUID: \(uuidString)")
-        }
-
-        let hostPort: String
-        var queryString: String?
-        if let questionIndex = serverPart.firstIndex(of: "?") {
-            let before = String(serverPart[..<questionIndex])
-            hostPort = before.hasSuffix("/") ? String(before.dropLast()) : before
-            queryString = String(serverPart[serverPart.index(after: questionIndex)...])
-        } else {
-            let parts = serverPart.split(separator: "/", maxSplits: 1)
-            hostPort = String(parts[0])
-        }
-
-        let (host, port) = try parseHostPort(hostPort)
-
-        let parameters = parseQueryParams(queryString)
-
+        let parameters = body.parameters
         let encryption = parameters["encryption"] ?? "none"
         let flow = parameters["flow"]
         let security = parameters["security"] ?? "none"
@@ -98,7 +75,7 @@ extension ProxyConfiguration {
             }
         } else if security == "tls" {
             do {
-                if let tlsConfig = try TLSConfiguration.parse(from: parameters, serverAddress: host) {
+                if let tlsConfig = try TLSConfiguration.parse(from: parameters, serverAddress: body.host) {
                     xraySecurityLayer = .tls(tlsConfig)
                 } else {
                     xraySecurityLayer = .none
@@ -110,12 +87,12 @@ extension ProxyConfiguration {
             xraySecurityLayer = .none
         }
 
-        let xrayTransportLayer = parseXrayTransportLayer(from: parameters, transport: transportStr, serverAddress: host, xraySecurityLayer: xraySecurityLayer)
+        let xrayTransportLayer = parseXrayTransportLayer(from: parameters, transport: transportStr, serverAddress: body.host, xraySecurityLayer: xraySecurityLayer)
 
         return ProxyConfiguration(
-            name: fragmentName ?? "Untitled",
-            serverAddress: host,
-            serverPort: port,
+            name: body.fragment ?? "Untitled",
+            serverAddress: body.host,
+            serverPort: body.port,
             outbound: .vless(
                 uuid: uuid,
                 encryption: encryption,
@@ -125,42 +102,15 @@ extension ProxyConfiguration {
             )
         )
     }
-    
+
     /// Parses `hysteria2://password@host:port/?sni=...&insecure=0#name` (`hy2://` alias accepted).
     private static func parseHysteria(url: String) throws -> ProxyConfiguration {
-        let rawPrefix: String = url.hasPrefix("hysteria2://") ? "hysteria2://" : "hy2://"
-        var remaining = String(url.dropFirst(rawPrefix.count))
+        let scheme = url.hasPrefix("hysteria2://") ? "hysteria2://" : "hy2://"
+        let body = try splitLinkBody(url, scheme: scheme, label: "hysteria")
+        let parameters = body.parameters
 
-        var fragmentName: String?
-        if let hashIndex = remaining.lastIndex(of: "#") {
-            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
-            remaining = String(remaining[..<hashIndex])
-        }
-        DeviceCensorship.deCensor(&fragmentName)
-
-        var queryString: String?
-        if let questionIndex = remaining.firstIndex(of: "?") {
-            queryString = String(remaining[remaining.index(after: questionIndex)...])
-            remaining = String(remaining[..<questionIndex])
-        }
-
-        guard let atIndex = remaining.lastIndex(of: "@") else {
-            throw ProxyError.invalidURL("Missing @ separator in hysteria URL")
-        }
-        let userInfo = String(remaining[..<atIndex])
-        var serverPart = String(remaining[remaining.index(after: atIndex)...])
-
-        if serverPart.hasSuffix("/") { serverPart.removeLast() }
-        if let slashIndex = serverPart.firstIndex(of: "/") {
-            serverPart = String(serverPart[..<slashIndex])
-        }
-
-        let password = userInfo.removingPercentEncoding ?? userInfo
-
-        let (host, port) = try parseHostPort(serverPart)
-        let parameters = parseQueryParams(queryString)
-
-        let sni = (parameters["sni"]?.isEmpty == false) ? parameters["sni"]! : host
+        let password = body.userInfo.removingPercentEncoding ?? body.userInfo
+        let sni = (parameters["sni"]?.isEmpty == false) ? parameters["sni"]! : body.host
 
         // Presence of upmbps/downmbps selects Brutal; a link without either runs BBR.
         let rawUp = parameters["upmbps"].flatMap { Int($0) }
@@ -189,9 +139,9 @@ extension ProxyConfiguration {
         }
 
         return ProxyConfiguration(
-            name: fragmentName ?? "Untitled",
-            serverAddress: host,
-            serverPort: port,
+            name: body.fragment ?? "Untitled",
+            serverAddress: body.host,
+            serverPort: body.port,
             outbound: .hysteria(
                 password: password,
                 congestionControl: congestionControl,
@@ -206,39 +156,14 @@ extension ProxyConfiguration {
 
     /// Parses `nowhere://<key>@host:port?net=udp|tcp&spec=...&sni=...&alpn=...#name`.
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
-        let rawPrefix = "nowhere://"
-        var remaining = String(url.dropFirst(rawPrefix.count))
+        let body = try splitLinkBody(url, scheme: "nowhere://", label: "Nowhere")
+        let parameters = body.parameters
 
-        var fragmentName: String?
-        if let hashIndex = remaining.lastIndex(of: "#") {
-            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
-            remaining = String(remaining[..<hashIndex])
-        }
-        DeviceCensorship.deCensor(&fragmentName)
-
-        var queryString: String?
-        if let questionIndex = remaining.firstIndex(of: "?") {
-            queryString = String(remaining[remaining.index(after: questionIndex)...])
-            remaining = String(remaining[..<questionIndex])
-        }
-
-        guard let atIndex = remaining.lastIndex(of: "@") else {
-            throw ProxyError.invalidURL("Missing @ separator in Nowhere URL")
-        }
-        let userInfo = String(remaining[..<atIndex])
-        var serverPart = String(remaining[remaining.index(after: atIndex)...])
-        if serverPart.hasSuffix("/") { serverPart.removeLast() }
-        if let slashIndex = serverPart.firstIndex(of: "/") {
-            serverPart = String(serverPart[..<slashIndex])
-        }
-
-        let key = userInfo.removingPercentEncoding ?? userInfo
+        let key = body.userInfo.removingPercentEncoding ?? body.userInfo
         guard !key.isEmpty else {
             throw ProxyError.invalidURL("Missing Nowhere key")
         }
 
-        let (host, port) = try parseHostPort(serverPart)
-        let parameters = parseQueryParams(queryString)
         let spec = parameters["spec"].flatMap { $0.isEmpty ? nil : $0 }
         let rawNetwork = parameters["net"] ?? ""
         let network: NowhereNetwork
@@ -258,17 +183,16 @@ extension ProxyConfiguration {
         } else {
             throw ProxyError.invalidURL("Invalid Nowhere pool value")
         }
-        let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
-            ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
-            ?? host
+
+        let sni = resolvedServerName(from: parameters, host: body.host)
         let alpn = parameters["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
         let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
         let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
 
         return ProxyConfiguration(
-            name: fragmentName ?? "Nowhere",
-            serverAddress: host,
-            serverPort: port,
+            name: body.fragment ?? "Nowhere",
+            serverAddress: body.host,
+            serverPort: body.port,
             outbound: .nowhere(
                 key: key,
                 spec: spec,
@@ -278,121 +202,39 @@ extension ProxyConfiguration {
             )
         )
     }
-    
+
     /// Parses `trojan://password@host:port?sni=...&alpn=...&fp=...#name`; TLS is mandatory.
     private static func parseTrojan(url: String) throws -> ProxyConfiguration {
-        var remaining = String(url.dropFirst("trojan://".count))
-
-        var fragmentName: String?
-        if let hashIndex = remaining.lastIndex(of: "#") {
-            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
-            remaining = String(remaining[..<hashIndex])
-        }
-        DeviceCensorship.deCensor(&fragmentName)
-
-        var queryString: String?
-        if let questionIndex = remaining.firstIndex(of: "?") {
-            queryString = String(remaining[remaining.index(after: questionIndex)...])
-            remaining = String(remaining[..<questionIndex])
-        }
-
-        guard let atIndex = remaining.lastIndex(of: "@") else {
-            throw ProxyError.invalidURL("Missing @ separator in trojan URL")
-        }
-        let userInfo = String(remaining[..<atIndex])
-        var serverPart = String(remaining[remaining.index(after: atIndex)...])
-
-        if serverPart.hasSuffix("/") { serverPart.removeLast() }
-        if let slashIndex = serverPart.firstIndex(of: "/") {
-            serverPart = String(serverPart[..<slashIndex])
-        }
+        let body = try splitLinkBody(url, scheme: "trojan://", label: "trojan")
 
         // Whole userinfo is the password (no user:pass split per trojan-gfw spec).
-        let password = userInfo.removingPercentEncoding ?? userInfo
-
-        let (host, port) = try parseHostPort(serverPart)
-        let parameters = parseQueryParams(queryString)
-
-        let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
-            ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
-            ?? host
-
-        var alpn: [String]? = nil
-        if let alpnString = parameters["alpn"], !alpnString.isEmpty {
-            alpn = alpnString.split(separator: ",").map { String($0) }
-        }
-
-        let fpString = parameters["fp"] ?? "chrome_120"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
-
-        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+        let password = body.userInfo.removingPercentEncoding ?? body.userInfo
+        let tlsConfiguration = standardTLSConfiguration(from: body.parameters, host: body.host)
 
         return ProxyConfiguration(
-            name: fragmentName ?? "Untitled",
-            serverAddress: host,
-            serverPort: port,
+            name: body.fragment ?? "Untitled",
+            serverAddress: body.host,
+            serverPort: body.port,
             outbound: .trojan(password: password, securityLayer: .tls(tlsConfiguration))
         )
     }
 
-    /// Parses `anytls://password@host:port?sni=…[&ici=30&it=30&mis=0]#name`; TLS is mandatory
-    /// and the pool knobs default to sing-anytls's recommended values.
+    /// Parses `anytls://password@host:port?sni=…[&ici=30&it=30&mis=0]#name`; TLS is mandatory.
     private static func parseAnyTLS(url: String) throws -> ProxyConfiguration {
-        var remaining = String(url.dropFirst("anytls://".count))
+        let body = try splitLinkBody(url, scheme: "anytls://", label: "anytls")
+        let parameters = body.parameters
 
-        var fragmentName: String?
-        if let hashIndex = remaining.lastIndex(of: "#") {
-            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
-            remaining = String(remaining[..<hashIndex])
-        }
-        DeviceCensorship.deCensor(&fragmentName)
-
-        var queryString: String?
-        if let questionIndex = remaining.firstIndex(of: "?") {
-            queryString = String(remaining[remaining.index(after: questionIndex)...])
-            remaining = String(remaining[..<questionIndex])
-        }
-
-        guard let atIndex = remaining.lastIndex(of: "@") else {
-            throw ProxyError.invalidURL("Missing @ separator in anytls URL")
-        }
-        let userInfo = String(remaining[..<atIndex])
-        var serverPart = String(remaining[remaining.index(after: atIndex)...])
-
-        if serverPart.hasSuffix("/") { serverPart.removeLast() }
-        if let slashIndex = serverPart.firstIndex(of: "/") {
-            serverPart = String(serverPart[..<slashIndex])
-        }
-
-        let password = userInfo.removingPercentEncoding ?? userInfo
-
-        let (host, port) = try parseHostPort(serverPart)
-        let parameters = parseQueryParams(queryString)
-
-        let sni = (parameters["sni"]?.isEmpty == false ? parameters["sni"] : nil)
-            ?? (parameters["peer"]?.isEmpty == false ? parameters["peer"] : nil)
-            ?? host
-
-        var alpn: [String]? = nil
-        if let alpnString = parameters["alpn"], !alpnString.isEmpty {
-            alpn = alpnString.split(separator: ",").map { String($0) }
-        }
-
-        let fpString = parameters["fp"] ?? "chrome_120"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
+        let password = body.userInfo.removingPercentEncoding ?? body.userInfo
+        let tlsConfiguration = standardTLSConfiguration(from: parameters, host: body.host)
 
         let idleCheckInterval = parameters["ici"].flatMap { Int($0) } ?? 30
         let idleTimeout = parameters["it"].flatMap  { Int($0) } ?? 30
         let minIdleSession = parameters["mis"].flatMap { Int($0) } ?? 0
 
-        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
-
         return ProxyConfiguration(
-            name: fragmentName ?? "Untitled",
-            serverAddress: host,
-            serverPort: port,
+            name: body.fragment ?? "Untitled",
+            serverAddress: body.host,
+            serverPort: body.port,
             outbound: .anytls(
                 password: password,
                 idleCheckInterval: idleCheckInterval,
@@ -407,13 +249,7 @@ extension ProxyConfiguration {
     /// pre-SIP002 `ss://base64(method:password@host:port)#name` shape.
     private static func parseShadowsocks(url: String) throws -> ProxyConfiguration {
         var urlWithoutScheme = String(url.dropFirst("ss://".count))
-
-        var fragmentName: String?
-        if let hashIndex = urlWithoutScheme.lastIndex(of: "#") {
-            fragmentName = String(urlWithoutScheme[urlWithoutScheme.index(after: hashIndex)...])
-                .removingPercentEncoding
-            urlWithoutScheme = String(urlWithoutScheme[..<hashIndex])
-        }
+        let fragmentName = extractFragment(&urlWithoutScheme)
 
         let method: String
         let password: String
@@ -483,7 +319,7 @@ extension ProxyConfiguration {
         let password = String(decodedString[decodedString.index(after: colonIndex)...])
         return (method, password)
     }
-    
+
     /// Parses `socks5://user:pass@host:port#name` or `socks5://host:port#name`.
     private static func parseSOCKS5(url: String) throws -> ProxyConfiguration {
         let urlWithoutScheme: String
@@ -496,13 +332,7 @@ extension ProxyConfiguration {
         }
 
         var remaining = urlWithoutScheme
-
-        var fragmentName: String?
-        if let hashIndex = remaining.lastIndex(of: "#") {
-            fragmentName = String(remaining[remaining.index(after: hashIndex)...])
-                .removingPercentEncoding
-            remaining = String(remaining[..<hashIndex])
-        }
+        let fragmentName = extractFragment(&remaining)
 
         let username: String?
         let password: String?
@@ -611,7 +441,100 @@ extension ProxyConfiguration {
         )
     }
 
+    // MARK: - Shared Link Decomposition
+
+    /// The structural pieces shared by `userinfo@host:port/?query#fragment` share links.
+    /// `userInfo` is returned raw so each scheme can decide whether to percent-decode it.
+    private struct LinkBody {
+        let userInfo: String
+        let host: String
+        let port: UInt16
+        let parameters: [String: String]
+        let fragment: String?
+    }
+    
+    private static func splitLinkBody(
+        _ url: String,
+        scheme: String,
+        label: String,
+        allowBase64Body: Bool = false
+    ) throws -> LinkBody {
+        var remaining = String(url.dropFirst(scheme.count))
+
+        var fragment = extractFragment(&remaining)
+
+        // Some providers base64-encode the whole body after the scheme. When the plain text
+        // carries no `@`, decode it and re-extract the fragment before giving up.
+        if allowBase64Body, !remaining.contains("@"),
+           let decoded = base64DecodedBody(remaining), decoded.contains("@") {
+            remaining = decoded
+            if fragment == nil { fragment = extractFragment(&remaining) }
+        }
+        DeviceCensorship.deCensor(&fragment)
+
+        var queryString: String?
+        if let questionIndex = remaining.firstIndex(of: "?") {
+            queryString = String(remaining[remaining.index(after: questionIndex)...])
+            remaining = String(remaining[..<questionIndex])
+        }
+
+        guard let atIndex = remaining.lastIndex(of: "@") else {
+            throw ProxyError.invalidURL("Missing @ separator in \(label) URL")
+        }
+        let userInfo = String(remaining[..<atIndex])
+        var serverPart = String(remaining[remaining.index(after: atIndex)...])
+        if serverPart.hasSuffix("/") { serverPart.removeLast() }
+        if let slashIndex = serverPart.firstIndex(of: "/") {
+            serverPart = String(serverPart[..<slashIndex])
+        }
+
+        let (host, port) = try parseHostPort(serverPart)
+        return LinkBody(
+            userInfo: userInfo,
+            host: host,
+            port: port,
+            parameters: parseQueryParams(queryString),
+            fragment: fragment
+        )
+    }
+
+    /// Strips a trailing `#fragment` from `remaining`, returning its percent-decoded value.
+    private static func extractFragment(_ remaining: inout String) -> String? {
+        guard let hashIndex = remaining.lastIndex(of: "#") else { return nil }
+        let fragment = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
+        remaining = String(remaining[..<hashIndex])
+        return fragment
+    }
+
+    /// Decodes a body that some providers base64-encode in full (e.g. `vless://<base64>`).
+    private static func base64DecodedBody(_ string: String) -> String? {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = Data(base64URLEncoded: trimmed),
+              let decoded = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return decoded
+    }
+
     // MARK: - Parsing Helpers
+    
+    private static func resolvedServerName(from parameters: [String: String], host: String) -> String {
+        if let sni = parameters["sni"], !sni.isEmpty { return sni }
+        if let peer = parameters["peer"], !peer.isEmpty { return peer }
+        return host
+    }
+    
+    private static func standardTLSConfiguration(from parameters: [String: String], host: String) -> TLSConfiguration {
+        let serverName = resolvedServerName(from: parameters, host: host)
+        var alpn: [String]? = nil
+        if let alpnString = parameters["alpn"], !alpnString.isEmpty {
+            alpn = alpnString.split(separator: ",").map { String($0) }
+        }
+        let fingerprint = TLSFingerprint(rawValue: parameters["fp"] ?? "chrome_120") ?? .chrome120
+        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
+        return TLSConfiguration(serverName: serverName, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+    }
 
     static func parseQueryParams(_ queryString: String?) -> [String: String] {
         guard let queryString else { return [:] }
