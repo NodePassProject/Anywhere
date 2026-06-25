@@ -174,27 +174,10 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                if #available(iOS 27.0, *) {
-                    Circle()
-                        .fill(.clear)
-                        .frame(width: isCompact ? 50 : 140)
-                        .glassEffect(.regular, in: .circle)
-                } else if #available(iOS 26.0, *) {
-                    Circle()
-                        .fill(.clear)
-                        .frame(width: isCompact ? 50 : 140)
-                        .glassEffect(.clear, in: .circle)
-                } else {
-                    Circle()
-                        .fill(.white.opacity(0.2))
-                        .frame(width: isCompact ? 50 : 140)
-                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
-                }
-
+                backgroundCircle
                 if isTransitioning || isLoading {
                     ProgressView()
                         .controlSize(.large)
-                        .tint(isConnected ? .white : .accentColor)
                 } else {
                     Image(systemName: "power")
                         .font(.system(size: isCompact ? 24 : 40, weight: .light))
@@ -205,6 +188,26 @@ private struct PowerButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .animation(animatesChanges ? Animation.easeInOut(duration: 0.6) : nil, value: isConnected)
+    }
+    
+    @ViewBuilder
+    private var backgroundCircle: some View {
+        if #available(iOS 27.0, *) {
+            Circle()
+                .fill(.clear)
+                .frame(width: isCompact ? 50 : 140)
+                .glassEffect(.regular, in: .circle)
+        } else if #available(iOS 26.0, *) {
+            Circle()
+                .fill(.clear)
+                .frame(width: isCompact ? 50 : 140)
+                .glassEffect(.clear, in: .circle)
+        } else {
+            Circle()
+                .fill(.white.opacity(0.2))
+                .frame(width: isCompact ? 50 : 140)
+                .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
+        }
     }
 }
 
@@ -270,16 +273,15 @@ private struct ConfigurationCapsule: View {
             ProminentCapsule {
                 HStack {
                     Image("anywhere")
-                        .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
+                        .foregroundStyle(.primary.opacity(0.7))
                         .frame(width: 24)
                     Text(configuration.name)
                         .font(.body.weight(.medium))
-                        .foregroundStyle(isConnected ? .white : .primary)
                         .lineLimit(1)
                     Spacer()
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
+                        .foregroundStyle(.primary.opacity(0.7))
                 }
             }
         }
