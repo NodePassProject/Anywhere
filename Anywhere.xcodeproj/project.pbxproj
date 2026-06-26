@@ -350,7 +350,11 @@
 		CB71D2EE2F838FF3002B9E1D /* Exceptions for "Shared" folder in "Anywhere Widget" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				AWCore.swift,
 				Localizable.xcstrings,
+				Models/ProxyMode.swift,
+				Models/QUICPolicy.swift,
+				Utilities/AnywhereLogger.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};
