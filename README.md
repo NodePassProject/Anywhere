@@ -162,8 +162,31 @@ if let url = URL(string: "anywhere://add-proxy?link=vless://uuid@host:443?type=t
 
 ## License
 
-Anywhere is licensed under the [GNU General Public License v3.0](LICENSE).
+The Anywhere **source code** is licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, study, modify, and redistribute the source under the terms of that license.
+
+Because Anywhere is GPLv3, anyone who distributes the app — original or modified — must, at a minimum:
+
+- **Keep it open source** — provide the *complete corresponding source code* of their version to all recipients under the GPLv3, including every modification (GPLv3 §5 & §6). Shipping a binary without making its source available is not permitted.
+- **Declare their changes** — carry prominent notices stating that the files were changed, with the date of each change (GPLv3 §5a), and preserve all existing copyright, license, and attribution notices.
+- **License the whole under the same terms** — release the entire modified work under the GPLv3, adding no further restrictions on the code itself.
+
+## Trademarks & Branding
+
+The GPLv3 applies to the **source code only**. It does **not** grant any right to use the Anywhere name or branding. The following are proprietary and are **not** covered by the GPLv3 or any other open-source license:
+
+- The names **"Anywhere"** and **"Anywhere Proxy"**
+- The **Anywhere app icon**, together with any other Anywhere logos, marks, and brand assets
+
+These remain the exclusive property of NodePassProject and may not be used without prior written permission, except for fair nominative references to the official app.
+
+**Argsment Limited** is the official issuer and publisher of the Anywhere app (including the App Store release) and is fully authorized to act for and represent Anywhere and the NodePassProject team in all matters — including any licensing of, or permission to use, the names, app icon, and brand assets above. Requests for permission may be directed to Argsment Limited.
+
+Restricting use of these marks is **not** an "additional restriction" forbidden by the GPL — GPLv3 §7(e) expressly lets the copyright holder decline to grant trademark rights, so the open-source obligations above and the branding terms here are fully consistent.
+
+In addition to the GPLv3 obligations above, if you fork, build, or redistribute this project you **must remove or replace** the "Anywhere" and "Anywhere Proxy" names and the Anywhere app icon with your own branding before distribution. You may not publish a build under the "Anywhere" or "Anywhere Proxy" name, or carrying the Anywhere app icon, in any app store or elsewhere, in a way that could imply it is the official app or is endorsed by NodePassProject.
 
 ---
+
+© 2026 NodePassProject. The Anywhere app is issued and published by **Argsment Limited**, which is fully authorized to represent Anywhere. **"Anywhere"**, **"Anywhere Proxy"**, and the Anywhere app icon are trademarks of NodePassProject and may not be used without permission.
 
 If you find Anywhere useful, consider starring the repo. It helps others discover it.
