@@ -40,7 +40,7 @@ final class MITMLeafCertCache {
         autoreleaseFrequency: .workItem
     )
 
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var entries: [String: CacheEntry] = [:]
 
     private struct CacheEntry {
@@ -71,12 +71,12 @@ final class MITMLeafCertCache {
 
     private func cachedLeaf(for normalized: String) -> Leaf? {
         lock.lock()
+        defer { lock.unlock() }
         guard let entry = entries[normalized],
               entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold else {
             return nil
         }
         entries[normalized]?.lastAccess = Date()
-        lock.unlock()
         return entry.leaf
     }
 

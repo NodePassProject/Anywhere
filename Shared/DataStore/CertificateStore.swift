@@ -47,7 +47,7 @@ final class CertificateStore {
 
     private func save() {
         AWCore.setTrustedCertificateFingerprints(fingerprints)
-        AWCore.notifyCertificatePolicyChanged()
+        AWNotificationCenter.notifyCertificatePolicyChanged()
     }
 
     private static func normalize(_ fingerprint: String) -> String {

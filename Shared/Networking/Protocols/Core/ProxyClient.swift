@@ -8,7 +8,7 @@
 import Foundation
 
 private final class TeardownCounter: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var remaining: Int
     private let completion: @Sendable () -> Void
 

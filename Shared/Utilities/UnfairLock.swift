@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Prefer over NSLock for short critical sections.
 nonisolated final class UnfairLock {
     private var _lock = os_unfair_lock()
 

@@ -56,7 +56,7 @@ final class AppSettings {
     var advertiseIPv6ToApps: Bool {
         didSet {
             AWCore.setAdvertiseIPv6ToApps(advertiseIPv6ToApps)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
@@ -66,7 +66,7 @@ final class AppSettings {
             if alwaysTrustCellular, alwaysUntrustCellular {
                 alwaysUntrustCellular = false
             }
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
@@ -76,14 +76,14 @@ final class AppSettings {
             if alwaysUntrustCellular, alwaysTrustCellular {
                 alwaysTrustCellular = false
             }
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
     var blockWebRTC: Bool {
         didSet {
             AWCore.setBlockWebRTC(blockWebRTC)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
@@ -93,7 +93,7 @@ final class AppSettings {
             if hideVPNIcon, advertiseIPv6ToApps {
                 advertiseIPv6ToApps = false
             } else {
-                AWCore.notifyTunnelSettingsChanged()
+                AWNotificationCenter.notifyTunnelSettingsChanged()
             }
         }
     }
@@ -106,35 +106,35 @@ final class AppSettings {
     var proxyMode: ProxyMode {
         didSet {
             AWCore.setProxyMode(proxyMode)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
     var quicPolicy: QUICPolicy {
         didSet {
             AWCore.setQUICPolicy(quicPolicy)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
     
     var reflectionAddresses: [String] {
         didSet {
             AWCore.setReflectionAddresses(reflectionAddresses)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
     var reflectionEnabled: Bool {
         didSet {
             AWCore.setReflectionEnabled(reflectionEnabled)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
     var trustedSSIDs: [String] {
         didSet {
             AWCore.setTrustedSSIDs(trustedSSIDs)
-            AWCore.notifyTunnelSettingsChanged()
+            AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
@@ -143,7 +143,7 @@ final class AppSettings {
     var allowInsecure: Bool {
         didSet {
             AWCore.setAllowInsecure(allowInsecure)
-            AWCore.notifyCertificatePolicyChanged()
+            AWNotificationCenter.notifyCertificatePolicyChanged()
         }
     }
 

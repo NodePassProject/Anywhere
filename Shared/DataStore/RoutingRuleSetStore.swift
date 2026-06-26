@@ -360,7 +360,7 @@ class RoutingRuleSetStore {
 
             if data != AWCore.getRoutingData() {
                 AWCore.setRoutingData(data)
-                AWCore.notifyRoutingChanged()
+                AWNotificationCenter.notifyRoutingChanged()
             }
         }.value
     }

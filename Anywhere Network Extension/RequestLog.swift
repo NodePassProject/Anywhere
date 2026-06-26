@@ -11,7 +11,7 @@ final class RequestLog {
 
     typealias Entry = TunnelRequestEntry
 
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var entries: [Entry] = []
 
     /// Records one routing decision; `host` is the domain if known, else the IP literal.

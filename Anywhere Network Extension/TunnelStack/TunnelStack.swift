@@ -187,8 +187,8 @@ class TunnelStack {
 
     // MARK: - Log Buffer
     //
-    // Recent logs for the main app's viewer. NSLock: appends come from I/O
-    // completion handlers, fetches from IPC.
+    // Recent logs for the main app's viewer. Locked because appends come from
+    // I/O completion handlers, fetches from IPC.
 
     typealias LogLevel = TunnelLogLevel
     typealias LogEntry = TunnelLogEntry
@@ -199,7 +199,7 @@ class TunnelStack {
         let summary: String
     }
 
-    private let logLock = NSLock()
+    private let logLock = UnfairLock()
     private var logEntries: [LogEntry] = []
 
     func appendLog(_ message: String, level: LogLevel) {

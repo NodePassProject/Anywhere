@@ -15,7 +15,7 @@ final class MITMScriptDiskStore {
     
     static let maxBytesPerScope: Int = 1 * 1024 * 1024
     static let maxTotalBytes: Int = 16 * 1024 * 1024
-
+    
     private let lock = NSLock()
     
     private let directory: URL?

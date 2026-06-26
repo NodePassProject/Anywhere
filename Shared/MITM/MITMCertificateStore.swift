@@ -34,7 +34,7 @@ final class MITMCertificateStore {
 
     private static let caSubjectCN = "Anywhere Root Certificate"
     private static let caOrganization = "Anywhere"
-
+    
     private let lock = NSLock()
 
     // MARK: - Init

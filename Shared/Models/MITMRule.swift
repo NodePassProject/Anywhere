@@ -581,7 +581,7 @@ struct MITMSnapshot: Codable, Equatable {
         guard let data = try? JSONEncoder().encode(self) else { return }
         JSONBlobStore.shared.save(.mitm, data: data)
         exportBinaryToAppGroup()
-        AWCore.notifyMITMChanged()
+        AWNotificationCenter.notifyMITMChanged()
     }
     
     func exportBinaryToAppGroup() {

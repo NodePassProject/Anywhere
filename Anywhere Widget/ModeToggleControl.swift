@@ -48,7 +48,7 @@ struct SwitchModeIntent: SetValueIntent {
 
     func perform() async throws -> some IntentResult {
         AWCore.setProxyMode(value ? .global : .rule)
-        AWCore.notifyTunnelSettingsChanged()
+        AWNotificationCenter.notifyTunnelSettingsChanged()
         return .result()
     }
 }

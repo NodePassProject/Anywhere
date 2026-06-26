@@ -72,7 +72,7 @@ enum MITMBodyReplace {
         qos: .userInitiated
     )
 
-    private static let inFlightLock = NSLock()
+    private static let inFlightLock = UnfairLock()
     private static var substitutionInFlight = false
 
     /// Runs one substitution under the soft budget; nil on timeout or while a prior runaway is still burning.

@@ -29,7 +29,7 @@ nonisolated enum CertificatePolicy {
             { _, _, _, _, _ in
                 CertificatePolicy.reload()
             },
-            AWCore.Notification.certificatePolicyChanged,
+            AWNotificationCenter.Notification.certificatePolicyChanged,
             nil,
             .deliverImmediately
         )

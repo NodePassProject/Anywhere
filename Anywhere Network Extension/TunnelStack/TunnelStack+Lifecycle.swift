@@ -296,7 +296,7 @@ extension TunnelStack {
                 let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleSettingsChanged()
             },
-            AWCore.Notification.tunnelSettingsChanged,
+            AWNotificationCenter.Notification.tunnelSettingsChanged,
             nil,
             .deliverImmediately
         )
@@ -309,7 +309,7 @@ extension TunnelStack {
                 let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleRoutingChanged()
             },
-            AWCore.Notification.routingChanged,
+            AWNotificationCenter.Notification.routingChanged,
             nil,
             .deliverImmediately
         )
@@ -322,7 +322,7 @@ extension TunnelStack {
                 let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleMITMChanged()
             },
-            AWCore.Notification.mitmChanged,
+            AWNotificationCenter.Notification.mitmChanged,
             nil,
             .deliverImmediately
         )

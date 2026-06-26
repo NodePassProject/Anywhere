@@ -39,7 +39,7 @@ class TVSettingsViewController: UIViewController {
         get { AWCore.getAllowInsecure() }
         set {
             AWCore.setAllowInsecure(newValue)
-            AWCore.notifyCertificatePolicyChanged()
+            AWNotificationCenter.notifyCertificatePolicyChanged()
             updateAppearance()
         }
     }

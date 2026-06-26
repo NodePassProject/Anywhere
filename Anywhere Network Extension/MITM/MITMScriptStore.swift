@@ -24,7 +24,7 @@ final class MITMScriptStore {
         case writeFailed
     }
 
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var buckets: [UUID: [String: Data]] = [:]
     /// Incremental sum of all scopes' bytes for O(1) aggregate-cap checks in `set`.
     private var totalBytes: Int = 0

@@ -21,7 +21,7 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
         case handshakeNoDial
     }
 
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     /// Parked until a default-proxy handshake promotes it — the socket can't
     /// know its route at dial time.
     private var pendingDialMs: Int?

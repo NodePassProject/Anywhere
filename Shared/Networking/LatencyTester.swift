@@ -179,7 +179,7 @@ nonisolated enum LatencyTester {
 
     /// Cancellation hook that fails whichever phase is currently awaiting.
     private final class PendingResumer: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = UnfairLock()
         private var hook: ((Error) -> Void)?
 
         func install(_ hook: @escaping (Error) -> Void) {
@@ -204,7 +204,7 @@ nonisolated enum LatencyTester {
     /// One-shot continuation wrapper; the second resume is a no-op, so a cancel
     /// during a hung send/receive can't double-resume or leak the continuation.
     private final class OneShotResumer<T>: @unchecked Sendable {
-        private let lock = NSLock()
+        private let lock = UnfairLock()
         private var continuation: CheckedContinuation<T, Error>?
 
         func arm(_ continuation: CheckedContinuation<T, Error>) {

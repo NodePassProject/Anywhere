@@ -95,6 +95,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
+				AWNotificationCenter.swift,
 				DataStore/FailableDecodable.swift,
 				DataStore/JSONBlobStore.swift,
 				MITM/MITMCertificateStore.swift,
@@ -351,10 +352,12 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
+				AWNotificationCenter.swift,
 				Localizable.xcstrings,
 				Models/ProxyMode.swift,
 				Models/QUICPolicy.swift,
 				Utilities/AnywhereLogger.swift,
+				Utilities/UnfairLock.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};
