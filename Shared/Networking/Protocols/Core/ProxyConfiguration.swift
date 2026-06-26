@@ -110,7 +110,13 @@ enum Outbound: Hashable {
         sni: String
     )
     /// Nowhere runs over QUIC/UDP or TLS/TCP with a shared-key auth frame.
-    case nowhere(key: String, spec: String?, net: NowhereNetwork, pool: Int, securityLayer: GenericSecurityLayer)
+    case nowhere(
+        key: String,
+        spec: String?,
+        net: NowhereNetwork,
+        pool: Int,
+        securityLayer: GenericSecurityLayer
+    )
     /// Trojan: SHA224(password)+CRLF+request over mandatory TLS. No plaintext variant.
     case trojan(password: String, securityLayer: GenericSecurityLayer)
     /// AnyTLS: stream multiplexer over pooled TLS sessions, authenticated with SHA256(password);
@@ -302,7 +308,9 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             case .udp:
                 return .udp
             case .tcp:
-                return downstreamCommand == .tcp ? .tcp : nil
+                if downstreamCommand == .tcp { return .tcp }
+                if downstreamCommand == .udp { return .tcp }
+                return nil
             }
         }
         return outboundProtocol.upstreamCommand(for: downstreamCommand)
@@ -475,13 +483,13 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             }
             let pool: Int
             if !container.contains(.pool) {
-                pool = 0
+                pool = network == .tcp ? NowherePool.enabledDefault : 0
             } else if try container.decodeNil(forKey: .pool) {
-                pool = 0
+                pool = network == .tcp ? NowherePool.enabledDefault : 0
             } else if let value = try? container.decode(Int.self, forKey: .pool) {
                 pool = value
             } else if let raw = try? container.decode(String.self, forKey: .pool), raw.isEmpty {
-                pool = 0
+                pool = network == .tcp ? NowherePool.enabledDefault : 0
             } else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .pool,
@@ -626,7 +634,9 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(key, forKey: .nowhereKey)
             try container.encodeIfPresent(spec, forKey: .nowhereSpec)
             try container.encode(net.rawValue, forKey: .net)
-            try container.encode(pool, forKey: .pool)
+            if net == .tcp {
+                try container.encode(pool, forKey: .pool)
+            }
             try container.encode(tls.serverName, forKey: .nowhereSNI)
             if let alpn = tls.alpn?.first, !alpn.isEmpty {
                 try container.encode(alpn, forKey: .nowhereALPN)

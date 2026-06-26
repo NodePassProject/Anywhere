@@ -14,6 +14,7 @@ enum NowhereProtocol {
     
     static let closeErrCodeOK: UInt64 = 0x100
     static let defaultSpec = "auto"
+    static let uotMagicTarget = "uot.nowhere.invalid:0"
 
     private static let proxyFrameVersion: UInt8 = 1
     private static let defaultALPN = "now/1"
@@ -317,6 +318,10 @@ enum NowhereProtocol {
         out.append(header)
         out.append(payload)
         return out
+    }
+
+    static func encodeUOTSetupTarget(_ target: String) throws -> Data {
+        try encodeTarget(target)
     }
 
     private static func encodeUDPHeader(type: UDPType, flowID: UInt64, target: String, protocolSpec: EffectiveSpec) throws -> Data {

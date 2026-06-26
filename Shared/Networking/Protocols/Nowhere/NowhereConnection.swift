@@ -7,6 +7,11 @@
 
 import Foundation
 
+enum NowhereTCPRelayMode {
+    case tcp
+    case udp
+}
+
 nonisolated final class NowhereConnection: ProxyConnection {
 
     enum State { case idle, openingStream, handshaking, ready, closed }
@@ -242,6 +247,88 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 }
 
+nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapable {
+
+    private let inner: NowhereTCPConnection
+
+    var udpBuffer = Data()
+    var udpBufferOffset = 0
+    let udpLock = UnfairLock()
+
+    init(inner: NowhereTCPConnection) {
+        self.inner = inner
+        super.init()
+    }
+
+    override var isConnected: Bool { inner.isConnected }
+    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    override var deliversDatagrams: Bool { true }
+
+    override func send(data: Data, completion: @escaping (Error?) -> Void) {
+        super.send(data: frameUDPPacket(data), completion: completion)
+    }
+
+    override func send(data: Data) {
+        super.send(data: frameUDPPacket(data))
+    }
+
+    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+        inner.sendRaw(data: data, completion: completion)
+    }
+
+    override func sendRaw(data: Data) {
+        inner.sendRaw(data: data)
+    }
+
+    override func receive(completion: @escaping (Data?, Error?) -> Void) {
+        udpLock.lock()
+        if let packet = extractUDPPacket() {
+            udpLock.unlock()
+            completion(packet, nil)
+            return
+        }
+        udpLock.unlock()
+        receiveMore(completion: completion)
+    }
+
+    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+        inner.receiveRaw(completion: completion)
+    }
+
+    private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
+        inner.receive { [weak self] data, error in
+            guard let self else {
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
+                return
+            }
+            if let error {
+                completion(nil, error)
+                return
+            }
+            guard let data else {
+                completion(nil, nil)
+                return
+            }
+            self.udpLock.lock()
+            self.udpBuffer.append(data)
+            if let packet = self.extractUDPPacket() {
+                self.udpLock.unlock()
+                completion(packet, nil)
+            } else {
+                self.udpLock.unlock()
+                self.receiveMore(completion: completion)
+            }
+        }
+    }
+
+    override func cancel() {
+        udpLock.lock()
+        clearUDPBuffer()
+        udpLock.unlock()
+        inner.cancel()
+    }
+}
+
 nonisolated final class NowhereTCPConnection: ProxyConnection {
 
     private enum State { case idle, connecting, authenticating, prepared, requesting, ready, closed }
@@ -302,16 +389,17 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
         connectAndSend(payload: auth, successState: .prepared, completion: completion)
     }
 
-    func openFresh(destination: String, completion: @escaping (Error?) -> Void) {
+    func openFresh(
+        destination: String,
+        mode: NowhereTCPRelayMode = .tcp,
+        completion: @escaping (Error?) -> Void
+    ) {
         let bootstrap: Data
         do {
             bootstrap = try NowhereProtocol.makeAuthFrame(
                 key: configuration.key,
                 protocolSpec: configuration.protocolSpec
-            ) + NowhereProtocol.encodeTCPRequest(
-                address: destination,
-                protocolSpec: configuration.protocolSpec
-            )
+            ) + requestPayload(destination: destination, mode: mode)
         } catch {
             completion(error)
             return
@@ -320,13 +408,14 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
         connectAndSend(payload: bootstrap, successState: .ready, completion: completion)
     }
 
-    func activate(destination: String, completion: @escaping (Error?) -> Void) {
+    func activate(
+        destination: String,
+        mode: NowhereTCPRelayMode = .tcp,
+        completion: @escaping (Error?) -> Void
+    ) {
         let request: Data
         do {
-            request = try NowhereProtocol.encodeTCPRequest(
-                address: destination,
-                protocolSpec: configuration.protocolSpec
-            )
+            request = try requestPayload(destination: destination, mode: mode)
         } catch {
             completion(error)
             return
@@ -359,6 +448,23 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
             }
             callback?(nil)
             self.deliverPendingReceive()
+        }
+    }
+
+    private func requestPayload(destination: String, mode: NowhereTCPRelayMode) throws -> Data {
+        switch mode {
+        case .tcp:
+            return try NowhereProtocol.encodeTCPRequest(
+                address: destination,
+                protocolSpec: configuration.protocolSpec
+            )
+        case .udp:
+            var payload = try NowhereProtocol.encodeTCPRequest(
+                address: NowhereProtocol.uotMagicTarget,
+                protocolSpec: configuration.protocolSpec
+            )
+            payload.append(try NowhereProtocol.encodeUOTSetupTarget(destination))
+            return payload
         }
     }
 

@@ -47,7 +47,13 @@ extension ProxyClient {
         }
 
         if net == .tcp {
-            guard command == .tcp else {
+            let mode: NowhereTCPRelayMode
+            switch command {
+            case .tcp:
+                mode = .tcp
+            case .udp:
+                mode = .udp
+            default:
                 completion(.failure(ProxyError.dropped))
                 return
             }
@@ -57,6 +63,7 @@ extension ProxyClient {
                     configuration: nwConfig,
                     connectHost: directDialHost,
                     destination: destination,
+                    mode: mode,
                     completion: completion
                 )
                 return
@@ -68,12 +75,17 @@ extension ProxyClient {
                 tunnel: tunnel
             )
             tunnel = nil
-            connection.openFresh(destination: destination) { error in
+            connection.openFresh(destination: destination, mode: mode) { error in
                 if let error {
                     connection.cancel()
                     completion(.failure(error))
                 } else {
-                    completion(.success(connection))
+                    switch mode {
+                    case .tcp:
+                        completion(.success(connection))
+                    case .udp:
+                        completion(.success(NowhereTCPUDPConnection(inner: connection)))
+                    }
                 }
             }
             return

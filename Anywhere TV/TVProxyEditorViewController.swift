@@ -80,7 +80,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var nowhereKey = ""
     private var nowhereSpec = ""
     private var nowhereNetwork: NowhereNetwork = .udp
-    private var nowherePoolEnabled = false
+    private var nowherePoolEnabled = true
     private var nowherePoolValue = NowherePool.enabledDefault
     private var nowhereSNI = ""
     private var nowhereALPN = ""
@@ -309,10 +309,10 @@ class TVProxyEditorViewController: UITableViewController {
                 ),
             ]
             if nowhereNetwork == .tcp {
-                transportRows.append(.toggle(label: String(localized: "Boost"), isOn: nowherePoolEnabled, key: .nowherePoolEnabled, systemImage: "speedometer"))
+                transportRows.append(.toggle(label: String(localized: "Preconnect"), isOn: nowherePoolEnabled, key: .nowherePoolEnabled, systemImage: "link.badge.plus"))
                 if nowherePoolEnabled {
                     transportRows.append(.selection(
-                        label: String(localized: "Boost"),
+                        label: String(localized: "Connections"),
                         value: String(nowherePoolValue),
                         options: NowherePool.sliderRange.map { (String($0), String($0)) },
                         key: .nowherePool
@@ -924,7 +924,7 @@ class TVProxyEditorViewController: UITableViewController {
             nowhereKey = key
             nowhereSpec = spec ?? ""
             nowhereNetwork = net
-            nowherePoolEnabled = pool > 0
+            nowherePoolEnabled = net == .tcp ? pool > 0 : true
             nowherePoolValue = pool > 0 ? pool : NowherePool.enabledDefault
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
@@ -1132,7 +1132,7 @@ class TVProxyEditorViewController: UITableViewController {
             )
         case .nowhere:
             let spec = nowhereSpec.isEmpty ? nil : nowhereSpec
-            let pool = nowherePoolEnabled
+            let pool = nowhereNetwork == .tcp && nowherePoolEnabled
                 ? min(
                     NowherePool.sliderRange.upperBound,
                     max(NowherePool.sliderRange.lowerBound, nowherePoolValue)

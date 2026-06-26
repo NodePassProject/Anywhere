@@ -134,7 +134,10 @@ extension ProxyConfiguration {
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var parameters: [String] = ["net=\(net.rawValue)", "pool=\(pool)"]
+        var parameters: [String] = ["net=\(net.rawValue)"]
+        if net == .tcp {
+            parameters.append("pool=\(pool)")
+        }
         if let spec, !spec.isEmpty {
             parameters.append("spec=\(encodedQueryValue(spec))")
         }
@@ -143,9 +146,6 @@ extension ProxyConfiguration {
         }
         if let alpn = tls.alpn?.first, !alpn.isEmpty {
             parameters.append("alpn=\(encodedQueryValue(alpn))")
-        }
-        if let ech = tls.echQueryValue {
-            parameters.append("ech=\(ech)")
         }
         let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
