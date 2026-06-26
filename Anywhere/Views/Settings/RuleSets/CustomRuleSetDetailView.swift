@@ -22,6 +22,7 @@ struct CustomRuleSetDetailView: View {
     @State private var renameText = ""
 
     @State private var isUpdating = false
+    @State private var updateSucceeded = false
     @State private var updateError: String?
 
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
@@ -145,7 +146,8 @@ struct CustomRuleSetDetailView: View {
                 refresh()
             } label: {
                 HStack {
-                    Label("Update", systemImage: "arrow.clockwise")
+                    Label("Update", systemImage: updateSucceeded ? "checkmark" : "arrow.clockwise")
+                        .contentTransition(.symbolEffect(.replace))
                     if isUpdating {
                         Spacer()
                         ProgressView()
@@ -159,11 +161,15 @@ struct CustomRuleSetDetailView: View {
     private func refresh() {
         isUpdating = true
         Task {
-            defer { isUpdating = false }
             do {
                 try await ruleSetStore.refreshCustomRuleSet(customRuleSetId)
                 loadInitial()
+                isUpdating = false
+                updateSucceeded = true
+                try? await Task.sleep(for: .seconds(2))
+                updateSucceeded = false
             } catch {
+                isUpdating = false
                 updateError = error.localizedDescription
             }
         }

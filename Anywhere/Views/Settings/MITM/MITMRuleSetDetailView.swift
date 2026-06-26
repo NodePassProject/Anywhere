@@ -31,6 +31,7 @@ struct MITMRuleSetDetailView: View {
     @State private var validationError: String?
 
     @State private var isUpdating = false
+    @State private var updateSucceeded = false
     @State private var updateError: String?
 
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
@@ -206,7 +207,8 @@ struct MITMRuleSetDetailView: View {
                 refresh()
             } label: {
                 HStack {
-                    Label("Update", systemImage: "arrow.clockwise")
+                    Label("Update", systemImage: updateSucceeded ? "checkmark" : "arrow.clockwise")
+                        .contentTransition(.symbolEffect(.replace))
                     if isUpdating {
                         Spacer()
                         ProgressView()
@@ -221,11 +223,15 @@ struct MITMRuleSetDetailView: View {
         guard let id = ruleSet?.id else { return }
         isUpdating = true
         Task {
-            defer { isUpdating = false }
             do {
                 let updated = try await store.refreshRuleSet(id: id)
                 loadState(from: updated)
+                isUpdating = false
+                updateSucceeded = true
+                try? await Task.sleep(for: .seconds(2))
+                updateSucceeded = false
             } catch {
+                isUpdating = false
                 updateError = error.localizedDescription
             }
         }
