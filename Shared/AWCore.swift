@@ -13,23 +13,23 @@ nonisolated final class AWCore {
     // MARK: - Identifiers
 
     enum Identifier {
-        static let bundle = "com.argsment.Anywhere"
         static let appGroupSuite = "group.\(bundle)"
-        static let iCloudContainer = "iCloud.\(bundle)"
+        static let bundle = "com.argsment.Anywhere"
         static let errorDomain = bundle
-        static let pathMonitorQueue = "\(bundle).path-monitor"
+        static let iCloudContainer = "iCloud.\(bundle)"
         static let lwipQueue = "\(bundle).lwip"
         static let mitmScriptQueue = "\(bundle).mitm-script"
-        static let udpQueue = "\(bundle).udp"
+        static let mitmCertMintQueue = "\(bundle).mitm-cert-mint"
         static let outputQueue = "\(bundle).output"
-
-        // MARK: Proxy socket & protocol queue labels
-        //
-        // Per-socket/per-session queues deliberately share one label per role.
-
+        static let pathMonitorQueue = "\(bundle).path-monitor"
+        static let quicQueue = "\(bundle).quic"
+        static let udpQueue = "\(bundle).udp"
+        
+        // MARK: Socket queue labels
         static let rawTCPSocketQueue = "\(bundle).raw-tcp-socket"
         static let rawUDPSocketQueue = "\(bundle).raw-udp-socket"
-        static let quicQueue = "\(bundle).quic"
+
+        // MARK: Protocol queue labels
         static let http11Queue = "\(bundle).http11"
         static let http2SessionQueue = "\(bundle).http2-session"
         static let http3PoolCleanupQueue = "\(bundle).http3-pool-cleanup"
