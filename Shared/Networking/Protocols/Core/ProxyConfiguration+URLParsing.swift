@@ -154,7 +154,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parses `nowhere://<key>@host:port?net=udp|tcp&spec=...&sni=...&alpn=...#name`.
+    /// Parses `nowhere://<key>@host:port?net=udp|tcp&spec=...&sni=...&alpn=...&pool=0..9#name`.
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let body = try splitLinkBody(url, scheme: "nowhere://", label: "Nowhere")
         let parameters = body.parameters
@@ -174,10 +174,13 @@ extension ProxyConfiguration {
         } else {
             throw ProxyError.invalidURL("Invalid Nowhere net value")
         }
+        if network == .udp, parameters["pool"] != nil {
+            throw ProxyError.invalidURL("Nowhere pool is only valid with net=tcp")
+        }
         let rawPool = parameters["pool"] ?? ""
         let pool: Int
         if rawPool.isEmpty {
-            pool = 0
+            pool = network == .tcp ? NowherePool.enabledDefault : 0
         } else if let parsed = Int(rawPool), NowherePool.validRange.contains(parsed) {
             pool = parsed
         } else {

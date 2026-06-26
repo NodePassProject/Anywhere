@@ -78,7 +78,7 @@ struct ProxyEditorView: View {
     @State private var nowhereKey = ""
     @State private var nowhereSpec = ""
     @State private var nowhereNetwork: NowhereNetwork = .udp
-    @State private var nowherePoolEnabled = false
+    @State private var nowherePoolEnabled = true
     @State private var nowherePoolSliderValue = Double(NowherePool.enabledDefault)
     @State private var nowhereSNI = ""
     @State private var nowhereALPN = ""
@@ -642,23 +642,23 @@ struct ProxyEditorView: View {
                     Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
                     Text(verbatim: "UDP").tag(NowhereNetwork.udp)
                 } label: {
-                    TextWithColorfulIcon(title: "Network", comment: nil, systemName: "globe", foregroundColor: .white, backgroundColor: .indigo)
+                    TextWithColorfulIcon(title: "Network", comment: nil, systemName: "globe", foregroundColor: .white, backgroundColor: .blue)
                 }
                 if nowhereNetwork == .tcp {
                     Toggle(isOn: $nowherePoolEnabled) {
-                        TextWithColorfulIcon(title: "Boost", comment: nil, systemName: "speedometer", foregroundColor: .white, backgroundColor: .orange)
+                        TextWithColorfulIcon(title: "Preconnect", comment: nil, systemName: "link.badge.plus", foregroundColor: .white, backgroundColor: .orange)
                     }
                     if nowherePoolEnabled {
                         Slider(
                             value: $nowherePoolSliderValue,
                             in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
                         ) {
-                            EmptyView()
+                            Text("Connections")
                         } minimumValueLabel: {
-                            Image(systemName: "gauge.with.dots.needle.0percent")
+                            Image(systemName: "dial.low")
                                 .foregroundStyle(.secondary)
                         } maximumValueLabel: {
-                            Image(systemName: "gauge.with.dots.needle.100percent")
+                            Image(systemName: "dial.high")
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -1133,7 +1133,7 @@ struct ProxyEditorView: View {
             nowhereKey = key
             nowhereSpec = spec ?? ""
             nowhereNetwork = net
-            nowherePoolEnabled = pool > 0
+            nowherePoolEnabled = net == .tcp ? pool > 0 : true
             nowherePoolSliderValue = Double(pool > 0 ? pool : NowherePool.enabledDefault)
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
@@ -1357,7 +1357,7 @@ struct ProxyEditorView: View {
             )
         case .nowhere:
             let spec = nowhereSpec.isEmpty ? nil : nowhereSpec
-            let pool = nowherePoolEnabled
+            let pool = nowhereNetwork == .tcp && nowherePoolEnabled
                 ? min(
                     NowherePool.sliderRange.upperBound,
                     max(NowherePool.sliderRange.lowerBound, Int(nowherePoolSliderValue.rounded()))

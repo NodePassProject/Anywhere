@@ -149,13 +149,6 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        if configuration.outboundProtocol == .nowhere,
-           configuration.nowhereNetwork == .tcp,
-           command == .udp {
-            completion(.failure(ProxyError.dropped))
-            return
-        }
-
         guard let chain = configuration.chain, !chain.isEmpty, tunnel == nil else {
             connectWithCommand(
                 command: command,
