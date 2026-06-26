@@ -88,31 +88,31 @@ struct ProxiesPageView: View {
             }
             
             if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 {
-                if #available(iOS 27.0, *) {
-                    ToolbarItemGroup {
-                        NavigationLink {
-                            ReorderProxiesView()
-                        } label: {
-                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
-                        }
-                    }
-                    .visibilityPriority(.low)
-                } else {
-                    ToolbarItemGroup {
-                        NavigationLink {
-                            ReorderProxiesView()
-                        } label: {
-                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
-                        }
-                    }
-                }
-//                ToolbarItemGroup {
-//                    NavigationLink {
-//                        ReorderProxiesView()
-//                    } label: {
-//                        Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+//                if #available(iOS 27.0, *) {
+//                    ToolbarItemGroup {
+//                        NavigationLink {
+//                            ReorderProxiesView()
+//                        } label: {
+//                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+//                        }
+//                    }
+//                    .visibilityPriority(.low)
+//                } else {
+//                    ToolbarItemGroup {
+//                        NavigationLink {
+//                            ReorderProxiesView()
+//                        } label: {
+//                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+//                        }
 //                    }
 //                }
+                ToolbarItemGroup {
+                    NavigationLink {
+                        ReorderProxiesView()
+                    } label: {
+                        Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+                    }
+                }
             }
             
             if #available(iOS 26.0, *) {
