@@ -82,6 +82,7 @@ nonisolated final class AWCore {
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let alwaysTrustCellular = "alwaysTrustCellular"
         static let alwaysUntrustCellular = "alwaysUntrustCellular"
+        static let blockUDP = "blockUDP"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let experimentalEnabled = "experimentalEnabled"
@@ -336,6 +337,14 @@ nonisolated final class AWCore {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
     }
     
+    static func getBlockUDP() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
+    }
+
+    static func setBlockUDP(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
+    }
+
     static func getBlockWebRTC() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.blockWebRTC)
     }

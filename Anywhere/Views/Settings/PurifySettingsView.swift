@@ -13,12 +13,27 @@ struct PurifySettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         Form {
-            Picker("Block QUIC", selection: $settings.quicPolicy) {
-                ForEach(QUICPolicy.allCases, id: \.self) { policy in
-                    Text(policy.title).tag(policy)
-                }
+            Section {
+                Toggle("Block UDP", isOn: $settings.blockUDP)
             }
-            Toggle("Block WebRTC", isOn: $settings.blockWebRTC)
+            
+            Section {
+                Picker("Block QUIC", selection: $settings.quicPolicy) {
+                    ForEach(QUICPolicy.allCases, id: \.self) { policy in
+                        Text(policy.title).tag(policy)
+                    }
+                }
+                .disabled(settings.blockUDP)
+            } footer: {
+                Text("QUIC connections through proxies may cause instability and increased wait time.")
+            }
+            
+            Section {
+                Toggle("Block WebRTC", isOn: $settings.blockWebRTC)
+                    .disabled(settings.blockUDP)
+            } footer: {
+                Text("Stop your device from being a CDN node without permission.")
+            }
         }
         .navigationTitle("Purify")
     }

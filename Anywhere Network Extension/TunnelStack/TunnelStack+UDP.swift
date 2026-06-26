@@ -82,6 +82,19 @@ extension TunnelStack {
             // Non-intercepted DNS server — fall through to ordinary UDP flow
         }
 
+        // Block UDP: reject every datagram except DNS (port 53).
+        if udpConfig.blockUDP && datagram.dstPort != 53 {
+            sendICMPPortUnreachable(
+                srcIP: datagram.srcIPData,
+                srcPort: datagram.srcPort,
+                dstIP: datagram.dstIPData,
+                dstPort: datagram.dstPort,
+                isIPv6: isIPv6,
+                udpPayloadLength: payload.count
+            )
+            return
+        }
+
         // QUIC (Blocked mode): drop UDP/443 with ICMP port-unreachable so
         // HTTP/3 clients fail fast and fall back to HTTP/2. Automatic mode is
         // decided post-resolution below (needs the routing result).

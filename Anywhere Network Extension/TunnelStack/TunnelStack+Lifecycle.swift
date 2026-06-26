@@ -371,6 +371,15 @@ extension TunnelStack {
                 publishUDPConfig()
             }
 
+            // Block UDP only drives the per-datagram UDP reject; reload in
+            // place, before the change-detection guard below.
+            let blockUDP = AWCore.getBlockUDP()
+            if blockUDP != self.blockUDP {
+                logger.info("[VPN] Block UDP changed: \(self.blockUDP) -> \(blockUDP)")
+                self.blockUDP = blockUDP
+                publishUDPConfig()
+            }
+
             // Block WebRTC only drives the per-datagram STUN check; reload in
             // place, before the change-detection guard below.
             let blockWebRTC = AWCore.getBlockWebRTC()

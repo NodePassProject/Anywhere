@@ -17,9 +17,9 @@ enum QUICPolicy: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .blocked: return "Blocked"
-        case .automatic: return "Automatic"
-        case .unblocked: return "Unblocked"
+        case .blocked: return String(localized: "Blocked")
+        case .automatic: return String(localized: "Automatic")
+        case .unblocked: return String(localized: "Unblocked")
         }
     }
 

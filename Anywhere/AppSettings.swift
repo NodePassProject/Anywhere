@@ -80,6 +80,13 @@ final class AppSettings {
         }
     }
 
+    var blockUDP: Bool {
+        didSet {
+            AWCore.setBlockUDP(blockUDP)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
     var blockWebRTC: Bool {
         didSet {
             AWCore.setBlockWebRTC(blockWebRTC)
@@ -212,6 +219,7 @@ final class AppSettings {
         advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
         alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
+        blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
         hideVPNIcon = AWCore.getHideVPNIcon()
         proxyMode = AWCore.getProxyMode()

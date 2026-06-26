@@ -108,6 +108,7 @@ class TunnelStack {
     var currentNetworkIsCellular: Bool = false
     var currentSSID: String?
     var hideVPNIcon: Bool = false
+    var blockUDP: Bool = false
     var quicPolicy: QUICPolicy = .blocked
     var blockWebRTC: Bool = true
     var advertiseIPv6ToApps: Bool = false
@@ -244,15 +245,22 @@ class TunnelStack {
         let configuration: ProxyConfiguration?
         /// `configuration?.id`, precomputed to avoid a cross-queue read.
         let configurationID: UUID?
+        let blockUDP: Bool
         let quicPolicy: QUICPolicy
         let blockWebRTC: Bool
         let advertiseIPv6ToApps: Bool
         let mitmEnabled: Bool
     }
     private let udpConfigLock = UnfairLock()
-    private var _udpConfig = UDPConfig(configuration: nil, configurationID: nil,
-                                       quicPolicy: .blocked, blockWebRTC: true,
-                                       advertiseIPv6ToApps: false, mitmEnabled: false)
+    private var _udpConfig = UDPConfig(
+        configuration: nil,
+        configurationID: nil,
+        blockUDP: false,
+        quicPolicy: .blocked,
+        blockWebRTC: true,
+        advertiseIPv6ToApps: false,
+        mitmEnabled: false
+    )
 
     /// Current UDP config snapshot; callable from any queue.
     func udpConfig() -> UDPConfig { udpConfigLock.withLock { _udpConfig } }
@@ -267,6 +275,7 @@ class TunnelStack {
         let snapshot = UDPConfig(
             configuration: configuration,
             configurationID: configuration?.id,
+            blockUDP: blockUDP,
             quicPolicy: quicPolicy,
             blockWebRTC: blockWebRTC,
             advertiseIPv6ToApps: advertiseIPv6ToApps,
@@ -403,6 +412,7 @@ class TunnelStack {
         loadIPv6Settings()
         loadBypassCountry()
         loadHideVPNIconSetting()
+        loadBlockUDPSetting()
         loadQUICPolicySetting()
         loadBlockWebRTCSetting()
         loadReflectionSetting()
@@ -466,6 +476,10 @@ class TunnelStack {
 
     private func loadHideVPNIconSetting() {
         hideVPNIcon = AWCore.getHideVPNIcon()
+    }
+    
+    private func loadBlockUDPSetting() {
+        blockUDP = AWCore.getBlockUDP()
     }
 
     private func loadQUICPolicySetting() {
