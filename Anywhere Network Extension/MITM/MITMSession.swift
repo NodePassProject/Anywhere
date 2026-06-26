@@ -500,26 +500,36 @@ final class MITMSession {
     // MARK: - Inner Handshake
 
     private func startInnerHandshake(sni: String, alpns: [String], tlsVersions: Set<UInt16>) {
-        // Never reached for a plaintext session, so the cache is always present.
         guard let leafCache else { cancel(error: nil); return }
-        do {
-            let leaf = try leafCache.leaf(for: sni)
-            let server = TLSServer(
-                leafCert: leaf.certificate,
-                leafCertDER: leaf.certificateDER,
-                leafPrivateKey: leaf.privateKeySecKey,
-                leafSigningKeyP256: leaf.privateKey,
-                acceptableALPNs: alpns,
-                acceptableTLSVersions: tlsVersions
-            )
-            server.delegate = self
-            tlsServer = server
-
-            server.feed(pendingClientBytes)
-            pendingClientBytes.removeAll(keepingCapacity: false)
-        } catch {
-            cancel(error: error)
+        leafCache.leaf(for: sni) { [weak self] result in
+            guard let self else { return }
+            self.lwipQueue.async {
+                guard !self.torn else { return }
+                switch result {
+                case .success(let leaf):
+                    self.beginInnerHandshake(with: leaf, alpns: alpns, tlsVersions: tlsVersions)
+                case .failure(let error):
+                    self.cancel(error: error)
+                }
+            }
         }
+    }
+
+    /// Builds the inner TLS server from a minted leaf and feeds the buffered ClientHello.
+    private func beginInnerHandshake(with leaf: MITMLeafCertCache.Leaf, alpns: [String], tlsVersions: Set<UInt16>) {
+        let server = TLSServer(
+            leafCert: leaf.certificate,
+            leafCertDER: leaf.certificateDER,
+            leafPrivateKey: leaf.privateKeySecKey,
+            leafSigningKeyP256: leaf.privateKey,
+            acceptableALPNs: alpns,
+            acceptableTLSVersions: tlsVersions
+        )
+        server.delegate = self
+        tlsServer = server
+
+        server.feed(pendingClientBytes)
+        pendingClientBytes.removeAll(keepingCapacity: false)
     }
 
     /// Picks ALPN and TLS versions from the client's offer (h2 / http/1.1, intersected).

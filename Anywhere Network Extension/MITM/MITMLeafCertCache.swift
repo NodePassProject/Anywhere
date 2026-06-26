@@ -32,6 +32,13 @@ final class MITMLeafCertCache {
     private static let maxEntries = 256
     private static let validity: TimeInterval = 7 * 24 * 60 * 60
     private static let refreshThreshold: TimeInterval = 24 * 60 * 60
+    
+    private static let mintQueue = DispatchQueue(
+        label: AWCore.Identifier.mitmCertMintQueue,
+        qos: .userInitiated,
+        attributes: .concurrent,
+        autoreleaseFrequency: .workItem
+    )
 
     private let lock = NSLock()
     private var entries: [String: CacheEntry] = [:]
@@ -48,34 +55,39 @@ final class MITMLeafCertCache {
         self.leafPrivateKeySecKey = try Self.importSoftwareP256(key)
     }
 
-    func leaf(for hostname: String) throws -> Leaf {
+    /// Resolves a leaf for `hostname`, minting one if the cache misses.
+    func leaf(for hostname: String, completion: @escaping (Result<Leaf, Error>) -> Void) {
         let normalized = hostname.lowercased()
-        lock.lock()
-        if let entry = entries[normalized],
-           entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold {
-            entries[normalized]?.lastAccess = Date()
-            let leaf = entry.leaf
-            lock.unlock()
-            return leaf
+        if let cached = cachedLeaf(for: normalized) {
+            completion(.success(cached))
+            return
         }
+        Self.mintQueue.async { [self] in
+            completion(Result { try mintAndStore(for: normalized) })
+        }
+    }
+
+    // MARK: - Internals
+
+    private func cachedLeaf(for normalized: String) -> Leaf? {
+        lock.lock()
+        guard let entry = entries[normalized],
+              entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold else {
+            return nil
+        }
+        entries[normalized]?.lastAccess = Date()
         lock.unlock()
+        return entry.leaf
+    }
 
-        // Mint outside the lock; no single-flight — racing mints both produce valid leaves,
-        // and blocking a waiter on the serial lwIP queue would deadlock.
+    private func mintAndStore(for normalized: String) throws -> Leaf {
         let leaf = try mintLeaf(for: normalized)
-
         lock.lock()
         entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
         evictIfNeededUnlocked()
         lock.unlock()
-
         return leaf
     }
-
-    // Intentionally no reset(): a naive clear races the lock-free mint path and could
-    // repopulate with a pre-rotation leaf; CA rotation would need a generation token.
-
-    // MARK: - Internals
 
     private func mintLeaf(for hostname: String) throws -> Leaf {
         guard let (caKey, caCertDER) = store.loadCA() else {
