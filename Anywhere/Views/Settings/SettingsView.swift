@@ -286,7 +286,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var voyagerRow: some View {
         HStack {
-            TextWithColorfulIcon(title: "Anywhere Voyager", comment: nil, systemName: "sparkles.2", foregroundColor: .white, backgroundColor: Color(hex: 0x5060F0))
+            TextWithColorfulIcon(title: "Anywhere Voyager", comment: nil, systemName: "sparkles", foregroundColor: .white, backgroundColor: Color(hex: 0x5060F0))
             Spacer()
             HStack {
                 if voyagerStore.isMember {
