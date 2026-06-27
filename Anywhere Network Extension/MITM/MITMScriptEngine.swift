@@ -110,8 +110,9 @@ final class MITMScriptEngine {
             self.completion = nil
         }
     }
-
-    private let context: JSContext
+    
+    private var context: JSContext
+    
     /// Compiled `process(ctx)` functions keyed by source hash; `byteCount` is a hash-collision guard.
     private struct CompiledEntry {
         let byteCount: Int
@@ -156,8 +157,13 @@ final class MITMScriptEngine {
 
     init() {
         self.context = JSContext(virtualMachine: Self.sharedVM)
+        configureContext()
+    }
+
+    /// Wires the exception handler and installs the `Anywhere` globals onto the current `context`.
+    private func configureContext() {
         // Reinstate JSC's default write to context.exception or downstream checks never fire.
-        self.context.exceptionHandler = { [weak self] context, exception in
+        context.exceptionHandler = { [weak self] context, exception in
             defer { context?.exception = exception }
             if let self, self.isFormattingException {
                 logger.warning("[MITM][JS] uncaught (nested throw while formatting exception)")
@@ -410,6 +416,20 @@ final class MITMScriptEngine {
         defer { invocationLock.unlock() }
         let stale = compiled.keys.filter { !keep.contains($0) }
         for key in stale { compiled.removeValue(forKey: key) }
+    }
+
+    /// Reload reset. Script-queue only.
+    fileprivate func resetOnReload(keepingCompiled keep: Set<Int>) {
+        invocationLock.lock()
+        defer { invocationLock.unlock() }
+        guard currentInvocation == nil, liveInvocations.isEmpty else {
+            let stale = compiled.keys.filter { !keep.contains($0) }
+            for key in stale { compiled.removeValue(forKey: key) }
+            return
+        }
+        compiled.removeAll()
+        context = JSContext(virtualMachine: Self.sharedVM)
+        configureContext()
     }
 
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
@@ -2091,11 +2111,28 @@ extension MITMScriptEngine {
             return engine
         }
     }
-
-    /// Drops engines for removed rule sets; state survives an edit (the id is stable) and clears only on removal.
+    
     static func purgeEngines(activeIDs: Set<UUID>) {
-        registryLock.withLock {
+        let dropped: [MITMScriptEngine] = registryLock.withLock {
+            let removed = engines.filter { !activeIDs.contains($0.key) }.map { $0.value }
             engines = engines.filter { activeIDs.contains($0.key) }
+            return removed
+        }
+        guard !dropped.isEmpty else { return }
+        // Hold the dropped engines until the queue drains them so their final release lands on the
+        // VM-owning queue.
+        MITMScriptTransform.scriptQueue.async { withExtendedLifetime(dropped) {} }
+    }
+
+    /// Reload reset for the engines that survive ``purgeEngines``.
+    static func resetCachesOnReload(keepByScope: [UUID: Set<Int>]) {
+        MITMScriptTransform.scriptQueue.async {
+            let snapshot: [(engine: MITMScriptEngine, keep: Set<Int>)] = registryLock.withLock {
+                engines.map { (engine: $0.value, keep: keepByScope[$0.key] ?? []) }
+            }
+            for item in snapshot {
+                item.engine.resetOnReload(keepingCompiled: item.keep)
+            }
         }
     }
 

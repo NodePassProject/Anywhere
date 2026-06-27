@@ -22,8 +22,9 @@ enum MITMScriptTransform {
     /// Compiles every script rule on scriptQueue at (re)configuration time so cold-start cost doesn't
     /// land on the first intercepted flow. One async dispatch per scope so real calls can interleave.
     static func prewarm(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
+        // scope → its deduped script/streamScript sources (the same source on multiple rules compiles once).
+        var scriptsByScope: [UUID: [(source: String, sourceKey: Int)]] = [:]
         for entry in scopedRules {
-            // Dedupe by cache key: the same source on multiple rules compiles once.
             var seen = Set<Int>()
             let scripts: [(source: String, sourceKey: Int)] = entry.rules.compactMap { rule in
                 switch rule.operation {
@@ -33,15 +34,18 @@ enum MITMScriptTransform {
                     return nil
                 }
             }
-            guard !scripts.isEmpty else { continue }
-            let scope = entry.scope
+            if !scripts.isEmpty { scriptsByScope[entry.scope] = scripts }
+        }
+        // Reset every surviving engine first.
+        let keepByScope = scriptsByScope.mapValues { Set($0.map { $0.sourceKey }) }
+        MITMScriptEngine.resetCachesOnReload(keepByScope: keepByScope)
+        // Precompile per scope.
+        for (scope, scripts) in scriptsByScope {
             scriptQueue.async {
                 let engine = MITMScriptEngine.sharedEngine(forScope: scope)
                 for script in scripts {
                     engine.precompile(source: script.source, sourceKey: script.sourceKey)
                 }
-                // An in-place script edit produces a new content-hash key; drop the stale compilation.
-                engine.pruneCompiled(keeping: Set(scripts.map { $0.sourceKey }))
             }
         }
     }
