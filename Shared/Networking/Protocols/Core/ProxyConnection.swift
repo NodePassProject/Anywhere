@@ -48,9 +48,7 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
 
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         statsLock.withLock { _bytesSent &+= Int64(data.count) }
-        let span = PerformanceMonitor.span(.proxySend)
         sendRaw(data: data) { error in
-            span.stop()
             completion(error)
         }
     }
@@ -71,9 +69,7 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
     // MARK: Receive
 
     func receive(completion: @escaping (Data?, Error?) -> Void) {
-        let span = PerformanceMonitor.span(.proxyReceive)
         receiveRaw { [weak self] data, error in
-            span.stop()
             if let self, let data, !data.isEmpty {
                 self.statsLock.withLock { self._bytesReceived &+= Int64(data.count) }
             }

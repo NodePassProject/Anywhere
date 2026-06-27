@@ -16,8 +16,6 @@ class DomainRouter {
     // Cross-source priority is tier query order (User > ADBlock > Built-in > Country
     // Bypass); within a tier, suffix beats keyword and deepest/longest match wins.
 
-    // MARK: - Action interning (see fileprivate `ActionTable` below)
-
     // MARK: - Keyword automaton
 
     /// Aho–Corasick automaton for `domainKeyword`: longest substring match in one
@@ -484,13 +482,10 @@ class DomainRouter {
     /// Matches a domain by walking tiers in priority order. First hit wins.
     func matchDomain(_ domain: String) -> RouteTarget? {
         guard !domain.isEmpty else { return nil }
-        // Lowercase once and share the UTF-8 bytes across tiers; timed outside
-        // routingLock so the monitor lock stays a leaf.
-        return PerformanceMonitor.measure(.routingDomain) {
-            var lowered = Self.asciiLowercasedIfNeeded(domain)
-            return routingLock.withLock {
-                lowered.withUTF8 { matchDomainBytes($0) }
-            }
+        // Lowercase once and share the UTF-8 bytes across tiers.
+        var lowered = Self.asciiLowercasedIfNeeded(domain)
+        return routingLock.withLock {
+            lowered.withUTF8 { matchDomainBytes($0) }
         }
     }
 
@@ -506,27 +501,24 @@ class DomainRouter {
     func matchIP(_ ip: String) -> RouteTarget? {
         guard !ip.isEmpty else { return nil }
 
-        // Timed outside routingLock so the monitor lock stays a leaf.
-        return PerformanceMonitor.measure(.routingIP) {
-            routingLock.withLock { () -> RouteTarget? in
-                if ip.contains(":") {
-                    var address = in6_addr()
-                    guard inet_pton(AF_INET6, ip, &address) == 1 else { return nil }
-                    // Pack to a 128-bit pair once; reuse across tiers.
-                    let (hi, lo) = withUnsafeBytes(of: &address) { raw -> (UInt64, UInt64) in
-                        CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
-                    }
-                    for i in tiers.indices {
-                        if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
-                    }
-                    return nil
-                } else {
-                    guard let ipv4Address = Self.parseIPv4(ip) else { return nil }
-                    for i in tiers.indices {
-                        if let action = tiers[i].lookupIPv4(ipv4Address) { return action }
-                    }
-                    return nil
+        return routingLock.withLock { () -> RouteTarget? in
+            if ip.contains(":") {
+                var address = in6_addr()
+                guard inet_pton(AF_INET6, ip, &address) == 1 else { return nil }
+                // Pack to a 128-bit pair once; reuse across tiers.
+                let (hi, lo) = withUnsafeBytes(of: &address) { raw -> (UInt64, UInt64) in
+                    CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
                 }
+                for i in tiers.indices {
+                    if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
+                }
+                return nil
+            } else {
+                guard let ipv4Address = Self.parseIPv4(ip) else { return nil }
+                for i in tiers.indices {
+                    if let action = tiers[i].lookupIPv4(ipv4Address) { return action }
+                }
+                return nil
             }
         }
     }

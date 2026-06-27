@@ -152,9 +152,7 @@ nonisolated final class QUICSocket {
         guard socketFD >= 0 else { return }
         while true {
             let bytesRead = receiveBuffer.withUnsafeMutableBufferPointer { buffer -> Int in
-                PerformanceMonitor.measure(.socketReceiveQUIC) {
-                    Darwin.recv(socketFD, buffer.baseAddress, buffer.count, 0)
-                }
+                Darwin.recv(socketFD, buffer.baseAddress, buffer.count, 0)
             }
             if bytesRead < 0 {
                 let error = errno
@@ -184,9 +182,7 @@ nonisolated final class QUICSocket {
     func send(_ bytes: UnsafePointer<UInt8>, length: Int) {
         guard socketFD >= 0, length > 0 else { return }
         while true {
-            let n = PerformanceMonitor.measure(.socketSendQUIC) {
-                Darwin.send(socketFD, bytes, length, 0)
-            }
+            let n = Darwin.send(socketFD, bytes, length, 0)
             if n >= 0 { return }
             if errno == EINTR { continue }
             return

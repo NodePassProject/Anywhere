@@ -84,13 +84,6 @@
             ReferencedContainer = "container:Anywhere.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
-      <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "ANYWHERE_PERF"
-            value = "all"
-            isEnabled = "NO">
-         </EnvironmentVariable>
-      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Debug"
@@ -105,13 +98,6 @@
          BundleIdentifier = "com.argsment.Anywhere"
          RemotePath = "/var/containers/Bundle/Application/42B10ED2-2E0D-467C-869A-89030C07D222/Anywhere.app">
       </RemoteRunnable>
-      <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "ANYWHERE_PERF"
-            value = "all"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-      </EnvironmentVariables>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

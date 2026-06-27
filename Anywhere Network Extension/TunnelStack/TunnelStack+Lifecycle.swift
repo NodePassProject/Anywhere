@@ -26,7 +26,6 @@ extension TunnelStack {
             }
             self?.appendLog(message, level: logLevel)
         }
-        PerformanceMonitor.start()
         self.packetFlow = packetFlow
         self.configuration = configuration
 
@@ -61,7 +60,6 @@ extension TunnelStack {
         }
 
         AnywhereLogger.logSink = nil
-        PerformanceMonitor.stop()
         packetFlow = nil
         configuration = nil
         TunnelStack.shared = nil

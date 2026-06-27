@@ -207,7 +207,6 @@ class UDPFlow {
     private func bufferPayload(data: Data, payloadLength: Int) {
         // Bound the buffer against a stalled connect; dropping is fine since UDP is lossy.
         if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
-            PerformanceMonitor.event(.udpBufferOverflow)
             if !didWarnPendingOverflow {
                 didWarnPendingOverflow = true
                 logger.warning("[UDP] Pending buffer overflow for \(flowKey); dropping datagrams until proxy connects")
@@ -216,7 +215,6 @@ class UDPFlow {
         }
         pendingData.append(data.prefix(payloadLength))
         pendingBufferSize += payloadLength
-        PerformanceMonitor.gauge(.udpFlowPendingBytes, pendingBufferSize, highWater: TunnelConstants.udpMaxBufferSize)
     }
 
     // MARK: - Proxy Connection

@@ -160,7 +160,6 @@
 				Networking/ngtcp2/ngtcp2_version.c,
 				Networking/ngtcp2/ngtcp2_window_filter.c,
 				Networking/ngtcp2/shared.c,
-				Networking/PerformanceMonitor.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexer.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexerPool.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexerRegistry.swift,

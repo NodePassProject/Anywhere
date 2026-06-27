@@ -185,7 +185,7 @@ final class MITMScriptEngine {
     private func runUserScript<T>(_ label: String, _ body: () -> T) -> T {
         MITMScriptWatchdog.begin(label)
         defer { MITMScriptWatchdog.end() }
-        return PerformanceMonitor.measure(.mitmScript, body)
+        return body()
     }
 
     /// A script-set directive wins over a trailing uncaught throw; a bare throw reverts to the original.

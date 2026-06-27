@@ -188,14 +188,11 @@ nonisolated class TLSClient {
     private func releasingConnectionOnFailure(
         _ completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) -> (Result<TLSRecordConnection, Error>) -> Void {
-        let span = PerformanceMonitor.span(.tlsHandshake)
         return { [weak self] result in
             if case .failure = result {
                 self?.connection?.forceCancel()
                 self?.connection = nil
                 self?.clearHandshakeState()
-            } else {
-                span.stop()
             }
             completion(result)
         }

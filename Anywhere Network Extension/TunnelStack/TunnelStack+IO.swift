@@ -59,7 +59,6 @@ extension TunnelStack {
                 }
             }
             
-            PerformanceMonitor.gauge(.outputQueueDepth, queueDepth, highWater: TunnelConstants.tunnelMaxPacketsPerWrite * 4)
             if packets.isEmpty { return }
             packetFlow?.writePackets(packets, withProtocols: protocols)
 

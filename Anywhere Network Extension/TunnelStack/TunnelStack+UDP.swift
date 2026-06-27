@@ -39,7 +39,6 @@ extension TunnelStack {
         }
 
         if let victim {
-            PerformanceMonitor.event(.udpFlowEvicted)
             if !udpFlowCapWarned {
                 udpFlowCapWarned = true
                 logger.warning("[UDP] Flow table at capacity (\(cap)); evicting flow with least time left to bound memory")
@@ -261,7 +260,6 @@ extension TunnelStack {
         )
         evictUDPFlowsToAdmit()
         udpFlows[flowKey] = flow
-        PerformanceMonitor.gauge(.udpFlowCount, udpFlows.count, highWater: TunnelConstants.udpMaxFlows)
         flow.handleReceivedData(payload, payloadLength: payload.count)
     }
 

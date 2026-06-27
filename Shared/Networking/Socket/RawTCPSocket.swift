@@ -573,9 +573,7 @@ nonisolated class RawTCPSocket: RawTransport {
             let fd = socketFD
             let sent: Int = head.data.withUnsafeBytes { raw -> Int in
                 guard let base = raw.baseAddress else { return -1 }
-                return PerformanceMonitor.measure(.socketSendTCP) {
-                    Darwin.send(fd, base.advanced(by: head.offset), remaining, 0)
-                }
+                return Darwin.send(fd, base.advanced(by: head.offset), remaining, 0)
             }
 
             if sent > 0 {
@@ -656,9 +654,7 @@ nonisolated class RawTCPSocket: RawTransport {
         let fd = socketFD
         withUnsafeTemporaryAllocation(byteCount: Self.recvScratchSize, alignment: 1) { scratch in
             let base = scratch.baseAddress!
-            let n = PerformanceMonitor.measure(.socketReceiveTCP) {
-                Darwin.recv(fd, base, Self.recvScratchSize, 0)
-            }
+            let n = Darwin.recv(fd, base, Self.recvScratchSize, 0)
             if n > 0 {
                 let buffer = Data(bytes: base, count: n)
                 pendingReceiveCompletion = nil

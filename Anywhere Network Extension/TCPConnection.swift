@@ -175,7 +175,6 @@ class TCPConnection {
     private func appendPendingData(bytes ptr: UnsafePointer<UInt8>, count: Int) -> Bool {
         if pendingData.count + count > TunnelConstants.tcpMaxPendingDataSize {
             logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
-            PerformanceMonitor.event(.pendingDataCapAbort)
             // The warning above already covers this abort; suppress duplicates.
             failureReporter.markReported()
             abort()
@@ -279,7 +278,6 @@ class TCPConnection {
         }
 
         uploadPipeline.buffer.append(bytePtr, count: count)
-        PerformanceMonitor.gauge(.tcpUploadBacklog, uploadBufferCount)
         schedulePumpIfNeeded()
     }
 
@@ -932,7 +930,6 @@ class TCPConnection {
         guard !closed, !data.isEmpty else { return }
         TunnelStack.shared?.addBytesIn(Int64(data.count), target: routeTarget)
         pendingWrite.append(data)
-        PerformanceMonitor.gauge(.tcpDownlinkBacklog, pendingWriteCount, highWater: TunnelConstants.drainLowWaterMark)
         drainPendingWrite()
     }
 
@@ -948,7 +945,6 @@ class TCPConnection {
                 guard let base = buffer.baseAddress else { return 0 }
                 let n = feedLWIP(base + head, count: live, retryOnEmpty: true)
                 if n == -1 {
-                    PerformanceMonitor.event(.lwipWriteFatal)
                     let sndbuf = Int(lwip_bridge_tcp_sndbuf(self.pcb))
                     let queuelen = Int(lwip_bridge_tcp_snd_queuelen(self.pcb))
                     self.reportFailure(
@@ -977,7 +973,6 @@ class TCPConnection {
             } else {
                 // Nothing drained (ERR_MEM / zero window) — retry after a delay;
                 // don't rearm the receive while stalled.
-                PerformanceMonitor.event(.downlinkStallRetry)
                 lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
                     guard let self, !self.closed else { return }
                     self.drainPendingWrite()
