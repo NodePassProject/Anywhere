@@ -147,8 +147,8 @@ struct CompiledMITMRuleSet {
 
 /// Domain-suffix matching is most-specific-wins via a trie of reversed labels.
 final class MITMRewritePolicy {
-
-    private var trie = FlatLabelTrie<CompiledMITMRuleSet>()
+    private var trie = FlatLabelTrie<Int16>()
+    private var compiledSets: [CompiledMITMRuleSet] = []
     private var setCount: Int = 0
 
     /// Guards trie + setCount; reload holds it across the full rebuild so lookups never see a half-built trie.
@@ -163,7 +163,8 @@ final class MITMRewritePolicy {
 
     /// Caller must hold `lock`.
     private func resetUnlocked() {
-        trie = FlatLabelTrie<CompiledMITMRuleSet>()
+        trie = FlatLabelTrie<Int16>()
+        compiledSets = []
         setCount = 0
     }
 
@@ -212,12 +213,18 @@ final class MITMRewritePolicy {
         }
 
         for suffix in suffixes {
+            guard compiledSets.count < Int(Int16.max) else {
+                logger.warning("MITM suffix table full (\(compiledSets.count) entries)")
+                break
+            }
             let payload = CompiledMITMRuleSet(
                 id: set.id,
                 domainSuffix: suffix,
                 rules: compiledRules
             )
-            if trie.insert(suffix: suffix, payload: payload) {
+            let payloadID = Int16(compiledSets.count)
+            compiledSets.append(payload)
+            if trie.insert(suffix: suffix, payload: payloadID) {
                 setCount += 1
             } else {
                 // Later set (user-list order) wins; log so the override is never silent.
@@ -237,7 +244,10 @@ final class MITMRewritePolicy {
         var lowered = host.lowercased()
         return lock.withLock { () -> CompiledMITMRuleSet? in
             guard setCount > 0 else { return nil }
-            return lowered.withUTF8 { trie.lookup($0) }
+            guard let id = lowered.withUTF8({ trie.lookup($0) }) else { return nil }
+            let index = Int(id)
+            guard index >= 0, index < compiledSets.count else { return nil }
+            return compiledSets[index]
         }
     }
 

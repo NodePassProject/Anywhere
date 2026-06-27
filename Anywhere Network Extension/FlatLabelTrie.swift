@@ -7,8 +7,97 @@
 
 import Foundation
 
-/// freeze() flattens the scratch tree into CSR arrays so lookup never allocates;
-/// insert after freeze traps, and the frozen state is safe for concurrent reads.
+// MARK: - Succinct bitvector
+//
+// A LOUDS-encoded trie navigates by rank/select over two bitvectors rather than
+// by following stored child pointers. This is a minimal rank/select structure:
+// the rank index is one `UInt32` cumulative popcount per 64-bit word (~0.5 bits
+// of overhead per stored bit). `lookup` only needs `rank1` and `select0`; both
+// are O(log words) here (a binary search over the rank index plus an in-word
+// scan), which is more than fast enough at this scale and keeps the structure
+// tiny. Value type with COW arrays, so a frozen trie is safe for concurrent reads.
+
+fileprivate struct LOUDSBitVector {
+    private(set) var words: ContiguousArray<UInt64> = []
+    private(set) var rank: ContiguousArray<UInt32> = []      // rank[w] = #ones in words[0..<w]
+    private(set) var nbits: Int = 0
+
+    mutating func append(_ bit: Bool) {
+        let w = nbits >> 6
+        if w >= words.count { words.append(0) }
+        if bit { words[w] |= (UInt64(1) << UInt64(nbits & 63)) }
+        nbits += 1
+    }
+
+    /// Builds the cumulative-popcount index. Call once after all `append`s.
+    mutating func build() {
+        rank = ContiguousArray(repeating: 0, count: words.count + 1)
+        var acc: UInt32 = 0
+        for i in 0..<words.count {
+            rank[i] = acc
+            acc &+= UInt32(words[i].nonzeroBitCount)
+        }
+        rank[words.count] = acc
+    }
+
+    /// Number of set bits in `[0, i)`. `i` may equal `nbits`.
+    @inline(__always)
+    func rank1(_ i: Int) -> Int {
+        let w = i >> 6, rem = i & 63
+        var r = Int(rank[w])
+        if rem != 0 { r += (words[w] & ((UInt64(1) << UInt64(rem)) &- 1)).nonzeroBitCount }
+        return r
+    }
+
+    /// 0-based position of the `k`-th zero (1-based `k`). Padding bits past
+    /// `nbits` in the final word are masked off so they are never selected.
+    @inline(__always)
+    func select0(_ k: Int) -> Int {
+        var lo = 0, hi = words.count
+        while lo < hi {
+            let mid = (lo + hi) >> 1
+            let bitsUpTo = Swift.min((mid + 1) << 6, nbits)
+            if bitsUpTo - Int(rank[mid + 1]) < k { lo = mid + 1 } else { hi = mid }
+        }
+        let w = lo
+        var remaining = k - ((w << 6) - Int(rank[w]))
+        let valid = Swift.min(64, nbits - (w << 6))
+        let mask: UInt64 = valid >= 64 ? ~0 : ((UInt64(1) << UInt64(valid)) &- 1)
+        var word = (~words[w]) & mask
+        var pos = 0
+        while true {
+            pos = word.trailingZeroBitCount
+            remaining -= 1
+            if remaining == 0 { break }
+            word &= word &- 1
+        }
+        return (w << 6) + pos
+    }
+
+    var byteSize: Int { words.count * 8 + rank.count * MemoryLayout<UInt32>.stride }
+}
+
+// MARK: - FlatLabelTrie
+//
+// A reversed-label domain-suffix trie. `freeze()`/`buildBulk()` flatten the
+// scratch tree into a LOUDS succinct representation so lookup never allocates;
+// inserting after freeze traps, and the frozen state is safe for concurrent reads.
+//
+// The frozen form is a Level-Order Unary Degree Sequence (LOUDS) trie:
+//   • `louds`  — the structure. "10" for a virtual super-root, then for each
+//                node in BFS order ("1" per child) + "0". Node `i` is the
+//                `(i+1)`-th set bit; a node's children occupy a contiguous BFS-id
+//                range, so each descent is one `select0` (to find the child
+//                block) + a binary search over the children's labels.
+//   • `term`   — one bit per node: set iff the node carries a payload.
+//   • `labelBytes`/`labelOff` — each node's incoming edge label.
+//   • `payloadTable` — payloads for terminal nodes only, in terminal-rank order.
+//
+// Versus the previous CSR encoding this drops the per-node `edgeRangeStart` and
+// per-edge `edgeTarget` `Int32` arrays (child links are implicit in `louds`) and
+// the mostly-nil `[Payload?]` array (payloads are kept only at terminals),
+// roughly halving the footprint for large suffix sets while making lookups
+// faster than the old linear edge scan at high fan-out (e.g. many `*.com` rules).
 struct FlatLabelTrie<Payload> {
 
     // MARK: - Build state (dropped on freeze)
@@ -20,21 +109,21 @@ struct FlatLabelTrie<Payload> {
 
     private var buildRoot: BuildNode? = BuildNode()
 
-    // MARK: - Frozen state (populated by freeze)
+    // MARK: - Frozen state (populated by freeze / buildBulk)
 
-    /// `nodePayload[i]` is the payload at node `i`, or nil. Root is 0.
-    private var nodePayload: ContiguousArray<Payload?> = []
+    fileprivate var louds = LOUDSBitVector()
+    fileprivate var term  = LOUDSBitVector()
 
-    /// CSR edge ranges: node `i`'s edges live at `[edgeRangeStart[i], edgeRangeStart[i + 1])`.
-    /// Length is `nodeCount + 1` once frozen.
-    private var edgeRangeStart: ContiguousArray<Int32> = []
+    /// Node `i`'s incoming label is `labelBytes[labelOff[i] ..< labelOff[i + 1]]`.
+    /// `labelOff.count == nodeCount + 1`; the root (node 0) has an empty label.
+    fileprivate var labelOff: ContiguousArray<Int32> = []
+    fileprivate var labelBytes: ContiguousArray<UInt8> = []
 
-    /// Edge labels as raw UTF-8 bytes in BFS row order: edge `e`'s label is
-    /// `edgeLabelBytes[edgeLabelOffset[e] ..< edgeLabelOffset[e + 1]]`, its target
-    /// node `edgeTarget[e]`. `edgeLabelOffset.count == edgeCount + 1`.
-    private var edgeLabelOffset: ContiguousArray<Int32> = []
-    private var edgeLabelBytes: ContiguousArray<UInt8> = []
-    private var edgeTarget: ContiguousArray<Int32> = []
+    /// Payloads for terminal nodes only, in ascending node order. The payload of
+    /// terminal node `i` is `payloadTable[term.rank1(i)]`.
+    fileprivate var payloadTable: ContiguousArray<Payload> = []
+
+    fileprivate var nodeCount = 0
 
     // MARK: - State
 
@@ -58,54 +147,51 @@ struct FlatLabelTrie<Payload> {
                 node = child
             }
         }
-
         let wasNewTerminal = node.payload == nil
         node.payload = payload
         isEmpty = false
         return wasNewTerminal
     }
 
-    /// Flattens the trie. Subsequent inserts trap; repeat freezes are no-ops.
+    /// Flattens the scratch tree into the LOUDS arrays. Subsequent inserts trap;
+    /// repeat freezes are no-ops.
     mutating func freeze() {
         guard !frozen else { return }
-        guard let root = buildRoot else {
-            frozen = true
-            return
-        }
+        guard let root = buildRoot else { frozen = true; return }
 
         var queue: [BuildNode] = []
         queue.reserveCapacity(64)
         queue.append(root)
 
-        var payloads: [Payload?] = []
-        payloads.append(root.payload)
-
-        var edgeStarts: [Int32] = [0]
-        var labelOffsets: [Int32] = [0]
-        var labelBytes: [UInt8] = []
-        var targets: [Int32] = []
+        louds.append(true); louds.append(false)         // virtual super-root "10"
+        var labelOffsets: [Int32] = [0, 0]              // node 0 (root) has an empty label
+        var bytes: [UInt8] = []
+        var termFlags: [Bool] = [false]                 // the root never matches
+        var payloads: [Payload] = []
 
         var head = 0
         while head < queue.count {
             let node = queue[head]; head += 1
-            // Sort by label for a stable, cache-friendly edge order.
-            let sortedChildren = node.children.sorted { $0.key < $1.key }
+            // Byte-order child sort so the binary-search comparator always agrees,
+            // and so this path matches buildBulk's ordering for ASCII/punycode labels.
+            let sortedChildren = node.children.sorted { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }
             for (label, child) in sortedChildren {
-                let childID = Int32(queue.count)
+                louds.append(true)
                 queue.append(child)
-                payloads.append(child.payload)
-                labelBytes.append(contentsOf: label.utf8)
-                labelOffsets.append(Int32(labelBytes.count))
-                targets.append(childID)
+                bytes.append(contentsOf: label.utf8)
+                labelOffsets.append(Int32(bytes.count))
+                if let p = child.payload { termFlags.append(true); payloads.append(p) }
+                else { termFlags.append(false) }
             }
-            edgeStarts.append(Int32(targets.count))
+            louds.append(false)
         }
 
-        nodePayload = ContiguousArray(payloads)
-        edgeRangeStart = ContiguousArray(edgeStarts)
-        edgeLabelOffset = ContiguousArray(labelOffsets)
-        edgeLabelBytes = ContiguousArray(labelBytes)
-        edgeTarget = ContiguousArray(targets)
+        nodeCount = queue.count
+        for f in termFlags { term.append(f) }
+        louds.build(); term.build()
+        labelOff = ContiguousArray(labelOffsets)
+        labelBytes = ContiguousArray(bytes)
+        payloadTable = ContiguousArray(payloads)
 
         buildRoot = nil
         frozen = true
@@ -116,10 +202,10 @@ struct FlatLabelTrie<Payload> {
     /// Payload at the deepest matching node for `host` (raw UTF-8, pre-lowercased),
     /// or nil; nil before freeze(). The root's payload is intentionally never a match.
     func lookup(_ host: UnsafeBufferPointer<UInt8>) -> Payload? {
-        guard frozen, !nodePayload.isEmpty else { return nil }
+        guard frozen, nodeCount > 0 else { return nil }
 
         var deepest: Payload? = nil
-        var nodeID = 0
+        var node = 0
 
         // Split labels right-to-left in place; empty labels are skipped, matching
         // `String.split` on the build side.
@@ -129,29 +215,36 @@ struct FlatLabelTrie<Payload> {
             var start = end
             while start > 0 && host[start - 1] != dot { start -= 1 }
             let labelLen = end - start
-            if labelLen == 0 {
-                end = start - 1
-                continue
-            }
+            if labelLen == 0 { end = start - 1; continue }
 
-            let edgeLo = Int(edgeRangeStart[nodeID])
-            let edgeHi = Int(edgeRangeStart[nodeID + 1])
-            var found: Int32 = -1
-            var e = edgeLo
-            while e < edgeHi {
-                let lo = Int(edgeLabelOffset[e])
-                let hi = Int(edgeLabelOffset[e + 1])
-                if hi - lo == labelLen {
-                    var j = 0
-                    while j < labelLen && edgeLabelBytes[lo + j] == host[start + j] { j += 1 }
-                    if j == labelLen { found = edgeTarget[e]; break }
+            // Children of `node` occupy the BFS-id range [firstChildID, +childCount),
+            // delimited by node's two LOUDS zeros; they are sorted by label.
+            let z1 = louds.select0(node + 1)
+            let z2 = louds.select0(node + 2)
+            let childCount = z2 - z1 - 1
+            if childCount == 0 { return deepest }
+            let firstChildID = louds.rank1(z1 + 2) - 1
+
+            var lo = firstChildID, hi = firstChildID + childCount
+            var found = -1
+            while lo < hi {
+                let mid = (lo + hi) >> 1
+                let o = Int(labelOff[mid]); let n = Int(labelOff[mid + 1]) - o
+                let m = Swift.min(n, labelLen)
+                var k = 0; var c = 0
+                while k < m {
+                    let a = labelBytes[o + k], b = host[start + k]
+                    if a != b { c = a < b ? -1 : 1; break }
+                    k += 1
                 }
-                e += 1
+                if c == 0 { c = (n == labelLen) ? 0 : (n < labelLen ? -1 : 1) }
+                if c < 0 { lo = mid + 1 } else if c > 0 { hi = mid } else { found = mid; break }
             }
 
             if found < 0 { return deepest }
-            nodeID = Int(found)
-            if let matchedPayload = nodePayload[nodeID] { deepest = matchedPayload }
+            node = found
+            let r = term.rank1(node)
+            if term.rank1(node + 1) - r == 1 { deepest = payloadTable[r] }
 
             end = start - 1
         }
@@ -167,8 +260,8 @@ struct FlatLabelTrie<Payload> {
 // of sibling suffixes — transient scaffolding that overflowed the Network
 // Extension memory limit. It sorts entries into reversed-label order, builds a
 // compact parallel-array node arena (labels referenced by offset, not copied),
-// and flattens to the same CSR arrays. Peak memory tracks output, not input. A
-// given trie uses one path or the other; `insert`/`freeze` stay for MITM.
+// then BFS-flattens that arena into the LOUDS arrays. Peak memory tracks output,
+// not input. A given trie uses one path or the other; `insert`/`freeze` stay for MITM.
 
 extension FlatLabelTrie {
     /// `offset`/`length` delimit the suffix's lowercased UTF-8 bytes in the
@@ -261,40 +354,58 @@ extension FlatLabelTrie {
             payloads[Int(stackNode[stackNode.count - 1])] = entry.payload
         }
 
-        // Flatten the arena to CSR. Children are contiguous per parent; because
-        // entries were sorted, each parent's children are also label-sorted.
-        let nodeCount = nodeParent.count
-        var cursor = [Int32](repeating: 0, count: nodeCount)        // child count, then write cursor
-        for i in 1..<nodeCount { cursor[Int(nodeParent[i])] += 1 }
-
-        var starts = [Int32](repeating: 0, count: nodeCount + 1)
-        for n in 0..<nodeCount { starts[n + 1] = starts[n] + cursor[n] }
-        let edgeCount = Int(starts[nodeCount])
-
-        for n in 0..<nodeCount { cursor[n] = starts[n] }            // reuse as write cursor
-        var targets = [Int32](repeating: 0, count: edgeCount)
-        for i in 1..<nodeCount {
+        // Group children per parent in creation-id space. Because entries were
+        // sorted, each parent's children come out label-sorted.
+        let n = nodeParent.count
+        var cursor = [Int32](repeating: 0, count: n)        // child count, then write cursor
+        for i in 1..<n { cursor[Int(nodeParent[i])] += 1 }
+        var starts = [Int32](repeating: 0, count: n + 1)
+        for v in 0..<n { starts[v + 1] = starts[v] + cursor[v] }
+        for v in 0..<n { cursor[v] = starts[v] }
+        var targets = [Int32](repeating: 0, count: Int(starts[n]))
+        for i in 1..<n {
             let parent = Int(nodeParent[i])
             targets[Int(cursor[parent])] = Int32(i)
             cursor[parent] += 1
         }
 
-        var labelOffsets = [Int32](repeating: 0, count: edgeCount + 1)
-        var labelBytes: [UInt8] = []
-        labelBytes.reserveCapacity(edgeCount * 8)
-        for e in 0..<edgeCount {
-            let node = Int(targets[e])
-            let off = Int(nodeLabelOffset[node])
-            let length = Int(nodeLabelLength[node])
-            for k in 0..<length { labelBytes.append(base[off + k]) }
-            labelOffsets[e + 1] = Int32(labelBytes.count)
+        // BFS the creation-id tree to assign BFS ids and emit LOUDS. Children are
+        // contiguous per parent and already label-sorted, so the emitted order is
+        // BFS with label-sorted siblings — exactly what lookup's binary search needs.
+        var order: [Int32] = []                             // bfs id -> creation id
+        order.reserveCapacity(n)
+        order.append(0)
+
+        louds.append(true); louds.append(false)             // virtual super-root
+        var labelOffsets: [Int32] = [0, 0]
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(n * 7)
+        var termFlags: [Bool] = [false]
+        var payloadsOut: [Payload] = []
+
+        var head = 0
+        while head < order.count {
+            let cid = Int(order[head]); head += 1
+            let lo = Int(starts[cid]), hi = Int(starts[cid + 1])
+            for e in lo..<hi {
+                let childCid = Int(targets[e])
+                order.append(Int32(childCid))
+                louds.append(true)
+                let off = Int(nodeLabelOffset[childCid]), len = Int(nodeLabelLength[childCid])
+                for j in 0..<len { bytes.append(base[off + j]) }
+                labelOffsets.append(Int32(bytes.count))
+                if let p = payloads[childCid] { termFlags.append(true); payloadsOut.append(p) }
+                else { termFlags.append(false) }
+            }
+            louds.append(false)
         }
 
-        nodePayload = ContiguousArray(payloads)
-        edgeRangeStart = ContiguousArray(starts)
-        edgeLabelOffset = ContiguousArray(labelOffsets)
-        edgeLabelBytes = ContiguousArray(labelBytes)
-        edgeTarget = ContiguousArray(targets)
+        nodeCount = order.count
+        for f in termFlags { term.append(f) }
+        louds.build(); term.build()
+        labelOff = ContiguousArray(labelOffsets)
+        labelBytes = ContiguousArray(bytes)
+        payloadTable = ContiguousArray(payloadsOut)
     }
 
     /// Next label scanning right-to-left from `end` (exclusive) down to `low`,
