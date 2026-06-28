@@ -147,6 +147,10 @@ class TunnelStack {
     /// path update inside the debounce window.
     var pendingNetworkRecovery: DispatchWorkItem?
 
+    /// Recurring stack-lifetime tasks. Centralizes their lifecycle and reconciles them
+    /// on device wake.
+    let scheduler = TunnelScheduler()
+
     var timeoutTimer: DispatchSourceTimer?
 
     /// True while ``timeoutTimer`` is suspended. Mutated only on ``lwipQueue``
@@ -316,7 +320,6 @@ class TunnelStack {
 
     /// Active UDP flows keyed by 5-tuple. Owned by ``udpQueue``.
     var udpFlows: [UDPFlowKey: UDPFlow] = [:]
-    var udpCleanupTimer: DispatchSourceTimer?
 
     /// Rising-edge latch so a sustained flow storm logs once, not per evicted
     /// flow. Owned by ``udpQueue``.

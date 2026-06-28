@@ -209,16 +209,16 @@ extension TunnelStack {
         timeoutTimer.resume()
     }
 
-    /// Starts the 1s cleanup timer reaping UDP flows past their idle deadline.
-    /// Runs on ``udpQueue``, which owns ``udpFlows``.
-    func startUDPCleanupTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: udpQueue)
-        timer.schedule(
-            deadline: .now() + .seconds(TunnelConstants.udpCleanupIntervalSec),
-            repeating: .seconds(TunnelConstants.udpCleanupIntervalSec),
-            leeway: .milliseconds(TunnelConstants.udpCleanupLeewayMs)
-        )
-        timer.setEventHandler { [weak self] in
+    /// Registers the 1s cleanup task reaping UDP flows past their idle deadline.
+    /// Runs on ``udpQueue``, which owns ``udpFlows``; owned by ``scheduler`` so it
+    /// catches up promptly on device wake instead of drifting with the frozen clock.
+    func scheduleUDPCleanup() {
+        scheduler.schedule(
+            label: "udp-cleanup",
+            on: udpQueue,
+            every: TimeInterval(TunnelConstants.udpCleanupIntervalSec),
+            leeway: TimeInterval(TunnelConstants.udpCleanupLeewayMs) / 1000
+        ) { [weak self] in
             guard let self, self.running else { return }
             let now = MonotonicClock.now
             var keysToRemove: [UDPFlowKey] = []
@@ -236,7 +236,5 @@ extension TunnelStack {
                 self.udpFlowCapWarned = false
             }
         }
-        timer.resume()
-        udpCleanupTimer = timer
     }
 }
