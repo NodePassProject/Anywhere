@@ -439,9 +439,7 @@ final class MITMScriptEngine {
             if cached.byteCount == byteCount { return cached.function }
             logger.warning("[MITM][JS] cache-key collision: recompiling under same key")
         }
-        // IIFE: keeps `process` out of globalThis; top-level user code runs here,
-        // so a `while(true)` outside `process` hangs at compile time — watchdog covers it.
-        let wrapped = "(function(){\n\(source)\nreturn process;\n})()"
+        let wrapped = "(function(){\n\"use strict\";\n\(source)\nreturn process;\n})()"
         let value = runUserScript(source) { context.evaluateScript(wrapped) }
         if context.exception != nil {
             context.exception = nil
