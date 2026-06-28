@@ -245,10 +245,10 @@ full rather than truncated.
 
 ## Limits
 
-| Limit                          | Value   | Effect on exceed                       |
-| ------------------------------ | ------- | -------------------------------------- |
-| Rules per custom set           | 10,000  | import / subscription rejected in full |
-| Domain pattern length          | 65,535 B| pattern dropped (effectively never hit)|
+| Limit                          | Value    | Effect on exceed                       |
+| ------------------------------ | -------- | -------------------------------------- |
+| Rules per custom set           | 100,000  | import / subscription rejected in full |
+| Domain pattern length          | 65,535 B | pattern dropped (effectively never hit)|
 
 Other safety properties:
 
