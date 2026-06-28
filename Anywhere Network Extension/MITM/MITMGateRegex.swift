@@ -49,9 +49,8 @@ final class MITMGateRegex: @unchecked Sendable {
     /// Timeouts before quarantine; >1 so a scheduling stall doesn't permanently
     /// declaw a legitimate rule. Strikes are sticky.
     static let strikeLimit = 3
-
-    /// FIFO eviction cap; 256 covers a browser's working set at negligible memory.
-    private static let maxCacheEntries = 256
+    
+    private static let maxCacheEntries = 64
 
     private let lock = UnfairLock()
     private var cache: [String: Bool] = [:]
