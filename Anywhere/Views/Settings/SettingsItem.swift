@@ -21,6 +21,8 @@ enum SettingsItem: String, CaseIterable, Identifiable {
     case purify
     case reflection
     case mitm
+    case logs
+    case requests
 
     var id: String { rawValue }
 
@@ -39,6 +41,8 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .purify: "Purify"
         case .reflection: "Reflection"
         case .mitm: "MITM"
+        case .logs: "Logs"
+        case .requests: "Requests"
         }
     }
 
@@ -57,6 +61,13 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .purify: "drop.fill"
         case .reflection: "arrow.turn.up.left"
         case .mitm: "key.horizontal.fill"
+        case .logs:
+            if #available(iOS 18.4, *) {
+                "info.circle.text.page.fill"
+            } else {
+                "info"
+            }
+        case .requests: "mail.fill"
         }
     }
 
@@ -82,6 +93,8 @@ enum SettingsItem: String, CaseIterable, Identifiable {
         case .purify: .blue
         case .reflection: .pink
         case .mitm: .mint
+        case .logs: .blue
+        case .requests: .blue
         }
     }
 

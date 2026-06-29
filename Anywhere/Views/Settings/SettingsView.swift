@@ -28,6 +28,7 @@ struct SettingsView: View {
             routingSection
             securitySection
             utilitiesSection
+            diagnosisSection
             aboutSection
         }
         .navigationTitle("Settings")
@@ -98,6 +99,10 @@ struct SettingsView: View {
         settings.isVisible(.purify)
             || settings.isVisible(.reflection)
             || (settings.experimentalEnabled && settings.isVisible(.mitm))
+    }
+
+    private var showDiagnosisSection: Bool {
+        settings.isVisible(.logs) || settings.isVisible(.requests)
     }
     
     @ViewBuilder
@@ -240,6 +245,28 @@ struct SettingsView: View {
                         MITMSettingsView()
                     } label: {
                         SettingsItem.mitm.label
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var diagnosisSection: some View {
+        if showDiagnosisSection {
+            Section("Diagnostics") {
+                if settings.isVisible(.logs) {
+                    NavigationLink {
+                        LogListView()
+                    } label: {
+                        SettingsItem.logs.label
+                    }
+                }
+                if settings.isVisible(.requests) {
+                    NavigationLink {
+                        RequestsView()
+                    } label: {
+                        SettingsItem.requests.label
                     }
                 }
             }

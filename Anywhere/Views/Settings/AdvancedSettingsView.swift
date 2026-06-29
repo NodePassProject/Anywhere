@@ -48,15 +48,6 @@ struct AdvancedSettingsView: View {
                 // Remnawave is a self-hosting proxy panel
                 Toggle("Remnawave HWID", isOn: $settings.remnawaveHWIDEnabled)
             }
-
-            Section("Diagnostics") {
-                NavigationLink("Logs") {
-                    LogListView()
-                }
-                NavigationLink("Requests") {
-                    RequestsView()
-                }
-            }
         }
         .navigationTitle("Advanced Settings")
         .alert("Hide VPN Icon", isPresented: $showHideVPNIconAlert) {

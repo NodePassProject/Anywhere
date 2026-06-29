@@ -46,6 +46,11 @@ struct ControlCenterView: View {
                     row(.mitm)
                 }
             }
+
+            Section("Diagnostics") {
+                row(.logs)
+                row(.requests)
+            }
         }
         .navigationTitle("Control Center")
     }
