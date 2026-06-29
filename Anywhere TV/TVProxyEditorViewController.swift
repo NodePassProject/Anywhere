@@ -1099,7 +1099,7 @@ class TVProxyEditorViewController: UITableViewController {
             else if let vlessHTTPUpgradeConfiguration { vlessXrayTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
             else if let vlessGRPCConfiguration { vlessXrayTransportLayer = .grpc(vlessGRPCConfiguration) }
             else if let vlessXHTTPConfiguration { vlessXrayTransportLayer = .xhttp(vlessXHTTPConfiguration) }
-            else { vlessXrayTransportLayer = .tcp }
+            else { vlessXrayTransportLayer = .raw }
 
             let vlessXraySecurityLayer: XraySecurityLayer
             if let vlessRealityConfiguration { vlessXraySecurityLayer = .reality(vlessRealityConfiguration) }

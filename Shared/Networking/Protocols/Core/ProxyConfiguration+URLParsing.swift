@@ -564,17 +564,17 @@ extension ProxyConfiguration {
             if let configuration = WebSocketConfiguration.parse(from: params, serverAddress: serverAddress) {
                 return .ws(configuration)
             }
-            return .tcp
+            return .raw
         case "httpupgrade":
             if let configuration = HTTPUpgradeConfiguration.parse(from: params, serverAddress: serverAddress) {
                 return .httpUpgrade(configuration)
             }
-            return .tcp
+            return .raw
         case "grpc":
             if let configuration = GRPCConfiguration.parse(from: params) {
                 return .grpc(configuration)
             }
-            return .tcp
+            return .raw
         case "xhttp":
             let tlsServerName: String?
             if case .tls(let tls) = xraySecurityLayer { tlsServerName = tls.serverName }
@@ -585,9 +585,9 @@ extension ProxyConfiguration {
             if let configuration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName) {
                 return .xhttp(configuration)
             }
-            return .tcp
+            return .raw
         default:
-            return .tcp
+            return .raw
         }
     }
 

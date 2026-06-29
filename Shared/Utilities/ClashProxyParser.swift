@@ -202,7 +202,7 @@ struct ClashProxyParser {
         if transport == "ws" {
             xrayTransportLayer = parseWSXrayTransportLayer(from: node, server: basics.server)
         } else {
-            xrayTransportLayer = .tcp
+            xrayTransportLayer = .raw
         }
 
         return ProxyConfiguration(

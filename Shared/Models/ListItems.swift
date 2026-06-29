@@ -16,16 +16,16 @@ final class ProxyListItem: Identifiable {
     nonisolated let subscriptionId: UUID?
     var name: String
     var protocolName: String
-    var transportTag: String?   // uppercased; nil unless VLESS with a non-empty transport
-    var securityTag: String?    // uppercased; nil when "none"
+    var transportLayerTag: String?
+    var securityLayerTag: String?
     var isVision: Bool
     var isSelected: Bool
     var latency: LatencyResult?
 
     var tags: [String] {
         var result = [protocolName]
-        if let transportTag { result.append(transportTag) }
-        if let securityTag { result.append(securityTag) }
+        if let transportLayerTag { result.append(transportLayerTag) }
+        if let securityLayerTag { result.append(securityLayerTag) }
         if isVision { result.append("Vision") }
         return result
     }
@@ -35,8 +35,8 @@ final class ProxyListItem: Identifiable {
         subscriptionId = configuration.subscriptionId
         name = configuration.name
         protocolName = configuration.outboundProtocol.name
-        transportTag = configuration.displayTransportTag
-        securityTag = configuration.displaySecurityTag
+        transportLayerTag = configuration.displayTransportLayerTag
+        securityLayerTag = configuration.displaySecurityLayerTag
         isVision = configuration.hasVisionFlow
         self.isSelected = isSelected
         self.latency = latency
@@ -46,8 +46,8 @@ final class ProxyListItem: Identifiable {
     func update(_ configuration: ProxyConfiguration, isSelected: Bool, latency: LatencyResult?) {
         if name != configuration.name { name = configuration.name }
         if protocolName != configuration.outboundProtocol.name { protocolName = configuration.outboundProtocol.name }
-        if transportTag != configuration.displayTransportTag { transportTag = configuration.displayTransportTag }
-        if securityTag != configuration.displaySecurityTag { securityTag = configuration.displaySecurityTag }
+        if transportLayerTag != configuration.displayTransportLayerTag { transportLayerTag = configuration.displayTransportLayerTag }
+        if securityLayerTag != configuration.displaySecurityLayerTag { securityLayerTag = configuration.displaySecurityLayerTag }
         if isVision != configuration.hasVisionFlow { isVision = configuration.hasVisionFlow }
         if self.isSelected != isSelected { self.isSelected = isSelected }
         if self.latency != latency { self.latency = latency }

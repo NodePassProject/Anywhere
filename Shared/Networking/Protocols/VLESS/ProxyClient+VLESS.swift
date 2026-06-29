@@ -28,7 +28,7 @@ extension ProxyClient {
     /// transport; otherwise only raw TCP carrying TLS/REALITY qualifies.
     var transportSupportsVision: Bool {
         if hasVLESSEncryption { return true }
-        if case .tcp = configuration.xrayTransportLayer { return true }
+        if case .raw = configuration.xrayTransportLayer { return true }
         return false
     }
 

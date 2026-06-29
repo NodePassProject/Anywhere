@@ -22,7 +22,7 @@ enum SampleData {
 
     private static func sampleVLESS(
         flow: String? = nil,
-        transport: XrayTransportLayer = .tcp,
+        transport: XrayTransportLayer = .raw,
         security: XraySecurityLayer
     ) -> Outbound {
         .vless(

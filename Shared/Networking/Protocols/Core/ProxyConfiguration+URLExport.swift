@@ -308,7 +308,7 @@ extension ProxyConfiguration {
             if let extra = xhttp.urlExtraParam {
                 params.append("extra=\(extra)")
             }
-        case .tcp:
+        case .raw:
             break
         }
     }

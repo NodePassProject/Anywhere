@@ -1324,7 +1324,7 @@ struct ProxyEditorView: View {
             else if let vlessHTTPUpgradeConfiguration { vlessXrayTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
             else if let vlessXHTTPConfiguration { vlessXrayTransportLayer = .xhttp(vlessXHTTPConfiguration) }
             else if let vlessGRPCConfiguration { vlessXrayTransportLayer = .grpc(vlessGRPCConfiguration) }
-            else { vlessXrayTransportLayer = .tcp }
+            else { vlessXrayTransportLayer = .raw }
             
             let vlessXraySecurityLayer: XraySecurityLayer
             if let vlessRealityConfiguration { vlessXraySecurityLayer = .reality(vlessRealityConfiguration) }

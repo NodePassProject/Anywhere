@@ -145,7 +145,7 @@ enum Outbound: Hashable {
 // MARK: - Xray Transport Layer Configuration
 
 enum XrayTransportLayer: Hashable {
-    case tcp
+    case raw
     case ws(WebSocketConfiguration)
     case httpUpgrade(HTTPUpgradeConfiguration)
     case grpc(GRPCConfiguration)
@@ -154,7 +154,7 @@ enum XrayTransportLayer: Hashable {
     /// Wire tag used in the flat JSON schema and `vless://` query params.
     var tag: String {
         switch self {
-        case .tcp:          "tcp"
+        case .raw:          "raw"
         case .ws:           "ws"
         case .httpUpgrade:  "httpupgrade"
         case .grpc:         "grpc"
@@ -250,21 +250,51 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         }
     }
 
-    var displayTransportTag: String? {
-        if outboundProtocol == .nowhere {
-            return nowhereNetwork.rawValue.uppercased()
+    var displayTransportLayerTag: String? {
+        let tag: String?
+        switch outboundProtocol {
+        case .hysteria:         tag = "QUIC"
+        case .nowhere:
+            switch nowhereNetwork {
+            case .tcp:          tag = nil
+            case .udp:          tag = "QUIC"
+            }
+        case .vless:
+            switch xrayTransportLayer {
+            case .raw:          tag = nil
+            case .ws:           tag = "WebSocket"
+            case .httpUpgrade:  tag = "HTTP Upgrade"
+            case .grpc:         tag = "gRPC"
+            case .xhttp:        tag = "XHTTP"
+            }
+        default:                tag = nil
         }
-        guard outboundProtocol == .vless else { return nil }
-        let tag = xrayTransportLayer.tag
-        return tag.isEmpty ? nil : tag.uppercased()
+        return tag
     }
 
-    var displaySecurityTag: String? {
-        guard outboundProtocol != .nowhere else { return nil }
-        let tag = (outboundProtocol == .vless
-            ? xraySecurityLayer.tag
-            : genericSecurityLayer.tag).uppercased()
-        return tag == "NONE" ? nil : tag
+    var displaySecurityLayerTag: String? {
+        let tag: String?
+        switch outboundProtocol {
+        case .hysteria:         tag = "TLS"
+        case .nowhere:
+            switch nowhereNetwork {
+            case .tcp:          tag = nil
+            case .udp:          tag = "TLS"
+            }
+        case .vless:
+            switch xraySecurityLayer {
+            case .none:         tag = nil
+            case .tls:          tag = "TLS"
+            case .reality:      tag = "Reality"
+            }
+        case .trojan, .anytls:
+            switch genericSecurityLayer {
+            case .none:         tag = nil
+            case .tls:          tag = "TLS"
+            }
+        default:                tag = nil
+        }
+        return tag
     }
     
     var hasVisionFlow: Bool {
@@ -276,7 +306,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
     var xrayTransportLayer: XrayTransportLayer {
         if case .vless(_, _, _, let t, _) = outbound { return t }
-        return .tcp
+        return .raw
     }
     
     var xraySecurityLayer: XraySecurityLayer {
@@ -401,23 +431,23 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
         switch proto {
         case .vless:
-            let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
+            let transportLayerString = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
             let transport: XrayTransportLayer
-            switch transportStr {
+            switch transportLayerString {
             case "ws":
-                transport = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
+                transport = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .raw
             case "httpupgrade":
-                transport = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .tcp
+                transport = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .raw
             case "grpc":
-                transport = (try container.decodeIfPresent(GRPCConfiguration.self, forKey: .grpc)).map { .grpc($0) } ?? .tcp
+                transport = (try container.decodeIfPresent(GRPCConfiguration.self, forKey: .grpc)).map { .grpc($0) } ?? .raw
             case "xhttp":
-                transport = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .tcp
+                transport = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .raw
             default:
-                transport = .tcp
+                transport = .raw
             }
-            let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
+            let securityLayerString = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
             let security: XraySecurityLayer
-            switch securityStr {
+            switch securityLayerString {
             case "tls":
                 security = (try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)).map { .tls($0) } ?? .none
             case "reality":
@@ -593,7 +623,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
             try container.encode(transport.tag, forKey: .transport)
             switch transport {
-            case .tcp: break
+            case .raw: break
             case .ws(let config): try container.encode(config, forKey: .websocket)
             case .httpUpgrade(let config): try container.encode(config, forKey: .httpUpgrade)
             case .grpc(let config): try container.encode(config, forKey: .grpc)

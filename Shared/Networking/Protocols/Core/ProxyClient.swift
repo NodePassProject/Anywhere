@@ -548,7 +548,7 @@ nonisolated class ProxyClient {
             connectWithGRPC(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .xhttp:
             connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        case .tcp:
+        case .raw:
             switch configuration.xraySecurityLayer {
             case .tls(let tlsConfig):
                 connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)

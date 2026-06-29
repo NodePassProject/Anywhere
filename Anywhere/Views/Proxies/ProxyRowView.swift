@@ -29,14 +29,18 @@ struct ProxyRowView: View {
                                 .foregroundStyle(.tint)
                         }
                     }
-                    HStack(spacing: 4) {
-                        ForEach(Array(item.tags.enumerated()), id: \.offset) { index, tag in
-                            if index > 0 { Text("·") }
-                            Text(tag)
+                    HStack(spacing: 5) {
+                        TagBadge(text: item.protocolName, color: .blue)
+                        if let transportLayerTag = item.transportLayerTag {
+                            TagBadge(text: transportLayerTag, color: .teal)
+                        }
+                        if let securityLayerTag = item.securityLayerTag {
+                            TagBadge(text: securityLayerTag, color: .orange)
+                        }
+                        if item.isVision {
+                            TagBadge(text: "Vision", color: .purple)
                         }
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 }
 
                 Spacer()
