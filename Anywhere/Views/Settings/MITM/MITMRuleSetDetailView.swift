@@ -24,6 +24,9 @@ struct MITMRuleSetDetailView: View {
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
 
     @State private var rules: [MITMRule] = []
+    
+    @State private var parameters: [MITMParameter] = []
+    @State private var parameterValues: [String: String] = [:]
 
     @State private var showAddSheet: Bool = false
     @State private var editingRule: MITMRule?
@@ -42,7 +45,6 @@ struct MITMRuleSetDetailView: View {
     }
 
     private var subscriptionURL: URL? { currentRuleSet?.subscriptionURL }
-    private var isSubscribed: Bool { subscriptionURL != nil }
 
     var body: some View {
         Form {
@@ -62,91 +64,23 @@ struct MITMRuleSetDetailView: View {
                 subscriptionSection(url: subscriptionURL)
             }
 
+            if !parameters.isEmpty {
+                parametersSection
+            }
+
             if isEditing == true || !suffixDrafts.isEmpty {
-                Section("Domain Suffixes") {
-                    ForEach($suffixDrafts) { $draft in
-                        TextField(String("anywhere.com"), text: $draft.value)
-                            .keyboardType(.URL)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .disabled(isEditing != true)
-                    }
-                    .onDelete(perform: isSubscribed ? nil : { offsets in
-                        suffixDrafts.remove(atOffsets: offsets)
-                        if isEditing != true {
-                            save()
-                        }
-                    })
-                    .onMove(perform: isSubscribed ? nil : { source, destination in
-                        suffixDrafts.move(fromOffsets: source, toOffset: destination)
-                        if isEditing != true {
-                            save()
-                        }
-                    })
-                    if isEditing == true {
-                        Button {
-                            withAnimation {
-                                suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
-                            }
-                        } label: {
-                            Label("Add", systemImage: "plus")
-                        }
-                    }
-                }
+                domainSuffixesSection
             }
 
             if isEditing == true || !rules.isEmpty {
-                Section("Rules") {
-                    ForEach(rules) { rule in
-                        VStack(alignment: .leading) {
-                            Text(rule.summaryTitle)
-                            Text(rule.summarySubtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .truncationMode(.middle)
-                                .lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            guard !isSubscribed else { return }
-                            // Scripts and native JSON-body edits are import-only.
-                            switch rule.operation {
-                            case .script, .streamScript, .bodyJSON: return
-                            default: break
-                            }
-                            editingRule = rule
-                        }
-                    }
-                    .onDelete(perform: isSubscribed ? nil : { offsets in
-                        rules.remove(atOffsets: offsets)
-                        if isEditing != true {
-                            save()
-                        }
-                    })
-                    .onMove(perform: isSubscribed ? nil : { source, destination in
-                        rules.move(fromOffsets: source, toOffset: destination)
-                        if isEditing != true {
-                            save()
-                        }
-                    })
-                    if isEditing == true {
-                        Button {
-                            showAddSheet = true
-                        } label: {
-                            Label("Add", systemImage: "plus")
-                        }
-                    }
-                }
+                rulesSection
             }
         }
         .navigationTitle(ruleSet?.name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !isSubscribed {
-                ToolbarItem {
-                    EditButton()
-                }
+            ToolbarItem {
+                EditButton()
             }
         }
         .sheet(isPresented: $showAddSheet) {
@@ -187,13 +121,14 @@ struct MITMRuleSetDetailView: View {
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-
         let result = MITMRuleSet(
             id: ruleSet?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             enabled: enabled,
             domainSuffixes: suffixes,
             rules: rules,
+            parameters: currentRuleSet?.parameters ?? parameters,
+            parameterValues: currentRuleSet?.parameterValues ?? [:],
             subscriptionURL: currentRuleSet?.subscriptionURL
         )
         store.updateRuleSet(result)
@@ -216,6 +151,148 @@ struct MITMRuleSetDetailView: View {
                 }
             }
             .disabled(isUpdating)
+        }
+    }
+
+    // MARK: - Parameters
+    
+    @ViewBuilder
+    private var parametersSection: some View {
+        ForEach(parameters) { parameter in
+            Section {
+                parameterRow(parameter)
+            } footer: {
+                if let description = parameter.description, !description.isEmpty {
+                    Text(description)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func parameterRow(_ parameter: MITMParameter) -> some View {
+        let parameterLabel = parameter.label ?? parameter.name
+        if isEditing != true {
+            HStack {
+                Text(parameterLabel)
+                Spacer()
+                Text(parameterValues[parameter.name] ?? parameter.defaultValue)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            switch parameter.type {
+            case .input:
+                HStack {
+                    Text(parameterLabel)
+                    Spacer()
+                    TextField(parameter.defaultValue, text: parameterBinding(parameter))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+            case .picker:
+                Picker(parameterLabel, selection: parameterBinding(parameter)) {
+                    ForEach(parameter.options, id: \.self) { option in
+                        Text(option).tag(option)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func parameterBinding(_ parameter: MITMParameter) -> Binding<String> {
+        Binding(
+            get: { parameterValues[parameter.name] ?? parameter.defaultValue },
+            set: { newValue in
+                parameterValues[parameter.name] = newValue
+                if let id = ruleSet?.id {
+                    store.setParameterValue(id, name: parameter.name, value: newValue)
+                }
+            }
+        )
+    }
+    
+    // MARK: - Domain Suffixes
+    
+    @ViewBuilder
+    private var domainSuffixesSection: some View {
+        Section("Domain Suffixes") {
+            ForEach($suffixDrafts) { $draft in
+                TextField(String("anywhere.com"), text: $draft.value)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .disabled(isEditing != true)
+            }
+            .onDelete { offsets in
+                suffixDrafts.remove(atOffsets: offsets)
+                if isEditing != true {
+                    save()
+                }
+            }
+            .onMove { source, destination in
+                suffixDrafts.move(fromOffsets: source, toOffset: destination)
+                if isEditing != true {
+                    save()
+                }
+            }
+            if isEditing == true {
+                Button {
+                    withAnimation {
+                        suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
+                    }
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            }
+        }
+    }
+    
+    // MARK: - Rules
+    
+    @ViewBuilder
+    private var rulesSection: some View {
+        Section("Rules") {
+            ForEach(rules) { rule in
+                VStack(alignment: .leading) {
+                    Text(rule.summaryTitle)
+                    Text(rule.summarySubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .truncationMode(.middle)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Scripts and native JSON-body edits are import-only.
+                    switch rule.operation {
+                    case .script, .streamScript, .bodyJSON: return
+                    default: break
+                    }
+                    editingRule = rule
+                }
+            }
+            .onDelete { offsets in
+                rules.remove(atOffsets: offsets)
+                if isEditing != true {
+                    save()
+                }
+            }
+            .onMove { source, destination in
+                rules.move(fromOffsets: source, toOffset: destination)
+                if isEditing != true {
+                    save()
+                }
+            }
+            if isEditing == true {
+                Button {
+                    showAddSheet = true
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            }
         }
     }
 
@@ -247,5 +324,11 @@ struct MITMRuleSetDetailView: View {
         enabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
+        parameters = ruleSet.parameters
+        parameterValues = Dictionary(
+            uniqueKeysWithValues: ruleSet.parameters.map {
+                ($0.name, $0.effectiveValue(ruleSet.parameterValues[$0.name]))
+            }
+        )
     }
 }

@@ -154,11 +154,15 @@ struct MITMSettingsView: View {
             }
             Spacer()
             if ruleSet.enabled {
-                Text("Enabled")
-                    .foregroundStyle(.secondary)
+                Image(systemName: "circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.caption)
+                    .accessibilityLabel("Enabled")
             } else {
-                Text("Disabled")
-                    .foregroundStyle(.secondary)
+                Image(systemName: "circle.fill")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .accessibilityLabel("Disabled")
             }
         }
     }
@@ -188,7 +192,8 @@ struct MITMSettingsView: View {
             let ruleSet = MITMRuleSet(
                 name: name,
                 domainSuffixes: parsed.domainSuffixes,
-                rules: parsed.rules
+                rules: parsed.rules,
+                parameters: parsed.parameters
             )
             ruleSetStore.addRuleSet(ruleSet)
         } catch {
@@ -224,6 +229,7 @@ struct MITMSettingsView: View {
                     name: name,
                     domainSuffixes: parsed.domainSuffixes,
                     rules: parsed.rules,
+                    parameters: parsed.parameters,
                     subscriptionURL: url
                 )
                 ruleSetStore.addRuleSet(ruleSet)
@@ -234,8 +240,8 @@ struct MITMSettingsView: View {
     }
     
     private var certificateStatusBadgeIcon: String {
-        if !certificateController.hasCA { return "xmark.circle.fill" }
-        return certificateController.trusted ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+        if !certificateController.hasCA { return "xmark.square.fill" }
+        return certificateController.trusted ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
     }
 
     private var certificateStatusBadgeColor: Color {
@@ -244,7 +250,10 @@ struct MITMSettingsView: View {
     }
 
     private func summary(for ruleSet: MITMRuleSet) -> String {
-        let count = ruleSet.rules.count
-        return String(localized: "\(count) rule(s)")
+        var parts = [String(localized: "\(ruleSet.rules.count) rule(s)")]
+        if !ruleSet.parameters.isEmpty {
+            parts.append(String(localized: "\(ruleSet.parameters.count) parameter(s)"))
+        }
+        return parts.joined(separator: " · ")
     }
 }

@@ -278,11 +278,15 @@ final class ImportRuleSetsModel {
                     name: name,
                     domainSuffixes: parsed.domainSuffixes,
                     rules: parsed.rules,
+                    parameters: parsed.parameters,
                     subscriptionURL: url
                 )
                 var summary = String(localized: "MITM") + " · " + String(localized: "\(parsed.rules.count) rule(s)")
                 if !parsed.domainSuffixes.isEmpty {
                     summary += " · " + String(localized: "\(parsed.domainSuffixes.count) domain(s)")
+                }
+                if !parsed.parameters.isEmpty {
+                    summary += " · " + String(localized: "\(parsed.parameters.count) parameter(s)")
                 }
                 apply(id: id) {
                     $0.status = .ready

@@ -443,8 +443,57 @@ extension MITMRewriteAction: Codable {
     }
 }
 
+struct MITMParameter: Codable, Equatable, Identifiable {
+    enum InputType: Int, Codable { case input = 0, picker = 1 }
+    enum DataType: Int, Codable { case string = 0 }
+
+    var type: InputType
+    var dataType: DataType
+    var name: String
+    var defaultValue: String
+    var options: [String]
+    var label: String?
+    var description: String?
+
+    var id: String { name }
+
+    init(
+        type: InputType,
+        dataType: DataType = .string,
+        name: String,
+        defaultValue: String,
+        options: [String] = [],
+        label: String? = nil,
+        description: String? = nil
+    ) {
+        self.type = type
+        self.dataType = dataType
+        self.name = name
+        self.defaultValue = defaultValue
+        self.options = options
+        self.label = label
+        self.description = description
+    }
+
+    /// Whether `value` is still valid: a picker's value must be a current option.
+    func accepts(_ value: String) -> Bool {
+        switch type {
+        case .picker: return options.contains(value)
+        case .input:  return true
+        }
+    }
+
+    /// The override when still valid, else the default — so a picker whose option
+    /// was removed falls back to the default everywhere it's resolved.
+    func effectiveValue(_ override: String?) -> String {
+        guard let override, accepts(override) else { return defaultValue }
+        return override
+    }
+}
+
 struct MITMRuleSet: Codable, Equatable, Identifiable {
     static let maxRuleCount = 10000
+    static let maxParameterCount = 256
 
     var id = UUID()
     var name: String
@@ -452,6 +501,10 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     var enabled: Bool
     var domainSuffixes: [String]
     var rules: [MITMRule]
+    var parameters: [MITMParameter]
+    /// User overrides keyed by name. On the NE data path this instead holds the
+    /// already-resolved values from the binary (definitions stay app-side).
+    var parameterValues: [String: String]
     /// When set, the suffixes and rules are sourced from a remote `.amrs` file
     /// and replaced on refresh; `id` and `name` are preserved.
     var subscriptionURL: URL?
@@ -463,6 +516,8 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         enabled: Bool = true,
         domainSuffixes: [String] = [],
         rules: [MITMRule] = [],
+        parameters: [MITMParameter] = [],
+        parameterValues: [String: String] = [:],
         subscriptionURL: URL? = nil
     ) {
         self.id = id
@@ -470,7 +525,14 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         self.enabled = enabled
         self.domainSuffixes = domainSuffixes
         self.rules = rules
+        self.parameters = parameters
+        self.parameterValues = parameterValues
         self.subscriptionURL = subscriptionURL
+    }
+
+    /// `name → effective value`, in definition order; the only view the data path consumes.
+    func resolvedParameters() -> [(name: String, value: String)] {
+        parameters.map { ($0.name, $0.effectiveValue(parameterValues[$0.name])) }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -480,6 +542,8 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         case domainSuffix       // legacy: single-suffix shape predating named sets
         case domainSuffixes
         case rules
+        case parameters
+        case parameterValues
         case subscriptionURL
         case deletedAt
     }
@@ -501,6 +565,8 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
+        self.parameters = (try? c.decodeIfPresent([MITMParameter].self, forKey: .parameters)) ?? []
+        self.parameterValues = (try? c.decodeIfPresent([String: String].self, forKey: .parameterValues)) ?? [:]
         self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
         self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
@@ -512,6 +578,9 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         try c.encode(enabled, forKey: .enabled)
         try c.encode(domainSuffixes, forKey: .domainSuffixes)
         try c.encode(rules, forKey: .rules)
+        // Omit when empty so paramless sets keep their existing on-disk shape.
+        if !parameters.isEmpty { try c.encode(parameters, forKey: .parameters) }
+        if !parameterValues.isEmpty { try c.encode(parameterValues, forKey: .parameterValues) }
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
         try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
@@ -602,7 +671,7 @@ struct MITMSnapshot: Codable, Equatable {
 /// UInt16 length + bytes, `str32` = UInt32 length + bytes). Layout:
 /// ```
 /// magic     "AMR1"        4 bytes
-/// version   UInt8         format version (= 1)
+/// version   UInt8         format version (= 2)
 /// enabled   UInt8         master MITM toggle (0/1)
 /// setCount  UInt32        number of (live) rule sets
 /// sets      setCount × Set
@@ -615,6 +684,8 @@ struct MITMSnapshot: Codable, Equatable {
 ///   suffixes    suffixCount × str16
 ///   ruleCount   UInt32
 ///   rules       ruleCount × Rule
+///   paramCount  UInt16     (v2+) resolved parameters; absent in v1
+///   params      paramCount × (name str16, value str16)
 ///
 /// Rule:
 ///   phase      UInt8      0 httpRequest · 1 httpResponse
@@ -622,11 +693,13 @@ struct MITMSnapshot: Codable, Equatable {
 ///   opKind     UInt8      operation discriminator (OpKind)
 ///   …operation-specific fields…
 /// ```
-/// `subscriptionURL`/`deletedAt` are intentionally omitted — they're sync-only
-/// and the data path never reads them.
+/// Only the *resolved* `name → value` map ships — the parameter definitions
+/// (type/options/default) stay app-side. `subscriptionURL`/`deletedAt` are
+/// intentionally omitted — they're sync-only and the data path never reads them.
+/// The reader accepts v1 (no parameter section) so an old payload still decodes.
 enum MITMBinaryFormat {
     static let magic: [UInt8] = [0x41, 0x4D, 0x52, 0x31]  // "AMR1"
-    static let version: UInt8 = 1
+    static let version: UInt8 = 2
 
     enum Phase: UInt8 { case httpRequest = 0, httpResponse = 1 }
 
@@ -675,6 +748,10 @@ struct MITMBinaryWriter {
         for suffix in suffixes { str16(suffix) }
         u32(UInt32(set.rules.count))
         for rule in set.rules { encodeRule(rule) }
+        // v2: resolved parameters (name → effective value).
+        let params = set.resolvedParameters().prefix(Int(UInt16.max))
+        u16(UInt16(params.count))
+        for param in params { str16(param.name); str16(param.value) }
     }
 
     private mutating func encodeRule(_ rule: MITMRule) {

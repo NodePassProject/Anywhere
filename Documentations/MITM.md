@@ -100,6 +100,7 @@ A rule set is the unit of configuration:
 | `name`           | Display name. Required, non-empty.                                      |
 | `domainSuffixes` | Hosts to intercept, matched by **suffix**. `example.com` covers `www.example.com`. No wildcards. |
 | `rules`          | Ordered list of rewrite rules. Redirect / reject / host-rewrite are per-rule via the [`rewrite` operation](#rewrite-0--request-only). |
+| `parameters`     | Optional user-editable values exposed read-only to scripts via [`Anywhere.params`](#anywhereparams). See [Parameter lines](#parameter-lines). |
 
 Suffix matching is **most-specific-win**: if both `example.com` and
 `api.example.com` are configured, a request to `api.example.com` uses only the
@@ -112,11 +113,17 @@ internally as JSON. The text format below is the authoring interface.
 
 ## The import format
 
-A rule set is a flat sequence of **header lines** and **rule lines**, in any
-order. Blank lines are ignored; lines beginning with `#` or `//` are comments.
-Parsing never hard-fails — a line that is neither a recognized header nor a
-valid rule is dropped silently, so a partially valid file still imports what it
-can.
+A rule set is a sequence of **header lines**, **rule lines**, and (optionally)
+**parameter lines**, in any order. Blank lines are ignored; lines beginning with
+`#` or `//` are comments. Parsing never hard-fails — a line that is neither a
+recognized header nor a valid rule/parameter is dropped silently, so a partially
+valid file still imports what it can.
+
+Lines belong to a **section** introduced by a bracketed header — `[Rule]` or
+`[Parameter]`. Sections are optional and a file starts in `[Rule]`, so any file
+without section headers (every rule set predating this feature) parses exactly as
+before. An unrecognized `[Section]` and its body are skipped. The `name` /
+`hostname` headers are file-level and are recognized in any section.
 
 ```
 # A complete example
@@ -204,6 +211,52 @@ query keep their case.
 For **response**-phase rules, the gate is tested against the **originating
 request's** URL (response heads carry no path), so a request and its response
 can be matched by the same URL pattern.
+
+### Parameter lines
+
+Parameters let a rule set expose a few user-editable values that its scripts read
+at runtime via [`Anywhere.params`](#anywhereparams) — a country code, a feature
+flag, an API token, and so on. Declare them under a `[Parameter]` section; the app
+renders an editor for each, and the chosen values are surfaced **read-only** to
+the set's scripts.
+
+Shape:
+
+```
+<type>, <data-type>, <name>, <label>, <description>, <default> [, "[<option>, …]"]
+```
+
+| Field           | Meaning |
+| --------------- | ------- |
+| `type`          | Editor to show: `0` = free-text input, `1` = picker (pick from a fixed list). |
+| `data-type`     | Value type: `0` = string. Reserved for future types; only string is supported today. |
+| `name`          | Lookup key for `Anywhere.params.get("<name>")`. ASCII letters, digits and `_`; unique within the set. |
+| `label`         | Human-readable label shown in the editor. Optional — falls back to `name` when empty. |
+| `description`   | Help text rendered as the editor's section footer. Optional. |
+| `default`       | Value used until the user changes it. |
+| `"[option, …]"` | A picker's allowed values, as a bracketed list. Ignored for an input. |
+
+A picker's options are the seventh field, written as a bracketed list. Because the
+list contains commas, **CSV-quote the whole field** so the commas aren't read as
+column separators: `"[US, JP, DE]"`. The same [field quoting](#fields-and-quoting)
+lets a `label`, `description`, or `default` carry a comma. A picker needs at least
+one option; a `default` that isn't already among them is added, and an empty
+`default` falls back to the first option. Duplicate names and malformed lines are
+dropped.
+
+```
+[Parameter]
+# free-text input — empty label/description, empty default
+0, 0, token, , ,
+# input with a label and a footer description
+0, 0, apiKey, API Key, Paste the key from your dashboard., 
+# picker: US / JP / DE, default US (note the quotes around the options list)
+1, 0, country, Country, Used for region-specific rewrites., US, "[US, JP, DE]"
+```
+
+User values **survive a subscription refresh**: an override is kept as long as
+its parameter still exists (and, for a picker, the value is still one of the
+options); otherwise it falls back to the new default.
 
 ---
 
@@ -668,6 +721,30 @@ async function process(ctx) {
     }
   }
   if (token) ctx.headers.push(["Authorization", "Bearer " + token]);
+}
+```
+
+### `Anywhere.params`
+
+Read-only access to the rule set's [parameters](#parameter-lines) — the
+user-editable values declared in its `[Parameter]` section, scoped to the running
+rule set. Each value is the user's choice, or the declared default.
+
+- `get(name) → string | undefined` — the value, or `undefined` if undeclared.
+- `keys() → [string]` — the declared parameter names.
+- `all() → { [name]: string }` — every `name → value` as an object.
+
+Unlike [`Anywhere.store`](#anywherestore), parameters have **no setter** — they
+are configured by the user in the app, not the script. An undeclared name reads
+back `undefined`, so pair it with a fallback:
+
+```js
+function process(ctx) {
+  // User-chosen country, or the parameter's default; fall back if undeclared.
+  const country = Anywhere.params.get("country") || "US";
+  Anywhere.log.info("country = " + country);
+  // …then use `country` to drive a body rewrite, an Anywhere.http fetch, etc.
+  return ctx;
 }
 ```
 

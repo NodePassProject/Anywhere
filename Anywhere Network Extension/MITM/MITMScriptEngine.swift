@@ -597,6 +597,7 @@ final class MITMScriptEngine {
         installJWTGlobals(on: anywhere)
         installJSONGlobals(on: anywhere)
         installStoreGlobals(on: anywhere)
+        installParamsGlobals(on: anywhere)
         installLogGlobals(on: anywhere)
         installControlGlobals(on: anywhere)
         installHTTPGlobals(on: anywhere)
@@ -1360,6 +1361,30 @@ final class MITMScriptEngine {
         store.setObject(storeDelete, forKeyedSubscript: "delete" as NSString)
         store.setObject(storeKeys, forKeyedSubscript: "keys" as NSString)
         anywhere.setObject(store, forKeyedSubscript: "store" as NSString)
+    }
+
+    /// Installs read-only `Anywhere.params` (no setter), scoped to the running rule set.
+    private func installParamsGlobals(on anywhere: JSValue) {
+        let params = JSValue(newObjectIn: context)!
+        let paramsGet: @convention(block) (String) -> JSValue = { [weak self] key in
+            let context = JSContext.current()!
+            guard let scope = self?.currentInvocation?.scope,
+                  let value = MITMParamStore.shared.get(scope: scope, key: key)
+            else { return JSValue(undefinedIn: context) }
+            return JSValue(object: value, in: context)
+        }
+        let paramsKeys: @convention(block) () -> [String] = { [weak self] in
+            guard let scope = self?.currentInvocation?.scope else { return [] }
+            return MITMParamStore.shared.keys(scope: scope)
+        }
+        let paramsAll: @convention(block) () -> [String: String] = { [weak self] in
+            guard let scope = self?.currentInvocation?.scope else { return [:] }
+            return MITMParamStore.shared.all(scope: scope)
+        }
+        params.setObject(paramsGet, forKeyedSubscript: "get" as NSString)
+        params.setObject(paramsKeys, forKeyedSubscript: "keys" as NSString)
+        params.setObject(paramsAll, forKeyedSubscript: "all" as NSString)
+        anywhere.setObject(params, forKeyedSubscript: "params" as NSString)
     }
 
     private func installLogGlobals(on anywhere: JSValue) {

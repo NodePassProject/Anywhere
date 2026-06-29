@@ -81,6 +81,22 @@ final class MITMRuleSetStore {
         save()
     }
 
+    /// Sets one parameter value (persists immediately, works for subscribed sets).
+    /// A value equal to the default clears the override, so it keeps following the default.
+    func setParameterValue(_ id: UUID, name: String, value: String) {
+        guard let index = ruleSets.firstIndex(where: { $0.id == id }),
+              let definition = ruleSets[index].parameters.first(where: { $0.name == name })
+        else { return }
+        if definition.defaultValue == value {
+            guard ruleSets[index].parameterValues[name] != nil else { return }
+            ruleSets[index].parameterValues.removeValue(forKey: name)
+        } else {
+            guard ruleSets[index].parameterValues[name] != value else { return }
+            ruleSets[index].parameterValues[name] = value
+        }
+        save()
+    }
+
     func removeRuleSets(atOffsets offsets: IndexSet) {
         recordTombstones(offsets.map { ruleSets[$0] })
         ruleSets.remove(atOffsets: offsets)
@@ -168,10 +184,32 @@ final class MITMRuleSetStore {
         guard let writeIndex = ruleSets.firstIndex(where: { $0.id == id }) else {
             throw MITMRuleSetRefreshError.ruleSetRemoved
         }
+        // Preserve user overrides across the refresh (see mergedParameterValues).
+        let previousValues = ruleSets[writeIndex].parameterValues
         ruleSets[writeIndex].domainSuffixes = parsed.domainSuffixes
         ruleSets[writeIndex].rules = parsed.rules
+        ruleSets[writeIndex].parameters = parsed.parameters
+        ruleSets[writeIndex].parameterValues = Self.mergedParameterValues(
+            definitions: parsed.parameters,
+            previousValues: previousValues
+        )
         save()
         return ruleSets[writeIndex]
+    }
+
+    /// Carries user overrides forward onto a refreshed definition set, dropping any
+    /// whose parameter vanished or whose value is no longer one of a picker's options.
+    private static func mergedParameterValues(
+        definitions: [MITMParameter],
+        previousValues: [String: String]
+    ) -> [String: String] {
+        var merged: [String: String] = [:]
+        for definition in definitions {
+            guard let value = previousValues[definition.name],
+                  definition.accepts(value) else { continue }
+            merged[definition.name] = value
+        }
+        return merged
     }
 
     // MARK: - Persistence

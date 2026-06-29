@@ -186,6 +186,8 @@ final class MITMRewritePolicy {
         // Purge JS engine state for deleted sets; edited sets (stable id) keep theirs.
         let activeIDs = Set(ruleSets.map { $0.id })
         MITMScriptEngine.purgeEngines(activeIDs: activeIDs)
+        // Surface each set's resolved parameters to scripts as Anywhere.params.
+        MITMParamStore.shared.replaceAll(ruleSets.map { (scope: $0.id, values: $0.parameterValues) })
         // Prewarm compile caches so the first intercepted flow doesn't pay cold-start inline.
         MITMScriptTransform.prewarm(scopedRules: scopedRules)
         let purged = MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
@@ -493,12 +495,18 @@ enum MITMBinaryReader {
         let bytes: UnsafeBufferPointer<UInt8>
         private var readOffset = 0
         private var count: Int { bytes.count }
+        /// Payload version; gates the v2 parameter section so a v1 blob still decodes.
+        private var version: UInt8 = 0
 
         init(bytes: UnsafeBufferPointer<UInt8>) { self.bytes = bytes }
 
         mutating func readSnapshot() throws -> (enabled: Bool, ruleSets: [MITMRuleSet]) {
             try expectMagic()
-            guard try u8() == MITMBinaryFormat.version else { throw ReadError.badVersion }
+            let payloadVersion = try u8()
+            guard payloadVersion >= 1, payloadVersion <= MITMBinaryFormat.version else {
+                throw ReadError.badVersion
+            }
+            version = payloadVersion
             let enabled = try u8() != 0
             let setCount = try u32()
             var sets: [MITMRuleSet] = []
@@ -527,8 +535,21 @@ enum MITMBinaryReader {
                 rules.append(try readRule())
                 remaining -= 1
             }
-            return MITMRuleSet(id: id, name: name, enabled: enabled,
-                               domainSuffixes: suffixes, rules: rules, subscriptionURL: nil)
+            // v2: resolved parameter values (name → value). Absent in v1 payloads.
+            var parameterValues: [String: String] = [:]
+            if version >= 2 {
+                let paramCount = try u16()
+                parameterValues.reserveCapacity(Int(paramCount))
+                for _ in 0..<paramCount {
+                    let key = try str16()
+                    let value = try str16()
+                    parameterValues[key] = value
+                }
+            }
+            var set = MITMRuleSet(id: id, name: name, enabled: enabled,
+                                  domainSuffixes: suffixes, rules: rules, subscriptionURL: nil)
+            set.parameterValues = parameterValues
+            return set
         }
 
         private mutating func readRule() throws -> MITMRule {

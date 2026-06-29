@@ -9,16 +9,33 @@ import Foundation
 import JavaScriptCore
 
 enum MITMRuleSetParser {
+    /// Parsing starts in `.rule`, so files without `[Section]` headers parse as rules.
+    private enum Section {
+        case rule
+        case parameter
+        /// Unrecognized `[Section]`; its body is skipped (forward-compatible).
+        case ignored
+    }
+
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
         var suffixes: [String] = []
         var rules: [MITMRule] = []
+        var parameters: [MITMParameter] = []
+        var parameterNames: Set<String> = []
+        var section: Section = .rule
 
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
             if line.hasPrefix("#") || line.hasPrefix("//") { continue }
 
+            if let next = parseSection(line) {
+                section = next
+                continue
+            }
+
+            // `name`/`hostname` are file-level metadata, recognized in any section.
             if let header = parseHeader(line) {
                 switch header.key {
                 case "name":
@@ -31,16 +48,46 @@ enum MITMRuleSetParser {
                 default:
                     break
                 }
-            } else if let rule = parseRuleLine(line) {
-                rules.append(rule)
+                continue
+            }
+
+            switch section {
+            case .rule:
+                if let rule = parseRuleLine(line) { rules.append(rule) }
+            case .parameter:
+                guard parameters.count < MITMRuleSet.maxParameterCount else { continue }
+                // Drop duplicate names: they'd collide as `Anywhere.params` keys.
+                if let parameter = parseParameterLine(line),
+                   parameterNames.insert(parameter.name).inserted {
+                    parameters.append(parameter)
+                }
+            case .ignored:
+                break
             }
         }
 
         return MITMRuleSet(
             name: name,
             domainSuffixes: suffixes,
-            rules: rules
+            rules: rules,
+            parameters: parameters
         )
+    }
+
+    /// Recognizes a `[Section]` header; unknown sections return `.ignored`.
+    private static func parseSection(_ line: String) -> Section? {
+        guard line.hasPrefix("["), line.hasSuffix("]"), line.count >= 2 else { return nil }
+        let inner = line.dropFirst().dropLast()
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        switch inner {
+        case "rule", "rules":
+            return .rule
+        case "parameter", "parameters", "param", "params":
+            return .parameter
+        default:
+            return .ignored
+        }
     }
 
     private static let recognizedHeaders: Set<String> = [
@@ -224,6 +271,74 @@ enum MITMRuleSetParser {
         default:
             return nil
         }
+    }
+
+    // MARK: - Parameter line parsing
+
+    /// Field layout: `<type>, <dataType>, <name>, <label>, <description>, <default> [, "[options]"]`
+    /// (`type`: 0 input · 1 picker; `dataType`: 0 string). Picker options are a CSV-quoted bracketed list.
+    private static func parseParameterLine(_ line: String) -> MITMParameter? {
+        let fields = splitCSV(line)
+        guard fields.count >= 6 else { return nil }
+        guard let typeRaw = Int(fields[0]),
+              let type = MITMParameter.InputType(rawValue: typeRaw) else { return nil }
+        guard let dataRaw = Int(fields[1]),
+              let dataType = MITMParameter.DataType(rawValue: dataRaw) else { return nil }
+        let name = fields[2]
+        guard isValidParameterName(name) else { return nil }
+        let label = fields[3].isEmpty ? nil : fields[3]
+        let description = fields[4].isEmpty ? nil : fields[4]
+        let defaultValue = fields[5]
+        let options = fields.count > 6 ? parseOptionList(fields[6]) : []
+
+        switch type {
+        case .input:
+            return MITMParameter(
+                type: .input,
+                dataType: dataType,
+                name: name,
+                defaultValue: defaultValue,
+                label: label,
+                description: description
+            )
+        case .picker:
+            guard !options.isEmpty else { return nil }
+            var resolvedOptions = options
+            let resolvedDefault: String
+            if defaultValue.isEmpty {
+                resolvedDefault = resolvedOptions[0]
+            } else if options.contains(defaultValue) {
+                resolvedDefault = defaultValue
+            } else {
+                resolvedOptions.insert(defaultValue, at: 0)
+                resolvedDefault = defaultValue
+            }
+            return MITMParameter(
+                type: .picker,
+                dataType: dataType,
+                name: name,
+                defaultValue: resolvedDefault,
+                options: resolvedOptions,
+                label: label,
+                description: description
+            )
+        }
+    }
+
+    /// Parses a picker's bracketed, CSV-quoted options list into its values.
+    private static func parseOptionList(_ field: String) -> [String] {
+        var inner = field.trimmingCharacters(in: .whitespaces)
+        if inner.hasPrefix("[") { inner.removeFirst() }
+        if inner.hasSuffix("]") { inner.removeLast() }
+        return inner
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func isValidParameterName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= 128 else { return false }
+        return name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
     }
 
     private static func phase(from raw: Int) -> MITMPhase? {
