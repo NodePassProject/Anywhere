@@ -32,8 +32,7 @@ nonisolated final class AWCore {
         // MARK: Protocol queue labels
         static let http11Queue = "\(bundle).http11"
         static let http2SessionQueue = "\(bundle).http2-session"
-        static let http3PoolCleanupQueue = "\(bundle).http3-pool-cleanup"
-        static let anyTLSIdleQueue = "\(bundle).anytls-idle-cleanup"
+        static let multiplexerEvictionQueue = "\(bundle).multiplexer-eviction"
         static let anyTLSSessionTimerQueue = "\(bundle).anytls-session-timer"
 
         static let sudokuTCPReadQueue = "\(bundle).sudoku.tcp.read"

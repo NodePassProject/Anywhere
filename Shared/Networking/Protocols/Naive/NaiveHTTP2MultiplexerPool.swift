@@ -19,7 +19,16 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
     /// post-GOAWAY multiplexers retained until their in-flight streams drain.
     private var dedicatedMultiplexers: [ObjectIdentifier: NaiveHTTP2Multiplexer] = [:]
 
-    private override init() {}
+    /// Unbounded mux count per key — H2 multiplexes heavily, so no soft/hard cap.
+    private static let poolPolicy = MultiplexerPolicy(
+        idleTimeout: 60,
+        idleCheckInterval: 60
+    )
+
+    private override init() {
+        super.init()
+        startIdleEviction(Self.poolPolicy)
+    }
 
     // MARK: - Acquire
 
@@ -70,6 +79,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
         multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
 
         if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+            lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
             multiplexer = existing
         } else {
             let new = NaiveHTTP2Multiplexer(
@@ -82,6 +92,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
                 self.removeMultiplexer(new, key: capturedKey)
             }
             multiplexers[key, default: []].append(new)
+            lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
             multiplexer = new
         }
         lock.unlock()

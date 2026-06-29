@@ -13,22 +13,16 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
 
     static let shared = NaiveHTTP3MultiplexerPool()
 
-    private var lastActivity: [ObjectIdentifier: CFAbsoluteTime] = [:]
-
-    /// Soft cap: try to evict an idle multiplexer before creating a new one.
-    private static let maxSessionsPerKey = 8
-
-    /// Hard cap: beyond this, pile onto the least-loaded multiplexer instead of opening another.
-    private static let hardMaxMultiplexersPerKey = 16
-
-    private static let idleTimeout: TimeInterval = 60
-
-    private var cleanupTimer: DispatchSourceTimer?
-    private let cleanupQueue = DispatchQueue(label: AWCore.Identifier.http3PoolCleanupQueue)
+    private static let poolPolicy = MultiplexerPolicy(
+        idleTimeout: 60,
+        idleCheckInterval: 60,
+        softCapPerKey: 8,
+        hardCapPerKey: 16
+    )
 
     private override init() {
         super.init()
-        startCleanupTimer()
+        startIdleEviction(Self.poolPolicy)
     }
 
     // MARK: - Acquire
@@ -46,18 +40,20 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
 
         lock.lock()
 
-        evictStale(key: key)
+        // Prune dead/stream-blocked muxes here; age-based idle eviction is the base's sweep.
+        pruneDead(key: key)
 
         if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-            lastActivity[ObjectIdentifier(existing)] = CFAbsoluteTimeGetCurrent()
+            lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
             multiplexer = existing
         } else if let overflow = overflowSession(key: key) {
-            lastActivity[ObjectIdentifier(overflow)] = CFAbsoluteTimeGetCurrent()
+            lastActivity[ObjectIdentifier(overflow)] = MonotonicClock.now
             multiplexer = overflow
         } else {
             // Never close a multiplexer with live streams; evict an idle one if possible, else grow up to the hard cap.
             let currentCount = multiplexers[key]?.count ?? 0
-            if currentCount >= Self.maxSessionsPerKey {
+            let softCap = policy?.softCapPerKey ?? 0
+            if softCap > 0, currentCount >= softCap {
                 if let victim = multiplexers[key]?.first(where: { !$0.hasActiveStreams }) {
                     lock.unlock()
                     victim.close()
@@ -76,7 +72,7 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
                 self.removeMultiplexer(new, key: capturedKey)
             }
             multiplexers[key, default: []].append(new)
-            lastActivity[ObjectIdentifier(new)] = CFAbsoluteTimeGetCurrent()
+            lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
             multiplexer = new
         }
         lock.unlock()
@@ -91,32 +87,25 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
     /// Returns the least-loaded multiplexer when the pool is at its hard cap.
     /// Must be called with `lock` held.
     private func overflowSession(key: String) -> HTTP3Multiplexer? {
-        guard let pool = multiplexers[key], pool.count >= Self.hardMaxMultiplexersPerKey else {
+        let hardCap = policy?.hardCapPerKey ?? 0
+        guard hardCap > 0, let pool = multiplexers[key], pool.count >= hardCap else {
             return nil
         }
         let candidate = pool
             .filter { !$0.isClosed && !$0.poolIsStreamBlocked }
             .min(by: { $0.activeStreamCount < $1.activeStreamCount })
         guard let candidate, candidate.forceReserveStream() else { return nil }
-        logger.warning("[HTTP3Pool] Pool hit hard cap (\(Self.hardMaxMultiplexersPerKey)) for \(key); overflowing onto existing multiplexer")
+        logger.warning("[HTTP3Pool] Pool hit hard cap (\(policy?.hardCapPerKey ?? 0)) for \(key); overflowing onto existing multiplexer")
         return candidate
     }
 
     // MARK: - Eviction
 
-    /// Removes closed, stream-blocked, and idle multiplexers. Must be called with ``lock`` held.
-    private func evictStale(key: String) {
-        let now = CFAbsoluteTimeGetCurrent()
+    /// Removes closed/stream-blocked muxes (age-based eviction is the base's). Must hold ``lock``.
+    private func pruneDead(key: String) {
         multiplexers[key]?.removeAll { multiplexer in
             if multiplexer.isClosed || multiplexer.poolIsStreamBlocked {
                 lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-                return true
-            }
-            if !multiplexer.hasActiveStreams,
-               let activity = lastActivity[ObjectIdentifier(multiplexer)],
-               now - activity > Self.idleTimeout {
-                lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-                DispatchQueue.global().async { multiplexer.close() }
                 return true
             }
             return false
@@ -124,64 +113,5 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         if multiplexers[key]?.isEmpty == true {
             multiplexers.removeValue(forKey: key)
         }
-    }
-
-    override func removeMultiplexer(_ multiplexer: HTTP3Multiplexer, key: String) {
-        super.removeMultiplexer(multiplexer, key: key)
-        lock.lock()
-        lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-        lock.unlock()
-    }
-
-    // MARK: - Periodic Cleanup
-
-    private func startCleanupTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: cleanupQueue)
-        timer.schedule(deadline: .now() + Self.idleTimeout,
-                      repeating: Self.idleTimeout, leeway: .seconds(5))
-        timer.setEventHandler { [weak self] in
-            self?.cleanupIdleSessions()
-        }
-        timer.resume()
-        cleanupTimer = timer
-    }
-
-    private func cleanupIdleSessions() {
-        lock.lock()
-        let now = CFAbsoluteTimeGetCurrent()
-        var multiplexersToClose: [HTTP3Multiplexer] = []
-
-        for key in multiplexers.keys {
-            multiplexers[key]?.removeAll { multiplexer in
-                if multiplexer.isClosed {
-                    lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-                    return true
-                }
-                if !multiplexer.hasActiveStreams,
-                   let activity = lastActivity[ObjectIdentifier(multiplexer)],
-                   now - activity > Self.idleTimeout {
-                    lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-                    multiplexersToClose.append(multiplexer)
-                    return true
-                }
-                return false
-            }
-            if multiplexers[key]?.isEmpty == true {
-                multiplexers.removeValue(forKey: key)
-            }
-        }
-        lock.unlock()
-
-        for multiplexer in multiplexersToClose {
-            multiplexer.close()
-        }
-    }
-
-    override func closeAll() {
-        lock.lock()
-        lastActivity.removeAll()
-        lock.unlock()
-
-        super.closeAll()
     }
 }

@@ -24,7 +24,9 @@ enum TransportReclaim {
     static func reclaimAll() {
         for proto in OutboundProtocol.allCases {
             switch proto {
-            case .vless:    VLESSEncryption0RTTCache.shared.clear()
+            case .vless:
+                VLESSEncryption0RTTCache.shared.clear()
+                XHTTPXMUXMultiplexerRegistry.shared.reclaim()
             case .hysteria: HysteriaClient.pool.reclaim()
             case .nowhere:  NowhereClient.pool.reclaim()
             case .anytls:   AnyTLSMultiplexerRegistry.shared.reclaim()

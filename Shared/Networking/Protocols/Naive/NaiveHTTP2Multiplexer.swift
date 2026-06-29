@@ -87,7 +87,8 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
 
     // MARK: - Capacity
 
-    var activeStreamCount: Int { streams.count }
+    /// Thread-safe count read off-queue by the idle sweep; don't use `streams.count` (queue-confined).
+    var activeStreamCount: Int { _poolLock.withLock { _poolStreamCount } }
 
     /// Whether the multiplexer can accept another stream (on-queue only).
     var hasCapacity: Bool {

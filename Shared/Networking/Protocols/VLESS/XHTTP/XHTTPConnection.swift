@@ -844,6 +844,15 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
         lock.lock(); defer { lock.unlock() }
         return clients.isEmpty
     }
+
+    /// Closes every pooled connection and empties the pool (called by the registry's `reclaim()`).
+    func closeAll() {
+        lock.lock()
+        let pooledConnections = clients.compactMap { $0.connection }
+        clients.removeAll()
+        lock.unlock()
+        for connection in pooledConnections { connection.poolClose() }
+    }
 }
 
 nonisolated final class XHTTPXMUXMultiplexerRegistry {
@@ -878,6 +887,18 @@ nonisolated final class XHTTPXMUXMultiplexerRegistry {
         if manager.hasNoClients() {
             managers.removeValue(forKey: key)
         }
+    }
+}
+
+extension XHTTPXMUXMultiplexerRegistry: TransportPool {
+    /// Drops every pooled connection so XHTTP doesn't reuse a socket the kernel killed
+    /// during sleep/path-change.
+    func reclaim() {
+        lock.lock()
+        let allManagers = Array(managers.values)
+        managers.removeAll()
+        lock.unlock()
+        for manager in allManagers { manager.closeAll() }
     }
 }
 

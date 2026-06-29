@@ -9,26 +9,19 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
 
-nonisolated final class AnyTLSMultiplexerPool {
+/// Warm pool per `(host, port, password)`. AnyTLS muxes are reused serially — one stream at
+/// a time — so each is reserved before its stream opens and released when it ends.
+nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer> {
 
     typealias DialOut = (@escaping (Result<ProxyConnection, Error>) -> Void) -> Void
 
+    /// Single bucket — every mux here shares one endpoint + password.
+    private static let bucket = "anytls"
+
     private let dialOut: DialOut
     private let passwordHash: Data
-
-    /// Clamped to ≥30s/≥30s/≥0 in `init`.
-    let idleSessionCheckInterval: TimeInterval
-    let idleSessionTimeout: TimeInterval
-    let minIdleSession: Int
-
-    private let lock = UnfairLock()
-    private var idleMultiplexers: [AnyTLSMultiplexer] = []     // newest seq last; popped from the end
-    private var activeMultiplexers: [ObjectIdentifier: AnyTLSMultiplexer] = [:]
     private var sessionCounter: UInt64 = 0
     private var closed: Bool = false
-
-    private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSIdleQueue)
-    private var idleTimer: DispatchSourceTimer?
 
     init(
         password: String,
@@ -38,15 +31,13 @@ nonisolated final class AnyTLSMultiplexerPool {
         dialOut: @escaping DialOut
     ) {
         self.passwordHash = AnyTLSProtocol.passwordHash(password)
-        self.idleSessionCheckInterval = max(30, idleSessionCheckInterval)
-        self.idleSessionTimeout       = max(30, idleSessionTimeout)
-        self.minIdleSession           = max(0, minIdleSession)
         self.dialOut = dialOut
-        startIdleTimer()
-    }
-
-    deinit {
-        idleTimer?.cancel()
+        super.init()
+        startIdleEviction(MultiplexerPolicy(
+            idleTimeout: max(30, idleSessionTimeout),
+            idleCheckInterval: max(30, idleSessionCheckInterval),
+            minIdleKeep: max(0, minIdleSession)
+        ))
     }
 
     /// The opened stream expects a destination address as its first cmdPSH payload.
@@ -58,17 +49,15 @@ nonisolated final class AnyTLSMultiplexerPool {
             completion(.failure(ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")))
             return
         }
-        if let reused = popIdleSessionLocked() {
-            activeMultiplexers[ObjectIdentifier(reused)] = reused
-            let idleCount = idleMultiplexers.count
-            let activeCount = activeMultiplexers.count
+        if let reused = multiplexers[Self.bucket]?.first(where: { $0.tryReserveStream() }) {
+            lastActivity[ObjectIdentifier(reused)] = MonotonicClock.now
             lock.unlock()
-            logger.debug("[AnyTLSMultiplexerPool] acquireStream reusing idle multiplexer seq=\(reused.seq) (idle=\(idleCount) active=\(activeCount))")
+            logger.debug("[AnyTLSMultiplexerPool] acquireStream reusing idle multiplexer seq=\(reused.seq)")
             dispatchOpenStream(on: reused, completion: completion)
             return
         }
         lock.unlock()
-        logger.debug("[AnyTLSMultiplexerPool] acquireStream — pool empty, dialing fresh TLS multiplexer")
+        logger.debug("[AnyTLSMultiplexerPool] acquireStream — no idle multiplexer, dialing fresh TLS multiplexer")
 
         dialOut { [weak self] result in
             guard let self else {
@@ -96,11 +85,14 @@ nonisolated final class AnyTLSMultiplexerPool {
                     padding: AnyTLSPaddingScheme.default
                 )
                 multiplexer.seq = seq
+                // Claim before publishing so a concurrent acquire can't grab it.
+                _ = multiplexer.tryReserveStream()
                 multiplexer.onClose = { [weak self, weak multiplexer] in
                     guard let self, let multiplexer else { return }
-                    self.evict(multiplexer: multiplexer)
+                    self.removeMultiplexer(multiplexer, key: Self.bucket)
                 }
-                self.activeMultiplexers[ObjectIdentifier(multiplexer)] = multiplexer
+                self.multiplexers[Self.bucket, default: []].append(multiplexer)
+                self.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
                 self.lock.unlock()
                 logger.debug("[AnyTLSMultiplexerPool] new multiplexer seq=\(seq) — running handshake")
                 multiplexer.start()
@@ -109,18 +101,12 @@ nonisolated final class AnyTLSMultiplexerPool {
         }
     }
 
-    func closeAll() {
+    /// Sets `closed` to reject new acquires, then defers to the base.
+    override func closeAll() {
         lock.lock()
         closed = true
-        idleTimer?.cancel()
-        idleTimer = nil
-        let multiplexers = idleMultiplexers + Array(activeMultiplexers.values)
-        idleMultiplexers.removeAll(keepingCapacity: false)
-        activeMultiplexers.removeAll(keepingCapacity: false)
         lock.unlock()
-        for multiplexer in multiplexers {
-            multiplexer.close(error: nil)
-        }
+        super.closeAll()
     }
 
     // MARK: - Private
@@ -131,96 +117,18 @@ nonisolated final class AnyTLSMultiplexerPool {
             completion(.failure(ProxyError.connectionFailed("Failed to open AnyTLS stream")))
             return
         }
-        // Return the multiplexer to the idle pool when the stream closes.
+        // Release the reservation and restart the idle clock at stream end, so a freed mux is
+        // kept warm for the full idle timeout (not evicted right after a long transfer).
         stream.onEnd = { [weak self, weak multiplexer] in
-            guard let self, let multiplexer else { return }
-            self.returnToPool(multiplexer: multiplexer)
+            guard let multiplexer else { return }
+            multiplexer.releaseReservation()
+            guard let self else { return }
+            self.lock.lock()
+            if self.lastActivity[ObjectIdentifier(multiplexer)] != nil {
+                self.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            }
+            self.lock.unlock()
         }
         completion(.success(stream))
     }
-
-    private func evict(multiplexer: AnyTLSMultiplexer) {
-        lock.lock()
-        let id = ObjectIdentifier(multiplexer)
-        activeMultiplexers.removeValue(forKey: id)
-        idleMultiplexers.removeAll { $0 === multiplexer }
-        lock.unlock()
-    }
-
-    fileprivate func returnToPool(multiplexer: AnyTLSMultiplexer) {
-        guard multiplexer.isAlive else {
-            logger.debug("[AnyTLSMultiplexerPool] returnToPool seq=\(multiplexer.seq): multiplexer already dead, dropping")
-            return
-        }
-        lock.lock()
-        if closed {
-            lock.unlock()
-            multiplexer.close(error: nil)
-            return
-        }
-        activeMultiplexers.removeValue(forKey: ObjectIdentifier(multiplexer))
-        multiplexer.idleSince = CFAbsoluteTimeGetCurrent()
-        idleMultiplexers.append(multiplexer)
-        let idleCount = idleMultiplexers.count
-        let activeCount = activeMultiplexers.count
-        lock.unlock()
-        logger.debug("[AnyTLSMultiplexerPool] multiplexer seq=\(multiplexer.seq) returned to pool (idle=\(idleCount) active=\(activeCount))")
-    }
-
-    private func popIdleSessionLocked() -> AnyTLSMultiplexer? {
-        // Pop most-recently-used so the LRU tail naturally ages out via cleanup.
-        while let candidate = idleMultiplexers.popLast() {
-            if candidate.isAlive { return candidate }
-        }
-        return nil
-    }
-
-    // MARK: - Idle cleanup
-
-    private func startIdleTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
-        timer.schedule(
-            deadline: .now() + idleSessionCheckInterval,
-            repeating: idleSessionCheckInterval,
-            leeway: .milliseconds(Int(idleSessionCheckInterval * 100))
-        )
-        timer.setEventHandler { [weak self] in
-            self?.runIdleCleanup()
-        }
-        timer.resume()
-        idleTimer = timer
-    }
-
-    private func runIdleCleanup() {
-        let cutoff = CFAbsoluteTimeGetCurrent() - idleSessionTimeout
-        var toClose: [AnyTLSMultiplexer] = []
-        lock.lock()
-        if closed {
-            lock.unlock()
-            return
-        }
-        var survivors: [AnyTLSMultiplexer] = []
-        var keptCount = 0
-        for multiplexer in idleMultiplexers {
-            if multiplexer.idleSince > cutoff {
-                survivors.append(multiplexer)
-                keptCount += 1
-                continue
-            }
-            if keptCount < minIdleSession {
-                multiplexer.idleSince = CFAbsoluteTimeGetCurrent()
-                survivors.append(multiplexer)
-                keptCount += 1
-                continue
-            }
-            toClose.append(multiplexer)
-        }
-        idleMultiplexers = survivors
-        lock.unlock()
-
-        for multiplexer in toClose {
-            multiplexer.close(error: nil)
-        }
-    }
 }
-

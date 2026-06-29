@@ -34,7 +34,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private var buffering: Bool = true
     private var outboundBuffer: Data = Data()
 
-    var idleSince: CFAbsoluteTime = .greatestFiniteMagnitude
     var seq: UInt64 = 0
 
     private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSSessionTimerQueue)
@@ -44,6 +43,9 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private var recvBuffer = Data()
 
     private var closed: Bool = false
+
+    /// Set while an acquire has claimed this mux for serial reuse (before its stream opens).
+    private var reserved: Bool = false
 
     var onClose: (() -> Void)?
 
@@ -61,6 +63,20 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     var isAlive: Bool { lock.withLock { !closed } }
     var isClosed: Bool { lock.withLock { closed } }
     var activeStreamCount: Int { lock.withLock { streams.count } }
+
+    /// Atomically claims a live, unreserved, stream-free multiplexer for serial reuse;
+    /// returns false otherwise. Released via ``releaseReservation()`` when the stream ends.
+    func tryReserveStream() -> Bool {
+        lock.withLock {
+            guard !closed, !reserved, streams.isEmpty else { return false }
+            reserved = true
+            return true
+        }
+    }
+
+    func releaseReservation() {
+        lock.withLock { reserved = false }
+    }
 
     // MARK: - Lifecycle
 
@@ -419,6 +435,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         lock.lock()
         guard !closed else { lock.unlock(); return }
         closed = true
+        reserved = false
         cancelSynDoneTimerLocked()
         let liveStreams = Array(streams.values)
         streams.removeAll(keepingCapacity: false)
