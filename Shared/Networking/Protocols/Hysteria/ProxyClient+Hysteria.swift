@@ -17,7 +17,7 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let obfuscation, let sni) = configuration.outbound else {
+        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni) = configuration.outbound else {
             completion(.failure(ProxyError.protocolError("Hysteria password not set")))
             return
         }
@@ -29,7 +29,6 @@ extension ProxyClient {
             congestionControl: congestionControl,
             uploadMbps: uploadMbps,
             downloadMbps: downloadMbps,
-            portHopping: portHopping,
             obfuscation: obfuscation,
             sni: sni
         )

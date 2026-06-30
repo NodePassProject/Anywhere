@@ -291,8 +291,8 @@ nonisolated class XHTTPConnection {
         self._isConnected = true
     }
 
-    convenience init(transport: RawTCPSocket, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
-        self.init(download: TransportClosures(rawTCP: transport), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
+    convenience init(transport: NWTCPTransport, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+        self.init(download: TransportClosures(tcp: transport), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {

@@ -14,7 +14,7 @@ nonisolated enum TransportErrorLogger {
 
     // MARK: - Formatting
 
-    /// Strips the operation prefix `SocketError.errorDescription` bakes in; the log line repeats it.
+    /// Strips the operation prefix `TransportError.errorDescription` bakes in; the log line repeats it.
     static func conciseErrorDescription(_ error: Error) -> String {
         var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         let redundantPrefixes = [
@@ -32,9 +32,9 @@ nonisolated enum TransportErrorLogger {
         return message
     }
 
-    /// Classifies a `SocketError`'s errno as a peer-initiated close, or nil.
+    /// Classifies a `TransportError`'s errno as a peer-initiated close, or nil.
     private static func peerCloseClass(for error: Error) -> PeerCloseClass? {
-        guard let errno = (error as? SocketError)?.posixErrno else { return nil }
+        guard let errno = (error as? TransportError)?.posixErrno else { return nil }
         switch errno {
         case EPIPE:        return .cascade     // write after we've seen EOF/RST
         case ECONNRESET:   return .reset       // remote sent RST

@@ -80,8 +80,8 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
 
     // MARK: - Init
 
-    /// - Parameter transport: When set, QUIC rides the relay transport instead of a
-    ///   kernel socket; `host`/`port` identify the server logically, not a dial target.
+    /// - Parameter transport: When set, QUIC rides the relay transport instead of the
+    ///   direct UDP carrier; `host`/`port` identify the server logically, not a dial target.
     init(host: String, port: UInt16, serverName: String, tuning: QUICTuning = .naive,
          transport: QUICDatagramTransport? = nil) {
         self.quic = QUICConnection(host: host, port: port, serverName: serverName,

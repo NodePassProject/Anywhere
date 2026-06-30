@@ -25,9 +25,9 @@ nonisolated final class AWCore {
         static let quicQueue = "\(bundle).quic"
         static let udpQueue = "\(bundle).udp"
         
-        // MARK: Socket queue labels
-        static let rawTCPSocketQueue = "\(bundle).raw-tcp-socket"
-        static let rawUDPSocketQueue = "\(bundle).raw-udp-socket"
+        // MARK: Transport queue labels
+        static let nwTCPTransportQueue = "\(bundle).nw-tcp-transport"
+        static let nwUDPTransportQueue = "\(bundle).nw-udp-transport"
 
         // MARK: Protocol queue labels
         static let http11Queue = "\(bundle).http11"

@@ -7,10 +7,10 @@
 
 import Foundation
 
-/// Adapts a push-based `RawUDPSocket` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
+/// Adapts a push-based `NWUDPTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
-    private let socket: RawUDPSocket
+    private let transport: NWUDPTransport
 
     private let recvLock = UnfairLock()
     private var recvBuffer: [Data] = []
@@ -22,20 +22,20 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
     /// Bounds memory under a burst the consumer hasn't drained yet.
     private static let maxBufferedDatagrams = 1024
 
-    init(socket: RawUDPSocket) {
-        self.socket = socket
+    init(transport: NWUDPTransport) {
+        self.transport = transport
         super.init()
     }
 
-    override var isConnected: Bool { socket.isReady }
+    override var isConnected: Bool { transport.isReady }
     override var deliversDatagrams: Bool { true }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        socket.send(data: data, completion: completion)
+        transport.send(data: data, completion: completion)
     }
 
     override func sendRaw(data: Data) {
-        socket.send(data: data)
+        transport.send(data: data)
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -43,7 +43,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
         if !startedReceiving {
             startedReceiving = true
-            socket.startReceiving(handler: { [weak self] data in
+            transport.startReceiving(handler: { [weak self] data in
                 self?.deliverIncoming(data)
             }, errorHandler: { [weak self] error in
                 self?.deliverError(error)
@@ -85,7 +85,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
         recvBuffer.removeAll()
         recvLock.unlock()
 
-        socket.cancel()
+        transport.cancel()
         parked?(nil, nil)
     }
 

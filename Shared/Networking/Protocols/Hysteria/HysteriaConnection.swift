@@ -16,9 +16,9 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     private let session: HysteriaSession
     private let destination: String
 
-    /// Confined to `session.queue`. The setter mirrors readiness into
-    /// `_isReady` so `isConnected` avoids a sync hop onto `session.queue`,
-    /// which would deadlock against the FD-pressure path hopping the other way.
+    /// Confined to `session.queue`. The setter mirrors readiness into the
+    /// lock-protected `_isReady` so `isConnected` can be read from any queue
+    /// without a sync hop onto `session.queue`.
     private var _state: State = .idle
     private var state: State {
         get { _state }

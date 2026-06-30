@@ -46,8 +46,8 @@ nonisolated class WebSocketConnection {
         self._isConnected = true
     }
 
-    convenience init(transport: RawTCPSocket, configuration: WebSocketConfiguration) {
-        self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration)
+    convenience init(transport: NWTCPTransport, configuration: WebSocketConfiguration) {
+        self.init(transport: TransportClosures(tcp: transport), configuration: configuration)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {

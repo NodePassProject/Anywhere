@@ -39,7 +39,7 @@ class UDPFlow {
     }
 
     // Direct bypass path
-    private var directSocket: RawUDPSocket?
+    private var directTransport: NWUDPTransport?
 
     // Non-mux path
     private var proxyClient: ProxyClient?
@@ -153,7 +153,7 @@ class UDPFlow {
         
         TunnelStack.shared?.addBytesOut(Int64(payloadLength), target: routeTarget)
 
-        // Buffer while connecting: sends on an unconnected UDP socket are silently dropped.
+        // Buffer while connecting: sends on an unconnected UDP transport are silently dropped.
         if proxyConnecting {
             bufferPayload(data: data, payloadLength: payloadLength)
             return
@@ -161,8 +161,8 @@ class UDPFlow {
 
         let payload = data.prefix(payloadLength)
 
-        if let socket = directSocket {
-            socket.send(data: payload) { [weak self] error in
+        if let transport = directTransport {
+            transport.send(data: payload) { [weak self] error in
                 if let error {
                     self?.logTransientSendFailure(error)
                 }
@@ -220,7 +220,7 @@ class UDPFlow {
     // MARK: - Proxy Connection
 
     private func connectProxy() {
-        guard !proxyConnecting && proxyConnection == nil && udpStream == nil && directSocket == nil && ssUDPSession == nil && !closed else { return }
+        guard !proxyConnecting && proxyConnection == nil && udpStream == nil && directTransport == nil && ssUDPSession == nil && !closed else { return }
 
         if bypass {
             connectDirectUDP()
@@ -373,7 +373,7 @@ class UDPFlow {
             return
         }
 
-        // The shared session buffers sends until its socket connects, so no `proxyConnecting`
+        // The shared session buffers sends until its transport connects, so no `proxyConnecting`
         // dance is needed. Hints use the synchronous DNS cache only (flowQueue is
         // performance-critical); the async prewarm below handles misses.
         let cachedHints = DNSResolver.shared.cachedIPs(for: dstHost) ?? []
@@ -398,7 +398,7 @@ class UDPFlow {
         self.ssUDPSession = session
         self.ssUDPSessionToken = token
 
-        // Drain what buffered meanwhile; the session re-buffers if its socket isn't ready yet.
+        // Drain what buffered meanwhile; the session re-buffers if its transport isn't ready yet.
         let host = dstHost
         let port = dstPort
         for payload in pendingData {
@@ -442,14 +442,13 @@ class UDPFlow {
     }
 
     private func connectDirectUDP() {
-        guard directSocket == nil && !closed else { return }
-        proxyConnecting = true  // reuse the flag so datagrams buffer until the socket connects
+        guard directTransport == nil && !closed else { return }
+        proxyConnecting = true  // reuse the flag so datagrams buffer until the transport connects
 
-        // One socket per peer 5-tuple; modest kernel buffers keep a NAT-traversal
-        // storm under the extension's memory cap.
-        let socket = RawUDPSocket(socketBufferSize: SocketHelpers.directDatagramSocketBufferSize)
-        self.directSocket = socket
-        socket.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
+        // One connection per peer 5-tuple.
+        let transport = NWUDPTransport()
+        self.directTransport = transport
+        transport.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
             guard let self else { return }
 
             self.flowQueue.async {
@@ -464,7 +463,7 @@ class UDPFlow {
                 }
 
                 for payload in self.pendingData {
-                    socket.send(data: payload) { [weak self] error in
+                    transport.send(data: payload) { [weak self] error in
                         if let error {
                             self?.logTransientSendFailure(error)
                         }
@@ -473,8 +472,8 @@ class UDPFlow {
                 self.pendingData.removeAll()
                 self.pendingBufferSize = 0
 
-                // Non-EAGAIN recv errors close the flow so we don't sit on a dead socket.
-                socket.startReceiving(handler: { [weak self] data in
+                // Non-EAGAIN recv errors close the flow so we don't sit on a dead transport.
+                transport.startReceiving(handler: { [weak self] data in
                     self?.handleProxyData(data)
                 }, errorHandler: { [weak self] error in
                     guard let self else { return }
@@ -521,35 +520,22 @@ class UDPFlow {
         }
     }
 
-    /// True when this flow owns a per-flow UDP FD eligible for FD-pressure eviction.
-    /// Mid-connect flows are excluded: their ioQueue may be blocked in getaddrinfo,
-    /// which would stall the relief path's synchronous cancelSync.
-    var holdsDirectFD: Bool { directSocket != nil && !proxyConnecting }
-
     // MARK: - Close
 
     func close() {
         guard !closed else { return }
         closed = true
-        releaseProxy(syncSocket: false)
+        releaseProxy()
     }
 
-    /// Synchronous close for the FD-pressure relief path: the direct socket's FD
-    /// is freed before returning, so the caller can retry `socket(2)`.
-    func closeSync() {
-        guard !closed else { return }
-        closed = true
-        releaseProxy(syncSocket: true)
-    }
-
-    private func releaseProxy(syncSocket: Bool) {
-        let socket = directSocket
+    private func releaseProxy() {
+        let transport = directTransport
         let ssSession = ssUDPSession
         let ssToken = ssUDPSessionToken
         let connection = proxyConnection
         let client = proxyClient
         let session = udpStream
-        directSocket = nil
+        directTransport = nil
         ssUDPSession = nil
         ssUDPSessionToken = nil
         proxyConnection = nil
@@ -558,11 +544,7 @@ class UDPFlow {
         proxyConnecting = false
         pendingData.removeAll()
         pendingBufferSize = 0
-        if syncSocket {
-            socket?.cancelSync()
-        } else {
-            socket?.cancel()
-        }
+        transport?.cancel()
         // The SS session is shared and owned by TunnelStack; unregister, never cancel.
         if let ssSession, let ssToken {
             ssSession.unregister(token: ssToken)

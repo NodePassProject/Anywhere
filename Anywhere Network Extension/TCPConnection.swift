@@ -437,7 +437,7 @@ class TCPConnection {
     /// later arrivals so the whole unacknowledged run is covered.
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
         reportFailure("Connect", error: error)
-        guard case SocketError.resolutionFailed = error else {
+        guard case TransportError.resolutionFailed = error else {
             abort()
             return
         }
@@ -555,7 +555,7 @@ class TCPConnection {
             pendingData.removeAll(keepingCapacity: true)
         }
 
-        let transport = RawTCPSocket()
+        let transport = NWTCPTransport()
         // Direct/bypass — not a proxied connection, so exclude it from the Dial stat.
         transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)
@@ -705,10 +705,10 @@ class TCPConnection {
         )
         // Inner-leg downlink: inner-leg output (TLS records or cleartext) goes straight to lwIP.
         session.onSendToClient = { [weak self] data, completion in
-            guard let self else { completion?(SocketError.notConnected); return }
+            guard let self else { completion?(TransportError.notConnected); return }
             self.lwipQueue.async {
                 if self.closed {
-                    completion?(SocketError.notConnected)
+                    completion?(TransportError.notConnected)
                     return
                 }
                 self.activityTimer?.update()
@@ -746,12 +746,12 @@ class TCPConnection {
     
     private func makeMITMDialer() -> MITMDialer {
         return { [weak self] host, port, completion in
-            guard let self else { completion(.failure(SocketError.notConnected)); return }
+            guard let self else { completion(.failure(TransportError.notConnected)); return }
             self.lwipQueue.async {
-                guard !self.closed else { completion(.failure(SocketError.notConnected)); return }
+                guard !self.closed else { completion(.failure(TransportError.notConnected)); return }
                 switch self.commitUpstreamRoute(forDialHost: host, port: port) {
                 case .reject:
-                    completion(.failure(SocketError.connectionFailed("rejected by routing rule: \(host)")))
+                    completion(.failure(TransportError.connectionFailed("rejected by routing rule: \(host)")))
                 case .direct:
                     self.dialDirectUpstream(host: host, port: port, completion: completion)
                 case .proxy(_, let configuration):
@@ -812,14 +812,14 @@ class TCPConnection {
     
     private func dialDirectUpstream(host: String, port: UInt16,
                                     completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
-        let transport = RawTCPSocket()
+        let transport = NWTCPTransport()
         // Direct/bypass — not a proxied connection, exclude from Dial.
         transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)
         transport.connect(host: host, port: port) { [weak self] error in
             guard let self else {
                 connection.cancel()
-                completion(.failure(error ?? SocketError.notConnected))
+                completion(.failure(error ?? TransportError.notConnected))
                 return
             }
             self.lwipQueue.async {
@@ -843,7 +843,7 @@ class TCPConnection {
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
                 client.cancel()
-                completion(.failure(SocketError.notConnected))
+                completion(.failure(TransportError.notConnected))
                 return
             }
             self.lwipQueue.async {

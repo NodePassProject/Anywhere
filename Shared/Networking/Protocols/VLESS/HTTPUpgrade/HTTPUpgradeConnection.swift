@@ -45,8 +45,8 @@ nonisolated class HTTPUpgradeConnection {
         self._isConnected = true
     }
 
-    convenience init(transport: RawTCPSocket, configuration: HTTPUpgradeConfiguration) {
-        self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration)
+    convenience init(transport: NWTCPTransport, configuration: HTTPUpgradeConfiguration) {
+        self.init(transport: TransportClosures(tcp: transport), configuration: configuration)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: HTTPUpgradeConfiguration) {

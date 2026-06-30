@@ -605,7 +605,7 @@ nonisolated final class SudokuConnectionFactory {
     private var initialTunnel: ProxyConnection?
     private var retainedClients: [ProxyClient] = []
     private var retainedTLSClients: [TLSClient] = []
-    private var retainedRawSockets: [RawTCPSocket] = []
+    private var retainedTransports: [NWTCPTransport] = []
     private var connections: [ProxyConnection] = []
     private var closed = false
 
@@ -703,7 +703,7 @@ nonisolated final class SudokuConnectionFactory {
         let toClose: [ProxyConnection]
         let clients: [ProxyClient]
         let tlsClients: [TLSClient]
-        let rawSockets: [RawTCPSocket]
+        let transports: [NWTCPTransport]
         stateLock.lock()
         if closed {
             stateLock.unlock()
@@ -713,17 +713,17 @@ nonisolated final class SudokuConnectionFactory {
         toClose = connections + (initialTunnel.map { [$0] } ?? [])
         clients = retainedClients
         tlsClients = retainedTLSClients
-        rawSockets = retainedRawSockets
+        transports = retainedTransports
         connections.removeAll()
         retainedClients.removeAll()
         retainedTLSClients.removeAll()
-        retainedRawSockets.removeAll()
+        retainedTransports.removeAll()
         initialTunnel = nil
         stateLock.unlock()
         for connection in toClose { connection.cancel() }
         for client in clients { client.cancel() }
         for client in tlsClients { client.cancel() }
-        for socket in rawSockets { socket.forceCancel() }
+        for transport in transports { transport.forceCancel() }
     }
 
     private func openProxyConnection(
@@ -763,15 +763,15 @@ nonisolated final class SudokuConnectionFactory {
             return
         }
 
-        let socket = RawTCPSocket()
-        guard retainRawSocket(socket) else {
+        let transport = NWTCPTransport()
+        guard retainTransport(transport) else {
             completion(.failure(SudokuNativeError.closed))
             return
         }
-        socket.connect(host: directDialHost, port: port) { error in
-            self.releaseRawSocket(socket)
+        transport.connect(host: directDialHost, port: port) { error in
+            self.releaseTransport(transport)
             if let error { completion(.failure(error)) }
-            else { completion(.success(DirectProxyConnection(connection: socket))) }
+            else { completion(.success(DirectProxyConnection(connection: transport))) }
         }
     }
 
@@ -836,17 +836,17 @@ nonisolated final class SudokuConnectionFactory {
         }
     }
 
-    private func retainRawSocket(_ socket: RawTCPSocket) -> Bool {
+    private func retainTransport(_ transport: NWTCPTransport) -> Bool {
         stateLock.withLock {
             guard !closed else { return false }
-            retainedRawSockets.append(socket)
+            retainedTransports.append(transport)
             return true
         }
     }
 
-    private func releaseRawSocket(_ socket: RawTCPSocket) {
+    private func releaseTransport(_ transport: NWTCPTransport) {
         stateLock.withLock {
-            retainedRawSockets.removeAll { $0 === socket }
+            retainedTransports.removeAll { $0 === transport }
         }
     }
 

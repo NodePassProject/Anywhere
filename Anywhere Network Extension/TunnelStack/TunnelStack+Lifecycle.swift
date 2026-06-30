@@ -37,7 +37,6 @@ extension TunnelStack {
             lwip_bridge_init()
             startTimeoutTimer()
             scheduleUDPCleanup()
-            installFDPressureReliefHandler()
             startReadingPackets()
             logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), bypass=\(!bypassCountryCode.isEmpty)")
         }
@@ -48,7 +47,6 @@ extension TunnelStack {
 
     func stop() {
         stopObservingSettings()
-        clearFDPressureReliefHandler()
         lwipQueue.sync { [self] in
             running = false
             deferredRestart?.cancel()

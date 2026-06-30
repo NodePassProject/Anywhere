@@ -29,7 +29,7 @@ extension ProxyClient {
         ))
     }
 
-    /// Opens a real-UDP path to the SS server (chain-tunnel datagram or raw socket)
+    /// Opens a real-UDP path to the SS server (chain-tunnel datagram or direct UDP transport)
     /// and wraps with SS UDP encryption keyed for the final destination.
     func connectShadowsocksRealUDP(
         destinationHost: String,
@@ -60,15 +60,15 @@ extension ProxyClient {
             self.tunnel = nil
             wrapAndComplete(tunnel)
         } else {
-            let socket = RawUDPSocket()
-            socket.connect(host: directDialHost,
+            let transport = NWUDPTransport()
+            transport.connect(host: directDialHost,
                            port: configuration.serverPort,
                            completionQueue: .global()) { error in
                 if let error {
                     completion(.failure(error))
                     return
                 }
-                wrapAndComplete(DirectUDPProxyConnection(socket: socket))
+                wrapAndComplete(DirectUDPProxyConnection(transport: transport))
             }
         }
     }

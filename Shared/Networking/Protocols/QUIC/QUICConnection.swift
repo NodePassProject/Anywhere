@@ -13,35 +13,9 @@ import Security
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
-// MARK: - QUICPortHopping
-
-/// Port hopping: the server DNATs the whole range to one listening port, so rotating the
-/// UDP destination is invisible to QUIC on both ends.
-struct QUICPortHopping {
-    /// Assumed non-empty.
-    let ports: [ClosedRange<UInt16>]
-    let interval: TimeInterval
-
-    var totalPortCount: Int {
-        ports.reduce(0) { $0 + (Int($1.upperBound) - Int($1.lowerBound) + 1) }
-    }
-
-    func randomPort() -> UInt16? {
-        let total = totalPortCount
-        guard total > 0 else { return nil }
-        var index = Int.random(in: 0..<total)
-        for range in ports {
-            let count = Int(range.upperBound) - Int(range.lowerBound) + 1
-            if index < count { return UInt16(Int(range.lowerBound) + index) }
-            index -= count
-        }
-        return ports.first?.lowerBound
-    }
-}
-
 // MARK: - QUICPacketObfuscator
 
-/// Transforms whole QUIC datagrams at the wire boundary (below ngtcp2, above the socket or chained
+/// Transforms whole QUIC datagrams at the wire boundary (below ngtcp2, above the direct carrier or chained
 /// transport), so the same obfuscation applies on both carriers. Methods are called only on
 /// `QUICConnection.queue`, so implementations need no internal locking.
 protocol QUICPacketObfuscator: AnyObject {
@@ -101,7 +75,7 @@ nonisolated class QUICConnection {
     private let alpn: [String]
     private let tuning: QUICTuning
 
-    /// When set, ngtcp2 rides this instead of a kernel socket (QUIC through a proxy chain's UDP relay).
+    /// When set, ngtcp2 rides this instead of the direct UDP carrier (QUIC through a proxy chain's UDP relay).
     private let transport: QUICDatagramTransport?
 
     /// Obfuscates datagrams at the wire boundary (Hysteria Salamander/Gecko); `nil` sends them raw.
@@ -126,14 +100,8 @@ nonisolated class QUICConnection {
     /// A coalesced flush is queued; drained by one `writeToUDP` at the end of the queue cycle.
     private var flushScheduled = false
 
-    /// Direct-dial UDP socket. `nil` when QUIC rides a `QUICDatagramTransport`.
-    private var quicSocket: QUICSocket?
-
-    /// Port-hopping config; `nil` disables it. Honored only on the direct kernel-socket path —
-    /// a chained transport has no port to rotate.
-    private let portHopping: QUICPortHopping?
-    /// Rotates the socket's destination port every `portHopping.interval`. On `queue`.
-    private var hopTimer: DispatchSourceTimer?
+    /// Direct-dial UDP carrier. `nil` when QUIC rides a `QUICDatagramTransport`.
+    private var carrier: QUICDatagramCarrier?
 
     private var localAddr = sockaddr_storage()
     private var remoteAddr = sockaddr_storage()
@@ -226,7 +194,6 @@ nonisolated class QUICConnection {
 
     init(host: String, port: UInt16, serverName: String? = nil, alpn: [String],
          datagramsEnabled: Bool = false, tuning: QUICTuning,
-         portHopping: QUICPortHopping? = nil,
          obfuscator: QUICPacketObfuscator? = nil,
          transport: QUICDatagramTransport? = nil) {
         self.host = host
@@ -235,8 +202,6 @@ nonisolated class QUICConnection {
         self.alpn = alpn
         self.datagramsEnabled = datagramsEnabled
         self.tuning = tuning
-        // Port hopping needs a kernel socket whose destination we control; a chained transport has none.
-        self.portHopping = transport == nil ? portHopping : nil
         self.obfuscator = obfuscator
         self.transport = transport
         self.queue = DispatchQueue(label: AWCore.Identifier.quicQueue, qos: .userInitiated)
@@ -606,7 +571,7 @@ nonisolated class QUICConnection {
                 self.connectionOpaquePointer = nil
             }
             self.transport?.cancel()
-            self.closeSocket()
+            self.closeCarrier()
             self.state = .closed
             let writes = self.pendingWrites
             self.pendingWrites.removeAll()
@@ -615,7 +580,7 @@ nonisolated class QUICConnection {
             self.inflightStreamBuffers.removeAll()
             self.streamTxOffset.removeAll()
             let closeError = error ?? QUICError.closed
-            // Fire any still-pending connect callback — the socket's non-EAGAIN
+            // Fire any still-pending connect callback — the carrier's non-EAGAIN
             // recv error path calls close() directly.
             if let callback = self.connectCompletion {
                 self.connectCompletion = nil
@@ -642,38 +607,33 @@ nonisolated class QUICConnection {
         if let transport {
             setupTunnelTransport(transport: transport, completion: completion)
         } else {
-            setupRawSocket(completion: completion)
+            setupDirectCarrier(completion: completion)
         }
     }
 
-    private func setupRawSocket(completion: @escaping (Error?) -> Void) {
+    private func setupDirectCarrier(completion: @escaping (Error?) -> Void) {
         do {
             populateRemoteAddr()
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
-            let socket = QUICSocket(queue: queue, receiveBufferSize: Self.maxUDPPayload)
-            // ngtcp2's path stays pinned to `remoteAddr` (the canonical host:port); only the
-            // socket's real destination rotates. The first dial already uses a hop port so the
-            // handshake itself rides the hopped range.
-            let initialPeer = initialHopAddr() ?? remoteAddr
-            try socket.connect(remoteAddr: initialPeer, localAddr: &localAddr, addrLen: addrLen)
-            quicSocket = socket
+            let carrier = QUICDatagramCarrier(queue: queue)
+            try carrier.connect(remoteAddr: remoteAddr, localAddr: &localAddr)
+            self.carrier = carrier
             try initializeNgtcp2()
             state = .handshaking
-            socket.startReceiving(
+            carrier.startReceiving(
                 onPacket: { [weak self] data in self?.handleReceivedPacket(data) },
                 onError: { [weak self] error in
                     self?.close(error: QUICError.connectionFailed("recv errno=\(error)"))
                 }
             )
-            startHopTimer()
             writeToUDP()
             rescheduleTimer()
         } catch {
             // Nil connectCompletion before firing to prevent double-fire from stray callbacks.
             state = .closed
-            closeSocket()
+            closeCarrier()
             connectCompletion = nil
             completion(error)
         }
@@ -736,65 +696,9 @@ nonisolated class QUICConnection {
         }
     }
 
-    private func closeSocket() {
-        hopTimer?.cancel()
-        hopTimer = nil
-        quicSocket?.close()
-        quicSocket = nil
-    }
-
-    // MARK: Port hopping
-
-    /// Initial socket destination when port hopping is enabled: `remoteAddr` with a random hop
-    /// port. `nil` when hopping is off or no port is available, so the caller dials `remoteAddr`.
-    private func initialHopAddr() -> sockaddr_storage? {
-        guard let port = portHopping?.randomPort() else { return nil }
-        return hopAddr(port: port)
-    }
-
-    /// Arms the repeating hop timer. No-op unless hopping is enabled and more than one port is
-    /// reachable — a single fixed port has nothing to rotate to.
-    private func startHopTimer() {
-        guard let portHopping, portHopping.totalPortCount > 1, quicSocket != nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.setEventHandler { [weak self] in self?.performHop() }
-        // Loose leeway: hop timing has no latency budget, and slack lets the scheduler coalesce
-        // the wakeup with QUIC's own timers.
-        timer.schedule(deadline: .now() + portHopping.interval,
-                       repeating: portHopping.interval,
-                       leeway: .milliseconds(250))
-        hopTimer = timer
-        timer.resume()
-    }
-
-    /// Re-points the socket at a fresh random port. ngtcp2 is untouched — it keeps sending to the
-    /// same fixed path, and the kernel redirects those bytes to the new peer.
-    private func performHop() {
-        guard state != .closed, let portHopping,
-              let socket = quicSocket, let port = portHopping.randomPort() else { return }
-        socket.reconnect(remoteAddr: hopAddr(port: port), addrLen: addrLen)
-        // Flush any pending frames onto the new port so the server's reverse-NAT mapping
-        // re-points immediately; an idle connection just falls back to the keep-alive PING.
-        writeToUDP()
-    }
-
-    /// Copies `remoteAddr`, overriding only the port. Preserves the resolved IP and family.
-    private func hopAddr(port: UInt16) -> sockaddr_storage {
-        var address = remoteAddr
-        if address.ss_family == sa_family_t(AF_INET) {
-            withUnsafeMutablePointer(to: &address) { storage in
-                storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
-                    sin.pointee.sin_port = port.bigEndian
-                }
-            }
-        } else if address.ss_family == sa_family_t(AF_INET6) {
-            withUnsafeMutablePointer(to: &address) { storage in
-                storage.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
-                    sin6.pointee.sin6_port = port.bigEndian
-                }
-            }
-        }
-        return address
+    private func closeCarrier() {
+        carrier?.close()
+        carrier = nil
     }
 
     private func populateRemoteAddr() {
@@ -896,23 +800,23 @@ nonisolated class QUICConnection {
             transport.sendDatagram(datagram)
             return
         }
-        guard let quicSocket else { return }
+        guard let carrier else { return }
         txBuffer.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
-            quicSocket.send(base, length: length)
+            carrier.send(base, length: length)
         }
     }
 
-    /// Routes one ready-to-send wire datagram to the active carrier (chained transport or socket).
+    /// Routes one ready-to-send wire datagram to the active path (chained transport or direct carrier).
     private func sendDatagram(_ datagram: Data) {
         if let transport {
             transport.sendDatagram(datagram)
             return
         }
-        guard let quicSocket else { return }
+        guard let carrier else { return }
         datagram.withUnsafeBytes { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            quicSocket.send(base, length: datagram.count)
+            carrier.send(base, length: datagram.count)
         }
     }
 
@@ -988,7 +892,7 @@ nonisolated class QUICConnection {
             return Unmanaged<QUICConnection>.fromOpaque(userData).takeUnretainedValue().connectionOpaquePointer
         }
 
-        // PMTUD only over a real kernel socket: chained probes don't reflect the
+        // PMTUD only over the direct carrier: chained probes don't reflect the
         // wire MTU, and a probe failure trips blackhole detection on a routine inner drop.
         let usePMTUD = (transport == nil)
         var connectionOpaquePointer: OpaquePointer?

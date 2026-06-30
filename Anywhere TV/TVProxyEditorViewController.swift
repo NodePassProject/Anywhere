@@ -69,8 +69,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaCC: HysteriaCongestionControl = .brutal
     private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
     private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
-    private var hysteriaPortsSpec = ""
-    private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
     private var hysteriaObfuscationType = "none"
     private var hysteriaObfuscationPassword = ""
     private var hysteriaObfuscationMinText = String(HysteriaObfuscation.geckoMinPacketSizeDefault)
@@ -158,7 +156,6 @@ class TVProxyEditorViewController: UITableViewController {
         case vlessXHTTPDownloadRealitySNI, vlessXHTTPDownloadRealityPublicKey,
              vlessXHTTPDownloadRealityShortId
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
-        case hysteriaPorts, hysteriaHopInterval
         case hysteriaObfuscationType, hysteriaObfuscationPassword, hysteriaObfuscationMin, hysteriaObfuscationMax
         case hysteriaSNI
         case nowhereKey, nowhereSpec, nowhereNetwork, nowherePoolEnabled, nowherePool, nowhereSNI, nowhereALPN
@@ -327,10 +324,6 @@ class TVProxyEditorViewController: UITableViewController {
             if hysteriaCC == .brutal {
                 hysteriaNetworkRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
                 hysteriaNetworkRows.append(.text(label: String(localized: "Download Speed", comment: "Download Speed for Hysteria protocol"), value: hysteriaDownloadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaDownloadMbps))
-            }
-            hysteriaNetworkRows.append(.text(label: String(localized: "Port Hopping", comment: "Port Hopping for Hysteria protocol"), value: hysteriaPortsSpec, placeholder: String("443,5000-6000"), key: .hysteriaPorts))
-            if !hysteriaPortsSpec.isEmpty {
-                hysteriaNetworkRows.append(.text(label: String(localized: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol"), value: hysteriaHopIntervalText, placeholder: String(localized: "Seconds"), key: .hysteriaHopInterval))
             }
             sections.append((nil, hysteriaNetworkRows))
         }
@@ -767,8 +760,6 @@ class TVProxyEditorViewController: UITableViewController {
             if let congestionControl = HysteriaCongestionControl(rawValue: value) { hysteriaCC = congestionControl }
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
-        case .hysteriaPorts: hysteriaPortsSpec = value
-        case .hysteriaHopInterval: hysteriaHopIntervalText = value
         case .hysteriaSNI: hysteriaSNI = value
         case .hysteriaObfuscationType: hysteriaObfuscationType = value
         case .hysteriaObfuscationPassword: hysteriaObfuscationPassword = value
@@ -903,13 +894,11 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let obfuscation, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
-            hysteriaPortsSpec = portHopping?.portsSpec ?? ""
-            hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             if let obfuscation {
                 hysteriaObfuscationType = obfuscation.typeTag
                 hysteriaObfuscationPassword = obfuscation.password
@@ -1116,17 +1105,12 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteria:
             let uploadMbps = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
             let downloadMbps = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
-            let portHopping = HysteriaPortHopping.make(
-                spec: hysteriaPortsSpec,
-                intervalSeconds: Int(hysteriaHopIntervalText)
-            )
             let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
                 password: hysteriaPassword,
                 congestionControl: hysteriaCC,
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
-                portHopping: portHopping,
                 obfuscation: hysteriaObfuscationValue,
                 sni: sni
             )

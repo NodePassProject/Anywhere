@@ -47,7 +47,7 @@ final class MITMSession {
         func send(data: Data, completion: @escaping (Error?) -> Void) {
             queue.async { [self] in
                 guard !closed else {
-                    completion(SocketError.notConnected)
+                    completion(TransportError.notConnected)
                     return
                 }
                 if let onSendToClient {

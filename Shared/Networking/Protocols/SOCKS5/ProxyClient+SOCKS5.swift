@@ -38,7 +38,7 @@ extension ProxyClient {
         if let tunnel = self.tunnel {
             onTransportReady(TunneledTransport(tunnel: tunnel))
         } else {
-            let transport = RawTCPSocket()
+            let transport = NWTCPTransport()
             self.connection = transport
             transport.connect(host: directDialHost, port: configuration.serverPort) { error in
                 if let error {
@@ -77,7 +77,7 @@ extension ProxyClient {
                 }
                 switch result {
                 case .success(let relay):
-                    // The relay socket must ride the same chain as the control channel.
+                    // The relay transport must ride the same chain as the control channel.
                     self.openSOCKS5UDPRelay(
                         relayHost: relay.host,
                         relayPort: relay.port
@@ -153,14 +153,14 @@ extension ProxyClient {
                 completion(.failure(error))
             }
         } else {
-            let socket = RawUDPSocket()
-            socket.connect(host: relayHost, port: relayPort,
+            let transport = NWUDPTransport()
+            transport.connect(host: relayHost, port: relayPort,
                            completionQueue: .global()) { error in
                 if let error {
                     completion(.failure(error))
                     return
                 }
-                completion(.success(DirectUDPProxyConnection(socket: socket)))
+                completion(.success(DirectUDPProxyConnection(transport: transport)))
             }
         }
     }

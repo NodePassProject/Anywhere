@@ -58,7 +58,7 @@ nonisolated class RealityClient {
         }
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = RawTCPSocket()
+        let transport = NWTCPTransport()
         self.connection = transport
 
         transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in

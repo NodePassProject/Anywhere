@@ -114,7 +114,7 @@ nonisolated final class HysteriaClient {
     }
 
     private let configuration: HysteriaConfiguration
-    /// Set for chained clients; `nil` for direct dials that use a kernel socket.
+    /// Set for chained clients; `nil` for direct dials that use the direct UDP carrier.
     private let transport: QUICDatagramTransport?
     /// Chain hop ProxyClients retained by a pooled chained entry.
     private var chainHolders: [ProxyClient]

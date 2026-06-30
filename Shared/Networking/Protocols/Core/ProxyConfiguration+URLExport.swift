@@ -96,7 +96,7 @@ extension ProxyConfiguration {
     }
     
     private func toHysteriaURL() -> String {
-        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let obfuscation, let sni) = outbound else {
+        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni) = outbound else {
             return ""
         }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
@@ -105,12 +105,6 @@ extension ProxyConfiguration {
         if congestionControl == .brutal {
             parameters.append("upmbps=\(uploadMbps)")
             parameters.append("downmbps=\(downloadMbps)")
-        }
-        if let portHopping {
-            parameters.append("mport=\(portHopping.portsSpec)")
-            if portHopping.intervalSeconds != HysteriaPortHopping.defaultIntervalSeconds {
-                parameters.append("hop-interval=\(portHopping.intervalSeconds)")
-            }
         }
         if let obfuscation {
             parameters.append("obfs=\(obfuscation.typeTag)")

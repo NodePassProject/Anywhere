@@ -240,19 +240,6 @@ struct ClashProxyParser {
             obfuscation = nil
         }
 
-        let portHopping: HysteriaPortHopping?
-        if let ports = getString(node, key: "ports"), !ports.isEmpty {
-            // Skip rather than silently collapse an unparseable range to one port.
-            guard HysteriaPortHopping.parseRanges(ports) != nil else { return nil }
-            let interval = getInt(node, key: "hop-interval") ?? getInt(node, key: "hop_interval")
-            portHopping = HysteriaPortHopping(
-                portsSpec: ports,
-                intervalSeconds: interval ?? HysteriaPortHopping.defaultIntervalSeconds
-            )
-        } else {
-            portHopping = nil
-        }
-
         let password = getString(node, key: "password") ?? ""
         let rawSNI = getString(node, key: "sni") ?? getString(node, key: "servername")
         let sni = (rawSNI?.isEmpty == false) ? rawSNI! : basics.server
@@ -273,7 +260,6 @@ struct ClashProxyParser {
                 congestionControl: congestionControl,
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
-                portHopping: portHopping,
                 obfuscation: obfuscation,
                 sni: sni
             )

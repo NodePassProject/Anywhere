@@ -93,8 +93,8 @@ nonisolated class GRPCConnection {
         }
     }
 
-    convenience init(transport: RawTCPSocket, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration, authority: authority)
+    convenience init(transport: NWTCPTransport, configuration: GRPCConfiguration, authority: String) {
+        self.init(transport: TransportClosures(tcp: transport), configuration: configuration, authority: authority)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: GRPCConfiguration, authority: String) {

@@ -18,7 +18,7 @@ struct TransportClosures {
 // MARK: - Transport adapters
 
 extension TransportClosures {
-    init(rawTCP transport: RawTCPSocket) {
+    init(tcp transport: NWTCPTransport) {
         self.init(
             send: { data, completion in
                 transport.send(data: data, completion: completion)

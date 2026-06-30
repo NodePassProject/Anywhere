@@ -23,8 +23,7 @@ extension TunnelStack {
     }
 
     /// Caps ``udpFlows`` by evicting the flow with the smallest idle deadline —
-    /// unreplied flows time out sooner, so one-way NAT probes shed first. Async
-    /// `close` (never `closeSync`): the victim may be inside `getaddrinfo`.
+    /// unreplied flows time out sooner, so one-way NAT probes shed first.
     /// Run on ``udpQueue`` before each insert.
     func evictUDPFlowsToAdmit() {
         // Runs before every insert and frees at most one slot, so a single pass suffices.

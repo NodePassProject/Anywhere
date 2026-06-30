@@ -14,7 +14,7 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksUDPSession
 
 // MARK: - ShadowsocksUDPSession
 
-/// Multiplexes every destination flow through one socket, sessionID, and packetID;
+/// Multiplexes every destination flow through one transport, sessionID, and packetID;
 /// replies demultiplex by (host, port), falling back to port-only when the server
 /// replies from an unseeded IP.
 nonisolated final class ShadowsocksUDPSession {
@@ -80,7 +80,7 @@ nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Mutable state (all on `delegateQueue`)
 
-    private let socket = RawUDPSocket()
+    private let transport = NWUDPTransport()
     private var state: State = .idle
 
     private var nextToken: Token = 0
@@ -219,7 +219,7 @@ nonisolated final class ShadowsocksUDPSession {
         pendingSends.removeAll { $0.token == token }
     }
 
-    /// Buffers in order while the socket is still connecting.
+    /// Buffers in order while the transport is still connecting.
     func send(token: Token,
               dstHost: String,
               dstPort: UInt16,
@@ -250,7 +250,7 @@ nonisolated final class ShadowsocksUDPSession {
     func cancel() {
         if case .cancelled = state { return }
         state = .cancelled
-        socket.cancel()
+        transport.cancel()
         notifyAllFlows(error: ProxyError.connectionFailed("Session cancelled"))
         registrations.removeAll()
         tokensByResponse.removeAll()
@@ -262,7 +262,7 @@ nonisolated final class ShadowsocksUDPSession {
 
     private func beginConnect() {
         state = .connecting
-        socket.connect(host: serverHost, port: serverPort, completionQueue: delegateQueue) { [weak self] error in
+        transport.connect(host: serverHost, port: serverPort, completionQueue: delegateQueue) { [weak self] error in
             guard let self else { return }
             if case .cancelled = self.state { return }
 
@@ -276,7 +276,7 @@ nonisolated final class ShadowsocksUDPSession {
             self.state = .ready
 
             // Receive on delegateQueue so handlers run on the same queue as state mutations.
-            self.socket.startReceiving(queue: self.delegateQueue, handler: { [weak self] data in
+            self.transport.startReceiving(queue: self.delegateQueue, handler: { [weak self] data in
                 self?.handleReceivedDatagram(data)
             }, errorHandler: { [weak self] error in
                 self?.handleTransportError(error)
@@ -313,7 +313,7 @@ nonisolated final class ShadowsocksUDPSession {
             let encrypted = try encryptPacket(payload: payload,
                                               dstHost: dstHost,
                                               dstPort: dstPort)
-            socket.send(data: encrypted) { error in
+            transport.send(data: encrypted) { error in
                 completion?(error)
             }
         } catch {
