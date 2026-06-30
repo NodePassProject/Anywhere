@@ -278,7 +278,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .hysteria:         tag = "TLS"
         case .nowhere:
             switch nowhereNetwork {
-            case .tcp:          tag = nil
+            case .tcp:          tag = "TLS"
             case .udp:          tag = "TLS"
             }
         case .vless:
