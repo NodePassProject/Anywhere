@@ -18,65 +18,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let statsRecorder = StatsRecorder()
     private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
     private var pathMonitor: NWPathMonitor?
-    private var lastPathSnapshot: PathSnapshot?
+    /// Last observed path status; nil before the first update.
+    private var lastPathStatus: Network.NWPath.Status?
 
-    /// Connection-relevant snapshot of a network path. A primary-interface change
-    /// strands established sockets; the other flags only distinguish additive changes.
-    private struct PathSnapshot {
-        let status: Network.NWPath.Status
-        let unsatisfiedReason: String?
-        let primaryInterface: PrimaryInterface?
-        let interfaceSummary: String
-        let supportsIPv4: Bool
-        let supportsIPv6: Bool
-        let isExpensive: Bool
-        let isConstrained: Bool
-
-        /// Egress interface identity (name + BSD index + type); a change means the
-        /// default route moved, invalidating every socket bound to the old interface.
-        struct PrimaryInterface: Equatable, CustomStringConvertible {
-            let name: String
-            let index: Int
-            let type: NWInterface.InterfaceType
-
-            var description: String {
-                let typeName: String
-                switch type {
-                case .wifi: typeName = "Wi-Fi"
-                case .cellular: typeName = "cellular"
-                case .wiredEthernet: typeName = "Ethernet"
-                case .loopback: typeName = "loopback"
-                case .other: typeName = "other"
-                @unknown default: typeName = "unknown"
-                }
-                return "\(name)/\(typeName)"
-            }
-        }
-
-        var summary: String {
-            var parts = [interfaceSummary]
-
-            switch (supportsIPv4, supportsIPv6) {
-            case (true, true):
-                parts.append("IPv4/IPv6")
-            case (true, false):
-                parts.append("IPv4")
-            case (false, true):
-                parts.append("IPv6")
-            case (false, false):
-                break
-            }
-
-            if isExpensive {
-                parts.append("expensive")
-            }
-            if isConstrained {
-                parts.append("constrained")
-            }
-
-            return parts.joined(separator: ", ")
-        }
-    }
+    /// True while `suspendOutbound` has released transports for the current outage;
+    /// drives the symmetric `resumeOutbound` on the up edge.
+    private var outboundSuspended = false
 
     // MARK: - Tunnel Lifecycle
     
@@ -268,14 +215,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func stopMonitoringPath() {
         pathMonitor?.cancel()
         pathMonitor = nil
-        lastPathSnapshot = nil
+        lastPathStatus = nil
+        outboundSuspended = false
     }
 
-    /// Resolves the current Wi-Fi SSID (iOS only) and hands the egress identity to
-    /// the stack, which applies the trusted-network policy.
-    private func resolveAndUpdateNetworkContext(_ snapshot: PathSnapshot) {
-        let isWiFi = snapshot.primaryInterface?.type == .wifi
-        let isCellular = snapshot.primaryInterface?.type == .cellular
+    /// Hands the egress identity (incl. Wi-Fi SSID on iOS) to the stack for the
+    /// trusted-network policy. `availableInterfaces.first` is the OS-preferred egress.
+    private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) {
+        let primaryType = path.availableInterfaces.first?.type
+        let isWiFi = primaryType == .wifi
+        let isCellular = primaryType == .cellular
 #if os(iOS)
         if isWiFi {
             // Requires the "Access WiFi Information" entitlement; otherwise `ssid`
@@ -289,101 +238,50 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
     }
 
-    private enum SatisfiedChange {
-        /// Nothing connection-relevant changed.
-        case unchanged
-        /// The egress interface moved; every outbound socket is stranded — recover.
-        case interfaceChanged(String)
-        /// Same interface but IPv4 reachability dropped; IPv4 proxy legs can no longer send — recover.
-        case ipv4EgressLost
-        /// Only additive/orthogonal attributes changed; existing connections stay valid.
-        case capabilityOnly(String)
-    }
-
+    /// Applies the trusted-network policy, releases upstream transports while the
+    /// path is down, and rebuilds them (flushing stale DNS) when it returns. Per-leg
+    /// recovery is left to the NW transports' viability handlers.
     private func handlePathUpdate(_ path: Network.NWPath) {
-        let snapshot = Self.makePathSnapshot(from: path)
-        let previous = lastPathSnapshot
-        lastPathSnapshot = snapshot
+        let previousStatus = lastPathStatus
+        lastPathStatus = path.status
 
-        if snapshot.status == .satisfied {
-            resolveAndUpdateNetworkContext(snapshot)
-        }
-
-        // First update after start: just record the baseline.
-        guard let previous else {
-            logger.info("[VPN] Network path ready: \(snapshot.summary)")
-            return
-        }
-
-        switch snapshot.status {
+        switch path.status {
         case .satisfied:
-            if previous.status != .satisfied {
-                // Restored after a drop: any leg that outlived the gap is stale.
-                logger.info("[VPN] Network path restored: \(snapshot.summary); recovering connections")
-                tunnelStack.handleNetworkPathChange(summary: "network path restored")
-            } else {
-                // Recover only on a real egress move; additive changes (e.g. IPv6
-                // arriving on the same Wi-Fi) leave connections valid.
-                switch Self.classifySatisfiedChange(from: previous, to: snapshot) {
-                case .interfaceChanged(let detail):
-                    logger.info("[VPN] Egress interface changed (\(detail)); recovering connections")
-                    tunnelStack.handleNetworkPathChange(summary: "interface change")
-                case .ipv4EgressLost:
-                    logger.info("[VPN] IPv4 egress lost (\(snapshot.summary)); recovering connections")
-                    tunnelStack.handleNetworkPathChange(summary: "IPv4 egress lost")
-                case .capabilityOnly(let what):
-                    logger.debug("[VPN] Path attributes changed (\(what)); connections unaffected")
-                case .unchanged:
-                    break
-                }
+            resolveAndUpdateNetworkContext(path)
+
+            if outboundSuspended {
+                // Up edge: rebuild the transports suspendOutbound released; flush stale DNS.
+                outboundSuspended = false
+                logger.info("[VPN] Network path restored: \(Self.pathSummary(path)); rebuilding upstream transports")
+                tunnelStack.resumeOutbound()
+            } else if previousStatus == nil {
+                logger.info("[VPN] Network path ready: \(Self.pathSummary(path))")
             }
+            // Otherwise satisfied→satisfied (e.g. an egress move): per-connection
+            // viability retires any stranded leg, so there's no global teardown.
+
             if reasserting {
                 reasserting = false
             }
 
         case .requiresConnection:
             // Dedupe repeated callbacks in the same state; nothing to recover onto yet.
-            guard previous.status != .requiresConnection else { return }
-            let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
-            logger.warning("[VPN] Network path waiting for attachment\(reasonSuffix); active connections may pause")
+            guard previousStatus != .requiresConnection else { return }
+            logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path)); active connections may pause")
             reasserting = true
 
         case .unsatisfied:
-            guard previous.status != .unsatisfied else { return }
-            let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
-            logger.warning("[VPN] Network path unavailable\(reasonSuffix); releasing upstream transports")
+            // Idempotent on repeated unsatisfied callbacks.
+            guard !outboundSuspended else { return }
+            outboundSuspended = true
+            logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path)); releasing upstream transports")
             reasserting = true
-            // Down edge: release dead upstream transports instead of pinning sockets
-            // through the outage; rebuilt on the up edge.
+            // Down edge: release dead upstream transports; rebuilt on the up edge.
             tunnelStack.suspendOutbound()
 
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")
         }
-    }
-
-    /// Classifies a satisfied→satisfied transition. Outbound sockets are pinned to
-    /// their egress interface, so additive changes on an unchanged interface are
-    /// deliberate no-ops.
-    private static func classifySatisfiedChange(from prev: PathSnapshot, to cur: PathSnapshot) -> SatisfiedChange {
-        if prev.primaryInterface != cur.primaryInterface {
-            let from = prev.primaryInterface?.description ?? "none"
-            let to = cur.primaryInterface?.description ?? "none"
-            return .interfaceChanged("\(from) → \(to)")
-        }
-
-        if prev.supportsIPv4 && !cur.supportsIPv4 {
-            return .ipv4EgressLost
-        }
-
-        var deltas: [String] = []
-        if prev.supportsIPv6 != cur.supportsIPv6 { deltas.append(cur.supportsIPv6 ? "+IPv6" : "-IPv6") }
-        if !prev.supportsIPv4 && cur.supportsIPv4 { deltas.append("+IPv4") }
-        if prev.isExpensive != cur.isExpensive { deltas.append(cur.isExpensive ? "+expensive" : "-expensive") }
-        if prev.isConstrained != cur.isConstrained { deltas.append(cur.isConstrained ? "+constrained" : "-constrained") }
-        if !deltas.isEmpty { return .capabilityOnly(deltas.joined(separator: ", ")) }
-
-        return .unchanged
     }
 
     private func logTunnelStop(reason: NEProviderStopReason) {
@@ -460,7 +358,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private static func makePathSnapshot(from path: Network.NWPath) -> PathSnapshot {
+    private static func pathSummary(_ path: Network.NWPath) -> String {
         let interfaceTypes: [String] = [
             (NWInterface.InterfaceType.wifi, "Wi-Fi"),
             (.wiredEthernet, "Ethernet"),
@@ -470,41 +368,36 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ]
         .compactMap { path.usesInterfaceType($0.0) ? $0.1 : nil }
 
-        let unsatisfiedReason: String?
-        if #available(iOS 14.2, tvOS 17.0, *) {
-            switch path.unsatisfiedReason {
-            case .notAvailable:
-                unsatisfiedReason = nil
-            case .cellularDenied:
-                unsatisfiedReason = "cellular denied"
-            case .wifiDenied:
-                unsatisfiedReason = "Wi-Fi denied"
-            case .localNetworkDenied:
-                unsatisfiedReason = "local network denied"
-            case .vpnInactive:
-                unsatisfiedReason = "required VPN inactive"
-            @unknown default:
-                unsatisfiedReason = "unspecified reason"
-            }
-        } else {
-            unsatisfiedReason = nil
+        var parts = [interfaceTypes.isEmpty ? "no interface" : interfaceTypes.joined(separator: "+")]
+        switch (path.supportsIPv4, path.supportsIPv6) {
+        case (true, true): parts.append("IPv4/IPv6")
+        case (true, false): parts.append("IPv4")
+        case (false, true): parts.append("IPv6")
+        case (false, false): break
         }
+        if path.isExpensive { parts.append("expensive") }
+        if path.isConstrained { parts.append("constrained") }
+        return parts.joined(separator: ", ")
+    }
 
-        // availableInterfaces is ordered by preference, so the first is the OS-preferred egress.
-        let primaryInterface = path.availableInterfaces.first.map {
-            PathSnapshot.PrimaryInterface(name: $0.name, index: $0.index, type: $0.type)
+    private static func unsatisfiedSuffix(_ path: Network.NWPath) -> String {
+        guard #available(iOS 14.2, tvOS 17.0, *) else { return "" }
+        let reason: String?
+        switch path.unsatisfiedReason {
+        case .notAvailable:
+            reason = nil
+        case .cellularDenied:
+            reason = "cellular denied"
+        case .wifiDenied:
+            reason = "Wi-Fi denied"
+        case .localNetworkDenied:
+            reason = "local network denied"
+        case .vpnInactive:
+            reason = "required VPN inactive"
+        @unknown default:
+            reason = "unspecified reason"
         }
-
-        return PathSnapshot(
-            status: path.status,
-            unsatisfiedReason: unsatisfiedReason,
-            primaryInterface: primaryInterface,
-            interfaceSummary: interfaceTypes.isEmpty ? "no interface" : interfaceTypes.joined(separator: "+"),
-            supportsIPv4: path.supportsIPv4,
-            supportsIPv6: path.supportsIPv6,
-            isExpensive: path.isExpensive,
-            isConstrained: path.isConstrained
-        )
+        return reason.map { " (\($0))" } ?? ""
     }
 
 }

@@ -82,9 +82,6 @@ enum TunnelConstants {
     /// Minimum interval between stack restarts; 2s absorbs back-to-back path and settings notifications.
     static let restartThrottleInterval: CFAbsoluteTime = 2.0
 
-    /// Debounce for path-change recovery; collapses the NWPath update burst from a Wi-Fi⇄cellular handoff.
-    static let networkRecoveryDebounceInterval: CFAbsoluteTime = 0.4
-
     // MARK: - TLS Sniffer
 
     /// Max bytes buffered while parsing a ClientHello for SNI; post-quantum key shares push ~4 KB.

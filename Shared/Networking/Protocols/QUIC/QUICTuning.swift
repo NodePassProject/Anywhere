@@ -58,6 +58,8 @@ struct QUICTuning {
 
     // MARK: Misc
 
+    /// Advertised `disable_active_migration`. `false` lets us change local address —
+    /// the prerequisite for migration, which is only attempted on a direct carrier.
     var disableActiveMigration: Bool
 }
 
@@ -79,7 +81,7 @@ extension QUICTuning {
         maxIdleTimeout: 30 * 1_000_000_000,
         handshakeTimeout: 10 * 1_000_000_000,
         keepAliveTimeout: 15 * 1_000_000_000,
-        disableActiveMigration: true
+        disableActiveMigration: false
     )
 
     /// Brutal windows are deliberately small — ~2× the proxied stream's `TCP_SND_BUF` (≈696 KB)
@@ -103,7 +105,7 @@ extension QUICTuning {
                 maxIdleTimeout: 30 * 1_000_000_000,
                 handshakeTimeout: 10 * 1_000_000_000,
                 keepAliveTimeout: 10 * 1_000_000_000,
-                disableActiveMigration: true
+                disableActiveMigration: false
             )
         case .bbr:
             return QUICTuning(
@@ -119,7 +121,7 @@ extension QUICTuning {
                 maxIdleTimeout: 30 * 1_000_000_000,
                 handshakeTimeout: 10 * 1_000_000_000,
                 keepAliveTimeout: 10 * 1_000_000_000,
-                disableActiveMigration: true
+                disableActiveMigration: false
             )
         }
     }
@@ -144,6 +146,6 @@ extension QUICTuning {
         maxIdleTimeout: 30 * 1_000_000_000,
         handshakeTimeout: 10 * 1_000_000_000,
         keepAliveTimeout: 10 * 1_000_000_000,
-        disableActiveMigration: true
+        disableActiveMigration: false
     )
 }

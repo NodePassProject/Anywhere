@@ -51,8 +51,6 @@ extension TunnelStack {
             running = false
             deferredRestart?.cancel()
             deferredRestart = nil
-            pendingNetworkRecovery?.cancel()
-            pendingNetworkRecovery = nil
             shutdownInternal()
             fakeIPPool.reset()
         }
@@ -95,31 +93,15 @@ extension TunnelStack {
         }
     }
 
-    /// Recovers connections after a network path change (only outbound sockets
-    /// are stranded — no full restart). Debounced: leading edge fires
-    /// immediately; a burst coalesces into one trailing recovery.
-    func handleNetworkPathChange(summary: String) {
+    /// Rebuilds the instance upstream transports `suspendOutbound` released and flushes
+    /// stale DNS, once the path returns. Pooled and app-facing legs are left to their
+    /// viability handlers; pooled transports rebuild on the next dial.
+    func resumeOutbound() {
         lwipQueue.async { [self] in
             guard running, configuration != nil else { return }
-
-            let now = CFAbsoluteTimeGetCurrent()
-            let elapsed = now - lastNetworkRecoveryTime
-
-            if elapsed < TunnelConstants.networkRecoveryDebounceInterval {
-                pendingNetworkRecovery?.cancel()
-                let delay = TunnelConstants.networkRecoveryDebounceInterval - elapsed
-                let work = DispatchWorkItem { [self] in
-                    pendingNetworkRecovery = nil
-                    guard running else { return }
-                    performNetworkRecovery(summary: summary)
-                }
-                pendingNetworkRecovery = work
-                lwipQueue.asyncAfter(deadline: .now() + delay, execute: work)
-                logger.debug("[TunnelStack] Network recovery debounced, deferred by \(String(format: "%.0f", delay * 1000))ms")
-                return
-            }
-
-            performNetworkRecovery(summary: summary)
+            logger.info("[VPN] Path restored: flushing DNS and rebuilding upstream transports")
+            DNSResolver.shared.flush()
+            reclaimInstanceTransports(rebuildMultiplexerPool: true)
         }
     }
 
@@ -142,16 +124,6 @@ extension TunnelStack {
             logger.info("[VPN] Trusted-network policy: effective mode \(proxyMode.rawValue) → \(newEffective.rawValue) (Wi-Fi=\(isWiFi), cellular=\(isCellular), SSID=\(ssid ?? "—"))")
             restartStack(configuration: configuration, revalidateMode: true)
         }
-    }
-
-    /// Runs the recovery and stamps the debounce clock. Must be called on `lwipQueue`.
-    private func performNetworkRecovery(summary: String) {
-        pendingNetworkRecovery?.cancel()
-        pendingNetworkRecovery = nil
-        lastNetworkRecoveryTime = CFAbsoluteTimeGetCurrent()
-        guard let configuration else { return }
-        logger.warning("[VPN] Recovering connections after \(summary)")
-        invalidateOutboundState(configuration: configuration)
     }
 
     /// Flushes cached DNS and invalidates all outbound transport state while

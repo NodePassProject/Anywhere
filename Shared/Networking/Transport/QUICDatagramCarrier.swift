@@ -13,9 +13,8 @@ import Dispatch
 // MARK: - QUICDatagramCarrier
 
 /// The direct UDP carrier for ngtcp2, backed by a connected `NWConnection.udp`.
-/// All I/O runs inline on the connection's `queue` (ngtcp2 is single-threaded).
-/// Migration is disabled, so the local 4-tuple is cosmetic; `connect` fills
-/// `localAddr` with a family-matched `ANY`.
+/// I/O runs inline on `queue` (ngtcp2 is single-threaded). Path identity is owned
+/// by `QUICConnection`, so this 4-tuple is cosmetic — `connect` fills a family `ANY`.
 nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     private typealias QUICError = QUICConnection.QUICError
@@ -30,12 +29,28 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     /// A failure seen before `startReceiving` armed the handler.
     private var pendingError: Int32?
 
+    /// When set, a viability drop calls this instead of surfacing a terminal error,
+    /// letting the owner attempt QUIC migration first. Fires on `queue`.
+    var onPathDown: (() -> Void)?
+    /// Fires (on `queue`) when NWConnection reports a better path — the cue for a
+    /// proactive migration while still healthy.
+    var onBetterPath: (() -> Void)?
+    /// Fires once (on `queue`) when the connection first reaches `.ready`; lets a
+    /// proactive migration wait for the target path before switching.
+    var onReady: (() -> Void)?
+
     private var ready = false
     /// Guards against double-arming the receive loop.
     private var receiving = false
 
     init(queue: DispatchQueue) {
         self.queue = queue
+    }
+
+    /// The egress interface type in use, or nil before `.ready`. Lets the owner
+    /// confirm a migration target is a *different* interface. Read on `queue`.
+    var currentInterfaceType: NWInterface.InterfaceType? {
+        connection?.currentPath?.availableInterfaces.first?.type
     }
 
     // MARK: - Connect
@@ -55,6 +70,23 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         connection.stateUpdateHandler = { [weak self] state in
             self?.handleState(state, for: connection)
         }
+        // Egress under a ready connection went away: hand off to `onPathDown` if set
+        // (the owner migrates), else deliver a network error so ngtcp2 tears down
+        // instead of waiting on its PTO/idle timers. Identity guards stale callbacks.
+        connection.viabilityUpdateHandler = { [weak self] viable in
+            guard let self, self.connection === connection, !viable, self.ready else { return }
+            if let onPathDown = self.onPathDown {
+                onPathDown()
+            } else {
+                self.deliverError(.posix(.ENETDOWN))
+            }
+        }
+        // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
+        // proactive migration before the current path degrades.
+        connection.betterPathUpdateHandler = { [weak self] better in
+            guard let self, self.connection === connection, better, self.ready else { return }
+            self.onBetterPath?()
+        }
         connection.start(queue: queue)
     }
 
@@ -68,6 +100,10 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
             if packetHandler != nil, !receiving {
                 receiving = true
                 receiveLoop(connection)
+            }
+            if let onReady {
+                self.onReady = nil
+                onReady()
             }
         case .failed(let error):
             deliverError(error)
@@ -148,6 +184,9 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         }
         packetHandler = nil
         recvErrorHandler = nil
+        onPathDown = nil
+        onBetterPath = nil
+        onReady = nil
         ready = false
         receiving = false
     }
@@ -185,8 +224,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         }
     }
 
-    /// Fills `localAddr` with a family-matched `ANY` placeholder. ngtcp2 runs with
-    /// a fixed path (migration disabled), so the real local 4-tuple is unused.
+    /// Fills `localAddr` with a family-matched `ANY` placeholder; the real local
+    /// 4-tuple is unused for routing (path identity lives in `QUICConnection`).
     private static func fillAnyLocalAddr(_ localAddr: inout sockaddr_storage, family: sa_family_t) {
         if Int32(family) == AF_INET {
             withUnsafeMutablePointer(to: &localAddr) { storage in

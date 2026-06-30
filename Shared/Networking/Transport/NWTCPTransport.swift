@@ -365,6 +365,13 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
                 break
             }
         }
+        // NWConnection drops viability before a send/receive would error. TCP can't
+        // migrate a 4-tuple, so fail the leg promptly — the next dial picks the live
+        // path. `failActive` only acts in `.ready`, so a teardown blip is a no-op.
+        connection.viabilityUpdateHandler = { [weak self] viable in
+            guard let self, !viable else { return }
+            self.failActive(with: TransportError.connectionFailed("Network path no longer viable"))
+        }
     }
 
     /// Moves to `.failed` and notifies an in-flight receive. Must run on `queue`.

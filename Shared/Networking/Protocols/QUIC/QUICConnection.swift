@@ -6,10 +6,8 @@
 //
 
 import Foundation
-import Darwin
-import Dispatch
+import Network
 import CryptoKit
-import Security
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
@@ -100,12 +98,36 @@ nonisolated class QUICConnection {
     /// A coalesced flush is queued; drained by one `writeToUDP` at the end of the queue cycle.
     private var flushScheduled = false
 
-    /// Direct-dial UDP carrier. `nil` when QUIC rides a `QUICDatagramTransport`.
+    /// Direct-dial UDP carrier (the active path). `nil` when QUIC rides a `QUICDatagramTransport`.
     private var carrier: QUICDatagramCarrier?
 
     private var localAddr = sockaddr_storage()
     private var remoteAddr = sockaddr_storage()
     private var addrLen: Int = MemoryLayout<sockaddr_in>.size
+
+    // MARK: Migration state (direct carrier only; all touched on `queue`)
+
+    private enum MigrationKind { case reactive, proactive }
+    /// Set while a path switch is in flight (awaiting ngtcp2 path validation).
+    private var migrationKind: MigrationKind?
+    /// Proactive-migration target, live alongside `carrier` until the new path
+    /// validates. `nil` for reactive (the dead carrier is retired at once).
+    private var migratingCarrier: QUICDatagramCarrier?
+    /// Distinct cosmetic local addr of the migration target path, so ngtcp2 sees a
+    /// path change and `writeToUDP` can route per path during proactive validation.
+    private var migratingLocalAddr = sockaddr_storage()
+    /// Monotonic source of distinct cosmetic local addrs across migrations.
+    private var migrationCounter: UInt8 = 0
+    /// Genuine migration failures (ngtcp2 rejected, or path didn't validate) since the
+    /// last success — a signal the server can't migrate. Benign aborts don't count.
+    private var migrationFailures = 0
+    private static let maxMigrationFailures = 3
+    /// True once a proactive migration called `initiate_migration` and ngtcp2 owns a
+    /// validation only `path_validation` can resolve. Gates eager aborts mid-probe.
+    private var proactiveValidating = false
+    /// Fires if a proactive target never becomes ready; bounds the in-flight state.
+    private var proactiveDeadline: DispatchWorkItem?
+    private static let proactiveReadyTimeout: TimeInterval = 5
 
     fileprivate var tlsHandler: QUICTLSHandler?
 
@@ -430,12 +452,14 @@ nonisolated class QUICConnection {
 
             var vec = ngtcp2_vec(base: stableBase.advanced(by: offset),
                                  len: remaining)
-            let nwrite: ngtcp2_ssize = txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                ngtcp2_swift_conn_writev_stream(
-                    conn, nil, &pi, destination.baseAddress, destination.count,
-                    &pdatalen, flags,
-                    streamId, &vec, 1, ts
-                )
+            let (nwrite, outCarrier) = writeReportingCarrier { pathPtr in
+                txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
+                    ngtcp2_swift_conn_writev_stream(
+                        conn, pathPtr, &pi, destination.baseAddress, destination.count,
+                        &pdatalen, flags,
+                        streamId, &vec, 1, ts
+                    )
+                }
             }
 
             if nwrite == 0 { break }
@@ -456,7 +480,7 @@ nonisolated class QUICConnection {
                 break
             }
 
-            sendTxBuf(length: Int(nwrite))
+            sendTxBuf(length: Int(nwrite), to: outCarrier)
             if pdatalen > 0 { offset += Int(pdatalen) }
             if pdatalen == 0 { break }
         }
@@ -622,12 +646,7 @@ nonisolated class QUICConnection {
             self.carrier = carrier
             try initializeNgtcp2()
             state = .handshaking
-            carrier.startReceiving(
-                onPacket: { [weak self] data in self?.handleReceivedPacket(data) },
-                onError: { [weak self] error in
-                    self?.close(error: QUICError.connectionFailed("recv errno=\(error)"))
-                }
-            )
+            armActiveCarrier(carrier, localAddr: localAddr)
             writeToUDP()
             rescheduleTimer()
         } catch {
@@ -639,8 +658,8 @@ nonisolated class QUICConnection {
         }
     }
 
-    /// Wires ngtcp2 to a datagram transport (chained QUIC). Placeholder addrs are safe
-    /// because `disable_active_migration` is set — ngtcp2 never routes by them.
+    /// Wires ngtcp2 to a datagram transport (chained QUIC). Placeholder addrs are safe:
+    /// chained QUIC rides a fixed relay path and never migrates; the transport routes.
     private func setupTunnelTransport(
         transport: QUICDatagramTransport,
         completion: @escaping (Error?) -> Void
@@ -649,9 +668,10 @@ nonisolated class QUICConnection {
             configurePlaceholderAddrs()
             try initializeNgtcp2()
             state = .handshaking
+            let placeholderLocal = localAddr
             transport.startReceiving { [weak self] data in
                 self?.queue.async {
-                    self?.handleReceivedPacket(data)
+                    self?.handleReceivedPacket(data, localAddr: placeholderLocal)
                 }
             } errorHandler: { [weak self] error in
                 self?.queue.async {
@@ -699,6 +719,10 @@ nonisolated class QUICConnection {
     private func closeCarrier() {
         carrier?.close()
         carrier = nil
+        // Also retire any in-flight migration target, so closing mid-migration doesn't
+        // leak its NWConnection or leave a deferred path_validation/deadline on stale state.
+        migratingCarrier?.close()
+        clearMigrationState()
     }
 
     private func populateRemoteAddr() {
@@ -782,14 +806,334 @@ nonisolated class QUICConnection {
         }
     }
 
-    /// Sends `length` bytes from `txBuffer`. Drop-on-error; ngtcp2 handles retransmit.
-    private func sendTxBuf(length: Int) {
+    // MARK: - Path-aware carrier I/O
+
+    /// Builds an `ngtcp2_path` over pinned copies of `local`/`remote` and runs `body`
+    /// with it. ngtcp2 copies the addrs internally, so the copies need only outlive the call.
+    private func withPath<R>(local: sockaddr_storage, remote: sockaddr_storage, addrLen: Int,
+                             _ body: (UnsafeMutablePointer<ngtcp2_path>) -> R) -> R {
+        var local = local
+        var remote = remote
+        return withUnsafeMutablePointer(to: &local) { lp in
+            withUnsafeMutablePointer(to: &remote) { rp in
+                var path = ngtcp2_path(
+                    local: ngtcp2_addr(addr: UnsafeMutableRawPointer(lp).assumingMemoryBound(to: sockaddr.self),
+                                       addrlen: ngtcp2_socklen(addrLen)),
+                    remote: ngtcp2_addr(addr: UnsafeMutableRawPointer(rp).assumingMemoryBound(to: sockaddr.self),
+                                        addrlen: ngtcp2_socklen(addrLen)),
+                    user_data: nil
+                )
+                return withUnsafeMutablePointer(to: &path) { body($0) }
+            }
+        }
+    }
+
+    /// Runs an ngtcp2 *write* (`body`) with an `ngtcp2_path` over owned buffers,
+    /// returning the result and the carrier its reported path maps to. The buffers are
+    /// mandatory: every write copies the chosen 4-tuple into `path`, so NULL would crash.
+    private func writeReportingCarrier<R>(
+        _ body: (UnsafeMutablePointer<ngtcp2_path>) -> R
+    ) -> (result: R, carrier: QUICDatagramCarrier?) {
+        var local = sockaddr_storage()
+        var remote = sockaddr_storage()
+        let cap = ngtcp2_socklen(MemoryLayout<sockaddr_storage>.size)
+        return withUnsafeMutablePointer(to: &local) { lp in
+            withUnsafeMutablePointer(to: &remote) { rp in
+                var path = ngtcp2_path(
+                    local: ngtcp2_addr(addr: UnsafeMutableRawPointer(lp).assumingMemoryBound(to: sockaddr.self),
+                                       addrlen: cap),
+                    remote: ngtcp2_addr(addr: UnsafeMutableRawPointer(rp).assumingMemoryBound(to: sockaddr.self),
+                                        addrlen: cap),
+                    user_data: nil
+                )
+                let result = withUnsafeMutablePointer(to: &path) { body($0) }
+                return (result, carrierForOutPath(path))
+            }
+        }
+    }
+
+    /// Arms a carrier's receive loop, tagging inbound packets with `localAddr` so
+    /// ngtcp2 attributes them to the right path. Migration triggers are set elsewhere.
+    private func armReceive(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage,
+                            onError: @escaping (Int32) -> Void) {
+        carrier.startReceiving(
+            onPacket: { [weak self] data in self?.handleReceivedPacket(data, localAddr: localAddr) },
+            onError: onError
+        )
+    }
+
+    /// Arms the active carrier's receive loop (close on hard error) and migration triggers.
+    private func armActiveCarrier(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage) {
+        armReceive(carrier, localAddr: localAddr) { [weak self] errno in
+            self?.close(error: QUICError.connectionFailed("recv errno=\(errno)"))
+        }
+        installMigrationTriggers(on: carrier)
+    }
+
+    /// Sets the reactive (path-down) and proactive (better-path) triggers; no-op when migration is off.
+    private func installMigrationTriggers(on carrier: QUICDatagramCarrier) {
+        guard migrationEnabled else { return }
+        carrier.onPathDown = { [weak self] in self?.attemptReactiveMigration() }
+        carrier.onBetterPath = { [weak self] in self?.attemptProactiveMigration() }
+    }
+
+    // MARK: - Migration
+
+    /// Migration applies only to the direct carrier, and only if we advertised support.
+    private var migrationEnabled: Bool {
+        transport == nil && !tuning.disableActiveMigration
+    }
+
+    /// A distinct cosmetic local addr for the next migration path, matching the remote's
+    /// family. Never hits the wire (ngtcp2 uses it only as path identity), but it must
+    /// differ from the current local or ngtcp2 won't see a path change.
+    private func makeMigrationLocalAddr() -> sockaddr_storage {
+        migrationCounter = migrationCounter &+ 1
+        let tag = migrationCounter == 0 ? 1 : migrationCounter
+        var storage = sockaddr_storage()
+        withUnsafeMutablePointer(to: &storage) { sp in
+            if Int32(remoteAddr.ss_family) == AF_INET6 {
+                sp.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                    sin6.pointee = sockaddr_in6()
+                    sin6.pointee.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+                    sin6.pointee.sin6_family = sa_family_t(AF_INET6)
+                    var a = in6addr_any
+                    withUnsafeMutableBytes(of: &a) { bytes in
+                        bytes[0] = 0xfd          // unique-local prefix
+                        bytes[15] = tag
+                    }
+                    sin6.pointee.sin6_addr = a
+                }
+            } else {
+                sp.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                    sin.pointee = sockaddr_in()
+                    sin.pointee.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                    sin.pointee.sin_family = sa_family_t(AF_INET)
+                    sin.pointee.sin_addr.s_addr = UInt32(tag).bigEndian  // 0.0.0.tag
+                }
+            }
+        }
+        return storage
+    }
+
+    /// The active path died. Move the live session onto a fresh carrier (picking the new
+    /// OS-preferred path) via immediate migration, rather than tearing down every stream.
+    /// Any failure falls back to `close()` and the pool reconnects. Runs on `queue`.
+    private func attemptReactiveMigration() {
+        // A proactive migration is moot now the path is dead; abandon it (not a failure).
+        if migrationKind == .proactive {
+            migratingCarrier?.close()
+            clearMigrationState()
+        }
+
+        guard migrationEnabled, state == .connected, migrationKind == nil,
+              migrationFailures < Self.maxMigrationFailures,
+              let conn = connectionOpaquePointer else {
+            close(error: QUICError.connectionFailed("network path lost"))
+            return
+        }
+
+        let newCarrier = QUICDatagramCarrier(queue: queue)
+        var placeholder = sockaddr_storage()
+        do {
+            try newCarrier.connect(remoteAddr: remoteAddr, localAddr: &placeholder)
+        } catch {
+            close(error: error)
+            return
+        }
+
+        let newLocal = makeMigrationLocalAddr()
+        let ts = currentTimestamp()
+        // Bracket the ngtcp2 call so a synchronously-closing callback can't free `conn`.
+        let prevBusy = ngtcp2Busy
+        ngtcp2Busy = true
+        let rv = withPath(local: newLocal, remote: remoteAddr, addrLen: addrLen) { pathPtr in
+            ngtcp2_conn_initiate_immediate_migration(conn, pathPtr, ts)
+        }
+        ngtcp2Busy = prevBusy
+        guard rv == 0 else {
+            logger.warning("[QUIC] Reactive migration rejected (ngtcp2 \(rv)); reconnecting")
+            newCarrier.close()
+            migrationFailures += 1
+            close(error: QUICError.connectionFailed("migration rejected: \(rv)"))
+            return
+        }
+
+        // Immediate migration switched the active path: one carrier now (no per-path
+        // routing), so route all I/O to it, retire the old one, validate in background.
+        migrationKind = .reactive
+        let oldCarrier = carrier
+        carrier = newCarrier
+        localAddr = newLocal
+        armActiveCarrier(newCarrier, localAddr: newLocal)
+        oldCarrier?.close()
+        logger.info("[QUIC] Reactive migration initiated; validating new path")
+        writeToUDP()
+        rescheduleTimer()
+    }
+
+    /// A better path appeared while the current one still works. Validate it on a parallel
+    /// carrier and switch only once it passes, keeping the working path until then.
+    /// Best-effort: any hitch leaves the current path untouched. Runs on `queue`.
+    private func attemptProactiveMigration() {
+        guard migrationEnabled, state == .connected, migrationKind == nil,
+              migrationFailures < Self.maxMigrationFailures,
+              connectionOpaquePointer != nil,
+              let oldType = carrier?.currentInterfaceType else { return }
+
+        let target = QUICDatagramCarrier(queue: queue)
+        var placeholder = sockaddr_storage()
+        do {
+            try target.connect(remoteAddr: remoteAddr, localAddr: &placeholder)
+        } catch {
+            target.close()
+            return
+        }
+
+        let newLocal = makeMigrationLocalAddr()
+        migrationKind = .proactive
+        migratingCarrier = target
+        migratingLocalAddr = newLocal
+
+        // Before validation, a target failure aborts cleanly; once validating, it's left
+        // for path_validation to time out so the in-flight probe isn't misrouted.
+        armReceive(target, localAddr: newLocal) { [weak self] _ in
+            self?.abortProactiveIfNotValidating()
+        }
+        target.onPathDown = { [weak self] in self?.abortProactiveIfNotValidating() }
+
+        // If the target never reaches `.ready`, give up rather than wedge `migrationKind`.
+        let deadline = DispatchWorkItem { [weak self, weak target] in
+            guard let self, let target, self.migratingCarrier === target, !self.proactiveValidating else { return }
+            logger.warning("[QUIC] Proactive migration target not ready in \(Int(Self.proactiveReadyTimeout))s; staying put")
+            self.abortProactiveMigration(countAsFailure: false)
+        }
+        proactiveDeadline = deadline
+        queue.asyncAfter(deadline: .now() + Self.proactiveReadyTimeout, execute: deadline)
+
+        // Once the target is up and confirmed a *different* interface, start validation.
+        // NWConnection buffers the probe until ready.
+        target.onReady = { [weak self, weak target] in
+            guard let self else { return }
+            guard let target, self.migratingCarrier === target,
+                  let conn = self.connectionOpaquePointer,
+                  let newType = target.currentInterfaceType, newType != oldType else {
+                self.abortProactiveMigration(countAsFailure: false)
+                return
+            }
+            let ts = self.currentTimestamp()
+            let prevBusy = self.ngtcp2Busy
+            self.ngtcp2Busy = true
+            let rv = self.withPath(local: newLocal, remote: self.remoteAddr, addrLen: self.addrLen) { pathPtr in
+                ngtcp2_conn_initiate_migration(conn, pathPtr, ts)
+            }
+            self.ngtcp2Busy = prevBusy
+            guard rv == 0 else {
+                logger.warning("[QUIC] Proactive migration rejected (ngtcp2 \(rv)); staying put")
+                self.abortProactiveMigration(countAsFailure: true)
+                return
+            }
+            // Committed: ngtcp2 owns the validation now. Cancel the readiness deadline;
+            // path_validation success/failure drives the rest.
+            self.proactiveValidating = true
+            self.proactiveDeadline?.cancel()
+            self.proactiveDeadline = nil
+            logger.info("[QUIC] Proactive migration: validating better path")
+            self.writeToUDP()
+            self.rescheduleTimer()
+        }
+    }
+
+    /// Drops a proactive-migration target and stays on the current path. `countAsFailure`
+    /// is true only when migration genuinely failed (ngtcp2 rejected, or validation
+    /// failed); benign aborts pass false. Runs on `queue`.
+    private func abortProactiveMigration(countAsFailure: Bool) {
+        guard migrationKind == .proactive else { return }
+        migratingCarrier?.close()
+        clearMigrationState()
+        if countAsFailure { migrationFailures += 1 }
+    }
+
+    /// Aborts a proactive migration only while still safe — before `initiate_migration`
+    /// hands ngtcp2 an active validation. Used by the target's error hooks.
+    private func abortProactiveIfNotValidating() {
+        guard migrationKind == .proactive, !proactiveValidating else { return }
+        abortProactiveMigration(countAsFailure: false)
+    }
+
+    /// Clears migration tracking and the readiness deadline; leaves `migrationFailures`. Runs on `queue`.
+    private func clearMigrationState() {
+        proactiveDeadline?.cancel()
+        proactiveDeadline = nil
+        proactiveValidating = false
+        migratingCarrier = nil
+        migrationKind = nil
+    }
+
+    /// Result ngtcp2 reports for a migration path; `aborted` means it abandoned the validation, not that the path failed.
+    fileprivate enum PathValidationResult { case success, failure, aborted }
+
+    /// ngtcp2 finished (or abandoned) validating a migration path. The trampoline defers
+    /// it off the ngtcp2 batch, so `close()` and re-entrant ngtcp2 calls are safe here.
+    fileprivate func handlePathValidation(result: PathValidationResult) {
+        // ABORTED ≠ failure: ngtcp2 abandons a validation (superseded by a newer
+        // migration, or its CID retired) — not a dead path. A reactive switch during
+        // proactive validation aborts the proactive pv; that stale ABORTED must not undo
+        // it. Retire the target only if a proactive migration is still live.
+        if result == .aborted {
+            if migrationKind == .proactive { abortProactiveMigration(countAsFailure: false) }
+            return
+        }
+        guard let kind = migrationKind else { return }
+        if result == .success {
+            if kind == .proactive, let target = migratingCarrier {
+                let old = carrier
+                carrier = target
+                localAddr = migratingLocalAddr
+                migratingCarrier = nil       // cleared first so routing settles on `carrier`
+                armActiveCarrier(target, localAddr: localAddr)
+                old?.close()
+            }
+            clearMigrationState()
+            migrationFailures = 0
+            logger.info("[QUIC] Migration validated; new path active")
+        } else {
+            logger.warning("[QUIC] Migration path validation failed")
+            if kind == .proactive {
+                abortProactiveMigration(countAsFailure: true)
+            } else {
+                clearMigrationState()
+                close(error: QUICError.connectionFailed("migration path validation failed"))
+            }
+        }
+    }
+
+    /// The carrier for a just-written packet, per the path ngtcp2 reported. Two carriers
+    /// exist only during a proactive migration; otherwise this is always `carrier`.
+    private func carrierForOutPath(_ path: ngtcp2_path) -> QUICDatagramCarrier? {
+        if migratingCarrier != nil, pathLocalMatchesMigrating(path.local) {
+            return migratingCarrier
+        }
+        return carrier
+    }
+
+    private func pathLocalMatchesMigrating(_ addr: ngtcp2_addr) -> Bool {
+        guard let a = addr.addr, addr.addrlen > 0 else { return false }
+        var mig = migratingLocalAddr
+        return withUnsafeBytes(of: &mig) { migBytes in
+            guard let base = migBytes.baseAddress else { return false }
+            return memcmp(a, base, min(Int(addr.addrlen), migBytes.count)) == 0
+        }
+    }
+
+    /// Sends `length` bytes from `txBuffer` to the given `carrier`. Drop-on-error; ngtcp2 retransmits.
+    private func sendTxBuf(length: Int, to carrier: QUICDatagramCarrier?) {
         guard length > 0 else { return }
         if let obfuscator {
             let datagrams = txBuffer.withUnsafeBytes { raw in
                 obfuscator.seal(UnsafeRawBufferPointer(rebasing: raw[0..<length]))
             }
-            for datagram in datagrams { sendDatagram(datagram) }
+            for datagram in datagrams { sendDatagram(datagram, to: carrier) }
             return
         }
         if let transport {
@@ -807,8 +1151,8 @@ nonisolated class QUICConnection {
         }
     }
 
-    /// Routes one ready-to-send wire datagram to the active path (chained transport or direct carrier).
-    private func sendDatagram(_ datagram: Data) {
+    /// Routes one wire datagram to the chained transport or the given direct carrier.
+    private func sendDatagram(_ datagram: Data, to carrier: QUICDatagramCarrier?) {
         if let transport {
             transport.sendDatagram(datagram)
             return
@@ -847,6 +1191,7 @@ nonisolated class QUICConnection {
         callbacks.get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb
         callbacks.version_negotiation = ngtcp2_crypto_version_negotiation_cb
         callbacks.handshake_completed = quicHandshakeCompletedCB
+        callbacks.path_validation = quicPathValidationCB
         if datagramsEnabled {
             callbacks.recv_datagram = quicRecvDatagramCB
         }
@@ -869,7 +1214,10 @@ nonisolated class QUICConnection {
         parameters.initial_max_stream_data_bidi_remote = tuning.initialMaxStreamDataBidiRemote
         parameters.initial_max_stream_data_uni = tuning.initialMaxStreamDataUni
         parameters.max_idle_timeout = tuning.maxIdleTimeout
-        parameters.disable_active_migration = tuning.disableActiveMigration ? 1 : 0
+        // Advertise migration support only when we can migrate (direct carrier); chained
+        // QUIC honestly declares it won't. ngtcp2 gates *our* migration on the server's
+        // flag, not this one — this is just the correct outbound declaration.
+        parameters.disable_active_migration = migrationEnabled ? 0 : 1
         if datagramsEnabled {
             parameters.max_datagram_frame_size = Self.maxDatagramFrameSize
         }
@@ -964,7 +1312,7 @@ nonisolated class QUICConnection {
         return false
     }
 
-    fileprivate func handleReceivedPacket(_ data: Data) {
+    fileprivate func handleReceivedPacket(_ data: Data, localAddr: sockaddr_storage) {
         guard let connectionOpaquePointer else { return }
 
         // Deobfuscate first; a `nil` result is an incomplete fragment or malformed packet — nothing
@@ -986,20 +1334,11 @@ nonisolated class QUICConnection {
         // Guard close() from freeing `conn` while ngtcp2 is still on the stack.
         let prevBusy = ngtcp2Busy
         ngtcp2Busy = true
-        let rv: Int32 = packet.withUnsafeBytes { raw in
+        let rv: Int32 = packet.withUnsafeBytes { raw -> Int32 in
             guard let pointer = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
-            var path = ngtcp2_path()
-            withUnsafeMutablePointer(to: &localAddr) { local in
-                withUnsafeMutablePointer(to: &remoteAddr) { remote in
-                    path.local = ngtcp2_addr(
-                        addr: UnsafeMutableRawPointer(local).assumingMemoryBound(to: sockaddr.self),
-                        addrlen: ngtcp2_socklen(addrLen))
-                    path.remote = ngtcp2_addr(
-                        addr: UnsafeMutableRawPointer(remote).assumingMemoryBound(to: sockaddr.self),
-                        addrlen: ngtcp2_socklen(addrLen))
-                }
+            return withPath(local: localAddr, remote: remoteAddr, addrLen: addrLen) { pathPtr in
+                ngtcp2_swift_conn_read_pkt(connectionOpaquePointer, pathPtr, &pi, pointer, packet.count, ts)
             }
-            return ngtcp2_swift_conn_read_pkt(connectionOpaquePointer, &path, &pi, pointer, packet.count, ts)
         }
         ngtcp2Busy = prevBusy
 
@@ -1055,15 +1394,17 @@ nonisolated class QUICConnection {
                 ? UInt32(NGTCP2_WRITE_DATAGRAM_FLAG_MORE)
                 : 0
 
-            let nwrite: ngtcp2_ssize = datagram.withUnsafeBytes { rawBuf in
-                guard let srcPtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                    return 0
-                }
-                return txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                    ngtcp2_swift_conn_write_datagram(
-                        connectionOpaquePointer, nil, &pi, destination.baseAddress, destination.count,
-                        &accepted, flags, 0, srcPtr, datagram.count, ts
-                    )
+            let (nwrite, outCarrier) = writeReportingCarrier { pathPtr in
+                datagram.withUnsafeBytes { rawBuf -> ngtcp2_ssize in
+                    guard let srcPtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                        return 0
+                    }
+                    return txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
+                        ngtcp2_swift_conn_write_datagram(
+                            connectionOpaquePointer, pathPtr, &pi, destination.baseAddress, destination.count,
+                            &accepted, flags, 0, srcPtr, datagram.count, ts
+                        )
+                    }
                 }
             }
 
@@ -1081,7 +1422,7 @@ nonisolated class QUICConnection {
                 continue
             }
             if nwrite > 0 {
-                sendTxBuf(length: Int(nwrite))
+                sendTxBuf(length: Int(nwrite), to: outCarrier)
             }
             if accepted != 0 {
                 let popped = pendingDatagrams.removeFirst()
@@ -1106,11 +1447,13 @@ nonisolated class QUICConnection {
         }
 
         while true {
-            let nwrite = txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                ngtcp2_swift_conn_write_pkt(connectionOpaquePointer, nil, &pi, destination.baseAddress, destination.count, ts)
+            let (nwrite, outCarrier) = writeReportingCarrier { pathPtr in
+                txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
+                    ngtcp2_swift_conn_write_pkt(connectionOpaquePointer, pathPtr, &pi, destination.baseAddress, destination.count, ts)
+                }
             }
             if nwrite <= 0 { break }
-            sendTxBuf(length: Int(nwrite))
+            sendTxBuf(length: Int(nwrite), to: outCarrier)
         }
 
         // Updates conn->tx.pacing.next_ts; without it the pacer is disabled and sends burst cwnd-wide.
@@ -1363,6 +1706,26 @@ private let quicHandshakeCompletedCB: @convention(c) (
         connection.connectCompletion?(nil)
         connection.connectCompletion = nil
     }
+    return 0
+}
+
+/// Fires when a migration path finishes — or is abandoned during — validation. Defers
+/// off the ngtcp2 batch (like the handshake callback) so promotion/close can re-enter
+/// ngtcp2 safely. ABORTED is mapped distinctly (see `handlePathValidation`).
+private let quicPathValidationCB: @convention(c) (
+    OpaquePointer?, UInt32, UnsafePointer<ngtcp2_path>?, UnsafePointer<ngtcp2_path>?,
+    ngtcp2_path_validation_result, UnsafeMutableRawPointer?
+) -> Int32 = { _, _, _, _, res, userData in
+    guard let connection = qcFromUserData(userData) else { return 0 }
+    let result: QUICConnection.PathValidationResult
+    if res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS {
+        result = .success
+    } else if res == NGTCP2_PATH_VALIDATION_RESULT_FAILURE {
+        result = .failure
+    } else {
+        result = .aborted
+    }
+    connection.queue.async { connection.handlePathValidation(result: result) }
     return 0
 }
 

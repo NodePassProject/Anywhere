@@ -140,13 +140,6 @@ class TunnelStack {
     /// Pending deferred restart when throttled. Cancelled and replaced on each new request.
     var deferredRestart: DispatchWorkItem?
 
-    /// Timestamp of the last network-path-change recovery (used for debouncing).
-    var lastNetworkRecoveryTime: CFAbsoluteTime = 0
-
-    /// Pending debounced network recovery. Cancelled and replaced on each new
-    /// path update inside the debounce window.
-    var pendingNetworkRecovery: DispatchWorkItem?
-
     /// Recurring stack-lifetime tasks. Centralizes their lifecycle and reconciles them
     /// on device wake.
     let scheduler = TunnelScheduler()

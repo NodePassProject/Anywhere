@@ -129,6 +129,13 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
                     break
                 }
             }
+            // NWConnection drops viability before the receive loop would error;
+            // surface a terminal error so the flow closes and re-dials on a live path.
+            connection.viabilityUpdateHandler = { [weak self] viable in
+                guard let self, self.connection === connection, !viable else { return }
+                guard case .ready = self.state else { return }
+                self.surfaceTerminalError(TransportError.connectionFailed("Network path no longer viable"))
+            }
             connection.start(queue: self.queue)
         }
     }
@@ -218,16 +225,19 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
     /// Surfaces a terminal receive error once, then stops the loop. Must run on
     /// `queue`.
     private func handleReceiveError(_ error: NWError) {
-        let handler = receiveErrorHandler
-        let handlerQueue = receiveHandlerQueue
+        surfaceTerminalError(mapNWError(error, op: .receive))
+    }
+
+    /// Delivers a terminal error to the receive-error handler at most once, then disarms
+    /// it. Shared by the receive loop and the viability watchdog. Must run on `queue`.
+    private func surfaceTerminalError(_ error: Error) {
+        guard let handler = receiveErrorHandler else { return }
         receiveErrorHandler = nil
-        if let handler {
-            let transportError = mapNWError(error, op: .receive)
-            if let handlerQueue {
-                handlerQueue.async { handler(transportError) }
-            } else {
-                handler(transportError)
-            }
+        let handlerQueue = receiveHandlerQueue
+        if let handlerQueue {
+            handlerQueue.async { handler(error) }
+        } else {
+            handler(error)
         }
     }
 
