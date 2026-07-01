@@ -101,6 +101,138 @@ enum X509Builder {
         return encodeCertificate(tbs: tbs, signature: signature)
     }
 
+    /// Builds a short-lived leaf certificate issued by the CA for signing a
+    /// document (e.g. a configuration profile). Returns DER.
+    static func buildSigningCertificate(
+        signingKey: SecKey,
+        caPrivateKey: SecKey,
+        caCertificateDER: Data,
+        commonName: String,
+        serial: Data,
+        notBefore: Date,
+        notAfter: Date
+    ) throws -> Data {
+        guard let publicKey = SecKeyCopyPublicKey(signingKey) else {
+            throw X509BuilderError.publicKeyExportFailed
+        }
+        let spki = try buildECP256SPKI(publicKey: publicKey)
+        let caComponents = try parseCAComponents(certDER: caCertificateDER)
+        let subject = encodeName(commonName: commonName, organization: "Anywhere")
+
+        let extensions = encodeExtensions([
+            encodeBasicConstraintsLeaf(),
+            encodeKeyUsage(keyCertSign: false, cRLSign: false, digitalSignature: true),
+            try encodeSubjectKeyIdentifier(spki: spki),
+            encodeAuthorityKeyIdentifier(keyIdentifier: caComponents.subjectKeyIdentifier),
+        ])
+
+        let tbs = encodeTBSCertificate(
+            serial: normalizeSerial(serial),
+            issuer: caComponents.subjectDN,
+            validity: encodeValidity(notBefore: notBefore, notAfter: notAfter),
+            subject: subject,
+            spki: spki,
+            extensions: extensions
+        )
+
+        let signature = try sign(privateKey: caPrivateKey, data: tbs)
+        return encodeCertificate(tbs: tbs, signature: signature)
+    }
+
+    // MARK: - CMS Profile Signing
+
+    /// Wraps `profileData` (a `.mobileconfig` plist) in a CMS SignedData structure
+    /// (RFC 5652) signed by `signerPrivateKey`. `certificates` should carry the
+    /// signer's certificate followed by any chain up to the CA.
+    static func buildSignedProfile(
+        profileData: Data,
+        signerPrivateKey: SecKey,
+        signerCertificateDER: Data,
+        certificates: [Data]
+    ) throws -> Data {
+        let (issuer, serial) = try parseIssuerAndSerial(certDER: signerCertificateDER)
+
+        // digestAlgorithm SHA-256; parameters omitted per RFC 5754 §2.
+        let digestAlgorithm = ASN1.sequence(ASN1OID.sha256)
+
+        // Authenticated attributes bind the signature to the content type and a
+        // digest of the payload (RFC 5652 §5.3). When present, the signature is
+        // computed over their DER, not over the content directly.
+        let contentTypeAttr = ASN1.sequence(
+            ASN1OID.attrContentType + ASN1.set(ASN1OID.data)
+        )
+        let messageDigestAttr = ASN1.sequence(
+            ASN1OID.attrMessageDigest + ASN1.set(ASN1.octetString(Data(SHA256.hash(data: profileData))))
+        )
+        // DER SET OF requires the elements sorted by their encodings (X.690 §11.6).
+        let attributes = derSortedSetOf([contentTypeAttr, messageDigestAttr])
+
+        // Sign the attributes under the explicit SET OF tag (0x31); they appear in
+        // the SignerInfo under the [0] IMPLICIT tag (0xA0) with identical content.
+        let signature = try sign(privateKey: signerPrivateKey, data: ASN1.set(attributes))
+        let signedAttrs = ASN1.contextSpecific(tag: 0, constructed: true, content: attributes)
+
+        // SignerInfo (RFC 5652 §5.3); version 1 for the IssuerAndSerialNumber sid.
+        var signerInfo = Data()
+        signerInfo.append(ASN1.integer(1))
+        signerInfo.append(ASN1.sequence(issuer + serial))       // sid = IssuerAndSerialNumber
+        signerInfo.append(digestAlgorithm)
+        signerInfo.append(signedAttrs)
+        signerInfo.append(algorithmECDSAWithSHA256)             // signatureAlgorithm
+        signerInfo.append(ASN1.octetString(signature))
+
+        // EncapsulatedContentInfo: attached id-data payload (RFC 5652 §5.2).
+        let eContent = ASN1.contextSpecific(tag: 0, constructed: true, content: ASN1.octetString(profileData))
+        let encapContentInfo = ASN1.sequence(ASN1OID.data + eContent)
+
+        // SignedData (RFC 5652 §5.1), version 1; the signer + chain ride in [0] IMPLICIT.
+        var certificateSet = Data()
+        for certificate in certificates { certificateSet.append(certificate) }
+
+        var signedData = Data()
+        signedData.append(ASN1.integer(1))
+        signedData.append(ASN1.set(digestAlgorithm))            // digestAlgorithms
+        signedData.append(encapContentInfo)
+        signedData.append(ASN1.contextSpecific(tag: 0, constructed: true, content: certificateSet))  // certificates [0]
+        signedData.append(ASN1.set(ASN1.sequence(signerInfo)))  // signerInfos
+
+        // ContentInfo: id-signedData wrapping SignedData in [0] EXPLICIT.
+        let content = ASN1.contextSpecific(tag: 0, constructed: true, content: ASN1.sequence(signedData))
+        return ASN1.sequence(ASN1OID.signedData + content)
+    }
+
+    /// Reads the `issuer` DN and `serialNumber` (full TLVs) from a certificate for
+    /// use as a CMS `IssuerAndSerialNumber`. Assumes the v3 layout this builder emits.
+    private static func parseIssuerAndSerial(certDER: Data) throws -> (issuer: Data, serial: Data) {
+        var parser = ASN1Parser(data: certDER)
+        let cert = try parser.readSequence()                    // Certificate
+        var certParser = ASN1Parser(data: cert)
+        let tbs = try certParser.readSequence()                 // TBSCertificate
+        var tbsParser = ASN1Parser(data: tbs)
+        try tbsParser.skipExplicitContextSpecific(tag: 0)       // version [0]
+        let serial = try tbsParser.readNextWithHeader(expectedTag: 0x02)   // serialNumber
+        try tbsParser.skipNext()                                // signature algorithm
+        let issuer = try tbsParser.readNextWithHeader(expectedTag: 0x30)   // issuer Name
+        return (issuer, serial)
+    }
+
+    /// Concatenates DER elements in ascending encoding order (X.690 §11.6): octet
+    /// strings compared with the shorter padded by trailing zero octets.
+    private static func derSortedSetOf(_ elements: [Data]) -> Data {
+        let sorted = elements.sorted { lhs, rhs in
+            let count = max(lhs.count, rhs.count)
+            for i in 0..<count {
+                let l = i < lhs.count ? lhs[lhs.startIndex + i] : 0
+                let r = i < rhs.count ? rhs[rhs.startIndex + i] : 0
+                if l != r { return l < r }
+            }
+            return lhs.count < rhs.count
+        }
+        var out = Data()
+        for element in sorted { out.append(element) }
+        return out
+    }
+
     // MARK: - Subject / Issuer
 
     private static func encodeName(commonName: String, organization: String) -> Data {
@@ -651,6 +783,18 @@ private enum ASN1OID {
     static let ecdsaWithSHA256 = Data([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02])
     /// id-kp-serverAuth 1.3.6.1.5.5.7.3.1
     static let serverAuth  = Data([0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01])
+
+    // CMS / PKCS#7 (RFC 5652) — used to wrap the .mobileconfig in a SignedData.
+    /// id-data 1.2.840.113549.1.7.1
+    static let data             = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01])
+    /// id-signedData 1.2.840.113549.1.7.2
+    static let signedData       = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02])
+    /// id-sha256 2.16.840.1.101.3.4.2.1
+    static let sha256           = Data([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01])
+    /// id-contentType 1.2.840.113549.1.9.3
+    static let attrContentType  = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x03])
+    /// id-messageDigest 1.2.840.113549.1.9.4
+    static let attrMessageDigest = Data([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04])
 }
 
 // MARK: - Minimal ASN.1 Parser

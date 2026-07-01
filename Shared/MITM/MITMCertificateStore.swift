@@ -134,10 +134,9 @@ final class MITMCertificateStore {
     func exportCertificateDER() -> Data? {
         loadCA()?.certificateDER
     }
-
-    /// Builds a `.mobileconfig` profile wrapping the CA cert; rebuilt every call, never persisted.
+    
     func exportMobileConfig() -> Data? {
-        guard let certDER = exportCertificateDER() else { return nil }
+        guard let (caKey, certDER) = loadCA() else { return nil }
 
         let identifier = "com.argsment.Anywhere.mitm.root"
         let payloadIdentifier = "\(identifier).payload"
@@ -166,11 +165,52 @@ final class MITMCertificateStore {
             ]
         ]
 
-        return try? PropertyListSerialization.data(
+        guard let profileData = try? PropertyListSerialization.data(
             fromPropertyList: plist,
             format: .xml,
             options: 0
+        ) else {
+            return nil
+        }
+        
+        return (try? signProfile(profileData, caKey: caKey, caCertificateDER: certDER)) ?? profileData
+    }
+    
+    private func signProfile(_ profileData: Data, caKey: SecKey, caCertificateDER: Data) throws -> Data {
+        let signingKey = try makeEphemeralSigningKey()
+        let now = Date()
+        let notAfter = Calendar(identifier: .gregorian).date(byAdding: .year, value: 1, to: now)
+            ?? now.addingTimeInterval(60 * 60 * 24 * 365)
+
+        let leafDER = try X509Builder.buildSigningCertificate(
+            signingKey: signingKey,
+            caPrivateKey: caKey,
+            caCertificateDER: caCertificateDER,
+            commonName: "Anywhere Profile Signing",
+            serial: randomSerial(),
+            notBefore: now.addingTimeInterval(-60 * 60),
+            notAfter: notAfter
         )
+
+        return try X509Builder.buildSignedProfile(
+            profileData: profileData,
+            signerPrivateKey: signingKey,
+            signerCertificateDER: leafDER,
+            certificates: [leafDER, caCertificateDER]
+        )
+    }
+    
+    private func makeEphemeralSigningKey() throws -> SecKey {
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+        ]
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+            let message = (error?.takeRetainedValue()).flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"
+            throw MITMCertificateStoreError.keyGenerationFailed(message)
+        }
+        return key
     }
 
     // MARK: - Leaf Signing Inputs
