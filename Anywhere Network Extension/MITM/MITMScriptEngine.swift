@@ -1675,7 +1675,7 @@ final class MITMScriptEngine {
         return out
     }
 
-    /// `Host` enables domain-fronting; the rest are framing/hop-by-hop smuggling vectors URLSession manages.
+    /// `Host` enables domain-fronting; the rest are framing / hop-by-hop headers the exchange sets itself, so a script-supplied copy would be a smuggling vector.
     private static let forbiddenRequestHeaders: Set<String> = [
         "host", "content-length", "connection", "transfer-encoding",
         "upgrade", "keep-alive", "te", "trailer", "expect", "proxy-connection",

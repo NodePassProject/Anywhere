@@ -20,6 +20,10 @@ struct TLSConfiguration {
     let minVersion: TLSVersion?         // nil = no constraint
     let maxVersion: TLSVersion?         // nil = no constraint
 
+    /// Skip server-certificate validation for this connection (accepts self-signed / mismatched
+    /// certs). Off by default; opt-in per connection.
+    let insecureSkipVerify: Bool
+
     /// Master switch for Encrypted Client Hello. Without an inline `echConfig` the
     /// ECHConfigList is discovered from the server's DNS HTTPS record (RFC 9460
     /// SvcParamKey 5, `ech`), fail-closed: finding none errors out rather than
@@ -38,11 +42,13 @@ struct TLSConfiguration {
     init(serverName: String, alpn: [String]? = nil,
          minVersion: TLSVersion? = nil, maxVersion: TLSVersion? = nil,
          echEnabled: Bool? = nil, echConfig: String? = nil,
-         fingerprint: TLSFingerprint = .chrome120) {
+         fingerprint: TLSFingerprint = .chrome120,
+         insecureSkipVerify: Bool = false) {
         self.serverName = serverName
         self.alpn = alpn
         self.minVersion = minVersion
         self.maxVersion = maxVersion
+        self.insecureSkipVerify = insecureSkipVerify
         // Normalize empty inline config to nil so `echConfig == nil` is the one
         // canonical "no inline ECH" test everywhere.
         let inlineECH = (echConfig?.isEmpty ?? true) ? nil : echConfig
@@ -53,7 +59,7 @@ struct TLSConfiguration {
         self.fingerprint = fingerprint
     }
 
-    /// Parse TLS parameters from VLESS URL query parameters.
+    /// Parse TLS parameters from URL query parameters.
     /// Expected: `security=tls&sni=example.com&alpn=h2,http/1.1&fp=chrome_133[&minVersion=1.2&maxVersion=1.3]`
     static func parse(from params: [String: String], serverAddress: String) throws -> TLSConfiguration? {
         guard params["security"] == "tls" else { return nil }
@@ -106,7 +112,7 @@ struct TLSConfiguration {
 
 extension TLSConfiguration: Codable {
     enum CodingKeys: String, CodingKey {
-        case serverName, alpn, fingerprint, minVersion, maxVersion, echEnabled, echConfig
+        case serverName, alpn, fingerprint, minVersion, maxVersion, echEnabled, echConfig, insecureSkipVerify
     }
 
     init(from decoder: Decoder) throws {
@@ -116,6 +122,7 @@ extension TLSConfiguration: Codable {
         fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome120
         minVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .minVersion)
         maxVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .maxVersion)
+        insecureSkipVerify = try container.decodeIfPresent(Bool.self, forKey: .insecureSkipVerify) ?? false
         let rawECH = try container.decodeIfPresent(String.self, forKey: .echConfig)
         let inlineECH = (rawECH?.isEmpty ?? true) ? nil : rawECH
         // Absent flag → infer from inline config presence.
@@ -130,6 +137,7 @@ extension TLSConfiguration: Codable {
         try container.encode(fingerprint, forKey: .fingerprint)
         try container.encodeIfPresent(minVersion, forKey: .minVersion)
         try container.encodeIfPresent(maxVersion, forKey: .maxVersion)
+        if insecureSkipVerify { try container.encode(insecureSkipVerify, forKey: .insecureSkipVerify) }
         // Persist the flag only when it can't be inferred from `echConfig` presence.
         if echEnabled != (echConfig != nil) { try container.encode(echEnabled, forKey: .echEnabled) }
         try container.encodeIfPresent(echConfig, forKey: .echConfig)
@@ -143,6 +151,7 @@ extension TLSConfiguration: Equatable, Hashable {
         lhs.fingerprint == rhs.fingerprint &&
         lhs.minVersion == rhs.minVersion &&
         lhs.maxVersion == rhs.maxVersion &&
+        lhs.insecureSkipVerify == rhs.insecureSkipVerify &&
         lhs.echEnabled == rhs.echEnabled &&
         lhs.echConfig == rhs.echConfig
     }
@@ -153,6 +162,7 @@ extension TLSConfiguration: Equatable, Hashable {
         hasher.combine(fingerprint)
         hasher.combine(minVersion)
         hasher.combine(maxVersion)
+        hasher.combine(insecureSkipVerify)
         hasher.combine(echEnabled)
         hasher.combine(echConfig)
     }

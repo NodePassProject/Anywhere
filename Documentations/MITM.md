@@ -776,9 +776,12 @@ async function process(ctx) {
   field of `options`.
 
 **Response**: `{ status, headers, body, url }` — `status` is the numeric HTTP
-status; `headers` is `[[name, value], …]` like `ctx.headers` (URLSession
-combines duplicate field names, and header order is not preserved); `body` is a
-`Uint8Array`; `url` is the final URL after any followed redirects. The Promise
+status; `headers` is `[[name, value], …]` like `ctx.headers`, preserving the
+origin's field order and keeping repeated field names as separate entries; `body`
+is a `Uint8Array`, fully buffered and — for a `gzip` / `deflate` / `br` response —
+decoded, with the now-stale `Content-Encoding` / `Content-Length` /
+`Transfer-Encoding` headers dropped; `url` is the final URL after any followed
+redirects. The Promise
 **rejects** with an `Error` on a transport failure, a timeout, a cap breach, or
 a non-HTTP response — wrap the `await` in `try/catch` to handle it. An *uncaught*
 rejection reverts the message unchanged, exactly like any other uncaught throw.
@@ -798,9 +801,11 @@ rejection reverts the message unchanged, exactly like any other uncaught throw.
 connection waits for the response — but the shared script runtime is **not**
 blocked: other connections' scripts keep running while this one is in flight
 (unlike a CPU-bound loop, which still monopolizes the runtime — see the
-[performance note](#how-it-works)). The request leaves as the extension's own
-traffic and is **not** itself intercepted by the MITM, so a script may safely
-call a host the rule set also intercepts without looping.
+[performance note](#how-it-works)). The request is dialed through the tunnel's
+routing rules — direct, reject, or proxy, exactly like any other connection — as
+the extension's own outbound traffic, and is **not** itself re-intercepted by the
+MITM, so a script may safely call a host the rule set also intercepts without
+looping.
 
 Because other invocations run during an `await`, another connection running the
 **same** rule set can mutate shared `globalThis` state between your `await` and
@@ -808,13 +813,14 @@ its resumption — don't assume exclusive access across a suspension. Per-messag
 state lives on `ctx`; cross-connection state belongs in
 [`Anywhere.store`](#anywherestore), whose sharing semantics are already explicit.
 
-> **Security.** `Anywhere.http` performs **no destination filtering** — a script
-> can reach any address the device can, including `localhost`, `*.local`, and
-> loopback / link-local (incl. the cloud-metadata address) / private / ULA
-> ranges, on the physical interface outside the tunnel. It is both an
-> exfiltration surface (a script can send data it has read to any host) and a
-> pivot into on-device and on-network services. Author and import rule sets only
-> from sources you trust.
+> **Security.** `Anywhere.http` requests follow the tunnel's routing rules — a
+> `reject` rule blocks the fetch and a `proxy` rule sends it through that proxy —
+> but there is **no SSRF filtering** beyond those rules: any host not rejected is
+> reachable, including `localhost`, `*.local`, and loopback / link-local (incl.
+> the cloud-metadata address) / private / ULA ranges, which (like any unmatched
+> destination) are dialed directly. It is both an exfiltration surface (a script
+> can send data it has read to any host) and a pivot into on-device and
+> on-network services. Author and import rule sets only from sources you trust.
 
 ### Control directives
 
@@ -889,11 +895,12 @@ Other safety properties:
   bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch does not
   monopolize the runtime — see its execution-model note.)
 - **Outbound requests.** [`Anywhere.http`](#anywherehttp) lets a script make the
-  extension issue HTTP(S) requests — an exfiltration and pivot surface bounded
-  only by the per-script and global concurrency / size caps above, **not** by
-  destination: any address is reachable, including loopback, link-local (incl.
-  cloud-metadata), private, and ULA ranges, on the physical interface outside
-  the tunnel. Only run rule sets from sources you trust.
+  extension issue HTTP(S) requests — an exfiltration and pivot surface bounded by
+  the per-script and global concurrency / size caps above and by the tunnel's
+  routing rules (a `reject` rule blocks a fetch; a `proxy` rule routes it), but
+  **not** otherwise by destination: any non-rejected address is reachable,
+  including loopback, link-local (incl. cloud-metadata), private, and ULA ranges,
+  which are dialed directly. Only run rule sets from sources you trust.
 - **Failure is safe-by-default.** A compile failure, a missing `process`, or an
   uncaught throw — including an unhandled `Anywhere.http` rejection — passes the
   original message through unchanged.

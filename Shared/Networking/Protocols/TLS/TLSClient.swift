@@ -622,6 +622,10 @@ nonisolated class TLSClient {
     // MARK: - Certificate Validation
 
     func validateCertificate(completion: @escaping (Result<Void, Error>) -> Void) {
+        if configuration.insecureSkipVerify {
+            completion(.success(()))
+            return
+        }
         switch CertificatePolicy.verify(chain: serverCertificates, serverName: configuration.serverName) {
         case .trusted:
             completion(.success(()))
