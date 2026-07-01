@@ -32,9 +32,6 @@ struct SettingsView: View {
             aboutSection
         }
         .navigationTitle("Settings")
-        .toolbar {
-            settingsToolbar
-        }
         .onChange(of: adBlockEnabled) { _, newValue in
             if let adBlockRuleSet = RoutingRuleSetStore.shared.adBlockRuleSet {
                 RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
@@ -61,67 +58,17 @@ struct SettingsView: View {
         }
     }
     
-    @ToolbarContentBuilder
-    private var settingsToolbar: some ToolbarContent {
-        ToolbarItem {
-            NavigationLink {
-                ControlCenterView()
-            } label: {
-                Label("Control Center", systemImage: "switch.2")
-            }
-        }
-    }
-    
-    private var showAppSection: Bool {
-        settings.isVisible(.iCloudSync) || settings.isVisible(.personalization)
-    }
-
-    private var showVPNSection: Bool {
-        settings.isVisible(.alwaysOn)
-    }
-
-    private var showRoutingSection: Bool {
-        if settings.isVisible(.globalMode) { return true }
-        return !settings.isGlobalMode && (
-            settings.isVisible(.adBlocking)
-                || settings.isVisible(.countryBypass)
-                || settings.isVisible(.routingRules)
-        )
-    }
-
-    private var showSecuritySection: Bool {
-        settings.isVisible(.allowInsecure)
-        || settings.isVisible(.trustedCertificates)
-        || settings.isVisible(.trustedNetwork)
-    }
-
-    private var showUtilitiesSection: Bool {
-        settings.isVisible(.purify)
-            || settings.isVisible(.reflection)
-            || (settings.experimentalEnabled && settings.isVisible(.mitm))
-    }
-
-    private var showDiagnosisSection: Bool {
-        settings.isVisible(.logs) || settings.isVisible(.requests)
-    }
-    
     @ViewBuilder
     private var appSection: some View {
         @Bindable var settings = settings
-        if showAppSection {
-            Section("App") {
-                if settings.isVisible(.iCloudSync) {
-                    Toggle(isOn: $settings.iCloudSyncEnabled) {
-                        SettingsItem.iCloudSync.label
-                    }
-                }
-                if settings.isVisible(.personalization) {
-                    NavigationLink {
-                        PersonalizationSettingsView()
-                    } label: {
-                        SettingsItem.personalization.label
-                    }
-                }
+        Section("App") {
+            Toggle(isOn: $settings.iCloudSyncEnabled) {
+                SettingsItem.iCloudSync.label
+            }
+            NavigationLink {
+                PersonalizationSettingsView()
+            } label: {
+                SettingsItem.personalization.label
             }
         }
     }
@@ -129,44 +76,30 @@ struct SettingsView: View {
     @ViewBuilder
     private var vpnSection: some View {
         @Bindable var settings = settings
-        if showVPNSection {
-            Section("VPN") {
-                if settings.isVisible(.alwaysOn) {
-                    Toggle(isOn: $settings.alwaysOnEnabled) {
-                        SettingsItem.alwaysOn.label
-                    }
-                    .disabled(viewModel.pendingReconnect)
-                }
+        Section("VPN") {
+            Toggle(isOn: $settings.alwaysOnEnabled) {
+                SettingsItem.alwaysOn.label
             }
+            .disabled(viewModel.pendingReconnect)
         }
     }
 
     @ViewBuilder
     private var routingSection: some View {
         @Bindable var settings = settings
-        if showRoutingSection {
-            Section("Routing") {
-                if settings.isVisible(.globalMode) {
-                    Toggle(isOn: $settings.isGlobalMode) {
-                        SettingsItem.globalMode.label
-                    }
+        Section("Routing") {
+            Toggle(isOn: $settings.isGlobalMode) {
+                SettingsItem.globalMode.label
+            }
+            if !settings.isGlobalMode {
+                Toggle(isOn: $adBlockEnabled) {
+                    SettingsItem.adBlocking.label
                 }
-                if !settings.isGlobalMode {
-                    if settings.isVisible(.adBlocking) {
-                        Toggle(isOn: $adBlockEnabled) {
-                            SettingsItem.adBlocking.label
-                        }
-                    }
-                    if settings.isVisible(.countryBypass) {
-                        countryBypassPicker
-                    }
-                    if settings.isVisible(.routingRules) {
-                        NavigationLink {
-                            RuleSetListView()
-                        } label: {
-                            SettingsItem.routingRules.label
-                        }
-                    }
+                countryBypassPicker
+                NavigationLink {
+                    RuleSetListView()
+                } label: {
+                    SettingsItem.routingRules.label
                 }
             }
         }
@@ -187,65 +120,51 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var securitySection: some View {
-        if showSecuritySection {
-            Section("Security") {
-                if settings.isVisible(.allowInsecure) {
-                    Toggle(isOn: Binding(
-                        get: { settings.allowInsecure },
-                        set: { newValue in
-                            if newValue {
-                                showInsecureAlert = true
-                            } else {
-                                settings.allowInsecure = false
-                            }
-                        }
-                    )) {
-                        SettingsItem.allowInsecure.label
-                    }
-                    .tint(.red)
-                }
-                if settings.isVisible(.trustedCertificates) {
-                    NavigationLink {
-                        TrustedCertificatesView()
-                    } label: {
-                        SettingsItem.trustedCertificates.label
+        Section("Security") {
+            Toggle(isOn: Binding(
+                get: { settings.allowInsecure },
+                set: { newValue in
+                    if newValue {
+                        showInsecureAlert = true
+                    } else {
+                        settings.allowInsecure = false
                     }
                 }
-                if settings.isVisible(.trustedNetwork) {
-                    NavigationLink {
-                        TrustedNetworkSettingsView()
-                    } label: {
-                        SettingsItem.trustedNetwork.label
-                    }
-                }
+            )) {
+                SettingsItem.allowInsecure.label
+            }
+            .tint(.red)
+            NavigationLink {
+                TrustedCertificatesView()
+            } label: {
+                SettingsItem.trustedCertificates.label
+            }
+            NavigationLink {
+                TrustedNetworkSettingsView()
+            } label: {
+                SettingsItem.trustedNetwork.label
             }
         }
     }
 
     @ViewBuilder
     private var utilitiesSection: some View {
-        if showUtilitiesSection {
-            Section("Utilities") {
-                if settings.isVisible(.purify) {
-                    NavigationLink {
-                        PurifySettingsView()
-                    } label: {
-                        SettingsItem.purify.label
-                    }
-                }
-                if settings.isVisible(.reflection) {
-                    NavigationLink {
-                        ReflectionSettingsView()
-                    } label: {
-                        SettingsItem.reflection.label
-                    }
-                }
-                if settings.experimentalEnabled, settings.isVisible(.mitm) {
-                    NavigationLink {
-                        MITMSettingsView()
-                    } label: {
-                        SettingsItem.mitm.label
-                    }
+        Section("Utilities") {
+            NavigationLink {
+                PurifySettingsView()
+            } label: {
+                SettingsItem.purify.label
+            }
+            NavigationLink {
+                ReflectionSettingsView()
+            } label: {
+                SettingsItem.reflection.label
+            }
+            if settings.experimentalEnabled {
+                NavigationLink {
+                    MITMSettingsView()
+                } label: {
+                    SettingsItem.mitm.label
                 }
             }
         }
@@ -253,22 +172,16 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var diagnosisSection: some View {
-        if showDiagnosisSection {
-            Section("Diagnostics") {
-                if settings.isVisible(.logs) {
-                    NavigationLink {
-                        LogListView()
-                    } label: {
-                        SettingsItem.logs.label
-                    }
-                }
-                if settings.isVisible(.requests) {
-                    NavigationLink {
-                        RequestsView()
-                    } label: {
-                        SettingsItem.requests.label
-                    }
-                }
+        Section("Diagnostics") {
+            NavigationLink {
+                LogListView()
+            } label: {
+                SettingsItem.logs.label
+            }
+            NavigationLink {
+                RequestsView()
+            } label: {
+                SettingsItem.requests.label
             }
         }
     }

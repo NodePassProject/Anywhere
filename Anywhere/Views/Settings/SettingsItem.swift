@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-enum SettingsItem: String, CaseIterable, Identifiable {
+enum SettingsItem: String {
     case iCloudSync
     case personalization
     case alwaysOn
@@ -23,8 +23,6 @@ enum SettingsItem: String, CaseIterable, Identifiable {
     case mitm
     case logs
     case requests
-
-    var id: String { rawValue }
 
     private var title: String.LocalizationValue {
         switch self {
