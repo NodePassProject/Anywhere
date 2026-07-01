@@ -42,6 +42,7 @@ nonisolated final class NowhereSession {
     private var closed = false
 
     private var authStreamID: Int64 = -1
+    private var authFrameWritten = false
     private var readyCallbacks: [(Error?) -> Void] = []
 
     var onClose: (() -> Void)?
@@ -115,6 +116,9 @@ nonisolated final class NowhereSession {
         quic.streamTerminationHandler = { [weak self] sid, error in
             self?.handleStreamTermination(sid: sid, error: error)
         }
+        quic.bidiCreditHandler = { [weak self] _ in
+            self?.finishAuthenticationIfReady()
+        }
         quic.datagramHandler = { [weak self] data in
             self?.handleDatagram(data)
         }
@@ -158,20 +162,32 @@ nonisolated final class NowhereSession {
                     return
                 }
                 guard self.state == .authenticating else { return }
-                self.state = .ready
-                let callbacks = self.readyCallbacks
-                self.readyCallbacks.removeAll()
-                for callback in callbacks { callback(nil) }
+                self.authFrameWritten = true
+                self.finishAuthenticationIfReady()
             }
         }
+    }
+
+    /// The auth write callback only means ngtcp2 accepted the frame locally.
+    /// The Portal confirms successful authentication by increasing the stream
+    /// limit from the single pre-auth stream; do not release callers before that
+    /// MAX_STREAMS update reaches the client.
+    private func finishAuthenticationIfReady() {
+        guard state == .authenticating,
+              authFrameWritten,
+              quic.availableBidiStreams > 0 else { return }
+
+        state = .ready
+        quic.bidiCreditHandler = nil
+        let callbacks = readyCallbacks
+        readyCallbacks.removeAll()
+        for callback in callbacks { callback(nil) }
     }
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
         if sid == authStreamID {
             if !data.isEmpty {
                 quic.extendStreamOffset(sid, count: data.count)
-            }
-            if state != .ready {
                 failSession(NowhereError.authFailed("Auth stream returned unexpected data"))
             }
             return
@@ -190,8 +206,10 @@ nonisolated final class NowhereSession {
 
     private func handleStreamTermination(sid: Int64, error: Error?) {
         if sid == authStreamID {
-            if state == .authenticating {
-                failSession(error ?? NowhereError.authFailed("Auth stream closed before completion"))
+            if state == .authenticating, let error {
+                failSession(error)
+            } else if state == .authenticating, !authFrameWritten {
+                failSession(NowhereError.authFailed("Auth stream closed before completion"))
             }
             return
         }
@@ -331,6 +349,7 @@ nonisolated final class NowhereSession {
             self.state = .closed
             self.idleCloseWorkItem?.cancel()
             self.idleCloseWorkItem = nil
+            self.quic.bidiCreditHandler = nil
 
             self._poolLock.lock()
             self._poolIsClosed = true
@@ -363,6 +382,7 @@ nonisolated final class NowhereSession {
             self.state = .closed
             self.idleCloseWorkItem?.cancel()
             self.idleCloseWorkItem = nil
+            self.quic.bidiCreditHandler = nil
 
             self._poolLock.lock()
             self._poolIsClosed = true

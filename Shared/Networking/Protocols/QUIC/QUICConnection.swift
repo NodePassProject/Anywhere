@@ -145,6 +145,10 @@ nonisolated class QUICConnection {
     var streamTerminationHandler: ((Int64, Error?) -> Void)?
     var datagramHandler: ((Data) -> Void)?
     var connectionClosedHandler: ((Error) -> Void)?
+    /// Fires after the peer increases the cumulative number of locally initiated
+    /// bidirectional streams. Delivery is deferred until ngtcp2 finishes the
+    /// current packet-processing batch, so handlers may safely open streams.
+    var bidiCreditHandler: ((UInt64) -> Void)?
 
     private var brutalCC: BrutalCongestionControl?
     /// Registry key (`ngtcp2_cc *`) for the `@_cdecl` trampolines.
@@ -256,6 +260,14 @@ nonisolated class QUICConnection {
             return nil
         }
         return streamId
+    }
+
+    /// Number of additional bidirectional streams the local endpoint may open.
+    /// Access is serialized on ``queue``.
+    var availableBidiStreams: UInt64 {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard state == .connected, let connectionOpaquePointer else { return 0 }
+        return ngtcp2_conn_get_streams_bidi_left2(connectionOpaquePointer)
     }
 
     func openUniStream() -> Int64? {
@@ -617,6 +629,7 @@ nonisolated class QUICConnection {
             self.streamDataHandler = nil
             self.streamTerminationHandler = nil
             self.datagramHandler = nil
+            self.bidiCreditHandler = nil
         }
         if isOnQueue {
             teardown()
@@ -1183,6 +1196,7 @@ nonisolated class QUICConnection {
         callbacks.acked_stream_data_offset = quicAckedCB
         callbacks.stream_close = quicStreamCloseCB
         callbacks.stream_reset = quicStreamResetCB
+        callbacks.extend_max_local_streams_bidi = quicBidiCreditCB
         callbacks.rand = quicRandCB
         callbacks.get_new_connection_id2 = quicGetNewCIDCB
         callbacks.update_key = ngtcp2_crypto_update_key_cb
@@ -1664,6 +1678,16 @@ private let quicStreamResetCB: @convention(c) (
         : QUICConnection.QUICError.streamReset(appErrorCode: appErrorCode)
     connection.failPendingWrites(streamId: sid, error: error ?? QUICConnection.QUICError.closed)
     connection.streamTerminationHandler?(sid, error)
+    return 0
+}
+
+private let quicBidiCreditCB: @convention(c) (
+    OpaquePointer?, UInt64, UnsafeMutableRawPointer?
+) -> Int32 = { _, maxStreams, userData in
+    guard let connection = qcFromUserData(userData) else { return 0 }
+    connection.queue.async { [weak connection] in
+        connection?.bidiCreditHandler?(maxStreams)
+    }
     return 0
 }
 
