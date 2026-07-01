@@ -38,7 +38,7 @@ struct PurifySettingsView: View {
             Section {
                 Toggle("Prevent DNS Leak", isOn: $settings.preventDNSLeak)
             } footer: {
-                Text("Turn on if you need extra DNS security.")
+                Text("Provide extra DNS security.")
             }
         }
         .navigationTitle("Purify")
