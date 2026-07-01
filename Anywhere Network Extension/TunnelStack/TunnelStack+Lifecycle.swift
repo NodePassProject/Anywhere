@@ -357,6 +357,14 @@ extension TunnelStack {
                 publishUDPConfig()
             }
 
+            // Prevent DNS Leak only affects the connection-time routing decision;
+            // the flag is self-synchronized, so update it in place.
+            let preventDNSLeak = AWCore.getPreventDNSLeak()
+            if preventDNSLeak != self.preventDNSLeak {
+                logger.info("[VPN] Prevent DNS Leak changed: \(self.preventDNSLeak) -> \(preventDNSLeak)")
+                self.preventDNSLeak = preventDNSLeak
+            }
+
             // Reflection is a pure read-path setting; reload in place, before
             // the change-detection guard below.
             let reflectionEnabled = AWCore.getReflectionEnabled()

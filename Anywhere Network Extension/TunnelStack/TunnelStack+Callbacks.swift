@@ -276,6 +276,31 @@ extension TunnelStack {
             }
         }
 
+        // No domain rule matched. Unless Prevent DNS Leak is enabled,
+        // resolve the domain locally and give it a second chance against
+        // IP-CIDR rules. The resolved IP feeds matching only.
+        if !preventDNSLeak {
+            if let resolvedIP = RuleResolver.shared.cachedIPv4(for: entry.domain) {
+                if let action = domainRouter.matchIP(resolvedIP) {
+                    switch action {
+                    case .direct:
+                        return .resolved(domain: entry.domain, target: .direct, configuration: nil)
+                    case .reject:
+                        logger.debug("[\(proto)] Domain \(entry.domain) → \(resolvedIP) rejected by IP rule (\(ip):\(dstPort))")
+                        return .drop(domain: entry.domain)
+                    case .proxy(let id):
+                        let configuration = domainRouter.resolveConfiguration(action: action)
+                        if configuration == nil {
+                            logger.warning("[\(proto)] Routing config not found for \(entry.domain) → \(resolvedIP)")
+                        }
+                        return .resolved(domain: entry.domain, target: .proxy(id), configuration: configuration)
+                    }
+                }
+            } else {
+                RuleResolver.shared.warm(entry.domain)
+            }
+        }
+
         return .resolved(domain: entry.domain, target: nil, configuration: nil)
     }
 }

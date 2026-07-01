@@ -105,7 +105,14 @@ final class AppSettings {
         get { proxyMode == .global }
         set { proxyMode = newValue ? .global : .rule }
     }
-
+    
+    var preventDNSLeak: Bool {
+        didSet {
+            AWCore.setPreventDNSLeak(preventDNSLeak)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
     var proxyMode: ProxyMode {
         didSet {
             AWCore.setProxyMode(proxyMode)
@@ -203,6 +210,7 @@ final class AppSettings {
         blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
         hideVPNIcon = AWCore.getHideVPNIcon()
+        preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()
         reflectionAddresses = AWCore.getReflectionAddresses()

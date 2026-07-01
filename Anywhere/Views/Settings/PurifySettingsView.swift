@@ -34,6 +34,12 @@ struct PurifySettingsView: View {
             } footer: {
                 Text("Stop your device from being a CDN node without permission.")
             }
+
+            Section {
+                Toggle("Prevent DNS Leak", isOn: $settings.preventDNSLeak)
+            } footer: {
+                Text("Turn on if you need extra DNS security.")
+            }
         }
         .navigationTitle("Purify")
     }

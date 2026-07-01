@@ -91,6 +91,7 @@ nonisolated final class AWCore {
         static let identifier = "identifier"
         static let lastConfigurationData = "lastConfigurationData"
         static let onboardingCompleted = "onboardingCompleted"
+        static let preventDNSLeak = "preventDNSLeak"
         static let proxyMode = "proxyMode"
         static let quicPolicy = "quicPolicy"
         static let reflectionAddresses = "reflectionAddresses"
@@ -342,7 +343,15 @@ nonisolated final class AWCore {
     static func setBlockWebRTC(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.blockWebRTC)
     }
-    
+
+    static func getPreventDNSLeak() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.preventDNSLeak)
+    }
+
+    static func setPreventDNSLeak(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
+    }
+
     static func getAdvertiseIPv6ToApps() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.advertiseIPv6ToApps)
     }
