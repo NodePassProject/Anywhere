@@ -108,6 +108,14 @@ final class MITMHTTP2Rewriter {
         )
     }
 
+    /// True when a rule of `phase` would read or rewrite the body (buffered or per-frame).
+    func hasBodyAccessingRule(phase: MITMPhase, requestURL: String?) -> Bool {
+        MITMScriptTransform.hasBodyAccessingRule(
+            in: rules(phase: phase),
+            requestURL: requestURL
+        )
+    }
+
     func rules(phase: MITMPhase) -> [CompiledMITMRule] {
         phase == .httpRequest ? requestRules : responseRules
     }

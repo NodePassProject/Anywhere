@@ -186,9 +186,14 @@ enum MITMBridgeHeaders {
             if lower == "te", value.trimmingCharacters(in: .whitespaces).lowercased() != "trailers" { continue }
             out.append((name: name, value: value))
         }
-        // Clamp Accept-Encoding to the codings we can decode so a buffered body rule isn't
-        // defeated by an undecodable Content-Encoding (e.g. zstd).
-        return out.map { entry in
+        return out
+    }
+
+    /// Clamps a request's `Accept-Encoding` to the codings we can decode (drops `zstd`, `*`, …).
+    static func clampingAcceptEncoding(
+        _ headers: [(name: String, value: String)]
+    ) -> [(name: String, value: String)] {
+        headers.map { entry in
             entry.name.lowercased() == "accept-encoding"
                 ? (name: entry.name, value: MITMBodyCodec.constrainedAcceptEncoding(entry.value))
                 : entry

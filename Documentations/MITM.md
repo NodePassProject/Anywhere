@@ -1051,11 +1051,15 @@ function process(ctx) {
   fresh `Content-Length`. `stream-script` rules see raw, still-compressed frames.
   A rare concatenated multi-member `gzip` body is left compressed and forwarded
   unrewritten rather than risk corrupting it.
-- **Accept-Encoding.** On an intercepted request, Anywhere clamps the client's
-  `Accept-Encoding` to the codings it can decode — `gzip`, `deflate`, `br`,
-  `identity` — dropping any others (notably `zstd`) so an origin can't select an
-  encoding a body rule couldn't reverse. A body that still arrives in an
-  unsupported `Content-Encoding` is forwarded unrewritten.
+- **Accept-Encoding.** Anywhere clamps the client's `Accept-Encoding` to the
+  codings it can decode — `gzip`, `deflate`, `br`, `identity` — dropping any
+  others (notably `zstd`) *only* when a response-phase body rule (`script`,
+  `stream-script`, `bodyReplace`, or `bodyJSON`) matches the request and would
+  read or rewrite the reply, so an origin can't select an encoding that rule
+  couldn't reverse. A passthrough request — one with no such rule — forwards
+  `Accept-Encoding` untouched, so its content-coding negotiation matches a
+  non-intercepted connection (an origin may still choose `zstd`). A body that
+  still arrives in an unsupported `Content-Encoding` is forwarded unrewritten.
 - **HEAD responses.** A response to `HEAD` never carries a body; its framing
   headers are preserved and a script that writes `ctx.body` has that write
   dropped on the wire.

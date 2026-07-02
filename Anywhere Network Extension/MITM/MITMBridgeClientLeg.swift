@@ -528,6 +528,12 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         let resolvedUpstream = rewriter.resolvedUpstream
         let gateURL = MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(host)\($0)" } ?? requestURL
 
+        // Clamp only when a response body rule will read the reply; a passthrough request keeps
+        // the client's `Accept-Encoding` so its negotiation matches a non-intercepted connection.
+        if rewriter.hasBodyAccessingRule(phase: .httpResponse, requestURL: gateURL) {
+            rewritten = MITMBridgeHeaders.clampingAcceptEncoding(rewritten)
+        }
+
         // Expect: 100-continue — answer with an interim 100 ourselves and strip Expect upstream.
         // The origin then never sends its own 100; without our synthesized one an h2 client
         // withholding its body would stall.

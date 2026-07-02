@@ -101,6 +101,13 @@ enum MITMScriptTransform {
             || hasBodyJSONRule(in: rules, requestURL: requestURL)
     }
 
+    /// True when any rule would read or rewrite the body — buffered (`hasBufferedBodyRule`) or
+    /// per-frame (`.streamScript`).
+    static func hasBodyAccessingRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
+        hasBufferedBodyRule(in: rules, requestURL: requestURL)
+            || hasStreamScriptRule(in: rules, requestURL: requestURL)
+    }
+
     /// True for media types meant for incremental delivery (SSE, NDJSON, etc.), where buffered
     /// `.script` is a poor fit. Matches the media type only — parameters don't affect the result.
     static func isStreamingMediaType(_ contentType: String?) -> Bool {

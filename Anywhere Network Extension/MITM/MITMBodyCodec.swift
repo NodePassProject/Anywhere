@@ -68,8 +68,8 @@ enum MITMBodyCodec {
         return Plan(codecs: codecs, supported: supported)
     }
 
-    /// Content-codings we can decode for a buffered transform — the set a request's
-    /// `Accept-Encoding` is clamped to so an origin never selects an encoding we can't reverse.
+    /// Content-codings we can decode — the set `constrainedAcceptEncoding` clamps a request's
+    /// `Accept-Encoding` to.
     static let decodableContentCodings: Set<String> = ["gzip", "x-gzip", "deflate", "br", "identity"]
 
     /// Clamps `Accept-Encoding` to ``decodableContentCodings`` (drops `zstd`, `*`, …) so a

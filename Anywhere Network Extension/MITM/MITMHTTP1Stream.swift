@@ -46,6 +46,9 @@ final class MITMHTTP1Stream {
     private let phase: MITMPhase
     /// Phase-filtered rules for this host, resolved once at init (one trie walk).
     private let rules: [CompiledMITMRule]
+    /// Response-phase rules for this host; the request stream consults them to gate the
+    /// `Accept-Encoding` clamp. Empty on a response stream.
+    private let responseBodyGateRules: [CompiledMITMRule]
     /// Rule-set ID for the matched host (`Anywhere.store` scope key); nil when no set matches.
     private let ruleSetID: UUID?
     /// Forced `Host:` once a transparent rewrite commits to a replacement
@@ -100,6 +103,9 @@ final class MITMHTTP1Stream {
         self.phase = phase
         let matchedSet = policy.set(for: host)
         self.rules = matchedSet?.rules.filter { $0.phase == phase } ?? []
+        self.responseBodyGateRules = phase == .httpRequest
+            ? (matchedSet?.rules.filter { $0.phase == .httpResponse } ?? [])
+            : []
         self.ruleSetID = matchedSet?.id
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
@@ -527,9 +533,10 @@ final class MITMHTTP1Stream {
         // Authority rewrite first so a headerReplace on Host can still override it.
         let withAuthority = applyAuthorityRewrite(parsed.headers)
         var rewrittenHeaders = applyHeaderRules(withAuthority, requestURL: gateURL)
-        // Clamp the request's Accept-Encoding to codings we can decode so a buffered body rule
-        // isn't defeated by an undecodable Content-Encoding (e.g. zstd).
-        if phase == .httpRequest {
+        // Clamp only when a response body rule will read the reply; a passthrough request keeps
+        // the client's `Accept-Encoding` so its negotiation matches a non-intercepted connection.
+        if phase == .httpRequest,
+           MITMScriptTransform.hasBodyAccessingRule(in: responseBodyGateRules, requestURL: gateURL) {
             rewrittenHeaders = rewrittenHeaders.map { entry in
                 ASCII.equalsIgnoringCase(entry.name, "accept-encoding")
                     ? (name: entry.name, value: MITMBodyCodec.constrainedAcceptEncoding(entry.value))
