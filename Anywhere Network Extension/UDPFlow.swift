@@ -257,7 +257,7 @@ class UDPFlow {
         udpMultiplexerPool.acquireStream(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
             guard let self else { return }
 
-            self.flowQueue.async {
+            self.flowQueue.async { [self] in
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
@@ -319,7 +319,7 @@ class UDPFlow {
         client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in
             guard let self else { return }
 
-            self.flowQueue.async {
+            self.flowQueue.async { [self] in
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
@@ -414,13 +414,14 @@ class UDPFlow {
         // Async-resolve uncached domains so replies route by exact IP; the port-only
         // fallback misroutes flows sharing a destination port (e.g. QUIC on 443).
         if cachedHints.isEmpty, Self.isDomainName(host) {
-            let weakSession = session
             let localQueue = flowQueue
-            DispatchQueue.global(qos: .userInitiated).async {
+            // `session` is owned by `self` (self.ssUDPSession); hold it weakly so a torn-down
+            // flow isn't pinned open across the blocking DNS resolve below.
+            DispatchQueue.global(qos: .userInitiated).async { [weak session] in
                 let ips = DNSResolver.shared.resolveAll(host)
-                guard !ips.isEmpty else { return }
-                localQueue.async { [weak weakSession] in
-                    weakSession?.addResponseHints(token: token, hints: ips)
+                guard !ips.isEmpty, let session else { return }
+                localQueue.async { [weak session] in
+                    session?.addResponseHints(token: token, hints: ips)
                 }
             }
         }
@@ -451,7 +452,7 @@ class UDPFlow {
         transport.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
             guard let self else { return }
 
-            self.flowQueue.async {
+            self.flowQueue.async { [self] in
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 

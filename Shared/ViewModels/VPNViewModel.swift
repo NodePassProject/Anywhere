@@ -410,7 +410,7 @@ class VPNViewModel {
         guard let manager = vpnManager,
               let configuration = selectedConfiguration else { return }
 
-        Task {
+        Task { [self] in
             let resolvedIP = await Task.detached {
                 VPNViewModel.resolveServerAddress(configuration.serverAddress)
             }.value

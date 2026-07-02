@@ -563,7 +563,7 @@ class TCPConnection {
         transport.connect(host: dstHost, port: dstPort) { [weak self] error in
             guard let self else { return }
 
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
@@ -621,7 +621,7 @@ class TCPConnection {
         client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
             guard let self else { return }
 
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 

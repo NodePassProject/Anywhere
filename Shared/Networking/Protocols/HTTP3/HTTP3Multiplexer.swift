@@ -184,7 +184,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
 
         quic.connect { [weak self] error in
             guard let self else { return }
-            self.queue.async {
+            self.queue.async { [self] in
                 if let error {
                     self.failSession(error)
                     return

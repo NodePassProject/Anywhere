@@ -747,7 +747,7 @@ final class MITMSession {
     private func startInboundPump(inner: any MITMByteLeg) {
         inner.receive { [weak self] data, error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 if let error {
                     self.cancel(error: error)
                     return
@@ -981,7 +981,7 @@ final class MITMSession {
     private func startOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) {
         outer.receive { [weak self] data, error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 // If this leg was swapped out (host-change reconnect replaced `outerRecord`), ignore
                 // its callbacks so its imminent EOF can't tear down the session or the replacement leg.
                 guard self.outerRecord === outer else { return }
@@ -1076,7 +1076,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     private func startBridgeInboundPump(inner: TLSRecordConnection) {
         inner.receive { [weak self] data, error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 guard !self.torn else { return }
                 if let error { self.cancel(error: error); return }
                 guard let data, !data.isEmpty else {
@@ -1326,7 +1326,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     private func startH2UpstreamPump(record: TLSRecordConnection) {
         record.receive { [weak self] data, error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 guard !self.torn, let leg = self.h2Upstream else { return }
                 if let error { self.cancel(error: error); return }
                 guard let data, !data.isEmpty else { self.cancel(error: nil); return }
@@ -1558,7 +1558,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard let bs = bridgeStreams[streamID], let record = bs.upstreamRecord else { return }
         record.receive { [weak self] data, error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipQueue.async { [self] in
                 guard !self.torn, let bs = self.bridgeStreams[streamID], let client = self.bridgeClient else { return }
                 if let error {
                     logger.warning("\(self.dstHost): bridge upstream read error for stream \(streamID): \(error)")
