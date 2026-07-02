@@ -42,6 +42,7 @@ enum NaiveHTTP2FrameType: UInt8 {
     case ping         = 0x6
     case goaway       = 0x7
     case windowUpdate = 0x8
+    case continuation = 0x9
 }
 
 enum NaiveHTTP2FrameFlags {

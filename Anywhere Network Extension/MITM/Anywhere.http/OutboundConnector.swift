@@ -29,16 +29,17 @@ enum OutboundConnector {
 
     // MARK: - Route resolution
 
-    static func resolveRoute(host: String) -> RouteTarget {
-        guard let stack = TunnelStack.shared else { return .direct }
+    /// Resolves the route and whether it came from the global default (vs. an explicit rule).
+    static func resolveRoute(host: String) -> (target: RouteTarget, viaDefault: Bool) {
+        guard let stack = TunnelStack.shared else { return (.direct, false) }
         let router = stack.domainRouter
 
         let matched: RouteTarget? = isIPLiteral(host) ? router.matchIP(host) : router.matchDomain(host)
-        if let matched { return matched }
+        if let matched { return (matched, false) }
 
         // No explicit rule: keep loopback / LAN destinations off any proxy.
-        if isLoopbackOrPrivate(host) { return .direct }
-        return stack.defaultRouteTarget
+        if isLoopbackOrPrivate(host) { return (.direct, false) }
+        return (stack.defaultRouteTarget, true)
     }
 
     // MARK: - Dial
@@ -50,7 +51,13 @@ enum OutboundConnector {
         queue: DispatchQueue,
         completion: @escaping (Result<Dialed, Error>) -> Void
     ) {
-        let route = resolveRoute(host: host)
+        let (route, viaDefault) = resolveRoute(host: host)
+        // The only place script `Anywhere.http` fetches reach the Requests log — they're the
+        // extension's own outbound, not captured device traffic. A pooled HTTP/2 connection
+        // logs once per dial, shared across its streams.
+        TunnelStack.shared?.requestLog.record(
+            protocolName: "HTTP", host: host, port: port, routeTarget: route, viaDefault: viaDefault
+        )
         switch route {
         case .reject:
             queue.async { completion(.failure(ConnectError.rejected(host))) }

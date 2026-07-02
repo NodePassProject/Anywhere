@@ -288,6 +288,10 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
                 let errorCode = NaiveHTTP2Framer.parseRstStream(payload: frame.payload) ?? 0
                 stream.handleReset(errorCode: errorCode)
             }
+
+        case .continuation:
+            // CONNECT tunnels never split HEADERS across CONTINUATION; nothing to do.
+            break
         }
     }
 

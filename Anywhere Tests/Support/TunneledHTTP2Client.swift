@@ -87,6 +87,9 @@ enum TunneledHTTP2Client {
                 case .windowUpdate:
                     break
 
+                case .continuation:
+                    throw HTTPClientError.unsupported("CONTINUATION frames")
+
                 case .headers:
                     guard frame.streamID == streamID else { break }
                     if frame.hasFlag(NaiveHTTP2FrameFlags.padded) || (frame.flags & priorityFlag) != 0 {

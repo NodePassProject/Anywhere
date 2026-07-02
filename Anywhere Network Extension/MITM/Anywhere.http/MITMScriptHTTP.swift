@@ -113,7 +113,8 @@ final class MITMScriptHTTPClient {
         }
     }
 
-    /// Dials the host via `OutboundConnector`, then runs one HTTP/1.1 exchange — over TLS first for https.
+    /// Routes one request. For https, prefers a pooled, multiplexed HTTP/2 connection and falls back
+    /// to HTTP/1.1 when the origin doesn't negotiate `h2`; plain http stays HTTP/1.1 (no h2c).
     private func performRoutedRequest(
         _ request: URLRequest,
         insecure: Bool,
@@ -129,6 +130,44 @@ final class MITMScriptHTTPClient {
         let defaultPort: UInt16 = isTLS ? 443 : 80
         let port = UInt16(exactly: request.url?.port ?? Int(defaultPort)) ?? defaultPort
         let hostHeader = Self.hostHeader(host: host, port: port, defaultPort: defaultPort)
+
+        guard isTLS else {
+            performHTTP1Request(request, host: host, port: port, hostHeader: hostHeader, isTLS: false,
+                                insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout,
+                                completion: completion)
+            return
+        }
+
+        MITMScriptHTTP2Pool.shared.perform(
+            request: request, host: host, port: port, hostHeader: hostHeader, insecure: insecure,
+            maxBytes: maxBytes, resourceTimeout: resourceTimeout
+        ) { [weak self] outcome in
+            switch outcome {
+            case .response(let response):
+                completion(.success(response))
+            case .failure(let error):
+                completion(.failure(error))
+            case .fallbackToHTTP1:
+                guard let self else { completion(.failure(ClientError.notHTTP)); return }
+                self.performHTTP1Request(request, host: host, port: port, hostHeader: hostHeader, isTLS: true,
+                                         insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout,
+                                         completion: completion)
+            }
+        }
+    }
+
+    /// Dials the host via `OutboundConnector`, then runs one HTTP/1.1 exchange — over TLS first for https.
+    private func performHTTP1Request(
+        _ request: URLRequest,
+        host: String,
+        port: UInt16,
+        hostHeader: String,
+        isTLS: Bool,
+        insecure: Bool,
+        maxBytes: Int,
+        resourceTimeout: TimeInterval,
+        completion: @escaping (Result<Response, Error>) -> Void
+    ) {
         let queue = DispatchQueue(label: "com.anywhere.ne.tunneled-http")
         OutboundConnector.dial(host: host, port: port, queue: queue) { result in
             switch result {

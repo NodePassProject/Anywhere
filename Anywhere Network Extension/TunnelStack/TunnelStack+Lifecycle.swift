@@ -88,7 +88,7 @@ extension TunnelStack {
             guard running else { return }
             logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
 
-            TransportReclaim.reclaimAll()
+            reclaimAllOutboundPools()
             reclaimInstanceTransports(rebuildMultiplexerPool: false)
         }
     }
@@ -141,8 +141,15 @@ extension TunnelStack {
             Unmanaged<TCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
         }
 
-        TransportReclaim.reclaimAll()
+        reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: true)
+    }
+
+    /// Reclaims process-wide outbound pools: `TransportReclaim` (Shared) plus the extension-only
+    /// script `fetch` HTTP/2 pool, which Shared can't see.
+    private func reclaimAllOutboundPools() {
+        TransportReclaim.reclaimAll()
+        MITMScriptHTTP2Pool.shared.reclaim()
     }
 
     /// Reclaims the udpQueue-owned per-tunnel transports (Vision mux, SS UDP
@@ -189,7 +196,7 @@ extension TunnelStack {
             outputDrainInFlight = false
         }
 
-        TransportReclaim.reclaimAll()
+        reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: false)
 
         isTearingDown = true
