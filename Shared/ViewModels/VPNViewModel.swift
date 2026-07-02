@@ -42,6 +42,10 @@ class VPNViewModel {
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
     @ObservationIgnored private var statusObserver: AnyCancellable?
     private(set) var pendingReconnect = false
+    /// Debounces a transient `.reasserting` (network blip) while connected so the UI keeps
+    /// showing "Connected" unless the reconnect persists past ``reassertingDebounceInterval``.
+    @ObservationIgnored private var reassertingDebounceTask: Task<Void, Never>?
+    private static let reassertingDebounceInterval: Duration = .seconds(5)
     /// Set only via `withoutSelectionPersistence` so the flag always resets.
     @ObservationIgnored private var _suppressSelectionPersistence = false
 
@@ -325,23 +329,47 @@ class VPNViewModel {
             .sink { [weak self] connection in
                 guard let self else { return }
                 guard connection === self.vpnManager?.connection else { return }
-                self.vpnStatus = connection.status
-                let stats = ConnectionStatsModel.shared
-                if connection.status == .connected {
-                    if let session = self.vpnManager?.connection as? NETunnelProviderSession {
-                        stats.startPolling(session: session)
-                    }
-                } else {
-                    stats.stopPolling()
-                    if connection.status == .disconnected || connection.status == .invalid {
-                        stats.reset()
-                        if self.pendingReconnect {
-                            self.pendingReconnect = false
-                            self.connectVPN()
-                        }
-                    }
+                self.handleStatusChange(connection.status, on: connection)
+            }
+    }
+
+    /// Routes a raw tunnel status to the UI, debouncing a transient reconnect.
+    private func handleStatusChange(_ status: NEVPNStatus, on connection: NEVPNConnection) {
+        reassertingDebounceTask?.cancel()
+        reassertingDebounceTask = nil
+
+        if status == .reasserting, vpnStatus == .connected {
+            reassertingDebounceTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.reassertingDebounceInterval)
+                guard !Task.isCancelled, let self else { return }
+                // Re-check the live status: apply only if it never recovered.
+                guard connection.status == .reasserting else { return }
+                self.applyStatus(.reasserting, on: connection)
+            }
+            return
+        }
+
+        applyStatus(status, on: connection)
+    }
+
+    /// Applies a tunnel status to `vpnStatus` and drives the stats-polling side effects.
+    private func applyStatus(_ status: NEVPNStatus, on connection: NEVPNConnection) {
+        vpnStatus = status
+        let stats = ConnectionStatsModel.shared
+        if status == .connected {
+            if let session = connection as? NETunnelProviderSession {
+                stats.startPolling(session: session)
+            }
+        } else {
+            stats.stopPolling()
+            if status == .disconnected || status == .invalid {
+                stats.reset()
+                if pendingReconnect {
+                    pendingReconnect = false
+                    connectVPN()
                 }
             }
+        }
     }
 
     private static let providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
