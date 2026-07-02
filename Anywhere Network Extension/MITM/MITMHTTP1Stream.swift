@@ -446,6 +446,15 @@ final class MITMHTTP1Stream {
     /// Scans for CRLF CRLF, parses the head, applies rewrites, and enters the
     /// appropriate body mode.
     private func consumeHead(into output: inout Data) -> Bool {
+        // RFC 9112 §2.2: a recipient may ignore empty line(s) before the start line. Consume and
+        // forward leading CRLF(s) verbatim, then parse the real start line. Without this a request
+        // starting with a blank line falls through to `.forward`, desyncing the request/response FIFO
+        // across a keep-alive connection. (Bridge path drops `output`, also correct.)
+        while rxBuffer.count >= 2, rxBuffer[0] == 0x0D, rxBuffer[1] == 0x0A {
+            output.append(0x0D); output.append(0x0A)
+            rxBuffer.removeFirst(2)
+            headScanned = 0
+        }
         let crlfcrlf = Data([0x0D, 0x0A, 0x0D, 0x0A])
         // Overlap the scanned prefix by 3 bytes so a straddling CRLF CRLF is found.
         let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
@@ -1568,6 +1577,12 @@ final class MITMHTTP1Stream {
         case smuggling
     }
 
+    /// HTTP OWS is exactly SP / HTAB (RFC 9110 §5.6.3). NOT `CharacterSet.whitespaces`, which also
+    /// contains U+00A0 and other Unicode Zs: on the ISO-8859-1 header decode a `0xA0` obs-text byte
+    /// becomes U+00A0, so `.whitespaces` would silently strip a legal field-value byte instead of
+    /// round-tripping it.
+    private static let fieldValueOWS = CharacterSet(charactersIn: " \t")
+
     private func parseHead(_ data: Data) -> ParsedHeadResult {
         // ISO-8859-1, not ASCII: HTTP/1 header octets are a byte string (RFC 9110 §5.5 obs-text), and
         // latin-1 maps every byte 1:1 so it never fails (ASCII would reject any byte > 0x7F, common in
@@ -1617,7 +1632,7 @@ final class MITMHTTP1Stream {
             guard let colon = line.firstIndex(of: ":") else { return .smuggling }
             let name = String(line[..<colon])
             let value = String(line[line.index(after: colon)...])
-                .trimmingCharacters(in: CharacterSet.whitespaces)
+                .trimmingCharacters(in: Self.fieldValueOWS)
             // RFC 9110 §5.6.2: SP/CTL in a field-name is the classic obfuscated-TE smuggle.
             guard HTTPHeader.isValidName(name) else { return .smuggling }
             // CR/LF in a field-value would split the line on re-emission (request/response splitting).

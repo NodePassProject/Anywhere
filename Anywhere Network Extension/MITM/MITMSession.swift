@@ -35,6 +35,10 @@ final class MITMSession {
         private var buffer = Data()
         private var pending: ((Data?, Bool, Error?) -> Void)?
         private var closed = false
+        /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
+        /// the client stay open so an in-flight response still drains — matching the non-MITM path,
+        /// which keeps pumping downlink after a client FIN. `closed` (forceCancel) blocks both sides.
+        private var receiveClosed = false
 
         var isTransportReady: Bool { !closed }
 
@@ -74,7 +78,7 @@ final class MITMSession {
                 completion(data, false, nil)
                 return
             }
-            if closed {
+            if closed || receiveClosed {
                 lock.unlock()
                 completion(nil, true, nil)
                 return
@@ -97,7 +101,7 @@ final class MITMSession {
 
         func feedFromClient(_ data: Data) {
             lock.lock()
-            if closed {
+            if closed || receiveClosed {
                 lock.unlock()
                 return
             }
@@ -113,7 +117,7 @@ final class MITMSession {
 
         func endOfClient() {
             lock.lock()
-            closed = true
+            receiveClosed = true
             let callback = pending
             pending = nil
             let pendingBuffer = buffer
@@ -749,7 +753,10 @@ final class MITMSession {
                     return
                 }
                 guard let data, !data.isEmpty else {
-                    self.cancel(error: nil)
+                    // Client half-closed its send side (FIN). Stop reading the client but keep the
+                    // outbound (response) leg pumping so an in-flight response still reaches it —
+                    // matching the non-MITM `downlinkOnlyTimeout` path. Teardown then follows from the
+                    // upstream's own EOF or the downlink-only idle timeout.
                     return
                 }
                 let handle: (Data) -> Void = { [weak self] transformed in
@@ -1072,7 +1079,12 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             self.lwipQueue.async {
                 guard !self.torn else { return }
                 if let error { self.cancel(error: error); return }
-                guard let data, !data.isEmpty else { self.cancel(error: nil); return }
+                guard let data, !data.isEmpty else {
+                    // Client half-closed (FIN): stop reading frames but keep in-flight response
+                    // streams draining to the client; teardown follows on the upstream's EOF or the
+                    // connection's downlink-only idle timeout, matching the non-MITM path.
+                    return
+                }
                 guard let client = self.bridgeClient else { return }
                 client.feed(data) { [weak self] in
                     guard let self, !self.torn else { return }
@@ -1271,6 +1283,13 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         // per-stream receive window so a slow client throttles the origin (h2 only).
         bridgeClient?.onResponseDrainedToClient = { [weak self] clientStreamID, n in
             self?.h2Upstream?.creditDrainedResponse(clientID: clientStreamID, n)
+        }
+        // Upload mirror of the response drain-coupling above: as the origin accepts request DATA,
+        // credit the client's upload window by the same amount so a slow origin backpressures the
+        // client. Streams opened from here on are drain-coupled; the first (probe) request stays eager.
+        bridgeClient?.uploadDrainCoupled = true
+        leg.onRequestDrainedToUpstream = { [weak self] clientStreamID, n in
+            self?.bridgeClient?.creditUploadDrained(clientStreamID, n)
         }
         leg.onUpstreamBytes = { [weak self] bytes in
             guard let self, !self.torn, !bytes.isEmpty else { return }

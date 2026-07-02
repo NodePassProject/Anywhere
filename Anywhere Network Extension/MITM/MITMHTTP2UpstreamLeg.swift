@@ -21,6 +21,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// Origin sent GOAWAY: ask the client leg to emit its own so the client redials new
     /// requests on a fresh connection instead of stalling on this draining one.
     var onDraining: (() -> Void)?
+    /// Request DATA (`n` body bytes for client stream `clientID`) was flushed to the origin under its
+    /// flow-control window. The client leg credits the client's upload window by the same amount, so a
+    /// slow origin backpressures the client — the upload mirror of `onResponseDrainedToClient`.
+    var onRequestDrainedToUpstream: ((_ clientID: UInt32, _ n: Int) -> Void)?
 
     private let host: String
     private let rewriter: MITMHTTP2Rewriter
@@ -137,11 +141,35 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         }
         responseStreams.removeValue(forKey: clientID)
         drainCoupledStreams.remove(clientID)
+        responseHalfClosed.remove(clientID)
         pendingRequestBodies.removeValue(forKey: clientID)
         openRequestStreams.remove(clientID)
         if let sid = ourStreamID.removeValue(forKey: clientID) { theirStreamID.removeValue(forKey: sid) }
         // A concurrency slot may have freed; open as many queued requests as now fit.
         drainQueue()
+    }
+
+    /// Finalizes a stream's response half. If the request (upload) half is still open and the origin
+    /// ended cleanly (END_STREAM), keep the origin stream half-open so the upload isn't RST-truncated;
+    /// `requestHalfFinished` releases it once the upload completes. Otherwise release now, RST'ing the
+    /// origin only when a half is genuinely left open.
+    private func finalizeResponseHalf(clientID: UInt32, originEnded: Bool) {
+        if originEnded, openRequestStreams.contains(clientID) {
+            responseStreams.removeValue(forKey: clientID)
+            drainCoupledStreams.remove(clientID)
+            responseHalfClosed.insert(clientID)
+        } else {
+            releaseStream(clientID: clientID, resetOrigin: !originEnded || openRequestStreams.contains(clientID))
+        }
+    }
+
+    /// Called when the request (upload) half finishes. If the response half already ended (the stream
+    /// was kept half-open only for this upload), the stream is now fully done — release it so its
+    /// concurrency slot and stream-ID mapping don't leak.
+    private func requestHalfFinished(_ clientID: UInt32) {
+        if responseHalfClosed.contains(clientID) {
+            releaseStream(clientID: clientID, resetOrigin: false)
+        }
     }
 
     /// Opens queued requests in FIFO order while a concurrency slot is free. The upstream stream
@@ -206,6 +234,12 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     /// eager-credited and are absent here.
     private var drainCoupledStreams: Set<UInt32> = []
 
+    /// Streams whose response half finished (origin sent END_STREAM) while the request (upload) half
+    /// was still open. The origin stream is kept half-open — not RST — so the client's upload isn't
+    /// truncated (RFC 9113 half-closed (remote)); the request-completion path then releases it. Empty
+    /// when the request finishes first (the common case).
+    private var responseHalfClosed: Set<UInt32> = []
+
     /// Receive-window credit (toward the origin) accumulated during one pass and flushed once at
     /// `finishPass`, so a burst of DATA frames yields one WINDOW_UPDATE per stream plus one for the
     /// connection instead of a pair per frame. `batchedStreamCredit` keyed by upstream (wire) id.
@@ -244,6 +278,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         pendingRequestBodies.removeAll()
         responseStreams.removeAll()
         drainCoupledStreams.removeAll()
+        responseHalfClosed.removeAll()
         openRequestStreams.removeAll()
         queuedRequests.removeAll()
         queueOrder.removeAll()
@@ -331,6 +366,13 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // RFC 9113 §8.2.1: header field names MUST be lowercase in HTTP/2.
         for (name, value) in head.headers {
             block.append((name: name.lowercased(), value: value))
+        }
+        // Re-materialize Content-Length from the framing decided at decode time. The IR strips the
+        // client's content-length because a rewritten body changes it, but a `.contentLength` framing
+        // carries the exact value, so preserving it keeps length-signing schemes (e.g. AWS SigV4) and
+        // length-requiring origins working. `.chunked`/`.none` carry no length (h2 frames the body itself).
+        if case .contentLength(let n) = head.framing {
+            block.append((name: "content-length", value: String(n)))
         }
         onUpstreamBytes?(Codec.emitHeaders(
             streamID: sid,
@@ -425,6 +467,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             pendingRequestBodies.removeValue(forKey: clientID)
             emitRequestTrailers(sid: sid, fields)
             openRequestStreams.remove(clientID)
+            requestHalfFinished(clientID)
         }
     }
 
@@ -454,10 +497,14 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
                                              endStream: bodyDone && entry.pendingTrailers == nil))
             flowController.debitServerConnection(available)
             entry.streamWindow -= available
+            // Bytes reached the origin under its window; let the client send that much more upload
+            // (drain-coupled flow control).
+            onRequestDrainedToUpstream?(clientID, available)
             if bodyDone {
                 if let trailers = entry.pendingTrailers { emitRequestTrailers(sid: sid, trailers) }
                 pendingRequestBodies.removeValue(forKey: clientID)
                 openRequestStreams.remove(clientID)
+                requestHalfFinished(clientID)
                 return true
             }
         } else if entry.remaining.isEmpty, entry.endStream {
@@ -468,6 +515,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             }
             pendingRequestBodies.removeValue(forKey: clientID)
             openRequestStreams.remove(clientID)
+            requestHalfFinished(clientID)
             return true
         }
         // Otherwise the upstream's flow-control window is exhausted; resume on its next WINDOW_UPDATE.
@@ -804,9 +852,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         if endStream || isHead || status == 204 || status == 304 {
             sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: true, neverIndexed: neverIndexed)
             // We tell the client the response is over, but the origin only really ended it if it set
-            // END_STREAM; a HEAD/204/304 that omitted it (or a request body still in flight) leaves
-            // the origin stream open — RST it so it isn't leaked.
-            releaseStream(clientID: clientID, resetOrigin: !endStream || openRequestStreams.contains(clientID))
+            // END_STREAM. `finalizeResponseHalf` keeps the origin half-open if the upload is in flight,
+            // else RSTs a synthesized end (e.g. HEAD/204/304 without END_STREAM) so it isn't leaked.
+            finalizeResponseHalf(clientID: clientID, originEnded: endStream)
             return false
         }
 
@@ -871,9 +919,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
                 creditStreamWindow(sid, onWireLength) // overflow→passthrough fallback stays eager
             }
             sink?.deliverResponseData(streamID: clientID, body, endStream: endStream)
-            // Response done; if the client never finished uploading, the origin's request half is
-            // still open — RST so the stream isn't leaked.
-            if endStream { releaseStream(clientID: clientID, resetOrigin: openRequestStreams.contains(clientID)) }
+            // Response done; `finalizeResponseHalf` keeps the origin half-open if the client is
+            // still uploading.
+            if endStream { finalizeResponseHalf(clientID: clientID, originEnded: true) }
             return false
 
         case .buffering(var buffer):
@@ -944,7 +992,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     private func finishResponseStream(streamID: UInt32, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
         switch responseStreams[streamID] {
         case .passthrough:
-            releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
+            finalizeResponseHalf(clientID: streamID, originEnded: true)
             if trailers.isEmpty {
                 sink?.deliverResponseData(streamID: streamID, Data(), endStream: true)
             } else {
@@ -989,10 +1037,10 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         if endStream, !trailers.isEmpty {
             if !body.isEmpty { sink?.deliverResponseData(streamID: streamID, body, endStream: false) }
             sink?.deliverResponseTrailers(streamID: streamID, trailers)
-            releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
+            finalizeResponseHalf(clientID: streamID, originEnded: true)
         } else {
             sink?.deliverResponseData(streamID: streamID, body, endStream: endStream)
-            if endStream { releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID)) }
+            if endStream { finalizeResponseHalf(clientID: streamID, originEnded: true) }
         }
     }
 
@@ -1000,9 +1048,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     private func runResponseScripts(_ streamID: UInt32, trailers: [(name: String, value: String)] = []) -> Bool {
         guard case .buffering(let buffer)? = responseStreams[streamID] else { return false }
-        // The body is complete (END_STREAM seen), so the stream is done once the script
-        // delivers; release it now — the async completion delivers by client ID, not the maps.
-        releaseStream(clientID: streamID, resetOrigin: openRequestStreams.contains(streamID))
+        // Response body complete (END_STREAM seen). Finalize now — the async script completion delivers
+        // by client ID, not via the maps, so tearing down the stream state here is safe.
+        finalizeResponseHalf(clientID: streamID, originEnded: true)
         let plaintext: Data
         if buffer.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(buffer.data, plan: buffer.codec, host: host) else {

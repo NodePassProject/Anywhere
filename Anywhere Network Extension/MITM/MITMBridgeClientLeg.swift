@@ -141,6 +141,17 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     private var batchedConnCredit = 0
     private var batchedStreamCredit: [UInt32: Int] = [:]
 
+    /// Set once the session binds an HTTP/2 upstream: uploads on streams opened from then on are
+    /// drain-coupled (see `streamDeferredUpload`). An h1 upstream leaves this false (no origin receive
+    /// window to couple to), so those uploads use the eager-credit + buffer-cap path instead.
+    var uploadDrainCoupled = false
+
+    /// Streams whose upload stream-window credit is deferred until the h2 upstream drains the body to
+    /// the origin (`creditUploadDrained`), so a slow origin backpressures the client instead of filling
+    /// the upstream buffer to its reset cap. Only the connection window and DATA padding are eager here;
+    /// pre-bind (probe) and buffered→chunked streams stay fully eager and are absent.
+    private var streamDeferredUpload: Set<UInt32> = []
+
 
     init(
         host: String,
@@ -164,6 +175,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         pendingStreamCredit.removeAll()
         batchedConnCredit = 0
         batchedStreamCredit.removeAll()
+        streamDeferredUpload.removeAll()
         pending = nil
     }
 
@@ -378,6 +390,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         streamMethods.removeValue(forKey: id)
         paceStates.removeValue(forKey: id)
         pendingStreamCredit.removeValue(forKey: id)
+        streamDeferredUpload.remove(id)
         if wasOpen { delegate?.clientLegAbortRequest(streamID: id) }
     }
 
@@ -534,20 +547,25 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             rewritten = MITMBridgeHeaders.clampingAcceptEncoding(rewritten)
         }
 
-        // Expect: 100-continue — answer with an interim 100 ourselves and strip Expect upstream.
-        // The origin then never sends its own 100; without our synthesized one an h2 client
-        // withholding its body would stall.
-        if !endStream, Self.expectsContinue(rewritten) {
-            sendInterimContinue(streamID)
-            rewritten = rewritten.filter { !ASCII.equalsIgnoringCase($0.name, "expect") }
-        }
-
         if rewriter.hasStreamScriptRule(phase: .httpRequest, requestURL: gateURL) {
             logger.warning("bridge \(host) stream \(streamID): request stream-script not supported on the bridge; forwarding body unscripted")
         }
 
         let hasBufferedRule = rewriter.hasBufferedBodyRule(phase: .httpRequest, requestURL: gateURL)
-        if hasBufferedRule, (endStream || shouldBuffer(headers: rewritten)) {
+        let willBufferBody = hasBufferedRule && (endStream || shouldBuffer(headers: rewritten))
+
+        // Expect: 100-continue — only intercept it when a rule buffers the whole body locally before
+        // the origin sees the request (the origin then can't send its own 100, so synthesize one and
+        // strip Expect). On the passthrough/streaming path, forward Expect upstream and relay the
+        // origin's own interim 100 / final status, matching a non-intercepted connection where the
+        // origin decides whether to accept the body before it is sent. A client that withholds its
+        // body then relies on its own Expect timeout if the origin never answers — same as direct.
+        if willBufferBody, !endStream, Self.expectsContinue(rewritten) {
+            sendInterimContinue(streamID)
+            rewritten = rewritten.filter { !ASCII.equalsIgnoringCase($0.name, "expect") }
+        }
+
+        if willBufferBody {
             let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
             requestStreams[streamID] = .buffering(BufferedReq(rewrittenHeaders: rewritten, codec: codec, data: Data(), neverIndexed: neverIndexed, scripted: true, resolvedUpstream: resolvedUpstream, originalURL: requestURL))
             if endStream { return finishBufferedRequest(streamID) }
@@ -583,6 +601,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         case .chunked: remaining = nil
         }
         requestStreams[streamID] = .streaming(remaining: remaining)
+        // Defer this stream's upload credit to the origin drain (see `streamDeferredUpload`); only for
+        // a stream with a body, since an immediate end has nothing to pace.
+        if uploadDrainCoupled, !endStream { streamDeferredUpload.insert(streamID) }
         // Correlate the response on the post-rewrite gate URL so one url-pattern matches both.
         delegate?.clientLegSendRequestHead(head, url: gateURL, endStream: endStream)
         if endStream { requestStreams.removeValue(forKey: streamID) }
@@ -651,7 +672,16 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
         switch requestStreams[id] {
         case .streaming(let remaining):
-            creditClientUpload(streamID: id, length: onWireLength)
+            if streamDeferredUpload.contains(id) {
+                // Drain-coupled: credit the connection window (withholding it would stall other
+                // streams) and any DATA padding (consumed here, never forwarded) now; defer the body's
+                // stream-window credit until the upstream flushes it to the origin (`creditUploadDrained`).
+                batchedConnCredit += onWireLength
+                let padding = onWireLength - body.count
+                if padding > 0 { batchedStreamCredit[id, default: 0] += padding }
+            } else {
+                creditClientUpload(streamID: id, length: onWireLength)
+            }
             // RFC 9113 §8.1.2.6: a request's DATA length must equal its declared Content-Length, or
             // surplus bytes get re-parsed by an h1 upstream as a second, smuggled request.
             if let remaining {
@@ -669,7 +699,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
                 if !endStream { requestStreams[id] = .streaming(remaining: left) }
             }
             delegate?.clientLegSendRequestData(streamID: id, body, endStream: endStream)
-            if endStream { requestStreams.removeValue(forKey: id) }
+            if endStream { finishRequestUpload(id) }
             return false
 
         case .buffering(var buffer):
@@ -718,7 +748,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             } else {
                 delegate?.clientLegSendRequestTrailers(streamID: streamID, trailers)
             }
-            requestStreams.removeValue(forKey: streamID)
+            finishRequestUpload(streamID)
             return false
         case .buffering:
             // A buffered request re-emits the body whole with a computed length, incompatible with
@@ -748,6 +778,15 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         // Accumulate; `finishPass` emits the coalesced WINDOW_UPDATEs at the end of the pass.
         batchedStreamCredit[streamID, default: 0] += length
         batchedConnCredit += length
+    }
+
+    /// Credits a drain-coupled stream's upload window by `n` drained body bytes. Runs between pump
+    /// passes, so it emits the WINDOW_UPDATE directly rather than via `finishPass`; a no-op for a
+    /// never-deferred or ended stream. Total credit = eager padding + drained body = the on-wire DATA,
+    /// so the window neither leaks nor overflows.
+    func creditUploadDrained(_ clientStreamID: UInt32, _ n: Int) {
+        guard n > 0, streamDeferredUpload.contains(clientStreamID) else { return }
+        delegate?.clientLegWriteToClient(Codec.windowUpdate(streamID: clientStreamID, increment: n))
     }
 
     // MARK: Buffered request script application
@@ -1008,8 +1047,32 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         streamMethods.removeValue(forKey: streamID)
         paceStates.removeValue(forKey: streamID)
         pendingStreamCredit.removeValue(forKey: streamID)
+        // If the client is still uploading to an h2 upstream, keep the request (upload) half alive so an
+        // earlier-finishing response doesn't truncate it (RFC 9113 half-closed streams);
+        // `finishRequestUpload` completes teardown when the upload ends. An h1 upstream can't take a
+        // continued upload after responding, so it closes here.
+        if uploadDrainCoupled, isRequestUploading(streamID) {
+            return
+        }
         requestStreams.removeValue(forKey: streamID)
+        streamDeferredUpload.remove(streamID)
         if notifyUpstream { delegate?.clientLegResponseComplete(streamID: streamID) }
+    }
+
+    private func isRequestUploading(_ streamID: UInt32) -> Bool {
+        if case .streaming = requestStreams[streamID] { return true }
+        return false
+    }
+
+    /// Called when the request (upload) half finishes. Cleans up its state and, if the response half
+    /// already completed (the stream was kept open only for this upload), notifies the upstream that
+    /// the stream is fully done.
+    private func finishRequestUpload(_ streamID: UInt32) {
+        requestStreams.removeValue(forKey: streamID)
+        streamDeferredUpload.remove(streamID)
+        if !isLiveResponseStream(streamID) {
+            delegate?.clientLegResponseComplete(streamID: streamID)
+        }
     }
 
     private func rstToClient(_ streamID: UInt32, errorCode: UInt32, abortUpstream: Bool) {
@@ -1018,6 +1081,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         paceStates.removeValue(forKey: streamID)
         pendingStreamCredit.removeValue(forKey: streamID)
         requestStreams.removeValue(forKey: streamID)
+        streamDeferredUpload.remove(streamID)
         if abortUpstream { delegate?.clientLegAbortRequest(streamID: streamID) }
     }
 
