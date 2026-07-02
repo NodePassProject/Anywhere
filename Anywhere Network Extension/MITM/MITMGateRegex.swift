@@ -244,7 +244,7 @@ final class MITMGateRegex: @unchecked Sendable {
             quarantined = true
             cache.removeAll(keepingCapacity: false)
             cacheOrder.removeAll(keepingCapacity: false)
-            logger.warning("URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each) — likely catastrophic backtracking. The rule is disabled (fail-closed) until the rule set is reloaded. Pattern: \(pattern)")
+            logger.warning("URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each); the rule is disabled. Pattern: \(pattern)")
         } else {
             logger.warning("URL-gate match exceeded its \(Self.matchDeadlineMillis)ms budget (strike \(timeoutStrikes)/\(Self.strikeLimit)); failing this match closed. Pattern: \(pattern)")
         }

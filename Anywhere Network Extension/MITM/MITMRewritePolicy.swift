@@ -151,7 +151,11 @@ final class MITMRewritePolicy {
     private var compiledSets: [CompiledMITMRuleSet] = []
     private var setCount: Int = 0
 
-    /// Guards trie + setCount; reload holds it across the full rebuild so lookups never see a half-built trie.
+    /// Compiled gate regexes keyed by pattern, carried across reloads so an unchanged pattern isn't
+    /// recompiled.
+    private var gateCache: [String: MITMGateRegex] = [:]
+
+    /// Guards trie + setCount + gateCache; reload holds it across the full rebuild so lookups never see a half-built trie.
     private let lock = UnfairLock()
 
     /// lwIP fast path: keeps the no-rules case at a single bool check.
@@ -161,11 +165,13 @@ final class MITMRewritePolicy {
         lock.withLock { resetUnlocked() }
     }
 
-    /// Caller must hold `lock`.
+    /// Caller must hold `lock`. Snapshot `gateCache` before calling if the compiled regexes are to be
+    /// reused across the rebuild — this drops them.
     private func resetUnlocked() {
         trie = FlatLabelTrie<Int16>()
         compiledSets = []
         setCount = 0
+        gateCache.removeAll()
     }
 
     /// Replaces the rule set table. Bad rules are dropped (logged) without
@@ -173,14 +179,17 @@ final class MITMRewritePolicy {
     func load(ruleSets: [MITMRuleSet]) {
         var scopedRules: [(scope: UUID, rules: [CompiledMITMRule])] = []
         lock.withLock {
+            let previousGates = gateCache
             resetUnlocked()
+            var newGates: [String: MITMGateRegex] = [:]
             for set in ruleSets {
                 // Disabled sets stay in activeIDs so toggling off preserves the script-store bucket.
                 guard set.enabled else { continue }
-                if let compiled = insertUnlocked(set) {
+                if let compiled = insertUnlocked(set, previousGates: previousGates, newGates: &newGates) {
                     scopedRules.append((scope: set.id, rules: compiled))
                 }
             }
+            gateCache = newGates
             trie.freeze()
         }
         // Purge JS engine state for deleted sets; edited sets (stable id) keep theirs.
@@ -199,17 +208,30 @@ final class MITMRewritePolicy {
     }
 
     /// Inserts one rule set and returns its compiled rules, or nil without a usable suffix. Caller must hold `lock`.
-    private func insertUnlocked(_ set: MITMRuleSet) -> [CompiledMITMRule]? {
+    /// Reuses a gate from `newGates` (this reload) or `previousGates` (last reload) before compiling, so each
+    /// distinct pattern is compiled at most once.
+    private func insertUnlocked(
+        _ set: MITMRuleSet,
+        previousGates: [String: MITMGateRegex],
+        newGates: inout [String: MITMGateRegex]
+    ) -> [CompiledMITMRule]? {
         let suffixes = set.domainSuffixes
             .map { $0.lowercased().trimmingCharacters(in: CharacterSet.whitespaces) }
             .filter { !$0.isEmpty }
         guard !suffixes.isEmpty else { return nil }
 
         let compiledRules = set.rules.compactMap { rule -> CompiledMITMRule? in
-            guard let gate = MITMGateRegex(pattern: rule.urlPattern) else {
-                logger.warning("rule URL pattern failed to compile (suffix=\(set.name)): \(rule.urlPattern)")
-                return nil
+            let gate: MITMGateRegex
+            if let cached = newGates[rule.urlPattern] ?? previousGates[rule.urlPattern] {
+                gate = cached
+            } else {
+                guard let compiled = MITMGateRegex(pattern: rule.urlPattern) else {
+                    logger.warning("rule URL pattern failed to compile (suffix=\(set.name)): \(rule.urlPattern)")
+                    return nil
+                }
+                gate = compiled
             }
+            newGates[rule.urlPattern] = gate
             guard let op = compile(rule.operation, suffix: set.name) else { return nil }
             return CompiledMITMRule(phase: rule.phase, gate: gate, operation: op)
         }

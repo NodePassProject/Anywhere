@@ -12,9 +12,9 @@ import Security
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptEngine")
 
-/// Bytes pinned by NoCopy Uint8Array allocations; file-private so the C deallocator can reference it without captures.
-private nonisolated(unsafe) var mitmScriptTypedArrayBytes: Int = 0
-private let mitmScriptTypedArrayLock = UnfairLock()
+/// Input-body bytes pinned by suspended async invocations, summed across all engines.
+private nonisolated(unsafe) var mitmScriptSuspendedBodyBytes: Int = 0
+private let mitmScriptSuspendedBodyLock = UnfairLock()
 
 /// In-flight Anywhere.http fetches across all engines, bounded by httpMaxConcurrentGlobal.
 private nonisolated(unsafe) var mitmScriptGlobalFetchCount: Int = 0
@@ -91,6 +91,9 @@ final class MITMScriptEngine {
         var inFlightFetches = 0
         var totalFetches = 0
         var delivered = false
+        /// Input-body bytes this invocation contributed to `mitmScriptSuspendedBodyBytes` while
+        /// suspended.
+        var pinnedBodyBytes = 0
 
         /// Idle watchdog; fires and reverts the invocation if the promise never settles.
         var watchdog: DispatchWorkItem?
@@ -135,10 +138,9 @@ final class MITMScriptEngine {
     /// Serializes synchronous JS spans and guards `currentInvocation`/`compiled`; never held across an `await`.
     private let invocationLock = NSLock()
 
-    /// GC-nudge threshold for pinned NoCopy bytes (JSC's GC can't see them).
-    private static let softTypedArrayBudget: Int = 16 * 1024 * 1024
-    /// Hard cap: NoCopy allocations past this fail with `undefined`.
-    private static let hardTypedArrayBudget: Int = 32 * 1024 * 1024
+    /// Ceiling on input-body bytes pinned by concurrently-suspended async invocations. A new
+    /// invocation whose body would push past this passes its flow through unmodified.
+    private static let maxSuspendedBodyBytes: Int = 16 * 1024 * 1024
 
     // MARK: Anywhere.http caps
 
@@ -248,9 +250,15 @@ final class MITMScriptEngine {
             completion: completion
         )
         invocationLock.lock()
-        defer {
-            invocationLock.unlock()
-            collectIfBudgetExceeded()
+        defer { invocationLock.unlock() }
+        // Admission control: if awaiting scripts already pin the body budget, pass this flow through
+        // unmodified.
+        let bodyBytes = message.body.count
+        let pinned = Self.suspendedBodyBytes()
+        if pinned + bodyBytes > Self.maxSuspendedBodyBytes {
+            logger.warning("[MITM][JS] suspended-body budget reached (\(pinned) B pinned by awaiting scripts); passing this flow through unmodified")
+            deliver(.modified(message), for: inv)
+            return
         }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             deliver(.modified(message), for: inv)
@@ -266,7 +274,10 @@ final class MITMScriptEngine {
             deliver(finalize(original: message, updated: updated, directive: inv.directive), for: inv)
             return
         }
-        // Suspended at an await — retain the promise so JSC keeps its reactions reachable.
+        // Suspended at an await — retain the promise so JSC keeps its reactions reachable, and count
+        // its pinned input body against the suspended-body budget.
+        inv.pinnedBodyBytes = bodyBytes
+        Self.addSuspendedBodyBytes(bodyBytes)
         inv.resultPromise = returned
         liveInvocations[ObjectIdentifier(inv)] = inv
         currentInvocation = nil
@@ -319,6 +330,10 @@ final class MITMScriptEngine {
         inv.watchdog?.cancel()
         inv.watchdog = nil
         liveInvocations.removeValue(forKey: ObjectIdentifier(inv))
+        if inv.pinnedBodyBytes > 0 {
+            Self.addSuspendedBodyBytes(-inv.pinnedBodyBytes)
+            inv.pinnedBodyBytes = 0
+        }
         inv.resultPromise = nil
         inv.ctxValue = nil
         guard let resumeQueue = inv.resumeQueue, let completion = inv.completion else { return }
@@ -340,16 +355,16 @@ final class MITMScriptEngine {
         MITMScriptTransform.scriptQueue.asyncAfter(deadline: .now() + Self.invocationIdleTimeout, execute: item)
     }
 
-    /// Nudges JSC's GC (unaware of pinned NoCopy buffers) past the soft budget.
-    private func collectIfBudgetExceeded() {
-        let snapshot: Int = {
-            mitmScriptTypedArrayLock.lock()
-            defer { mitmScriptTypedArrayLock.unlock() }
-            return mitmScriptTypedArrayBytes
-        }()
-        if snapshot >= Self.softTypedArrayBudget {
-            JSGarbageCollect(context.jsGlobalContextRef)
-        }
+    private static func suspendedBodyBytes() -> Int {
+        mitmScriptSuspendedBodyLock.lock()
+        defer { mitmScriptSuspendedBodyLock.unlock() }
+        return mitmScriptSuspendedBodyBytes
+    }
+
+    private static func addSuspendedBodyBytes(_ delta: Int) {
+        mitmScriptSuspendedBodyLock.lock()
+        mitmScriptSuspendedBodyBytes += delta
+        mitmScriptSuspendedBodyLock.unlock()
     }
 
     /// Runs ``source`` against one streaming frame; on failure emits the frame unchanged.
@@ -361,10 +376,7 @@ final class MITMScriptEngine {
         state: JSValue?
     ) -> FrameOutcome {
         invocationLock.lock()
-        defer {
-            invocationLock.unlock()
-            collectIfBudgetExceeded()
-        }
+        defer { invocationLock.unlock() }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
@@ -1595,10 +1607,7 @@ final class MITMScriptEngine {
         result: Result<MITMScriptHTTPClient.Response, Error>
     ) {
         invocationLock.lock()
-        defer {
-            invocationLock.unlock()
-            collectIfBudgetExceeded()
-        }
+        defer { invocationLock.unlock() }
         if inv.inFlightFetches > 0 { inv.inFlightFetches -= 1 }
         // Progress: re-arm the watchdog for the continuation window.
         if !inv.delivered { armWatchdog(for: inv) }
@@ -1707,68 +1716,21 @@ final class MITMScriptEngine {
 
     private static func makeUint8Array(in context: JSContext, from data: Data) -> JSValue {
         let count = data.count
-        let projected: Int = {
-            mitmScriptTypedArrayLock.lock()
-            defer { mitmScriptTypedArrayLock.unlock() }
-            return mitmScriptTypedArrayBytes + count
-        }()
-        if projected > hardTypedArrayBudget && count > 0 {
-            // Budget exhausted: fail with undefined, not an empty Uint8Array. An empty array would
-            // masquerade as a valid empty body and zero whatever the script writes back; with a
-            // process-global counter, one rule set could corrupt another's. Undefined makes readBack
-            // keep the original bytes and a script that uses the value throws (reverting unchanged).
-            logger.warning("[MITM][JS] typed-array budget exhausted (\(projected) B > \(hardTypedArrayBudget) B); failing allocation (undefined)")
-            return JSValue(undefinedIn: context)
-        }
-        // Always allocate at least 1 byte: the deallocator needs a valid pointer.
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: max(count, 1), alignment: 1)
-        if count > 0 {
-            data.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: count)
-        }
-        if count > 0 {
-            mitmScriptTypedArrayLock.lock()
-            mitmScriptTypedArrayBytes += count
-            mitmScriptTypedArrayLock.unlock()
-        }
-        // C deallocator can't capture state; pass the byte count via deallocatorContext to subtract from the global.
-        let lengthBox = UnsafeMutablePointer<Int>.allocate(capacity: 1)
-        lengthBox.initialize(to: count)
-        let deallocator: JSTypedArrayBytesDeallocator = { ptr, ctx in
-            ptr?.deallocate()
-            if let ctx {
-                let box = ctx.assumingMemoryBound(to: Int.self)
-                let length = box.pointee
-                if length > 0 {
-                    mitmScriptTypedArrayLock.lock()
-                    mitmScriptTypedArrayBytes -= length
-                    mitmScriptTypedArrayLock.unlock()
-                }
-                box.deinitialize(count: 1)
-                box.deallocate()
-            }
-        }
+        let ctxRef = context.jsGlobalContextRef
         var exception: JSValueRef?
-        let ref = JSObjectMakeTypedArrayWithBytesNoCopy(
-            context.jsGlobalContextRef,
-            kJSTypedArrayTypeUint8Array,
-            buffer,
-            count,
-            deallocator,
-            UnsafeMutableRawPointer(lengthBox),
-            &exception
-        )
-        guard exception == nil, let ref else {
-            buffer.deallocate()
-            lengthBox.deinitialize(count: 1)
-            lengthBox.deallocate()
-            if count > 0 {
-                mitmScriptTypedArrayLock.lock()
-                mitmScriptTypedArrayBytes -= count
-                mitmScriptTypedArrayLock.unlock()
-            }
+        // Allocates a zero-filled, JSC-owned buffer; we overwrite [0, count) below.
+        guard let object = JSObjectMakeTypedArray(ctxRef, kJSTypedArrayTypeUint8Array, count, &exception),
+              exception == nil else {
             return JSValue(undefinedIn: context)
         }
-        return JSValue(jsValueRef: ref, in: context)
+        if count > 0 {
+            // Pointer is valid only until the next JSC API call; copy immediately with none intervening.
+            guard let pointer = JSObjectGetTypedArrayBytesPtr(ctxRef, object, &exception), exception == nil else {
+                return JSValue(undefinedIn: context)
+            }
+            data.copyBytes(to: pointer.assumingMemoryBound(to: UInt8.self), count: count)
+        }
+        return JSValue(jsValueRef: object, in: context)
     }
 
     private static func bytesFromValue(_ value: JSValue, in context: JSContext) -> Data? {

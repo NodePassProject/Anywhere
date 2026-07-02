@@ -244,6 +244,9 @@ class DomainRouter {
             domainRuleCount += 1
         }
 
+        mutating func reserveIPv4(additionalPrefixes: Int) { ipv4Trie.reserveForAdditionalPrefixes(additionalPrefixes) }
+        mutating func reserveIPv6(additionalPrefixes: Int) { ipv6Trie.reserveForAdditionalPrefixes(additionalPrefixes) }
+
         mutating func insertIPv4(network: UInt32, prefixLen: Int, action: RouteTarget) {
             ipv4Trie.insert(network: network, prefixLen: prefixLen, actionID: actionTable.intern(action))
             ipRuleCount += 1
@@ -348,6 +351,14 @@ class DomainRouter {
         }
     }
     
+    fileprivate func reserveCIDRv4(tierIndex: Int, additionalPrefixes: Int) {
+        tiers[tierIndex].reserveIPv4(additionalPrefixes: additionalPrefixes)
+    }
+
+    fileprivate func reserveCIDRv6(tierIndex: Int, additionalPrefixes: Int) {
+        tiers[tierIndex].reserveIPv6(additionalPrefixes: additionalPrefixes)
+    }
+
     fileprivate func ingestRule(tierIndex: Int, action: RouteTarget, type: RoutingRuleType,
                                 valueStart: Int, length: Int, base: UnsafeBufferPointer<UInt8>) {
         switch type {
@@ -405,12 +416,25 @@ class DomainRouter {
             let action = try readAction()
 
             var remainingRules = try u32()
+            // Upper bound on this entry's CIDR rules; reserving on the first of each family lets a bulk load
+            // skip the doubling reallocations. Clamp to what the payload could hold (min rule = 3 bytes) so a
+            // corrupt count can't drive a wild reserveCapacity.
+            let reserveHint = min(Int(remainingRules), count / 3)
+            var reservedV4 = false
+            var reservedV6 = false
             while remainingRules > 0 {
                 let typeByte = try u8()
                 let length = Int(try u16())
                 let valueStart = cursor
                 try advance(length)
                 if let type = RoutingRuleType(rawValue: Int(typeByte)) {
+                    if type == .ipCIDR, !reservedV4 {
+                        owner.reserveCIDRv4(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
+                        reservedV4 = true
+                    } else if type == .ipCIDR6, !reservedV6 {
+                        owner.reserveCIDRv6(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
+                        reservedV6 = true
+                    }
                     owner.ingestRule(tierIndex: Int(tier.rawValue), action: action, type: type,
                                      valueStart: valueStart, length: length, base: bytes)
                 }
@@ -649,6 +673,13 @@ struct CIDRv4Trie {
 
     private var nodes: [Node] = [Node()]
 
+    /// Reserves headroom for `prefixes` more insertions so a bulk load skips the doubling reallocations.
+    /// A path-compressed binary trie holds at most 2N-1 nodes for N disjoint prefixes, so 2× is safe.
+    mutating func reserveForAdditionalPrefixes(_ prefixes: Int) {
+        guard prefixes > 0 else { return }
+        nodes.reserveCapacity(nodes.count + 2 * prefixes)
+    }
+
     // MARK: - Insert
 
     /// More-specific prefixes win at lookup; duplicate prefixes overwrite.
@@ -801,6 +832,12 @@ struct CIDRv6Trie {
     }
 
     private var nodes: [Node] = [Node()]
+
+    /// Reserves headroom for `prefixes` more insertions ahead of a bulk load; see the v4 counterpart.
+    mutating func reserveForAdditionalPrefixes(_ prefixes: Int) {
+        guard prefixes > 0 else { return }
+        nodes.reserveCapacity(nodes.count + 2 * prefixes)
+    }
 
     // MARK: - Insert
 

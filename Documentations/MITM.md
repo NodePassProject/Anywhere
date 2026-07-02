@@ -875,7 +875,7 @@ If you need composed behavior, consolidate the logic into a single
 | `Anywhere.http` in-flight body bytes (all scripts) | 16 MiB | Promise rejects |
 | `Anywhere.http` response body      | 4 MiB        | Promise rejects |
 | HTTP/1 request/response head       | 64 KiB       | fails closed — connection closed (request) / 502 (response) |
-| Typed-array memory (all scripts)   | 16 MiB / 32 MiB | soft → GC hint; hard → empty `Uint8Array` returned |
+| Body bytes pinned by suspended `async` scripts (all) | 16 MiB | new flow passes through unmodified |
 | Idle suspended `async` script      | ~60 s no progress | reverted to original, released |
 | Runaway synchronous JS span        | ~30 s        | extension crashes & relaunches clean |
 
