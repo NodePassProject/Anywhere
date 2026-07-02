@@ -51,7 +51,7 @@
 #define LWIP_CHECKSUM_ON_COPY           1
 
 /* --- Pool sizes --- */
-#define MEMP_NUM_TCP_PCB                256
+#define MEMP_NUM_TCP_PCB                1024
 #define MEMP_NUM_TCP_PCB_LISTEN         2
 #define MEMP_NUM_TCP_SEG                32768
 #define MEMP_NUM_PBUF                   64
@@ -59,7 +59,7 @@
 #define MEMP_NUM_NETCONN                0
 
 /* --- Pbuf configuration --- */
-#define PBUF_POOL_SIZE                  2048
+#define PBUF_POOL_SIZE                  0
 #define PBUF_POOL_BUFSIZE               1500
 
 /* --- TCP configuration --- */
@@ -73,6 +73,7 @@
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
 #define TCP_MAXRTX                      8
 #define TCP_SYNMAXRTX                   3
+#define TCP_MSL                         1000
 #define LWIP_TCP_TIMESTAMPS             0
 #define LWIP_TCP_SACK_OUT               0
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(32U * (mss)))
