@@ -1101,7 +1101,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard !torn else { return }
         switch upstreamProtocol {
         case .h2:
-            h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url)
+            h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url, originalUrl: head.originalURL)
             h2Upstream?.sendRequestHead(head, endStream: endStream)
         case .h1:
             openH1Stream(head, url: url)
@@ -1291,7 +1291,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         for event in events {
             switch event {
             case .head(let head, let url, let endStream):
-                h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url)
+                h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url, originalUrl: head.originalURL)
                 leg.sendRequestHead(head, endStream: endStream)
             case .data(let streamID, let data, let endStream):
                 leg.sendRequestData(streamID: streamID, data, endStream: endStream)
@@ -1350,7 +1350,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             return
         }
         let responseLog = MITMRequestLog()
-        responseLog.recordHTTP1(method: head.method, url: url)
+        responseLog.recordHTTP1(method: head.method, url: url, originalUrl: head.originalURL)
         let responseStream = MITMHTTP1Stream(
             host: dstHost, phase: .httpResponse, policy: policy, effectiveAuthority: nil,
             scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipQueue: lwipQueue

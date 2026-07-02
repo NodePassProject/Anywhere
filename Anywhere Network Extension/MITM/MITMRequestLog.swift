@@ -15,6 +15,7 @@ final class MITMRequestLog {
     struct Record {
         let method: String?
         let url: String?
+        let originalUrl: String?
         /// Synthesized response bytes queued behind this record's upstream response to preserve pipeline order (RFC 9112 §9.3.2).
         var synthAfter: Data = Data()
     }
@@ -35,11 +36,11 @@ final class MITMRequestLog {
 
     // MARK: - HTTP/1
 
-    func recordHTTP1(method: String?, url: String?) {
+    func recordHTTP1(method: String?, url: String?, originalUrl: String?) {
         if http1Queue.count >= Self.maxHTTP1Queue {
             http1Queue.removeFirst()
         }
-        http1Queue.append(Record(method: method, url: url))
+        http1Queue.append(Record(method: method, url: url, originalUrl: originalUrl))
     }
 
     func popHTTP1() -> Record? {
@@ -80,12 +81,12 @@ final class MITMRequestLog {
 
     // MARK: - HTTP/2
 
-    func recordHTTP2(streamID: UInt32, method: String?, url: String?) {
+    func recordHTTP2(streamID: UInt32, method: String?, url: String?, originalUrl: String?) {
         if http2Streams[streamID] == nil, http2Streams.count >= Self.maxHTTP2Streams,
            let oldest = http2Streams.keys.min() {
             http2Streams.removeValue(forKey: oldest)
         }
-        http2Streams[streamID] = Record(method: method, url: url)
+        http2Streams[streamID] = Record(method: method, url: url, originalUrl: originalUrl)
     }
 
     func popHTTP2(streamID: UInt32) -> Record? {

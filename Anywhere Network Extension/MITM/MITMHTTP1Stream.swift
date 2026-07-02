@@ -57,6 +57,12 @@ final class MITMHTTP1Stream {
     /// deferred-dial pump. Request phase only.
     private(set) var resolvedUpstream: (host: String, port: UInt16?)?
 
+    /// The request URL as first seen (pre-rewrite), for `ctx.originalUrl` and the request-log
+    /// record the response phase reads. Set when the head is parsed, before `applyRewrite`; valid
+    /// through the request's buffered/streaming resume since heads process strictly in order on an
+    /// h1 connection. Request phase only; nil for a malformed request line.
+    private var currentRequestOriginalURL: String?
+
     /// Fired once on 101 / CONNECT-2xx so the session can flip the opposite
     /// leg to passthrough. Response phase only.
     var onProtocolUpgrade: (() -> Void)?
@@ -487,6 +493,12 @@ final class MITMHTTP1Stream {
                 requestHeaders: parsed.headers,
                 into: &output
             )
+        }
+
+        // Capture the pre-rewrite request URL from the *original* start line.
+        if phase == .httpRequest {
+            let originalParts = parsed.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            currentRequestOriginalURL = originalParts.count >= 2 ? "\(scheme)://\(host)\(String(originalParts[1]))" : nil
         }
 
         // Pop the request record once per *final* response head so the FIFO never
@@ -1133,6 +1145,7 @@ final class MITMHTTP1Stream {
             phase: phase,
             method: streamingMethod(streaming),
             url: streamingURL(streaming),
+            originalUrl: streamingOriginalURL(streaming),
             status: streamingStatus(streaming),
             headers: streaming.headers,
             frameIndex: streaming.frameIndex,
@@ -1208,6 +1221,15 @@ final class MITMHTTP1Stream {
             return "\(scheme)://\(host)\(String(parts[1]))"
         case .httpResponse:
             return streaming.originatingRequest?.url
+        }
+    }
+
+    private func streamingOriginalURL(_ streaming: StreamingState) -> String? {
+        switch phase {
+        case .httpRequest:
+            return currentRequestOriginalURL
+        case .httpResponse:
+            return streaming.originatingRequest?.originalUrl
         }
     }
 
@@ -2077,6 +2099,7 @@ final class MITMHTTP1Stream {
     ) -> HTTPMessage {
         var method: String?
         var url: String?
+        var originalUrl: String?
         var status: Int?
         switch phase {
         case .httpRequest:
@@ -2085,6 +2108,7 @@ final class MITMHTTP1Stream {
                 method = String(parts[0])
                 url = "\(scheme)://\(host)\(String(parts[1]))"
             }
+            originalUrl = currentRequestOriginalURL
         case .httpResponse:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let code = HTTPHeader.parseStatusCode(parts[1]) {
@@ -2092,11 +2116,13 @@ final class MITMHTTP1Stream {
             }
             method = originatingRequest?.method
             url = originatingRequest?.url
+            originalUrl = originatingRequest?.originalUrl
         }
         return HTTPMessage(
             phase: phase,
             method: method,
             url: url,
+            originalUrl: originalUrl,
             status: status,
             headers: headers,
             body: body,
@@ -2194,13 +2220,13 @@ final class MITMHTTP1Stream {
         guard phase == .httpRequest else { return }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else {
-            requestLog.recordHTTP1(method: nil, url: nil)
+            requestLog.recordHTTP1(method: nil, url: nil, originalUrl: nil)
             return
         }
         let method = String(parts[0])
         let target = String(parts[1])
         let url = "\(scheme)://\(host)\(target)"
-        requestLog.recordHTTP1(method: method, url: url)
+        requestLog.recordHTTP1(method: method, url: url, originalUrl: currentRequestOriginalURL)
     }
 }
 

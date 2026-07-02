@@ -34,6 +34,10 @@ struct MITMRequestHead {
     /// the original). Kept on the head so a concurrent stream's rewrite can't change this
     /// request's dial target while it's buffered for a body rewrite.
     let resolvedUpstream: (host: String, port: UInt16?)?
+    /// The request URL before the request-phase rewrite (`https://<host><original :path>`), carried
+    /// so the request log records it for `ctx.originalUrl`. Equal to the recorded post-rewrite URL
+    /// when no transparent rewrite matched.
+    let originalURL: String?
 }
 
 protocol MITMUpstreamLeg: AnyObject {

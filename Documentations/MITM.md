@@ -270,7 +270,7 @@ remaining field(s) depend on it. When the `url-pattern` gate matches, the
 
 | Sub-mode | Name             | Args          | Effect |
 | -------- | ---------------- | ------------- | ------ |
-| `0`      | transparent      | `<full-url>`  | Replace the whole request URL with `<full-url>` (which may carry `$1`-style capture references — see below). The request-target becomes the replacement's path+query; the outer leg is dialed to the replacement **host** and `Host` / `:authority` is rewritten to match it (a no-op in effect when the host is unchanged). The client still sees the **original** host on the leaf certificate. |
+| `0`      | transparent      | `<full-url>`  | Replace the whole request URL with `<full-url>` (which may carry `$1`-style capture references — see below). The request-target becomes the replacement's path+query; the outer leg is dialed to the replacement **host** and `Host` / `:authority` is rewritten to match it (a no-op in effect when the host is unchanged). The client still sees the **original** host on the leaf certificate. A matching `script` reads the rewritten URL as `ctx.url` and the pre-rewrite URL as `ctx.originalUrl`. |
 | `1`      | 302 redirect     | `<full-url>`  | Synthesize a `302 Found` whose `Location` is `<full-url>`. No upstream dial. |
 | `2`      | reject 200 text  | `[<content>]` | Synthesize a `200 OK` with a `text/plain; charset=utf-8` body. Empty `<content>` → a short default line. No upstream dial. |
 | `3`      | reject 200 gif   | *(none)*      | Synthesize a `200 OK` carrying the canned 1×1 `image/gif`. No upstream dial. |
@@ -512,8 +512,8 @@ HTTP/2 DATA streams, or any long-lived or very large body. `process(ctx)` runs
 
 The trade-off is a narrower contract:
 
-- The head is **immutable** — `ctx.url` / `ctx.method` / `ctx.status` /
-  `ctx.headers` are read-only (the head is already on the wire).
+- The head is **immutable** — `ctx.url` / `ctx.originalUrl` / `ctx.method` /
+  `ctx.status` / `ctx.headers` are read-only (the head is already on the wire).
 - **No HTTP-level decompression.** `ctx.body` is the raw frame payload.
 - **No HTTP/1 `Content-Length` bodies** — the byte count is already committed
   and can't change mid-stream, so length-prefixed HTTP/1 bodies are skipped
@@ -549,14 +549,15 @@ only one read back is `ctx.body` — replace it or mutate it in place.
 | ------------- | ------------------------- | --------- | ------- | ----- |
 | `ctx.phase`   | `"request"` / `"response"`| both      | no      | Reassigning is a no-op. |
 | `ctx.method`  | string or `null`          | both      | no      | Read-only. On response, the originating request's method. |
-| `ctx.url`     | string or `null`          | both      | no      | Read-only — use a `rewrite` rule. Absolute URL; on response, the originating request's URL. |
+| `ctx.url`     | string or `null`          | both      | no      | Read-only — use a `rewrite` rule. Absolute URL; on response, the originating request's URL. Reflects any transparent `rewrite`. |
+| `ctx.originalUrl` | string or `null`      | both      | no      | Read-only. The request URL **before** a transparent `rewrite` changed the request-target; equal to `ctx.url` when no rewrite matched. On response, the originating request's pre-rewrite URL. |
 | `ctx.status`  | number or `null`          | response  | no      | Read-only. `null` on request. |
 | `ctx.headers` | array of `[name, value]`  | both      | no      | Read-only — use `header-add` / `header-delete` / `header-replace` rules. Pairs; preserves duplicates and order. |
 | `ctx.body`    | `Uint8Array`              | both      | yes     | Backed by native memory; element-wise writes propagate. |
 
 Only `ctx.body` is mutable — in both `script` and `stream-script` (the latter
-also reads back `ctx.state`). Every head field (`method`, `url`, `status`,
-`headers`, `phase`) is **read-only**: assigning it is ignored on readback. URL
+also reads back `ctx.state`). Every head field (`method`, `url`, `originalUrl`,
+`status`, `headers`, `phase`) is **read-only**: assigning it is ignored on readback. URL
 and header edits have dedicated rule operations — `rewrite` and `header-add`
 / `header-delete` / `header-replace` — so scripts don't duplicate them; `method`
 and `status` have no script-side write at all. Keeping the head read-only also

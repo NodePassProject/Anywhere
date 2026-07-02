@@ -47,6 +47,8 @@ final class MITMScriptEngine {
         let phase: MITMPhase
         let method: String?
         let url: String?
+        /// The request URL before any transparent `rewrite`; equal to `url` when none matched.
+        let originalUrl: String?
         let status: Int?
         let headers: [(name: String, value: String)]
         let frameIndex: Int
@@ -474,6 +476,7 @@ final class MITMScriptEngine {
         )
         object.setObject(msg.method as Any, forKeyedSubscript: "method" as NSString)
         object.setObject(msg.url as Any, forKeyedSubscript: "url" as NSString)
+        object.setObject(msg.originalUrl as Any, forKeyedSubscript: "originalUrl" as NSString)
         object.setObject(msg.status as Any, forKeyedSubscript: "status" as NSString)
         // [[name, value], ...] preserves duplicates and emit order.
         let pairs: [[String]] = msg.headers.map { [$0.name, $0.value] }
@@ -496,6 +499,7 @@ final class MITMScriptEngine {
         )
         object.setObject(ctx.method as Any, forKeyedSubscript: "method" as NSString)
         object.setObject(ctx.url as Any, forKeyedSubscript: "url" as NSString)
+        object.setObject(ctx.originalUrl as Any, forKeyedSubscript: "originalUrl" as NSString)
         object.setObject(ctx.status as Any, forKeyedSubscript: "status" as NSString)
         let pairs: [[String]] = ctx.headers.map { [$0.name, $0.value] }
         object.setObject(pairs, forKeyedSubscript: "headers" as NSString)
