@@ -120,6 +120,8 @@ nonisolated class QUICTLSHandler {
     private(set) var peerQUICTransportParameters: Data?
 
     private(set) var negotiatedALPN: String?
+    
+    private(set) var handshakeError: Error?
 
     // MARK: - Initialization
 
@@ -144,6 +146,7 @@ nonisolated class QUICTLSHandler {
         transcriptBeforeCertVerify = nil
         certificateVerifySignature = nil
         certificateVerifyAlgorithm = 0
+        handshakeError = nil
 
         let p256Public = privateKeyP256.publicKey.x963Representation
         let x25519Public = privateKeyX25519.publicKey.rawRepresentation
@@ -485,6 +488,7 @@ nonisolated class QUICTLSHandler {
         if !pskAccepted {
             if let error = validateCertificate() {
                 logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
+                handshakeError = error
                 return .error(NGTCP2_ERR_CALLBACK_FAILURE)
             }
 
@@ -498,6 +502,7 @@ nonisolated class QUICTLSHandler {
                     keyDerivation: keyDerivation
                 ) {
                     logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
+                    handshakeError = error
                     return .error(NGTCP2_ERR_CALLBACK_FAILURE)
                 }
             }

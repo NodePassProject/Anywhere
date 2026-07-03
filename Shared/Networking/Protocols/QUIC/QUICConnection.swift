@@ -1372,7 +1372,7 @@ nonisolated class QUICConnection {
             case NGTCP2_ERR_CLOSING:
                 error = QUICError.closed
             case NGTCP2_ERR_CALLBACK_FAILURE, NGTCP2_ERR_CRYPTO:
-                error = QUICError.handshakeFailed("ngtcp2 error: \(rv)")
+                error = tlsHandler?.handshakeError ?? QUICError.handshakeFailed("ngtcp2 error: \(rv)")
             default:
                 error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv)")
             }
