@@ -117,6 +117,17 @@ extension TunnelStack {
                 logger.debug("[TunnelStack] tcp_accept: guard failed")
                 return nil
             }
+            
+            let activeTCP = Int(lwip_bridge_active_tcp_count())
+            if activeTCP > TunnelConstants.tcpMaxConnections {
+                if !shared.tcpConnectionCapWarned {
+                    shared.tcpConnectionCapWarned = true
+                    logger.warning("[TCP] Connection table at capacity (\(TunnelConstants.tcpMaxConnections)); refusing new connections to bound memory")
+                }
+                return nil  // bridge aborts newpcb (tcp_abort)
+            } else if shared.tcpConnectionCapWarned && activeTCP < TunnelConstants.tcpMaxConnections * 3 / 4 {
+                shared.tcpConnectionCapWarned = false
+            }
 
             let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
 

@@ -68,6 +68,9 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     /// Per-attempt connect timeout (seconds).
     private static let connectTimeout: Int = 16
 
+    /// Wall-clock backstop for the whole dial.
+    private static let dialDeadlineSeconds: Int = 20
+
     private static let maxReceiveLength = 65535
 
     // MARK: State
@@ -102,6 +105,10 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
     private var connectCompletion: ((Error?) -> Void)?
     private var pendingInitialData: Data?
+
+    /// Backstop that fails the dial if it never reaches `.ready`/`.failed`; armed in
+    /// `connect`, cancelled the moment the dial resolves. Touched only on `queue`.
+    private var dialDeadline: DispatchWorkItem?
 
     /// Times the dial for the live "Dial" stat; direct/bypass dials disable it
     /// so only proxied first-hop dials are counted.
@@ -159,6 +166,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
                 self?.handleConnectState(newState)
             }
             connection.start(queue: queue)
+            armDialDeadline()
         }
     }
 
@@ -256,6 +264,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
             return
         case .startTeardown:
             queue.async { [self] in
+                cancelDialDeadline()
                 if let c = connectCompletion {
                     connectCompletion = nil
                     c(TransportError.connectionFailed("Cancelled"))
@@ -286,6 +295,27 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
     // MARK: - Connect pipeline
 
+    /// Arms the wall-clock dial backstop on `queue`. Bounds time spent in
+    /// `.waiting`, which `connectionTimeout` (an active-handshake bound) does not.
+    private func armDialDeadline() {
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Runs on `queue`; only bite while the dial is unresolved so a fire/cancel
+            // race can't tear down an already-ready connection.
+            guard case .setup = self.state else { return }
+            logger.debug("[TCP] dial deadline exceeded after \(Self.dialDeadlineSeconds)s")
+            self.finishConnectFailure(TransportError.posixError(.connect, errno: ETIMEDOUT))
+        }
+        dialDeadline = deadline
+        queue.asyncAfter(deadline: .now() + .seconds(Self.dialDeadlineSeconds), execute: deadline)
+    }
+
+    /// Cancels the dial backstop once the dial resolves. Must run on `queue`.
+    private func cancelDialDeadline() {
+        dialDeadline?.cancel()
+        dialDeadline = nil
+    }
+
     /// Handles connect-phase state changes. `NWConnection` resolves the name and
     /// races addresses; a definitive failure or the `connectionTimeout` drives
     /// `.failed`. Must run on `queue`.
@@ -314,6 +344,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     private func handleConnectReady() {
         // A racing .cancelled wins; teardown fires the completion.
         guard transitionFromSetup(to: .ready) else { return }
+        cancelDialDeadline()
 
         dialTimer.stop()
 
@@ -337,6 +368,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     /// left intact for the teardown path to fire with "Cancelled"; consuming it
     /// here without reporting would drop the caller's completion entirely.
     private func finishConnectFailure(_ error: Error) {
+        cancelDialDeadline()
         pendingInitialData = nil
         if let connection {
             self.connection = nil

@@ -319,6 +319,10 @@ class TunnelStack {
     /// flow. Owned by ``udpQueue``.
     var udpFlowCapWarned = false
 
+    /// Rising-edge latch so a sustained TCP connection storm logs once, not per
+    /// refused connection. Owned by ``lwipQueue``.
+    var tcpConnectionCapWarned = false
+
     /// Shared Shadowsocks UDP sessions keyed by configuration id: one session
     /// serves every flow for that configuration. Owned by ``udpQueue``.
     var ssUDPSessions: [UUID: ShadowsocksUDPSession] = [:]

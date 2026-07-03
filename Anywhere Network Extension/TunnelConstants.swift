@@ -38,6 +38,11 @@ enum TunnelConstants {
     /// (otherwise downlink degrades to stop-and-wait); half TCP_SND_BUF (lwipopts.h).
     static let drainLowWaterMark = 512 * 1360
 
+    // MARK: - TCP Settings
+
+    /// Hard ceiling on concurrent TCP connections.
+    static let tcpMaxConnections = 512
+
     // MARK: - UDP Settings
 
     static let udpMaxBufferSize = 256 * 1024
