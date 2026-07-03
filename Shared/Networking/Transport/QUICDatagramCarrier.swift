@@ -43,6 +43,9 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     /// Guards against double-arming the receive loop.
     private var receiving = false
 
+    /// Number of `receiveMessage` calls kept outstanding at once.
+    private static let receiveWindow = 16
+
     init(queue: DispatchQueue) {
         self.queue = queue
     }
@@ -99,7 +102,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
             ready = true
             if packetHandler != nil, !receiving {
                 receiving = true
-                receiveLoop(connection)
+                armReceiving(connection)
             }
             if let onReady {
                 self.onReady = nil
@@ -129,12 +132,19 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         }
         if ready, let connection, !receiving {
             receiving = true
-            receiveLoop(connection)
+            armReceiving(connection)
         }
     }
 
-    /// Receives one datagram and re-arms. Must run on `queue`.
-    private func receiveLoop(_ connection: NWConnection) {
+    /// Issues `receiveWindow` concurrent receives. Must run on `queue`.
+    private func armReceiving(_ connection: NWConnection) {
+        for _ in 0..<Self.receiveWindow {
+            receiveOne(connection)
+        }
+    }
+
+    /// Receives one datagram and refills the window slot it occupied. Must run on `queue`.
+    private func receiveOne(_ connection: NWConnection) {
         connection.receiveMessage { [weak self] data, _, _, error in
             guard let self, self.connection === connection else { return }
             if let data, !data.isEmpty {
@@ -144,9 +154,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 self.deliverError(error)
                 return
             }
-            // The handler may synchronously close the carrier; re-check identity.
             if self.connection === connection {
-                self.receiveLoop(connection)
+                self.receiveOne(connection)
             }
         }
     }
@@ -180,6 +189,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         if let connection {
             self.connection = nil
             connection.stateUpdateHandler = nil
+            connection.viabilityUpdateHandler = nil
+            connection.betterPathUpdateHandler = nil
             connection.cancel()
         }
         packetHandler = nil

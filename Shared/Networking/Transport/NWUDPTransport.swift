@@ -28,6 +28,9 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
 
     private static let maxPendingDatagrams = 1024
 
+    /// Number of `receiveMessage` calls kept outstanding at once.
+    private static let receiveWindow = 16
+
     // MARK: State
 
     private let stateLock = UnfairLock()
@@ -132,7 +135,7 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
             // NWConnection drops viability before the receive loop would error;
             // surface a terminal error so the flow closes and re-dials on a live path.
             connection.viabilityUpdateHandler = { [weak self] viable in
-                guard let self, self.connection === connection, !viable else { return }
+                guard let self, !viable else { return }
                 guard case .ready = self.state else { return }
                 self.surfaceTerminalError(TransportError.connectionFailed("Network path no longer viable"))
             }
@@ -179,12 +182,14 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
         }
     }
 
-    /// Must run on `queue`.
+    /// Fills the receive window with concurrent receives. Must run on `queue`.
     private func armReceiveLoop(_ connection: NWConnection) {
-        receiveOne(connection)
+        for _ in 0..<Self.receiveWindow {
+            receiveOne(connection)
+        }
     }
 
-    /// Receives one datagram and re-arms. Must run on `queue`.
+    /// Receives one datagram and refills the window slot it occupied. Must run on `queue`.
     private func receiveOne(_ connection: NWConnection) {
         connection.receiveMessage { [weak self] data, _, _, error in
             guard let self, self.connection === connection else { return }
@@ -287,6 +292,7 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
         if let connection {
             self.connection = nil
             connection.stateUpdateHandler = nil
+            connection.viabilityUpdateHandler = nil
             connection.cancel()
         }
         // Fires only if connect hasn't already completed (ready/failure).
