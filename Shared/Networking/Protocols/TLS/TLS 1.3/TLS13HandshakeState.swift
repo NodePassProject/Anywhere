@@ -23,4 +23,8 @@ struct TLS13HandshakeState {
     var handshakeTranscript: Data?
 
     var serverHandshakeSeqNum: UInt64 = 0
+    
+    var transcriptBeforeCertVerify: Data?
+    var certificateVerifySignature: Data?
+    var certificateVerifyAlgorithm: UInt16 = 0
 }

@@ -302,7 +302,7 @@ extension TLSClient {
         content.append(serverRandom)
         content.append(body.subdata(in: 0..<paramsEnd))
 
-        let secAlgorithm = secKeyAlgorithm(for: sigAlgorithm)
+        let secAlgorithm = TLSSignatureScheme.secKeyAlgorithm(for: sigAlgorithm)
 
         var error: Unmanaged<CFError>?
         let isValid = SecKeyVerifySignature(

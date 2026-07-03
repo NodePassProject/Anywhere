@@ -139,6 +139,11 @@ nonisolated class QUICTLSHandler {
 
     func buildClientHello(transportParams: Data) -> Data? {
         guard let privateKeyP256, let privateKeyX25519 else { return nil }
+        
+        serverCertificates.removeAll()
+        transcriptBeforeCertVerify = nil
+        certificateVerifySignature = nil
+        certificateVerifyAlgorithm = 0
 
         let p256Public = privateKeyP256.publicKey.x963Representation
         let x25519Public = privateKeyX25519.publicKey.rawRepresentation
@@ -483,15 +488,16 @@ nonisolated class QUICTLSHandler {
                 return .error(NGTCP2_ERR_CALLBACK_FAILURE)
             }
 
-            if !serverCertificates.isEmpty,
-               let cvTranscript = transcriptBeforeCertVerify,
-               let signature = certificateVerifySignature {
-                if let error = verifyCertificateVerify(
-                    transcript: cvTranscript,
+            // CertificateVerify is MANDATORY in a full TLS 1.3 handshake.
+            if !CertificatePolicy.allowInsecure {
+                if let error = TLS13CertificateVerifier.verify(
+                    transcriptBeforeCertVerify: transcriptBeforeCertVerify,
                     algorithm: certificateVerifyAlgorithm,
-                    signature: signature
+                    signature: certificateVerifySignature,
+                    serverCertificates: serverCertificates,
+                    keyDerivation: keyDerivation
                 ) {
-                    logger.warning("[QUIC-TLS] CertificateVerify failed: \(error.localizedDescription)")
+                    logger.warning("[QUIC-TLS] CertificateVerify rejected: \(error.localizedDescription)")
                     return .error(NGTCP2_ERR_CALLBACK_FAILURE)
                 }
             }
@@ -842,7 +848,7 @@ nonisolated class QUICTLSHandler {
         }
         certificateVerifyAlgorithm = UInt16(body[0]) << 8 | UInt16(body[1])
 
-        // Verify that the signature algorithm matches the client's offer.
+        // Parse-time sanity check: must be an algorithm we offered.
         guard TLSClientHelloBuilder.quicSignatureAlgorithms.contains(certificateVerifyAlgorithm) else {
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
@@ -863,69 +869,6 @@ nonisolated class QUICTLSHandler {
             return nil
         case .rejected(let reason):
             return TLSError.certificateValidationFailed(reason)
-        }
-    }
-
-    private func verifyCertificateVerify(
-        transcript: Data,
-        algorithm: UInt16,
-        signature: Data
-    ) -> Error? {
-        guard let kd = keyDerivation else {
-            return TLSError.handshakeFailed("Missing key derivation")
-        }
-
-        guard let serverCert = serverCertificates.first else {
-            return TLSError.certificateValidationFailed("No server certificate for CertificateVerify")
-        }
-
-        guard let serverPublicKey = SecCertificateCopyKey(serverCert) else {
-            return TLSError.certificateValidationFailed("Failed to extract public key")
-        }
-
-        let transcriptHash = kd.transcriptHash(transcript)
-
-        var content = Data(repeating: 0x20, count: 64)
-        content.append("TLS 1.3, server CertificateVerify".data(using: .ascii)!)
-        content.append(0x00)
-        content.append(transcriptHash)
-
-        let secAlgorithm = Self.secKeyAlgorithm(for: algorithm)
-
-        var error: Unmanaged<CFError>?
-        let isValid = SecKeyVerifySignature(
-            serverPublicKey,
-            secAlgorithm,
-            content as CFData,
-            signature as CFData,
-            &error
-        )
-
-        if !isValid {
-            if CertificatePolicy.allowInsecure {
-                return nil
-            }
-            let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
-            return TLSError.certificateValidationFailed("CertificateVerify failed: \(message)")
-        }
-
-        return nil
-    }
-
-    private static func secKeyAlgorithm(for tlsAlgorithm: UInt16) -> SecKeyAlgorithm {
-        switch tlsAlgorithm {
-        case TLSSignatureScheme.ecdsa_secp256r1_sha256: return .ecdsaSignatureMessageX962SHA256
-        case TLSSignatureScheme.ecdsa_secp384r1_sha384: return .ecdsaSignatureMessageX962SHA384
-        case TLSSignatureScheme.ecdsa_secp521r1_sha512: return .ecdsaSignatureMessageX962SHA512
-        case TLSSignatureScheme.ecdsa_sha1:             return .ecdsaSignatureMessageX962SHA1
-        case TLSSignatureScheme.rsa_pss_rsae_sha256:    return .rsaSignatureMessagePSSSHA256
-        case TLSSignatureScheme.rsa_pss_rsae_sha384:    return .rsaSignatureMessagePSSSHA384
-        case TLSSignatureScheme.rsa_pss_rsae_sha512:    return .rsaSignatureMessagePSSSHA512
-        case TLSSignatureScheme.rsa_pkcs1_sha256:       return .rsaSignatureMessagePKCS1v15SHA256
-        case TLSSignatureScheme.rsa_pkcs1_sha384:       return .rsaSignatureMessagePKCS1v15SHA384
-        case TLSSignatureScheme.rsa_pkcs1_sha512:       return .rsaSignatureMessagePKCS1v15SHA512
-        case TLSSignatureScheme.rsa_pkcs1_sha1:         return .rsaSignatureMessagePKCS1v15SHA1
-        default:                                        return .rsaSignatureMessagePSSSHA256
         }
     }
 

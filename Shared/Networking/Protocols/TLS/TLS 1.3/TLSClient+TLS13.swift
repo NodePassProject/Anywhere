@@ -37,6 +37,11 @@ extension TLSClient {
             let serverHello = extractServerHelloMessage(from: buffer)
 
             tls13.keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
+            
+            serverCertificates.removeAll()
+            tls13.transcriptBeforeCertVerify = nil
+            tls13.certificateVerifySignature = nil
+            tls13.certificateVerifyAlgorithm = 0
 
             // With ECH, the accepted handshake transcript is seeded by the inner
             // ClientHello. Detect acceptance via the confirmation embedded in the
@@ -131,10 +136,6 @@ extension TLSClient {
         var fullTranscript = tls13.handshakeTranscript ?? Data()
         var foundServerFinished = false
 
-        var transcriptBeforeCertVerify: Data? = nil
-        var certificateVerifySignature: Data? = nil
-        var certificateVerifyAlgorithm: UInt16 = 0
-
         while offset + 5 <= buffer.count {
             let contentType = buffer[offset]
             let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
@@ -191,13 +192,13 @@ extension TLSClient {
                             parseTLS13CertificateMessage(hsBody)
 
                         case TLSHandshakeType.certificateVerify:
-                            transcriptBeforeCertVerify = fullTranscript
+                            tls13.transcriptBeforeCertVerify = fullTranscript
                             fullTranscript.append(hsMessage)
                             if hsBody.count >= 4 {
-                                certificateVerifyAlgorithm = UInt16(hsBody[0]) << 8 | UInt16(hsBody[1])
+                                tls13.certificateVerifyAlgorithm = UInt16(hsBody[0]) << 8 | UInt16(hsBody[1])
                                 let sigLen = Int(hsBody[2]) << 8 | Int(hsBody[3])
                                 if hsBody.count >= 4 + sigLen {
-                                    certificateVerifySignature = hsBody.subdata(in: 4..<(4 + sigLen))
+                                    tls13.certificateVerifySignature = hsBody.subdata(in: 4..<(4 + sigLen))
                                 }
                             }
 
@@ -267,16 +268,16 @@ extension TLSClient {
                     break
                 }
 
-                if !self.serverCertificates.isEmpty,
-                   let transcript = transcriptBeforeCertVerify,
-                   let signature = certificateVerifySignature {
-                    do {
-                        try self.verifyCertificateVerify(
-                            transcript: transcript,
-                            algorithm: certificateVerifyAlgorithm,
-                            signature: signature
-                        )
-                    } catch {
+                // CertificateVerify is MANDATORY in a full TLS 1.3 handshake.
+                let skipVerification = self.configuration.insecureSkipVerify || CertificatePolicy.allowInsecure
+                if !skipVerification {
+                    if let error = TLS13CertificateVerifier.verify(
+                        transcriptBeforeCertVerify: self.tls13.transcriptBeforeCertVerify,
+                        algorithm: self.tls13.certificateVerifyAlgorithm,
+                        signature: self.tls13.certificateVerifySignature,
+                        serverCertificates: self.serverCertificates,
+                        keyDerivation: self.tls13.keyDerivation
+                    ) {
                         completion(.failure(error))
                         return
                     }
@@ -464,53 +465,6 @@ extension TLSClient {
             connection.send(data: ccsRecord, completion: completion)
         } catch {
             completion(error)
-        }
-    }
-
-    // MARK: - CertificateVerify (TLS 1.3)
-
-    private func verifyCertificateVerify(
-        transcript: Data,
-        algorithm: UInt16,
-        signature: Data
-    ) throws {
-        guard let kd = tls13.keyDerivation else {
-            throw TLSError.handshakeFailed("Missing key derivation")
-        }
-
-        guard Self.offeredSignatureAlgorithms.contains(algorithm) else {
-            throw TLSError.certificateValidationFailed("CertificateVerify algorithm not offered")
-        }
-
-        guard let serverCert = serverCertificates.first else {
-            throw TLSError.certificateValidationFailed("No server certificate for CertificateVerify")
-        }
-
-        guard let serverPublicKey = SecCertificateCopyKey(serverCert) else {
-            throw TLSError.certificateValidationFailed("Failed to extract public key from certificate")
-        }
-
-        let transcriptHash = kd.transcriptHash(transcript)
-
-        var content = Data(repeating: 0x20, count: 64)
-        content.append("TLS 1.3, server CertificateVerify".data(using: .ascii)!)
-        content.append(0x00)
-        content.append(transcriptHash)
-
-        let secAlgorithm = secKeyAlgorithm(for: algorithm)
-
-        var error: Unmanaged<CFError>?
-        let isValid = SecKeyVerifySignature(
-            serverPublicKey,
-            secAlgorithm,
-            content as CFData,
-            signature as CFData,
-            &error
-        )
-
-        if !isValid {
-            let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
-            throw TLSError.certificateValidationFailed("CertificateVerify failed: \(message)")
         }
     }
 

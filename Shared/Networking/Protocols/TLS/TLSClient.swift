@@ -64,20 +64,6 @@ nonisolated class TLSClient {
     /// The value of the ALPN sent by the peer; empty when the server echoed none.
     var negotiatedALPN: String = ""
 
-    static let offeredSignatureAlgorithms: Set<UInt16> = [
-        TLSSignatureScheme.rsa_pkcs1_sha1,
-        TLSSignatureScheme.ecdsa_sha1,
-        TLSSignatureScheme.rsa_pkcs1_sha256,
-        TLSSignatureScheme.rsa_pkcs1_sha384,
-        TLSSignatureScheme.rsa_pkcs1_sha512,
-        TLSSignatureScheme.ecdsa_secp256r1_sha256,
-        TLSSignatureScheme.ecdsa_secp384r1_sha384,
-        TLSSignatureScheme.ecdsa_secp521r1_sha512,
-        TLSSignatureScheme.rsa_pss_rsae_sha256,
-        TLSSignatureScheme.rsa_pss_rsae_sha384,
-        TLSSignatureScheme.rsa_pss_rsae_sha512,
-    ]
-
     private static let supportedTLS12CipherSuites: Set<UInt16> = [
         TLSCipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
         TLSCipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
@@ -631,24 +617,6 @@ nonisolated class TLSClient {
             completion(.success(()))
         case .rejected(let reason):
             completion(.failure(TLSError.certificateValidationFailed(reason)))
-        }
-    }
-
-
-    func secKeyAlgorithm(for tlsAlgorithm: UInt16) -> SecKeyAlgorithm {
-        switch tlsAlgorithm {
-        case TLSSignatureScheme.ecdsa_secp256r1_sha256: return .ecdsaSignatureMessageX962SHA256
-        case TLSSignatureScheme.ecdsa_secp384r1_sha384: return .ecdsaSignatureMessageX962SHA384
-        case TLSSignatureScheme.ecdsa_secp521r1_sha512: return .ecdsaSignatureMessageX962SHA512
-        case TLSSignatureScheme.ecdsa_sha1:             return .ecdsaSignatureMessageX962SHA1
-        case TLSSignatureScheme.rsa_pss_rsae_sha256:    return .rsaSignatureMessagePSSSHA256
-        case TLSSignatureScheme.rsa_pss_rsae_sha384:    return .rsaSignatureMessagePSSSHA384
-        case TLSSignatureScheme.rsa_pss_rsae_sha512:    return .rsaSignatureMessagePSSSHA512
-        case TLSSignatureScheme.rsa_pkcs1_sha256:       return .rsaSignatureMessagePKCS1v15SHA256
-        case TLSSignatureScheme.rsa_pkcs1_sha384:       return .rsaSignatureMessagePKCS1v15SHA384
-        case TLSSignatureScheme.rsa_pkcs1_sha512:       return .rsaSignatureMessagePKCS1v15SHA512
-        case TLSSignatureScheme.rsa_pkcs1_sha1:         return .rsaSignatureMessagePKCS1v15SHA1
-        default:                                        return .rsaSignatureMessagePSSSHA256
         }
     }
 
