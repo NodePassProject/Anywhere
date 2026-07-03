@@ -132,12 +132,11 @@ class TCPConnection {
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
-
-        // Covers both the sniff wait and the proxy dial so a stalled client can't hold the connection open.
+        
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
             if self.isEstablishing {
-                let phase = self.isSniffing ? "protocol sniff" : "proxy dial"
+                let phase = self.isSniffing ? "protocol sniff" : (self.bypass ? "direct dial" : "proxy dial")
                 self.failureReporter.report(
                     operation: "Handshake",
                     endpoint: self.endpointDescription,
