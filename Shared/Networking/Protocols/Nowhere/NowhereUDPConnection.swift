@@ -159,7 +159,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             let callback = self.pendingReceive
             self.pendingReceive = nil
             self.packetQueue.removeAll()
-            callback?(nil, NowhereError.streamClosed)
+            callback?(nil, nil)
         }
     }
 
@@ -178,6 +178,10 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     }
 
     func handleSessionError(_ error: Error) {
+        if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
+            handleSessionClose()
+            return
+        }
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
@@ -187,6 +191,16 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 self.closureError = error
             }
             callback?(nil, error)
+        }
+    }
+
+    func handleSessionClose() {
+        session.queue.async { [weak self] in
+            guard let self, self.state != .closed else { return }
+            self.state = .closed
+            let callback = self.pendingReceive
+            self.pendingReceive = nil
+            callback?(nil, nil)
         }
     }
 }

@@ -363,7 +363,7 @@ nonisolated final class NowhereSession {
 
             let udp = Array(self.udpSessions.values)
             self.udpSessions.removeAll()
-            for c in udp { c.handleSessionError(NowhereError.connectionFailed("Session closed")) }
+            for c in udp { c.handleSessionClose() }
 
             self.quic.close()
             self.onClose?()
