@@ -38,6 +38,7 @@ extension ProxyClient {
     ) {
         let wrapAndComplete: (ProxyConnection) -> Void = { [weak self] udpInner in
             guard let self else {
+                udpInner.cancel()
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
@@ -61,6 +62,7 @@ extension ProxyClient {
             wrapAndComplete(tunnel)
         } else {
             let transport = NWUDPTransport()
+            self.udpTransport = transport
             transport.connect(host: directDialHost,
                            port: configuration.serverPort,
                            completionQueue: .global()) { error in

@@ -268,6 +268,7 @@ nonisolated final class ShadowsocksUDPSession {
 
             if let error {
                 self.state = .failed(error)
+                self.transport.cancel()
                 self.notifyAllFlows(error: error)
                 self.pendingSends.removeAll()
                 return
@@ -295,6 +296,7 @@ nonisolated final class ShadowsocksUDPSession {
     private func handleTransportError(_ error: Error) {
         if case .cancelled = state { return }
         state = .failed(error)
+        transport.cancel()
         notifyAllFlows(error: error)
     }
 

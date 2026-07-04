@@ -32,6 +32,8 @@ nonisolated class ProxyClient {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
     var connection: NWTCPTransport?
+    /// Raw UDP leg for the SOCKS5 relay / Shadowsocks real-UDP paths.
+    var udpTransport: NWUDPTransport?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
     var tlsClient: TLSClient?
@@ -383,6 +385,8 @@ nonisolated class ProxyClient {
         tlsClient?.cancel()
         tlsClient = nil
         tunnel = nil
+        udpTransport?.cancel()
+        udpTransport = nil
 
         // Awaitable teardowns: the raw socket and each chain client (each owns its own raw socket).
         let socket = connection

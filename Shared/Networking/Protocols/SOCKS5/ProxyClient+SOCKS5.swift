@@ -154,6 +154,7 @@ extension ProxyClient {
             }
         } else {
             let transport = NWUDPTransport()
+            self.udpTransport = transport
             transport.connect(host: relayHost, port: relayPort,
                            completionQueue: .global()) { error in
                 if let error {

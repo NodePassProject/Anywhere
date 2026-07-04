@@ -255,11 +255,17 @@ class UDPFlow {
         // Stable per-source globalID lets the server pin one upstream session (Full Cone NAT).
         let globalID = VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)")
         udpMultiplexerPool.acquireStream(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
-            guard let self else { return }
+            guard let self else {
+                if case .success(let session) = result { session.close() }
+                return
+            }
 
             self.flowQueue.async { [self] in
                 self.proxyConnecting = false
-                guard !self.closed else { return }
+                guard !self.closed else {
+                    if case .success(let session) = result { session.close() }
+                    return
+                }
 
                 switch result {
                 case .success(let session):
@@ -317,11 +323,17 @@ class UDPFlow {
         self.proxyClient = client
 
         client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in
-            guard let self else { return }
+            guard let self else {
+                if case .success(let connection) = result { connection.cancel() }
+                return
+            }
 
             self.flowQueue.async { [self] in
                 self.proxyConnecting = false
-                guard !self.closed else { return }
+                guard !self.closed else {
+                    if case .success(let connection) = result { connection.cancel() }
+                    return
+                }
 
                 switch result {
                 case .success(let proxyConnection):
