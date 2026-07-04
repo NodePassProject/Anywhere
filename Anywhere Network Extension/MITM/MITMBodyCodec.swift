@@ -161,12 +161,16 @@ enum MITMBodyCodec {
         case capExceeded
         /// Trailer mismatch — effectively always a concatenated multi-member body.
         case multiMember
+        /// A member after the first failed to decode — returning the decoded prefix would pass
+        /// off a partial body as complete, so fail closed.
+        case trailingMember(GzipMemberFailure)
 
         var description: String {
             switch self {
             case .firstMember(let reason): return reason.description
             case .capExceeded:             return "output exceeded \(maxBufferedBodyBytes) B cap"
             case .multiMember:             return "multi-member gzip unsupported; forwarding verbatim"
+            case .trailingMember(let reason): return "gzip member after the first failed (\(reason)); forwarding verbatim"
             }
         }
     }
@@ -214,8 +218,7 @@ enum MITMBodyCodec {
                 logger.warning("gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                 return (nil, .capExceeded)
             case .failure(let reason):
-                // First-member failure is fatal; trailing junk after a decoded prefix is recoverable.
-                return combined.isEmpty ? (nil, .firstMember(reason)) : (combined, nil)
+                return combined.isEmpty ? (nil, .firstMember(reason)) : (nil, .trailingMember(reason))
             case .success(let memberBytes, let consumed):
                 combined.append(memberBytes)
                 cursor = data.index(cursor, offsetBy: consumed)

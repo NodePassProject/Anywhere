@@ -572,7 +572,8 @@ final class MITMHTTP1Stream {
             if case .readUntilClose = framing, buffersBody,
                !MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: gateURL) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-                if codec.supported, !codec.requiresDecompression {
+                let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
+                if codec.supported, !codec.requiresDecompression, !teContentCoded {
                     warnIfBufferedScriptDeStreams(rewrittenHeaders)
                     // Force Connection: close so success and overflow paths both frame correctly.
                     var headers = rewrittenHeaders.filter {
@@ -589,6 +590,9 @@ final class MITMHTTP1Stream {
                         accumulator: Data()
                     )
                     return true
+                }
+                if teContentCoded {
+                    logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
                 }
             }
             if phase == .httpRequest {
@@ -716,6 +720,9 @@ final class MITMHTTP1Stream {
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
+        // Any Transfer-Encoding here is rule-injected (parseHead rejects inbound TE+CL); strip it
+        // so the emitted head can't carry the TE+CL smuggling pair (RFC 9112 §6.3.3).
+        let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "transfer-encoding") }
         // Stream scripts can't modify a length-prefixed body; warn and fall through.
         if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
             logger.warning("HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
@@ -760,6 +767,10 @@ final class MITMHTTP1Stream {
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
+        // A rule can inject Content-Length onto a chunked message (post-rule headers aren't
+        // re-validated); strip it so the emitted head can't carry the TE+CL smuggling pair
+        // (RFC 9112 §6.3.3).
+        let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-length") }
         // Streaming script wins over buffered script; emit head immediately
         // (stream scripts can't mutate head fields).
         if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
@@ -789,7 +800,8 @@ final class MITMHTTP1Stream {
         }
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        if buffersBody, codec.supported {
+        let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
+        if buffersBody, codec.supported, !teContentCoded {
             warnIfBufferedScriptDeStreams(rewrittenHeaders)
             let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
             mode = .rewritingChunked(
@@ -803,6 +815,9 @@ final class MITMHTTP1Stream {
                 reader: ChunkedReader()
             )
             return true
+        }
+        if buffersBody, teContentCoded {
+            logger.warning("HTTP/1 \(host): Transfer-Encoding content-coding not decodable on the buffered path; forwarding verbatim")
         }
         if phase == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
@@ -1712,6 +1727,17 @@ final class MITMHTTP1Stream {
             .last?
             .trimmingCharacters(in: CharacterSet.whitespaces)
         return last.map { ASCII.equalsIgnoringCase($0, "chunked") } == true
+    }
+
+    /// True when Transfer-Encoding carries a content-coding (e.g. `gzip, chunked`, or bare `gzip`
+    /// framed by EOF). The buffered rewrite decodes only Content-Encoding layers and the chunked
+    /// framing, so such a body must forward verbatim or it would ship compressed but labeled identity.
+    static func transferEncodingHasContentCoding(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: CharacterSet.whitespaces).lowercased() }
+            .contains { !$0.isEmpty && $0 != "chunked" && $0 != "identity" }
     }
 
     /// Returns the normalized Transfer-Encoding (lowercased, whitespace around commas removed) iff it is

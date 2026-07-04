@@ -201,7 +201,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     func feed(_ data: Data, completion: @escaping () -> Void) {
         guard parkedCompletion == nil else {
-            logger.error("bridge \(host): feed re-entered while a script hop is outstanding; dropping chunk")
+            // Dropping the chunk would desync frame boundaries and leak receive-window
+            // credit with the connection alive — fail closed.
+            fail("feed re-entered while a script hop is outstanding", code: Codec.ErrorCode.internalError)
             completion()
             return
         }

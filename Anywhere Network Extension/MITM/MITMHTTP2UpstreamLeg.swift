@@ -547,7 +547,9 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     func feed(_ data: Data, completion: @escaping () -> Void) {
         guard parkedCompletion == nil else {
-            logger.error("h2-upstream \(host): feed re-entered while parked; dropping chunk")
+            // Dropping the chunk would desync frame boundaries and leak receive-window
+            // credit with the connection alive — fail closed.
+            fail("feed re-entered while parked")
             completion()
             return
         }
@@ -889,7 +891,12 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     private func handleData(_ frame: Codec.RawFrame) -> Bool {
         guard frame.streamID != 0 else { fail("DATA on stream 0"); return false }
         let onWireLength = frame.payload.count
-        guard let body = Codec.stripDataPadding(payload: frame.payload, flags: frame.flags) else { return false }
+        // Invalid padding is a connection error (RFC 9113 §6.1); returning without failing
+        // would skip the window credit below and leak our receive window toward a stall.
+        guard let body = Codec.stripDataPadding(payload: frame.payload, flags: frame.flags) else {
+            fail("DATA with invalid padding")
+            return false
+        }
         let endStream = frame.flags & 0x1 != 0
         let sid = frame.streamID
         guard let clientID = theirStreamID[sid] else {

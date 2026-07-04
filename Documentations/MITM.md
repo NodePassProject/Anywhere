@@ -1049,8 +1049,20 @@ function process(ctx) {
 - **Content-Encoding.** For `script` rules the body is decompressed before the
   script runs and re-emitted as identity with `Content-Encoding` dropped and a
   fresh `Content-Length`. `stream-script` rules see raw, still-compressed frames.
-  A rare concatenated multi-member `gzip` body is left compressed and forwarded
-  unrewritten rather than risk corrupting it.
+  A rare concatenated multi-member `gzip` body — or one that is truncated or
+  corrupt past its first member — is left compressed and forwarded unrewritten
+  rather than risk corrupting it or passing off a decoded prefix as the whole
+  body.
+- **Transfer-Encoding content-codings.** A body whose `Transfer-Encoding`
+  carries a content-coding (`gzip, chunked`, or a bare `gzip` framed by
+  connection close) is forwarded verbatim rather than rewritten: the buffered
+  path decodes only `Content-Encoding` layers and the `chunked` framing, so
+  rewriting would emit still-compressed bytes labeled identity. Separately, a
+  framing header injected by a header rule that contradicts the message's actual
+  framing — a `Content-Length` added to a chunked message, a `Transfer-Encoding`
+  added to a length-framed one — is dropped at emission, so a rule can't create
+  the `Transfer-Encoding` + `Content-Length` pair that inbound messages are
+  rejected for (RFC 9112 §6.3.3).
 - **Accept-Encoding.** Anywhere clamps the client's `Accept-Encoding` to the
   codings it can decode — `gzip`, `deflate`, `br`, `identity` — dropping any
   others (notably `zstd`) *only* when a response-phase body rule (`script`,

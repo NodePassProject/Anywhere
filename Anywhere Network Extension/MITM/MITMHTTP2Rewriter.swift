@@ -153,7 +153,9 @@ final class MITMHTTP2Rewriter {
         let hasMethod = headers.contains { ASCII.equalsIgnoringCase($0.name, ":method") }
         guard hasMethod else { return headers }
         var sawAuthority = false
-        var result = headers.map { entry -> (name: String, value: String) in
+        var result = headers.compactMap { entry -> (name: String, value: String)? in
+            // Drop a client-sent Host — the rewritten `:authority` supersedes it (RFC 9113 §8.3.1).
+            if ASCII.equalsIgnoringCase(entry.name, "host") { return nil }
             // RFC 9113 §8.2.1: normalise a peer's mis-cased `:Authority` on the way out.
             if ASCII.equalsIgnoringCase(entry.name, ":authority") {
                 sawAuthority = true
@@ -198,7 +200,9 @@ final class MITMHTTP2Rewriter {
                 effectiveAuthority = replacement.authority
                 resolvedUpstream = (host: replacement.host, port: replacement.port)
                 var sawAuthority = false
-                current = current.map { entry in
+                current = current.compactMap { entry -> (name: String, value: String)? in
+                    // Drop a client-sent Host — the rewritten `:authority` supersedes it (RFC 9113 §8.3.1).
+                    if ASCII.equalsIgnoringCase(entry.name, "host") { return nil }
                     // RFC 9113 §8.2.1: normalise mis-cased pseudo-headers on the way out.
                     if ASCII.equalsIgnoringCase(entry.name, ":path") {
                         return (name: ":path", value: replacement.requestTarget)
