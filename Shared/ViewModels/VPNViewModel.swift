@@ -57,6 +57,7 @@ class VPNViewModel {
     }
 
     init() {
+        restoreLatencyResults()
         setupStatusObserver()
         setupVPNManager()
     }
@@ -174,7 +175,7 @@ class VPNViewModel {
         let useIPC = vpnStatus == .connected
         latencyTask = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: configuration, viaIPC: useIPC, session: useIPC ? self?.providerSession : nil)
-            await MainActor.run { self?.latencyResults[configurationId] = result }
+            await MainActor.run { self?.recordLatencyResult(result, for: configurationId) }
         }
     }
 
@@ -187,7 +188,7 @@ class VPNViewModel {
         let session = useIPC ? providerSession : nil
         latencyTask = Task { [weak self] in
             await Self.runLatencyTests(targets, viaIPC: useIPC, session: session) { id, result in
-                await MainActor.run { self?.latencyResults[id] = result }
+                await MainActor.run { self?.recordLatencyResult(result, for: id) }
             }
         }
     }
@@ -205,7 +206,7 @@ class VPNViewModel {
         chainLatencyTask?.cancel()
         chainLatencyTask = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: resolved, viaIPC: useIPC, session: session)
-            await MainActor.run { self?.chainLatencyResults[chainId] = result }
+            await MainActor.run { self?.recordChainLatencyResult(result, for: chainId) }
         }
     }
 
@@ -224,10 +225,50 @@ class VPNViewModel {
         chainLatencyTask = Task { [weak self] in
             await Self.runLatencyTests(chainData.map(\.1), viaIPC: useIPC, session: session) { configId, result in
                 if let chainId = chainIdByConfigId[configId] {
-                    await MainActor.run { self?.chainLatencyResults[chainId] = result }
+                    await MainActor.run { self?.recordChainLatencyResult(result, for: chainId) }
                 }
             }
         }
+    }
+
+    // MARK: - Latency Persistence
+    
+    @ObservationIgnored private var storedLatencyResults: [UUID: LatencyResult] = [:]
+    @ObservationIgnored private var storedChainLatencyResults: [UUID: LatencyResult] = [:]
+
+    private func restoreLatencyResults() {
+        storedLatencyResults = Self.decodeLatencyResults(AWCore.getLatencyResultsData())
+        storedChainLatencyResults = Self.decodeLatencyResults(AWCore.getChainLatencyResultsData())
+        latencyResults = storedLatencyResults
+        chainLatencyResults = storedChainLatencyResults
+    }
+
+    private func recordLatencyResult(_ result: LatencyResult, for configurationId: UUID) {
+        latencyResults[configurationId] = result
+        storedLatencyResults[configurationId] = result
+        if let data = Self.encodeLatencyResults(storedLatencyResults) {
+            AWCore.setLatencyResultsData(data)
+        }
+    }
+
+    private func recordChainLatencyResult(_ result: LatencyResult, for chainId: UUID) {
+        chainLatencyResults[chainId] = result
+        storedChainLatencyResults[chainId] = result
+        if let data = Self.encodeLatencyResults(storedChainLatencyResults) {
+            AWCore.setChainLatencyResultsData(data)
+        }
+    }
+    
+    private static func encodeLatencyResults(_ results: [UUID: LatencyResult]) -> Data? {
+        try? JSONEncoder().encode(results.mapValues { LatencyTestResponse($0) })
+    }
+
+    private static func decodeLatencyResults(_ data: Data?) -> [UUID: LatencyResult] {
+        guard let data,
+              let responses = try? JSONDecoder().decode([UUID: LatencyTestResponse].self, from: data) else {
+            return [:]
+        }
+        return responses.mapValues { $0.asLatencyResult }
     }
 
     // MARK: - Latency Test Execution

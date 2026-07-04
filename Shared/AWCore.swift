@@ -84,12 +84,14 @@ nonisolated final class AWCore {
         static let blockUDP = "blockUDP"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
+        static let chainLatencyResults = "chainLatencyResults"
         static let experimentalEnabled = "experimentalEnabled"
         static let hideVPNIcon = "hideVPNIcon"
         static let homeColorScheme = "homeColorScheme"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
         static let lastConfigurationData = "lastConfigurationData"
+        static let latencyResults = "latencyResults"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
         static let proxyMode = "proxyMode"
@@ -214,7 +216,24 @@ nonisolated final class AWCore {
             userDefaults.removeObject(forKey: UserDefaultsKey.selectedChainId)
         }
     }
-    
+
+    // Latency
+    static func getLatencyResultsData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.latencyResults)
+    }
+
+    static func setLatencyResultsData(_ data: Data) {
+        userDefaults.set(data, forKey: UserDefaultsKey.latencyResults)
+    }
+
+    static func getChainLatencyResultsData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.chainLatencyResults)
+    }
+
+    static func setChainLatencyResultsData(_ data: Data) {
+        userDefaults.set(data, forKey: UserDefaultsKey.chainLatencyResults)
+    }
+
     // Settings
     static func getAlwaysOnEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
