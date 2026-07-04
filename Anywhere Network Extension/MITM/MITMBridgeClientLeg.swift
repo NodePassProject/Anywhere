@@ -387,7 +387,10 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     private func handleClientRST(_ frame: Codec.RawFrame) {
         let id = frame.streamID
         guard id != 0 else { return }
-        let wasOpen = requestStreams[id] != nil || paceStates[id] != nil
+        // `isLiveResponseStream` also covers the window between forwarding the request head and the
+        // response head arriving, where `requestStreams` and `paceStates` are both empty but
+        // `streamMethods` still tracks the stream — a client cancel there must still abort upstream.
+        let wasOpen = requestStreams[id] != nil || isLiveResponseStream(id)
         requestStreams.removeValue(forKey: id)
         streamMethods.removeValue(forKey: id)
         paceStates.removeValue(forKey: id)
@@ -836,6 +839,11 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         )
         rewriter.applyScripts(message, phase: .httpRequest, resumeOn: lwipQueue) { [weak self] outcome in
             guard let self, !self.torn else { return }
+            // The client can RST the stream while the script runs; only `streamMethods` still
+            // tracks it here. If it's gone, drop the result — forwarding would open an origin
+            // stream whose response every sink guard drops, and a synth answer would strand a
+            // dead `.synthAnswered` entry.
+            guard self.streamMethods[streamID] != nil else { return }
             switch outcome {
             case .message(let updated):
                 self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
@@ -955,7 +963,10 @@ final class MITMBridgeClientLeg: MITMResponseSink {
     }
 
     func deliverResponseReset(streamID: UInt32, errorCode: UInt32) {
-        guard !torn, isLiveResponseStream(streamID) else { return }
+        // `requestStreams` also catches an upload half still open after the response half finished —
+        // an origin RST there must still reach the client. After a client RST every entry is gone,
+        // so a late upstream event still no-ops.
+        guard !torn, isLiveResponseStream(streamID) || requestStreams[streamID] != nil else { return }
         rstToClient(streamID, errorCode: errorCode, abortUpstream: false)
     }
 

@@ -35,6 +35,11 @@ final class MITMHTTP1Stream {
     /// line is a remote memory DoS; on exceed the framing is treated as malformed.
     fileprivate static let maxChunkLineBytes: Int = 16 * 1024
 
+    /// Cap on recorded original chunk sizes (`ChunkedReader.sizes`), which only drive cosmetic
+    /// re-chunking on the decompression-failure passthrough — millions of tiny chunks would
+    /// otherwise grow the array to tens of MB. Past the cap the tail folds into the final chunk.
+    fileprivate static let maxTrackedChunkSizes: Int = 8192
+
     /// Memory cap on `Anywhere.respond` bodies; oversized bodies are truncated
     /// rather than rejected — a partial mock beats a dropped one.
     private static let maxSynthesizedResponseBodyBytes: Int = MITMBodyCodec.maxBufferedBodyBytes
@@ -179,9 +184,9 @@ final class MITMHTTP1Stream {
         /// runs the script chain at EOF. On cap overflow falls back to passthrough.
         case rewritingUntilClose(pending: PendingHead, accumulator: Data)
 
-        /// Draining a chunked body without forwarding it: `afterSynth` for a
-        /// locally answered request, else an over-cap rewrite tail.
-        case discardingChunked(reader: ChunkedReader, afterSynth: Bool)
+        /// Draining a chunked request body without forwarding it, after a
+        /// synthesized 302 / reject answered the request locally.
+        case discardingChunked(reader: ChunkedReader)
 
         /// Discarding a Content-Length request body after a synthesized 302 / reject.
         case discardingLength(remaining: Int)
@@ -424,9 +429,9 @@ final class MITMHTTP1Stream {
             mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
             return rewriteUntilClose(pending: pending, accumulator: &accumulator, into: &output)
 
-        case .discardingChunked(var reader, let afterSynth):
-            mode = .discardingChunked(reader: reader, afterSynth: afterSynth)
-            return discardChunked(reader: &reader, afterSynth: afterSynth, into: &output)
+        case .discardingChunked(var reader):
+            mode = .discardingChunked(reader: reader)
+            return discardChunked(reader: &reader)
 
         case .discardingLength(let remaining):
             return discardLength(remaining: remaining)
@@ -1295,20 +1300,14 @@ final class MITMHTTP1Stream {
         return true
     }
 
-    private func discardChunked(reader: inout ChunkedReader, afterSynth: Bool, into output: inout Data) -> Bool {
+    private func discardChunked(reader: inout ChunkedReader) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
-        var sink = Data()
-        let result = reader.consumeBuffered(&rxBuffer, into: &sink)
+        let result = reader.consumeForwardIR(&rxBuffer) { _ in }
         switch result {
         case .needMore:
-            mode = .discardingChunked(reader: reader, afterSynth: afterSynth)
+            mode = .discardingChunked(reader: reader)
             return false
         case .complete:
-            // Synth-after boundary; flush only for over-cap rewrite tails
-            // (post-synth discards are request streams).
-            if !afterSynth {
-                flushSynthAfterResponse(into: &output)
-            }
             mode = .awaitingHead
             return true
         case .malformed:
@@ -2093,7 +2092,7 @@ final class MITMHTTP1Stream {
         case .contentLength(let length) where length > 0:
             mode = .discardingLength(remaining: length)
         case .chunked:
-            mode = .discardingChunked(reader: ChunkedReader(), afterSynth: true)
+            mode = .discardingChunked(reader: ChunkedReader())
         case .none, .contentLength, .readUntilClose, .switchingProtocols:
             mode = .awaitingHead
         }
@@ -2280,8 +2279,9 @@ final class MITMHTTP1Stream {
 
 // MARK: - ChunkedReader
 
-/// Streaming chunked-transfer decoder: `consumeForward` re-emits framing verbatim;
-/// `consumeBuffered` emits decoded data and returns original chunk sizes.
+/// Streaming chunked-transfer decoder: `consumeForward` re-emits framing verbatim,
+/// `consumeForwardIR` hands decoded payloads to a closure, and `consumeBuffered`
+/// emits decoded data and returns the original chunk sizes.
 private final class ChunkedReader {
     private enum State {
         case sizeLine
@@ -2452,7 +2452,7 @@ private final class ChunkedReader {
                     return .malformed
                 }
                 buffer.removeFirst(2)
-                sizes.append(originalSize)
+                if sizes.count < MITMHTTP1Stream.maxTrackedChunkSizes { sizes.append(originalSize) }
                 state = .sizeLine
             case .trailerOrEnd:
                 // Rewritten bodies use empty trailers; discard originals.

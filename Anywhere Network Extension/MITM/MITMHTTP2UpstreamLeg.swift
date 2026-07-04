@@ -431,10 +431,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             dropFromQueue(clientID)
             return
         }
-        if openRequestStreams.contains(clientID), let sid = ourStreamID[clientID] {
-            onUpstreamBytes?(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.cancel))
-        }
-        releaseStream(clientID: clientID)
+        releaseStream(clientID: clientID, resetOrigin: true)
     }
 
     func sendRequestTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
@@ -765,8 +762,17 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         let neverIndexed = result.neverIndexed
         let endStream = originalFlags & 0x1 != 0
         // `streamID` is the upstream wire ID; map back to the client stream for all state,
-        // request-log, and sink delivery.
-        let clientID = theirStreamID[streamID] ?? streamID
+        // request-log, and sink delivery. No mapping: an idle ID means the origin opened a stream
+        // (connection error); a used ID is a late response to a stream we already released — RST
+        // and drop it (the decode above kept the HPACK table in sync).
+        guard let clientID = theirStreamID[streamID] else {
+            if streamID >= nextUpstreamStreamID {
+                fail("response HEADERS on idle upstream stream \(streamID)")
+            } else {
+                onUpstreamBytes?(Codec.rstStream(streamID: streamID, errorCode: Codec.ErrorCode.cancel))
+            }
+            return false
+        }
 
         // RFC 9113 §8.3: validate the response pseudo-header section (only :status, leading, no
         // duplicates). A malformed block is a protocol error — tear down so it's never re-encoded
