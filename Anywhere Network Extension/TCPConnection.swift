@@ -105,6 +105,15 @@ class TCPConnection {
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
+    /// Per-dial state (deadline, transport-cancel, settled flag), one instance per in-flight dial rather
+    /// than single-valued so the bridge's concurrent per-stream dials don't cross-wire timeouts or cancels.
+    private final class InFlightDial {
+        var deadline: DispatchWorkItem?
+        var cancel: (() -> Void)?
+        var settled = false
+    }
+    /// Dials awaiting resolution; `releaseProxy` cancels every one on teardown. lwipQueue-confined.
+    private var inFlightDials: [InFlightDial] = []
     /// Commits the IP-based route if the sniff doesn't resolve in time.
     private var sniffDeadline: DispatchWorkItem?
     private var uplinkDone = false
@@ -748,16 +757,57 @@ class TCPConnection {
             guard let self else { completion(.failure(TransportError.notConnected)); return }
             self.lwipQueue.async {
                 guard !self.closed else { completion(.failure(TransportError.notConnected)); return }
-                switch self.commitUpstreamRoute(forDialHost: host, port: port) {
-                case .reject:
-                    completion(.failure(TransportError.connectionFailed("rejected by routing rule: \(host)")))
-                case .direct:
-                    self.dialDirectUpstream(host: host, port: port, completion: completion)
-                case .proxy(_, let configuration):
-                    self.dialProxyUpstream(configuration: configuration, host: host, port: port, completion: completion)
-                }
+                self.dialUpstreamBounded(host: host, port: port, completion: completion)
             }
         }
+    }
+
+    /// Bounds the deferred MITM upstream dial (TCP connect + proxy protocol handshake) — the gap between the
+    /// per-connection `handshakeTimer` and the session's TLS-only `armUpstreamHandshakeTimeout`, where a stalled
+    /// protocol handshake would otherwise linger on the 300 s idle timer. On expiry the transport is cancelled,
+    /// not just failed; `completion` fires exactly once. lwipQueue-confined.
+    private func dialUpstreamBounded(
+        host: String, port: UInt16,
+        completion: @escaping (Result<MITMDialResult, Error>) -> Void
+    ) {
+        let dial = InFlightDial()
+        inFlightDials.append(dial)
+
+        let deadline = DispatchWorkItem { [weak self, weak dial] in
+            guard let self, let dial, !self.closed, !dial.settled else { return }
+            dial.settled = true
+            dial.cancel?()
+            self.forgetDial(dial)
+            completion(.failure(HandshakeTimeoutError(phase: "upstream dial")))
+        }
+        dial.deadline = deadline
+        lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: deadline)
+
+        // First of {dial resolves, deadline fires, teardown} wins; a late result cancels whatever it
+        // produced, so a timed-out or torn-down dial can't hand back a live socket.
+        let settle: (Result<MITMDialResult, Error>) -> Void = { [weak self, weak dial] result in
+            guard let self, let dial, !dial.settled else {
+                if case .success(let d) = result { d.connection.cancel(); d.proxyClient?.cancel() }
+                return
+            }
+            dial.settled = true
+            dial.deadline?.cancel()
+            self.forgetDial(dial)
+            completion(result)
+        }
+
+        switch commitUpstreamRoute(forDialHost: host, port: port) {
+        case .reject:
+            settle(.failure(TransportError.connectionFailed("rejected by routing rule: \(host)")))
+        case .direct:
+            dialDirectUpstream(host: host, port: port, dial: dial, completion: settle)
+        case .proxy(_, let configuration):
+            dialProxyUpstream(configuration: configuration, host: host, port: port, dial: dial, completion: settle)
+        }
+    }
+
+    private func forgetDial(_ dial: InFlightDial) {
+        inFlightDials.removeAll { $0 === dial }
     }
     
     private func commitUpstreamRoute(forDialHost host: String, port: UInt16) -> UpstreamRoute {
@@ -809,12 +859,13 @@ class TCPConnection {
         return .proxy(routeTarget: stack.defaultRouteTarget, configuration: configuration)
     }
     
-    private func dialDirectUpstream(host: String, port: UInt16,
+    private func dialDirectUpstream(host: String, port: UInt16, dial: InFlightDial,
                                     completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
         let transport = NWTCPTransport()
         // Direct/bypass — not a proxied connection, exclude from Dial.
         transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)
+        dial.cancel = { [weak connection] in connection?.cancel() }
         transport.connect(host: host, port: port) { [weak self] error in
             guard let self else {
                 connection.cancel()
@@ -833,11 +884,13 @@ class TCPConnection {
     }
     
     private func dialProxyUpstream(configuration: ProxyConfiguration, host: String, port: UInt16,
+                                   dial: InFlightDial,
                                    completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
         )
+        dial.cancel = { [weak client] in client?.cancel() }
         client.connect(to: host, port: port, initialData: nil) { [weak self] result in
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
@@ -1050,6 +1103,13 @@ class TCPConnection {
     private func releaseProxy() {
         handshakeTimer?.cancel()
         handshakeTimer = nil
+        // Mark settled so a dial resolving after teardown cancels its socket instead of completing.
+        for dial in inFlightDials {
+            dial.settled = true
+            dial.deadline?.cancel()
+            dial.cancel?()
+        }
+        inFlightDials.removeAll()
         sniffDeadline?.cancel()
         sniffDeadline = nil
         sniffer = nil
