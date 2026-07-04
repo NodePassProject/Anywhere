@@ -127,24 +127,13 @@ class VPNViewModel {
             return .gray
         }
     }
+    
+    var status: VPNStatus {
+        VPNStatus(vpnStatus)
+    }
 
     var statusText: String {
-        switch vpnStatus {
-        case .connected:
-            return String(localized: "Connected")
-        case .connecting:
-            return String(localized: "Connecting...")
-        case .disconnecting:
-            return String(localized: "Disconnecting...")
-        case .reasserting:
-            return String(localized: "Reconnecting...")
-        case .disconnected:
-            return String(localized: "Disconnected")
-        case .invalid:
-            return String(localized: "Not Configured")
-        @unknown default:
-            return String(localized: "Unknown")
-        }
+        status.localizedText
     }
 
     func isButtonDisabled(hasConfigurations: Bool) -> Bool {
@@ -576,5 +565,20 @@ class VPNViewModel {
 extension NEVPNStatus {
     var isTransitioning: Bool {
         self == .connecting || self == .disconnecting || self == .reasserting
+    }
+}
+
+extension VPNStatus {
+    /// Unknown future tunnel states read as `.invalid`.
+    init(_ status: NEVPNStatus) {
+        switch status {
+        case .invalid: self = .invalid
+        case .disconnected: self = .disconnected
+        case .connecting: self = .connecting
+        case .connected: self = .connected
+        case .reasserting: self = .reasserting
+        case .disconnecting: self = .disconnecting
+        @unknown default: self = .invalid
+        }
     }
 }

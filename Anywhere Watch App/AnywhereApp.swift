@@ -2,7 +2,7 @@
 //  AnywhereApp.swift
 //  Anywhere
 //
-//  Created by NodePassProject on 1/23/26.
+//  Created by NodePassProject on 7/4/26.
 //
 
 import SwiftUI
@@ -10,13 +10,13 @@ import SwiftUI
 @main
 struct AnywhereApp: App {
     init() {
-        CloudBlobSync.start()
-        WatchSessionManager.shared.start()
+        PhoneSession.shared.start()
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(PhoneSession.shared)
         }
     }
 }

@@ -1560,6 +1560,52 @@
         }
       }
     },
+    "Add a configuration on your iPhone." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "أضف تكوينًا على iPhone الخاص بك."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agrega una configuración en tu iPhone."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "یک پیکربندی روی iPhone خود اضافه کنید."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавьте конфигурацию на вашем iPhone."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhone'unuzda bir yapılandırma ekleyin."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm cấu hình trên iPhone của bạn."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在你的 iPhone 上添加一个配置。"
+          }
+        }
+      }
+    },
     "Add at least 2 proxies to form a chain." : {
       "localizations" : {
         "ar" : {
@@ -4048,6 +4094,52 @@
         }
       }
     },
+    "Configurations" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التكوينات"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Configuraciones"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پیکربندی‌ها"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Конфигурации"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yapılandırmalar"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cấu hình"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配置"
+          }
+        }
+      }
+    },
     "Congestion Control" : {
       "comment" : "Congestion control algorithm for Hysteria protocol",
       "localizations" : {
@@ -4153,54 +4245,48 @@
         }
       }
     },
-    "Connecting..." : {
+    "Connecting" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "جارٍ الاتصال..."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Connecting..."
+            "value" : "جارٍ الاتصال"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Conectando..."
+            "value" : "Conectando"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "در حال اتصال..."
+            "value" : "در حال اتصال"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Подключение..."
+            "value" : "Подключение"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bağlanıyor..."
+            "value" : "Bağlanıyor"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Đang kết nối..."
+            "value" : "Đang kết nối"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在连接..."
+            "value" : "正在连接"
           }
         }
       }
@@ -5357,54 +5443,48 @@
         }
       }
     },
-    "Disconnecting..." : {
+    "Disconnecting" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "جارٍ قطع الاتصال..."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Disconnecting..."
+            "value" : "جارٍ قطع الاتصال"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Desconectando..."
+            "value" : "Desconectando"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "در حال قطع..."
+            "value" : "در حال قطع"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Отключение..."
+            "value" : "Отключение"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bağlantı Kesiliyor..."
+            "value" : "Bağlantı Kesiliyor"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Đang ngắt kết nối..."
+            "value" : "Đang ngắt kết nối"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在断开..."
+            "value" : "正在断开连接"
           }
         }
       }
@@ -10887,6 +10967,52 @@
         }
       }
     },
+    "Open Anywhere on your iPhone to sync." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افتح Anywhere على iPhone الخاص بك للمزامنة."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abre Anywhere en tu iPhone para sincronizar."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "برای همگام‌سازی، Anywhere را روی iPhone خود باز کنید."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Откройте Anywhere на вашем iPhone для синхронизации."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Eşitlemek için iPhone'unuzda Anywhere'i açın."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mở Anywhere trên iPhone của bạn để đồng bộ."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在你的 iPhone 上打开 Anywhere 来同步。"
+          }
+        }
+      }
+    },
     "Open Source Libraries" : {
       "localizations" : {
         "ar" : {
@@ -12418,54 +12544,48 @@
     "Reality" : {
       "shouldTranslate" : false
     },
-    "Reconnecting..." : {
+    "Reconnecting" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "جارٍ إعادة الاتصال..."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Reconnecting..."
+            "value" : "جارٍ إعادة الاتصال"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Reconectando..."
+            "value" : "Reconectando"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "در حال اتصال مجدد..."
+            "value" : "در حال اتصال مجدد"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Переподключение..."
+            "value" : "Переподключение"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Yeniden Bağlanıyor..."
+            "value" : "Yeniden Bağlanıyor"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Đang kết nối lại..."
+            "value" : "Đang kết nối lại"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在重连..."
+            "value" : "正在重新连接"
           }
         }
       }
@@ -15783,6 +15903,52 @@
         }
       }
     },
+    "Syncing with iPhone" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جارٍ المزامنة مع iPhone"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sincronizando con el iPhone"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "در حال همگام‌سازی با iPhone"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Синхронизация с iPhone"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhone ile eşitleniyor"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đang đồng bộ với iPhone"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在与 iPhone 同步"
+          }
+        }
+      }
+    },
     "Target" : {
       "localizations" : {
         "ar" : {
@@ -17092,58 +17258,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "不阻止"
-          }
-        }
-      }
-    },
-    "Unknown" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "غير معروف"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Unknown"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Desconocido"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "نامشخص"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Неизвестно"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bilinmiyor"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Không xác định"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未知"
           }
         }
       }

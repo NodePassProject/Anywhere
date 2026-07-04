@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		7870E4302FF89000006C0F14 /* Anywhere Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -16,6 +17,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		7870E4322FF89000006C0F14 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7870E4192FF88ED5006C0F14;
+			remoteInfo = "Anywhere Watch App";
+		};
 		78B6DF9E2FE7B70D0084897A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
@@ -47,6 +55,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		7870E4312FF89000006C0F14 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				7870E4302FF89000006C0F14 /* Anywhere Watch App.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		CB1C10872F23B82F00B74CD8 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -73,6 +92,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Anywhere Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		78B6DF9A2FE7B70D0084897A /* Anywhere Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Anywhere Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10652F23B81500B74CD8 /* Anywhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anywhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Network Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -84,6 +104,17 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		7870E4262FF88FDC006C0F14 /* Exceptions for "Shared" folder in "Anywhere Watch App" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AppIcons/AppIcon.icon,
+				Localizable.xcstrings,
+				Models/WatchBridge.swift,
+				Utilities/AnywhereLogger.swift,
+				Utilities/VPNStatus.swift,
+			);
+			target = 7870E4192FF88ED5006C0F14 /* Anywhere Watch App */;
+		};
 		CB1C10832F23B82F00B74CD8 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere Network Extension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -337,6 +368,7 @@
 				Utilities/SubscriptionDomainHelper.swift,
 				Utilities/UnfairLock.swift,
 				"Utilities/UUID+VLESSString.swift",
+				Utilities/VPNStatus.swift,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
@@ -385,6 +417,11 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		7870E41B2FF88ED5006C0F14 /* Anywhere Watch App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "Anywhere Watch App";
+			sourceTree = "<group>";
+		};
 		78B6DF9B2FE7B70D0084897A /* Anywhere Tests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "Anywhere Tests";
@@ -426,6 +463,7 @@
 		CB7A00022F65700100C85E4A /* Shared */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				7870E4262FF88FDC006C0F14 /* Exceptions for "Shared" folder in "Anywhere Watch App" target */,
 				CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */,
 				CB71D2EE2F838FF3002B9E1D /* Exceptions for "Shared" folder in "Anywhere Widget" target */,
 			);
@@ -435,6 +473,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		7870E4172FF88ED5006C0F14 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		78B6DF972FE7B70D0084897A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -481,6 +526,7 @@
 			children = (
 				CB7A00022F65700100C85E4A /* Shared */,
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
+				7870E41B2FF88ED5006C0F14 /* Anywhere Watch App */,
 				CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
 				CB71CDC82F837D11002B9E1D /* Anywhere Widget */,
@@ -498,6 +544,7 @@
 				CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */,
 				CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */,
 				78B6DF9A2FE7B70D0084897A /* Anywhere Tests.xctest */,
+				7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -515,6 +562,28 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		7870E4192FF88ED5006C0F14 /* Anywhere Watch App */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7870E4242FF88ED6006C0F14 /* Build configuration list for PBXNativeTarget "Anywhere Watch App" */;
+			buildPhases = (
+				7870E4162FF88ED5006C0F14 /* Sources */,
+				7870E4172FF88ED5006C0F14 /* Frameworks */,
+				7870E4182FF88ED5006C0F14 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				7870E41B2FF88ED5006C0F14 /* Anywhere Watch App */,
+			);
+			name = "Anywhere Watch App";
+			packageProductDependencies = (
+			);
+			productName = "Anywhere Watch App";
+			productReference = 7870E41A2FF88ED5006C0F14 /* Anywhere Watch App.app */;
+			productType = "com.apple.product-type.application";
+		};
 		78B6DF992FE7B70D0084897A /* Anywhere Tests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 78B6DFA22FE7B70D0084897A /* Build configuration list for PBXNativeTarget "Anywhere Tests" */;
@@ -546,12 +615,14 @@
 				CB1C10622F23B81500B74CD8 /* Frameworks */,
 				CB1C10632F23B81500B74CD8 /* Resources */,
 				CB1C10872F23B82F00B74CD8 /* Embed Foundation Extensions */,
+				7870E4312FF89000006C0F14 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				CB1C10812F23B82F00B74CD8 /* PBXTargetDependency */,
 				CB71CDD32F837D11002B9E1D /* PBXTargetDependency */,
+				7870E4332FF89000006C0F14 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
@@ -640,9 +711,12 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2650;
+				LastSwiftUpdateCheck = 2700;
 				LastUpgradeCheck = 2640;
 				TargetAttributes = {
+					7870E4192FF88ED5006C0F14 = {
+						CreatedOnToolsVersion = 27.0;
+					};
 					78B6DF992FE7B70D0084897A = {
 						CreatedOnToolsVersion = 26.5;
 						TestTargetID = CB1C10642F23B81500B74CD8;
@@ -685,6 +759,7 @@
 			projectRoot = "";
 			targets = (
 				CB1C10642F23B81500B74CD8 /* Anywhere */,
+				7870E4192FF88ED5006C0F14 /* Anywhere Watch App */,
 				CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */,
 				CB71CDC22F837D11002B9E1D /* Anywhere Widget */,
@@ -694,6 +769,13 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		7870E4182FF88ED5006C0F14 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		78B6DF982FE7B70D0084897A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -732,6 +814,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		7870E4162FF88ED5006C0F14 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		78B6DF962FE7B70D0084897A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -770,6 +859,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		7870E4332FF89000006C0F14 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7870E4192FF88ED5006C0F14 /* Anywhere Watch App */;
+			targetProxy = 7870E4322FF89000006C0F14 /* PBXContainerItemProxy */;
+		};
 		78B6DF9F2FE7B70D0084897A /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = CB1C10642F23B81500B74CD8 /* Anywhere */;
@@ -793,6 +887,76 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		7870E4222FF88ED6006C0F14 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Anywhere Watch App/Anywhere Watch App.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.argsment.Anywhere;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		7870E4232FF88ED6006C0F14 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Anywhere Watch App/Anywhere Watch App.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.argsment.Anywhere;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
 		78B6DFA02FE7B70D0084897A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1395,6 +1559,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		7870E4242FF88ED6006C0F14 /* Build configuration list for PBXNativeTarget "Anywhere Watch App" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7870E4222FF88ED6006C0F14 /* Debug */,
+				7870E4232FF88ED6006C0F14 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		78B6DFA22FE7B70D0084897A /* Build configuration list for PBXNativeTarget "Anywhere Tests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

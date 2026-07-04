@@ -54,8 +54,11 @@ struct HomeView: View {
                             }
                         } else {
                             VStack(spacing: 80) {
-                                powerButton
-                                    .matchedGeometryEffect(id: "powerButton", in: namespace)
+                                VStack(spacing: 20) {
+                                    powerButton
+                                        .matchedGeometryEffect(id: "powerButton", in: namespace)
+                                    statusLabel
+                                }
                                 configurationCard
                                     .matchedGeometryEffect(id: "configurationCard", in: namespace)
                             }
@@ -121,6 +124,12 @@ struct HomeView: View {
     private var configurationCard: some View {
         ConfigurationCapsule(isConnected: isConnected, showingAddSheet: $showingAddSheet)
             .frame(maxWidth: 500)
+    }
+    
+    private var statusLabel: some View {
+        Text(viewModel.statusText)
+            .font(.headline)
+            .foregroundStyle(.secondary)
     }
 }
 
