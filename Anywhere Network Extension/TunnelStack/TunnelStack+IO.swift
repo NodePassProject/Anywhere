@@ -232,7 +232,7 @@ extension TunnelStack {
                 self.udpFlows.removeValue(forKey: key)
             }
             // Re-arm the flow-cap warning so a later storm logs its own rising edge.
-            if self.udpFlowCapWarned && self.udpFlows.count < TunnelConstants.udpMaxFlows {
+            if self.udpFlowCapWarned && self.udpFlows.count < TunnelLimits.udpMaxFlows {
                 self.udpFlowCapWarned = false
             }
         }

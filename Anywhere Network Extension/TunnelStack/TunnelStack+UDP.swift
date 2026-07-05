@@ -27,7 +27,7 @@ extension TunnelStack {
     /// Run on ``udpQueue`` before each insert.
     func evictUDPFlowsToAdmit() {
         // Runs before every insert and frees at most one slot, so a single pass suffices.
-        let cap = TunnelConstants.udpMaxFlows
+        let cap = TunnelLimits.udpMaxFlows
         guard udpFlows.count >= cap else { return }
 
         var victim: UDPFlow?

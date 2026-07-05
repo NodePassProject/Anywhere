@@ -360,6 +360,7 @@
 				Networking/Transport/NWUDPTransport.swift,
 				Networking/Transport/QUICDatagramCarrier.swift,
 				Networking/Transport/RawTransport.swift,
+				Networking/TunnelLimits.swift,
 				Utilities/ActivityTimer.swift,
 				Utilities/AnywhereLogger.swift,
 				"Utilities/Data+appendCompacting.swift",

@@ -10,10 +10,8 @@ import Network
 
 nonisolated private let logger = AnywhereLogger(category: "NWTCPTransport")
 
-// MARK: - NWError mapping (shared with NWUDPTransport)
+// MARK: - NWError handling
 
-/// Translates an `NWError` into the project's `TransportError`, preserving the raw
-/// `errno` so callers (e.g. `TransportErrorLogger`) can keep classifying by code.
 nonisolated func mapNWError(_ error: NWError, op: TransportError.Operation) -> TransportError {
     switch error {
     case .posix(let code):
@@ -26,9 +24,6 @@ nonisolated func mapNWError(_ error: NWError, op: TransportError.Operation) -> T
     }
 }
 
-/// `NWConnection` keeps retrying in `.waiting` on both transient and definitive
-/// failures. Definitive per-address errors won't resolve on the current path, so
-/// the caller fails them immediately rather than stalling until the attempt timeout.
 nonisolated func isDefinitiveConnectError(_ error: NWError) -> Bool {
     guard case .posix(let code) = error else { return false }
     switch code {
@@ -40,8 +35,16 @@ nonisolated func isDefinitiveConnectError(_ error: NWError) -> Bool {
     }
 }
 
-/// Parses an IPv4/IPv6 literal into an `NWEndpoint.Host`; returns nil for a
-/// hostname, which the caller passes to `NWConnection` as a `.name` to resolve.
+nonisolated func isResourceExhaustionError(_ error: NWError) -> Bool {
+    guard case .posix(let code) = error else { return false }
+    switch code {
+    case .ENOMEM, .ENOBUFS, .EMFILE, .ENFILE:
+        return true
+    default:
+        return false
+    }
+}
+
 nonisolated func nwHost(fromIPLiteral ip: String) -> NWEndpoint.Host? {
     if ip.contains(":") {
         return IPv6Address(ip).map { .ipv6($0) }
@@ -49,11 +52,84 @@ nonisolated func nwHost(fromIPLiteral ip: String) -> NWEndpoint.Host? {
     return IPv4Address(ip).map { .ipv4($0) }
 }
 
+// MARK: - DialGauge
+
+/// Process-wide count of TCP dials in flight (connect issued, not yet resolved).
+nonisolated enum DialGauge {
+    private static let lock = UnfairLock()
+    private nonisolated(unsafe) static var count = 0
+
+    static var inFlight: Int {
+        lock.withLock { count }
+    }
+
+    static func increment() {
+        lock.withLock { count += 1 }
+    }
+
+    static func decrement() {
+        lock.withLock { count -= 1 }
+    }
+}
+
+// MARK: - DialGate
+
+/// Global cap on concurrent TCP dial attempts.
+nonisolated enum DialGate {
+    /// Concurrent-dial ceiling; generous for interactive bursts, far below the
+    /// observed ENOMEM collapse (~250 in-flight dials).
+    static let maxConcurrentDials = 64
+
+    private static let lock = UnfairLock()
+    private nonisolated(unsafe) static var active = 0
+    private nonisolated(unsafe) static var nextTicket: UInt64 = 0
+    private nonisolated(unsafe) static var waiters: [(ticket: UInt64, start: @Sendable () -> Void)] = []
+
+    /// (dialing now, queued) — sampled by failure diagnostics.
+    static var stats: (active: Int, queued: Int) {
+        lock.withLock { (active, waiters.count) }
+    }
+
+    /// Claims a slot: returns nil when one is free (the caller proceeds
+    /// immediately and owns the slot), otherwise queues `start` and returns its
+    /// ticket. A queued `start` runs exactly once, when a slot frees, unless
+    /// cancelled first — and then owns the slot the same way.
+    static func acquire(_ start: @escaping @Sendable () -> Void) -> UInt64? {
+        lock.withLock { () -> UInt64? in
+            if active < maxConcurrentDials {
+                active += 1
+                return nil
+            }
+            nextTicket += 1
+            waiters.append((nextTicket, start))
+            return nextTicket
+        }
+    }
+
+    /// Removes a queued waiter. Returns false when it already started (or never
+    /// existed) — its closure then owns the slot and must release it.
+    static func cancelWaiter(_ ticket: UInt64) -> Bool {
+        lock.withLock {
+            guard let index = waiters.firstIndex(where: { $0.ticket == ticket }) else { return false }
+            waiters.remove(at: index)
+            return true
+        }
+    }
+
+    /// Releases a slot: hands it to the newest waiter, or lowers `active`.
+    static func release() {
+        let next = lock.withLock { () -> (@Sendable () -> Void)? in
+            if let waiter = waiters.popLast() { return waiter.start }
+            active -= 1
+            return nil
+        }
+        // Outside the lock; the closure hops to its transport's queue.
+        next?()
+    }
+}
+
 // MARK: - NWTCPTransport
 
-/// A TCP transport over `NWConnection`. All callbacks and state mutations run on
-/// the serial `queue`; `state` is additionally lock-protected so `isTransportReady`
-/// and `forceCancel()` are safe from any thread.
 nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
     enum State {
@@ -70,6 +146,10 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
     /// Wall-clock backstop for the whole dial.
     private static let dialDeadlineSeconds: Int = 20
+
+    /// Minimum time a connection must have actually been dialing before a
+    /// deadline timeout counts as destination evidence.
+    private static let minDialProbeSeconds: TimeInterval = 10
 
     private static let maxReceiveLength = 65535
 
@@ -109,6 +189,27 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     /// Backstop that fails the dial if it never reaches `.ready`/`.failed`; armed in
     /// `connect`, cancelled the moment the dial resolves. Touched only on `queue`.
     private var dialDeadline: DispatchWorkItem?
+
+    /// "host:port" for connect-phase diagnostics. Set once in `connect`.
+    private var dialEndpointDescription = ""
+
+    /// Last non-definitive `.waiting` error seen during the dial, plus whether the
+    /// dial ever reached `.preparing`. `queue`-confined.
+    private var lastWaitingDescription: String?
+    private var sawPreparing = false
+
+    /// Whether this dial is counted in `DialGauge`. `queue`-confined.
+    private var countedInFlightDial = false
+
+    /// Dial-gate bookkeeping: `dialGateTicket` is non-nil while queued for a
+    /// slot; `holdsDialGateSlot` is true from slot acquisition until
+    /// `markDialResolved` releases it. Both `queue`-confined.
+    private var dialGateTicket: UInt64?
+    private var holdsDialGateSlot = false
+
+    /// When `beginDial` started the `NWConnection`, on the `MonotonicClock`
+    /// timeline; nil while still queued at the gate. `queue`-confined.
+    private var dialStartedAt: TimeInterval?
 
     /// Times the dial for the live "Dial" stat; direct/bypass dials disable it
     /// so only proxied first-hop dials are counted.
@@ -155,19 +256,48 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
             pendingInitialData = initialData
             connectCompletion = completion
-            // Dial timing spans name resolution; NWConnection owns DNS.
+            dialEndpointDescription = "\(host):\(port)"
+            countedInFlightDial = true
+            DialGauge.increment()
             dialTimer.start()
+            armDialDeadline()
 
             let endpointHost = nwHost(fromIPLiteral: host) ?? .name(host, nil)
-            let connection = NWConnection(to: .hostPort(host: endpointHost, port: nwPort),
-                                          using: Self.makeParameters())
-            self.connection = connection
-            connection.stateUpdateHandler = { [weak self] newState in
-                self?.handleConnectState(newState)
+            let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
+            if let ticket = DialGate.acquire({ [weak self] in
+                // The popped waiter owns the slot; a transport torn down without
+                // cancel must still hand it back.
+                guard let self else {
+                    DialGate.release()
+                    return
+                }
+                self.queue.async { self.beginDial(to: endpoint) }
+            }) {
+                dialGateTicket = ticket
+            } else {
+                beginDial(to: endpoint)
             }
-            connection.start(queue: queue)
-            armDialDeadline()
         }
+    }
+
+    /// Starts the `NWConnection` once a dial-gate slot is held. Must run on
+    /// `queue`. A dial cancelled or timed out while queued releases the slot
+    /// without dialing.
+    private func beginDial(to endpoint: NWEndpoint) {
+        dialGateTicket = nil
+        holdsDialGateSlot = true
+        guard case .setup = state else {
+            holdsDialGateSlot = false
+            DialGate.release()
+            return
+        }
+        dialStartedAt = MonotonicClock.now
+        let connection = NWConnection(to: endpoint, using: Self.makeParameters())
+        self.connection = connection
+        connection.stateUpdateHandler = { [weak self] newState in
+            self?.handleConnectState(newState)
+        }
+        connection.start(queue: queue)
     }
 
     /// Ordered send; `NWConnection` handles partial writes and backpressure.
@@ -265,6 +395,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
         case .startTeardown:
             queue.async { [self] in
                 cancelDialDeadline()
+                markDialResolved()
                 if let c = connectCompletion {
                     connectCompletion = nil
                     c(TransportError.connectionFailed("Cancelled"))
@@ -295,16 +426,47 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
     // MARK: - Connect pipeline
 
-    /// Arms the wall-clock dial backstop on `queue`. Bounds time spent in
-    /// `.waiting`, which `connectionTimeout` (an active-handshake bound) does not.
+    /// Balances `DialGauge` and `DialGate` exactly once per dial. Must run on `queue`.
+    private func markDialResolved() {
+        guard countedInFlightDial else { return }
+        countedInFlightDial = false
+        DialGauge.decrement()
+        if let ticket = dialGateTicket {
+            dialGateTicket = nil
+            // A false return means the waiter was already popped; its closure
+            // still runs, and `beginDial` releases the slot on seeing the
+            // resolved state.
+            _ = DialGate.cancelWaiter(ticket)
+        } else if holdsDialGateSlot {
+            holdsDialGateSlot = false
+            DialGate.release()
+        }
+    }
+    
+    static let dialDeadlinePrefix = "Dial deadline exceeded"
+    
+    static let dialQueuedDeadlinePrefix = "Dial queue deadline exceeded"
+
+    /// Arms the wall-clock dial backstop on `queue`. Bounds time spent queued at
+    /// the gate or in `.waiting`, which `connectionTimeout` does not.
     private func armDialDeadline() {
         let deadline = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            // Runs on `queue`; only bite while the dial is unresolved so a fire/cancel
-            // race can't tear down an already-ready connection.
-            guard case .setup = self.state else { return }
-            logger.debug("[TCP] dial deadline exceeded after \(Self.dialDeadlineSeconds)s")
-            self.finishConnectFailure(TransportError.posixError(.connect, errno: ETIMEDOUT))
+            guard let self, case .setup = self.state else { return }
+            let message: String
+            let probeSeconds = self.dialStartedAt.map { MonotonicClock.now - $0 }
+            if self.dialGateTicket != nil {
+                message = "\(Self.dialQueuedDeadlinePrefix) (\(Self.dialDeadlineSeconds)s; "
+                    + "dial gate full, \(DialGate.stats.queued) waiting)"
+            } else if let probeSeconds, probeSeconds < Self.minDialProbeSeconds {
+                message = "\(Self.dialQueuedDeadlinePrefix) (\(Self.dialDeadlineSeconds)s; "
+                    + "dialed only \(Int(probeSeconds))s after gate wait)"
+            } else {
+                let lastState = self.lastWaitingDescription
+                    ?? (self.sawPreparing ? "preparing, no error reported" : "no state updates")
+                message = "\(Self.dialDeadlinePrefix) (\(Self.dialDeadlineSeconds)s; last state: \(lastState))"
+            }
+            logger.debug("[TCP] \(message): \(self.dialEndpointDescription)")
+            self.finishConnectFailure(TransportError.connectionFailed(message))
         }
         dialDeadline = deadline
         queue.asyncAfter(deadline: .now() + .seconds(Self.dialDeadlineSeconds), execute: deadline)
@@ -327,21 +489,41 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
             logger.debug("[TCP] connect failed: \(error)")
             finishConnectFailure(mapNWError(error, op: .connect))
         case .waiting(let error):
-            // Definitive errors won't recover on this path; fail now instead of
-            // stalling to the connect timeout. A DNS hiccup stays pending so
-            // NWConnection can retry, bounded by `connectionTimeout`.
             if isDefinitiveConnectError(error) {
                 logger.debug("[TCP] connect unreachable: \(error)")
                 finishConnectFailure(mapNWError(error, op: .connect))
+            } else if isResourceExhaustionError(error) {
+                logger.debug("[TCP] connect resource exhaustion: \(dialEndpointDescription): \(error)")
+                finishConnectFailure(mapNWError(error, op: .connect))
+            } else {
+                let description = Self.describeConnectWaiting(error)
+                if description != lastWaitingDescription {
+                    logger.debug("[TCP] connect \(dialEndpointDescription) \(description)")
+                    lastWaitingDescription = description
+                }
             }
+        case .preparing:
+            sawPreparing = true
         default:
-            break  // .setup, .preparing, .cancelled
+            break  // .setup, .cancelled
+        }
+    }
+    
+    private static func describeConnectWaiting(_ error: NWError) -> String {
+        switch error {
+        case .posix(let code):
+            return "waiting(errno \(code.rawValue): \(String(cString: strerror(code.rawValue))))"
+        case .dns(let code):
+            return "waiting(dns \(code))"
+        default:
+            return "waiting(\(error.localizedDescription))"
         }
     }
 
     /// Promotes to `.ready`, sends `initialData`, and fires the connect
     /// completion exactly once. Must run on `queue`.
     private func handleConnectReady() {
+        markDialResolved()
         // A racing .cancelled wins; teardown fires the completion.
         guard transitionFromSetup(to: .ready) else { return }
         cancelDialDeadline()
@@ -364,11 +546,9 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     }
 
     /// Connect failed. Transitions to `.failed` and fires the completion once.
-    /// If a racing `forceCancel()` already latched `.cancelled`, the completion is
-    /// left intact for the teardown path to fire with "Cancelled"; consuming it
-    /// here without reporting would drop the caller's completion entirely.
     private func finishConnectFailure(_ error: Error) {
         cancelDialDeadline()
+        markDialResolved()
         pendingInitialData = nil
         if let connection {
             self.connection = nil

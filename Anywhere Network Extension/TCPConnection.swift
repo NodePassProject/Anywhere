@@ -149,7 +149,8 @@ class TCPConnection {
                 self.failureReporter.report(
                     operation: "Handshake",
                     endpoint: self.endpointDescription,
-                    error: HandshakeTimeoutError(phase: phase)
+                    error: HandshakeTimeoutError(phase: phase),
+                    context: DialDiagnostics.snapshot()
                 )
                 self.abort()
             }
@@ -440,11 +441,24 @@ class TCPConnection {
     private func reportFailure(_ operation: String, error: Error) {
         failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
     }
-
-    /// Terminal handler for a failed dial; restores `bufferedClientData` ahead of
-    /// later arrivals so the whole unacknowledged run is covered.
+    
+    private static func isTimeoutClassError(_ error: Error) -> Bool {
+        guard let transportError = error as? TransportError else { return false }
+        if transportError.posixErrno == ETIMEDOUT { return true }
+        if case .connectionFailed(let message) = transportError,
+           message.hasPrefix(NWTCPTransport.dialDeadlinePrefix) {
+            return true
+        }
+        return false
+    }
+    
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
-        reportFailure("Connect", error: error)
+        failureReporter.report(operation: "Connect", endpoint: endpointDescription,
+                               error: error, context: DialDiagnostics.snapshot())
+        // Only raw-IP direct dials feed the backoff cache.
+        if bypass, !hostIsResolvedDomain, Self.isTimeoutClassError(error) {
+            DialBackoffCache.shared.recordTimeout(host: dstHost)
+        }
         guard case TransportError.resolutionFailed = error else {
             abort()
             return
@@ -578,6 +592,9 @@ class TCPConnection {
                 if let error {
                     self.handleConnectFailure(error, bufferedClientData: initialData)
                     return
+                }
+                if !self.hostIsResolvedDomain {
+                    DialBackoffCache.shared.recordSuccess(host: self.dstHost)
                 }
                 self.handshakeTimer?.cancel()
                 self.handshakeTimer = nil

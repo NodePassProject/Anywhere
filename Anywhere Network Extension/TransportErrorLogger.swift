@@ -76,36 +76,35 @@ nonisolated enum TransportErrorLogger {
     }
 
     // MARK: - Terminal Failure Logging
-
-    /// Logs a terminal connection failure. `NaiveHTTP2Error` demotes to debug
-    /// (GOAWAY/stream-reset is normal h2 churn), EPIPE cascades to debug,
-    /// ECONNRESET to info; everything else logs at error.
+    
     fileprivate static func logTerminal(
         operation: String,
         endpoint: String,
         error: Error,
         logger: AnywhereLogger,
-        prefix: String
+        prefix: String,
+        context: String? = nil
     ) {
         let errorDescription = conciseErrorDescription(error)
+        let suffix = context.map { " [\($0)]" } ?? ""
 
         if error is NaiveHTTP2Error {
-            logger.debug("\(prefix) \(operation) error: \(endpoint): \(errorDescription)")
+            logger.debug("\(prefix) \(operation) error: \(endpoint): \(errorDescription)\(suffix)")
             return
         }
 
         switch peerCloseClass(for: error) {
         case .cascade:
-            logger.debug("\(prefix) \(operation) after peer close: \(endpoint): \(errorDescription)")
+            logger.debug("\(prefix) \(operation) after peer close: \(endpoint): \(errorDescription)\(suffix)")
             return
         case .reset:
-            logger.info("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
+            logger.info("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)\(suffix)")
             return
         case .none:
             break
         }
 
-        logger.error("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
+        logger.error("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)\(suffix)")
     }
 
     // MARK: - Transient Failure Logging
@@ -121,10 +120,24 @@ nonisolated enum TransportErrorLogger {
     }
 }
 
+// MARK: - DialDiagnostics
+
+/// Dial-pressure snapshots appended to TCP connect-failure logs.
+nonisolated enum DialDiagnostics {
+
+    /// E.g. `dials=37 dialing=24 queued=13 blocked=8 tcp=124`. Must run on
+    /// lwipQueue: the PCB count and backoff cache are lwipQueue-confined.
+    static func snapshot() -> String {
+        let gate = DialGate.stats
+        return "dials=\(DialGauge.inFlight) dialing=\(gate.active) queued=\(gate.queued) "
+            + "blocked=\(DialBackoffCache.shared.blockedCount) "
+            + "tcp=\(Int(lwip_bridge_active_tcp_count()))"
+    }
+}
+
 // MARK: - ConnectionFailureReporter
 
 /// Emits exactly one terminal-failure line per connection; later reports no-op.
-/// Not thread-safe; the owning connection must serialize access on its own queue.
 final class ConnectionFailureReporter {
     private let prefix: String
     private let logger: AnywhereLogger
@@ -134,10 +147,9 @@ final class ConnectionFailureReporter {
         self.prefix = prefix
         self.logger = logger
     }
-
-    /// Logs the terminal failure on first call only. `endpoint` is an autoclosure so
-    /// callers surface the most current description (e.g. post-SNI hostname).
-    func report(operation: String, endpoint: @autoclosure () -> String, error: Error) {
+    
+    func report(operation: String, endpoint: @autoclosure () -> String, error: Error,
+                context: @autoclosure () -> String? = nil) {
         guard !reported else { return }
         reported = true
         TransportErrorLogger.logTerminal(
@@ -145,7 +157,8 @@ final class ConnectionFailureReporter {
             endpoint: endpoint(),
             error: error,
             logger: logger,
-            prefix: prefix
+            prefix: prefix,
+            context: context()
         )
     }
 

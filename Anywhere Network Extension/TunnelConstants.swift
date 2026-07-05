@@ -38,10 +38,18 @@ enum TunnelConstants {
     /// (otherwise downlink degrades to stop-and-wait); half TCP_SND_BUF (lwipopts.h).
     static let drainLowWaterMark = 512 * 1360
 
-    // MARK: - TCP Settings
+    // MARK: - Dial Backoff
 
-    /// Hard ceiling on concurrent TCP connections.
-    static let tcpMaxConnections = 512
+    /// Connect timeouts within ``dialBackoffStrikeWindow`` before SYNs to a
+    /// raw-IP direct destination fast-fail; two strikes so one transient
+    /// timeout can't block a legitimate host.
+    static let dialBackoffStrikeThreshold = 2
+    /// Window (seconds) in which timeout strikes accumulate.
+    static let dialBackoffStrikeWindow: TimeInterval = 120
+    /// How long (seconds) SYNs to a struck-out destination are RST'd immediately.
+    static let dialBackoffBlockInterval: TimeInterval = 45
+    /// Cap on destinations tracked by the dial backoff cache.
+    static let dialBackoffMaxEntries = 4096
 
     // MARK: - UDP Settings
 
@@ -53,9 +61,6 @@ enum TunnelConstants {
     /// Downlink datagrams before a flow earns the longer stream timeout; one
     /// reply is not enough since STUN and one-shot DNS get exactly one answer.
     static let udpStreamMinReplies = 4
-    /// Hard ceiling on concurrent UDP flows; each pins a socket plus a 64 KB
-    /// buffer, and an uncapped probe storm can get the extension jetsam-killed.
-    static let udpMaxFlows = 256
 
     // MARK: - Log Buffer
 

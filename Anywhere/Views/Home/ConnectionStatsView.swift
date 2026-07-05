@@ -13,8 +13,8 @@ struct ConnectionStatsView: View {
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
 
-    private static let tcpConnectionCeiling: Double = 256
-    private static let udpConnectionCeiling: Double = 256
+    private static let tcpConnectionCeiling = Double(TunnelLimits.tcpMaxConnections)
+    private static let udpConnectionCeiling = Double(TunnelLimits.udpMaxFlows)
     private static let memoryCeiling: Double = 50 * 1024 * 1024
 
     @State private var availableWidth: CGFloat = 353

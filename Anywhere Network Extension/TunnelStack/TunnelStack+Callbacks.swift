@@ -96,6 +96,10 @@ extension TunnelStack {
                 if case .reject = shared.domainRouter.matchIP(dstIPString) {
                     return reject(host: dstIPString, reason: "IP rule")
                 }
+                if DialBackoffCache.shared.shouldFastFail(host: dstIPString),
+                   shared.wouldRouteDirect(ip: dstIPString) {
+                    return Int32(LWIP_BRIDGE_SYN_RESET)
+                }
                 return Int32(LWIP_BRIDGE_SYN_PASS)
             case .resolved:
                 return Int32(LWIP_BRIDGE_SYN_PASS)
@@ -119,13 +123,13 @@ extension TunnelStack {
             }
             
             let activeTCP = Int(lwip_bridge_active_tcp_count())
-            if activeTCP > TunnelConstants.tcpMaxConnections {
+            if activeTCP > TunnelLimits.tcpMaxConnections {
                 if !shared.tcpConnectionCapWarned {
                     shared.tcpConnectionCapWarned = true
-                    logger.warning("[TCP] Connection table at capacity (\(TunnelConstants.tcpMaxConnections)); refusing new connections to bound memory")
+                    logger.warning("[TCP] Connection table at capacity (\(TunnelLimits.tcpMaxConnections)); refusing new connections to bound memory")
                 }
                 return nil  // bridge aborts newpcb (tcp_abort)
-            } else if shared.tcpConnectionCapWarned && activeTCP < TunnelConstants.tcpMaxConnections * 3 / 4 {
+            } else if shared.tcpConnectionCapWarned && activeTCP < TunnelLimits.tcpMaxConnections * 3 / 4 {
                 shared.tcpConnectionCapWarned = false
             }
 
@@ -245,6 +249,17 @@ extension TunnelStack {
             let tcpConnection = Unmanaged<TCPConnection>.fromOpaque(connection).takeRetainedValue()
             tcpConnection.handleError(err: err)
         }
+    }
+
+    // MARK: - Routing Helpers
+    
+    func wouldRouteDirect(ip: String) -> Bool {
+        if let action = domainRouter.matchIP(ip) {
+            if case .direct = action { return true }
+            return false
+        }
+        if case .direct = defaultRouteTarget { return true }
+        return false
     }
 
     // MARK: - Fake-IP Resolution
