@@ -1,6 +1,6 @@
 //
 //  PhoneSession.swift
-//  Anywhere Watch App
+//  Anywhere
 //
 //  Created by NodePassProject on 7/4/26.
 //

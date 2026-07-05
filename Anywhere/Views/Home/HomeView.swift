@@ -226,7 +226,22 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                backgroundCircle
+                if #available(iOS 27.0, *) {
+                    Circle()
+                        .fill(.clear)
+                        .frame(width: Self.circleDiameter)
+                        .glassEffect(.regular, in: .circle)
+                } else if #available(iOS 26.0, *) {
+                    Circle()
+                        .fill(.clear)
+                        .frame(width: Self.circleDiameter)
+                        .glassEffect(.clear, in: .circle)
+                } else {
+                    Circle()
+                        .fill(.white.opacity(0.2))
+                        .frame(width: Self.circleDiameter)
+                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
+                }
                 if isTransitioning || isLoading {
                     ProgressView()
                         .controlSize(.large)
@@ -240,28 +255,6 @@ private struct PowerButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .animation(animatesChanges ? Animation.easeInOut(duration: 0.6) : nil, value: isConnected)
-    }
-
-    @ViewBuilder
-    private var backgroundCircle: some View {
-        if #available(iOS 27.0, *) {
-            glassCircle
-                .glassEffect(.regular, in: .circle)
-        } else if #available(iOS 26.0, *) {
-            glassCircle
-                .glassEffect(.clear, in: .circle)
-        } else {
-            Circle()
-                .fill(.white.opacity(0.2))
-                .frame(width: Self.circleDiameter)
-                .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
-        }
-    }
-
-    private var glassCircle: some View {
-        Circle()
-            .fill(.clear)
-            .frame(width: Self.circleDiameter)
     }
 }
 

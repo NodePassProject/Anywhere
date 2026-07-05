@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  Anywhere Watch App
+//  Anywhere
 //
 //  Created by NodePassProject on 7/4/26.
 //
@@ -61,38 +61,10 @@ struct ContentView: View {
                     .foregroundStyle(.orange)
             }
 
-            configurationCapsule
+            ConfigurationCapsule(showingPicker: $showingPicker)
         }
         .padding(.horizontal, 8)
         .sensoryFeedback(.impact, trigger: phone.isConnected)
-    }
-
-    @ViewBuilder
-    private var configurationCapsule: some View {
-        if phone.snapshot?.hasConfigurations ?? false {
-            Button {
-                showingPicker = true
-            } label: {
-                HStack(spacing: 6) {
-                    Text(phone.snapshot?.selectedName ?? String(localized: "Not Configured"))
-                        .font(.footnote.weight(.medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Capsule().fill(.white.opacity(0.2)))
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-        } else {
-            Text("Add a configuration on your iPhone.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
     }
 }
 
@@ -135,12 +107,19 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                Circle()
-                    .fill(.white.opacity(0.2))
-                    .shadow(
-                        color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08),
-                        radius: isConnected ? 16 : 6
-                    )
+                if #available(watchOS 27.0, *) {
+                    Circle()
+                        .fill(.clear)
+                        .glassEffect(.regular, in: .circle)
+                } else if #available(watchOS 26.0, *) {
+                    Circle()
+                        .fill(.clear)
+                        .glassEffect(.clear, in: .circle)
+                } else {
+                    Circle()
+                        .fill(.white.opacity(0.2))
+                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 16 : 6)
+                }
                 if isTransitioning {
                     ProgressView()
                 } else {
@@ -153,6 +132,74 @@ private struct PowerButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled || isTransitioning)
+    }
+}
+
+// MARK: - Configuration Capsule
+
+private struct ConfigurationCapsule: View {
+    @Environment(PhoneSession.self) private var phone
+    
+    @Binding var showingPicker: Bool
+    
+    var body: some View {
+        if phone.snapshot?.hasConfigurations ?? false {
+            Button {
+                showingPicker = true
+            } label: {
+                HStack(spacing: 6) {
+                    Text(phone.snapshot?.selectedName ?? String(localized: "Not Configured"))
+                        .font(.footnote.weight(.medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Capsule().fill(.white.opacity(0.2)))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        } else {
+            Text("Add a configuration on your iPhone.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+    }
+}
+
+private struct ProminentCapsule<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        if #available(watchOS 27.0, *) {
+            content
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .contentShape(Capsule())
+                .glassEffect(.regular.interactive(), in: .capsule)
+        } else if #available(watchOS 26.0, *) {
+            content
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .contentShape(Capsule())
+                .glassEffect(.clear.interactive(), in: .capsule)
+        } else {
+            content
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .contentShape(Capsule())
+                .background(
+                    Capsule()
+                        .fill(.white.opacity(0.2))
+                )
+        }
     }
 }
 
