@@ -77,6 +77,7 @@ extension ProxyClient {
                 connectHost: directDialHost,
                 tunnel: tunnel
             )
+            own(connection)
             tunnel = nil
             connection.openFresh(destination: destination, mode: mode) { error in
                 if let error {

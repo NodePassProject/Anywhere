@@ -627,11 +627,17 @@ class TCPConnection {
         self.proxyClient = client
 
         client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
-            guard let self else { return }
+            guard let self else {
+                if case .success(let connection) = result { connection.cancel() }
+                return
+            }
 
             self.lwipQueue.async { [self] in
                 self.proxyConnecting = false
-                guard !self.closed else { return }
+                guard !self.closed else {
+                    if case .success(let connection) = result { connection.cancel() }
+                    return
+                }
 
                 switch result {
                 case .success(let proxyConnection):

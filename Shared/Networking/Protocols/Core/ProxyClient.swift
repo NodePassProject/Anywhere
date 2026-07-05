@@ -31,24 +31,13 @@ private final class TeardownCounter: @unchecked Sendable {
 nonisolated class ProxyClient {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
-    var connection: NWTCPTransport?
-    /// Raw UDP leg for the SOCKS5 relay / Shadowsocks real-UDP paths.
-    var udpTransport: NWUDPTransport?
-    private var realityClient: RealityClient?
-    private var realityConnection: TLSRecordConnection?
-    var tlsClient: TLSClient?
-    var tlsConnection: TLSRecordConnection?
-
-    /// Sockets/TLS/Reality clients dialed for XHTTP legs, retained for the connection's lifetime.
-    private var retainedXHTTPObjects: [AnyObject] = []
-    private var webSocketConnection: WebSocketConnection?
-    private var httpUpgradeConnection: HTTPUpgradeConnection?
-    private var grpcConnection: GRPCConnection?
-    private var xhttpConnection: XHTTPConnection?
+    
+    private var ownedResources: [any ProxyClientOwned] = []
+    private let ownedLock = UnfairLock()
+    private var ownedCancelled = false
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
     var tunnel: ProxyConnection?
-    private var chainClients: [ProxyClient] = []
 
     /// For a chain link, the chain prefix leading to this link's server, so it can rebuild
     /// that prefix for an extra dial (e.g. SOCKS5's UDP-ASSOCIATE relay). Empty otherwise.
@@ -75,6 +64,41 @@ nonisolated class ProxyClient {
     /// Host for direct first-hop dials: the hostname normally, the pre-resolved IP for latency tests.
     var directDialHost: String {
         useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
+    }
+
+    // MARK: - Resource Ownership
+
+    /// Registers a resource at creation time, before dialing, so `cancel()` reaches it
+    /// even mid-dial.
+    @discardableResult
+    func own(_ resource: any ProxyClientOwned) -> Bool {
+        ownedLock.lock()
+        if ownedCancelled {
+            ownedLock.unlock()
+            resource.releaseOwned()
+            return false
+        }
+        ownedResources.append(resource)
+        ownedLock.unlock()
+        return true
+    }
+
+    /// Wraps a connect completion so the delivered connection is client-owned before
+    /// the caller sees it; a delivery that races teardown is cancelled and reported as a
+    /// failure instead.
+    private func owningDelivered(
+        _ completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) -> (Result<ProxyConnection, Error>) -> Void {
+        return { [weak self] result in
+            if case .success(let connection) = result {
+                guard let self, self.own(connection) else {
+                    connection.cancel()
+                    completion(.failure(ProxyError.connectionFailed("Client released during connect")))
+                    return
+                }
+            }
+            completion(result)
+        }
     }
 
     // MARK: - Public API
@@ -110,7 +134,7 @@ nonisolated class ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: initialData,
-            completion: handshakeTimed(completion)
+            completion: handshakeTimed(owningDelivered(completion))
         )
     }
     
@@ -124,7 +148,7 @@ nonisolated class ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: nil,
-            completion: handshakeTimed(completion)
+            completion: handshakeTimed(owningDelivered(completion))
         )
     }
     
@@ -134,7 +158,7 @@ nonisolated class ProxyClient {
             destinationHost: "v1.mux.cool",
             destinationPort: 666,
             initialData: nil,
-            completion: handshakeTimed(completion)
+            completion: handshakeTimed(owningDelivered(completion))
         )
     }
     
@@ -263,7 +287,7 @@ nonisolated class ProxyClient {
         let resolvedDestination: (host: String, port: UInt16) = finalDestination
             ?? (host: configuration.serverAddress, port: configuration.serverPort)
         let resolvedTrack: (ProxyClient) -> Void = track ?? { [weak self] client in
-            self?.chainClients.append(client)
+            self?.own(client)
         }
         Self.dispatchChainHop(
             chain: chain,
@@ -365,46 +389,28 @@ nonisolated class ProxyClient {
 
     /// Fires `completion` once every underlying socket has fully torn down (fd closed).
     func cancel(completion: @escaping @Sendable () -> Void) {
-        // Higher-level wrappers don't hold fds — teardown is synchronous bookkeeping.
-        webSocketConnection?.cancel()
-        webSocketConnection = nil
-        httpUpgradeConnection?.cancel()
-        httpUpgradeConnection = nil
-        grpcConnection?.cancel()
-        grpcConnection = nil
-        xhttpConnection?.cancel()
-        xhttpConnection = nil
-        // XHTTP sockets are torn down via xhttpConnection.cancel(); just drop the references.
-        retainedXHTTPObjects.removeAll()
-        realityConnection?.cancel()
-        realityConnection = nil
-        realityClient?.cancel()
-        realityClient = nil
-        tlsConnection?.cancel()
-        tlsConnection = nil
-        tlsClient?.cancel()
-        tlsClient = nil
+        ownedLock.lock()
+        ownedCancelled = true
+        let owned = ownedResources
+        ownedResources.removeAll()
+        ownedLock.unlock()
+
+        // A chain link's inbound tunnel belongs to the client that produced it; drop the reference only.
         tunnel = nil
-        udpTransport?.cancel()
-        udpTransport = nil
 
-        // Awaitable teardowns: the raw socket and each chain client (each owns its own raw socket).
-        let socket = connection
-        connection = nil
-        let chains = chainClients
-        chainClients.removeAll()
-
-        let total = (socket != nil ? 1 : 0) + chains.count
-        if total == 0 {
-            completion()
-            return
+        // LIFO: unwind wrappers before the transports they ride. Awaitable resources
+        // (raw sockets, chain clients) report fd teardown through the counter; the
+        // +1 sentinel fires `completion` even when there are none.
+        let awaitables = owned.reduce(into: 0) { if $1 is any AwaitableProxyClientOwned { $0 += 1 } }
+        let counter = TeardownCounter(remaining: awaitables + 1, completion: completion)
+        for resource in owned.reversed() {
+            if let awaitable = resource as? any AwaitableProxyClientOwned {
+                awaitable.releaseOwned { counter.decrement() }
+            } else {
+                resource.releaseOwned()
+            }
         }
-
-        let counter = TeardownCounter(remaining: total, completion: completion)
-        socket?.forceCancel { counter.decrement() }
-        for client in chains {
-            client.cancel { counter.decrement() }
-        }
+        counter.decrement()
     }
 
     // MARK: - Protocol Handshake
@@ -582,7 +588,7 @@ nonisolated class ProxyClient {
             )
         } else {
             let transport = NWTCPTransport()
-            self.connection = transport
+            self.own(transport)
 
             transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                 if let error {
@@ -614,7 +620,7 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let tlsClient = TLSClient(configuration: tlsConfig)
-        self.tlsClient = tlsClient
+        self.own(tlsClient)
 
         let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
@@ -623,7 +629,7 @@ nonisolated class ProxyClient {
             }
             switch result {
             case .success(let tlsConnection):
-                self.tlsConnection = tlsConnection
+                self.own(tlsConnection)
                 let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
                 self.sendProtocolHandshake(
                     over: tlsProxyConnection, command: command, destinationHost: destinationHost,
@@ -653,7 +659,7 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let realityClient = RealityClient(configuration: realityConfig)
-        self.realityClient = realityClient
+        self.own(realityClient)
 
         let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
@@ -662,7 +668,7 @@ nonisolated class ProxyClient {
             }
             switch result {
             case .success(let realityConnection):
-                self.realityConnection = realityConnection
+                self.own(realityConnection)
                 let realityProxyConnection = RealityProxyConnection(realityConnection: realityConnection)
                 self.sendProtocolHandshake(
                     over: realityProxyConnection, command: command, destinationHost: destinationHost,
@@ -704,7 +710,7 @@ nonisolated class ProxyClient {
                 fingerprint: baseTLSConfig.fingerprint
             )
             let tlsClient = TLSClient(configuration: wsTlsConfig)
-            self.tlsClient = tlsClient
+            self.own(tlsClient)
 
             let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
@@ -713,7 +719,7 @@ nonisolated class ProxyClient {
                 }
                 switch result {
                 case .success(let tlsConnection):
-                    self.tlsConnection = tlsConnection
+                    self.own(tlsConnection)
                     let wsConnection = WebSocketConnection(tlsConnection: tlsConnection, configuration: wsConfig)
                     self.performWebSocketUpgrade(
                         wsConnection: wsConnection, command: command, destinationHost: destinationHost,
@@ -738,7 +744,7 @@ nonisolated class ProxyClient {
                 )
             } else {
                 let transport = NWTCPTransport()
-                self.connection = transport
+                self.own(transport)
 
                 transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                     if let error {
@@ -767,7 +773,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        self.webSocketConnection = wsConnection
+        own(wsConnection)
 
         wsConnection.performUpgrade { [weak self] error in
             if let error {
@@ -803,7 +809,7 @@ nonisolated class ProxyClient {
 
         if case .tls(let tlsConfiguration) = configuration.xraySecurityLayer {
             let tlsClient = TLSClient(configuration: tlsConfiguration)
-            self.tlsClient = tlsClient
+            self.own(tlsClient)
 
             let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
@@ -812,7 +818,7 @@ nonisolated class ProxyClient {
                 }
                 switch result {
                 case .success(let tlsConnection):
-                    self.tlsConnection = tlsConnection
+                    self.own(tlsConnection)
                     let huConnection = HTTPUpgradeConnection(tlsConnection: tlsConnection, configuration: huConfig)
                     self.performHTTPUpgrade(
                         huConnection: huConnection, command: command, destinationHost: destinationHost,
@@ -837,7 +843,7 @@ nonisolated class ProxyClient {
                 )
             } else {
                 let transport = NWTCPTransport()
-                self.connection = transport
+                self.own(transport)
 
                 transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                     if let error {
@@ -866,7 +872,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        self.httpUpgradeConnection = huConnection
+        own(huConnection)
 
         huConnection.performUpgrade { [weak self] error in
             if let error {
@@ -927,7 +933,7 @@ nonisolated class ProxyClient {
         if case .reality(let realityConfig) = configuration.xraySecurityLayer {
             // Reality handles its own ALPN internally; layer gRPC on top.
             let realityClient = RealityClient(configuration: realityConfig)
-            self.realityClient = realityClient
+            self.own(realityClient)
 
             let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
@@ -936,7 +942,7 @@ nonisolated class ProxyClient {
                 }
                 switch result {
                 case .success(let realityConnection):
-                    self.realityConnection = realityConnection
+                    self.own(realityConnection)
                     let grpcConnection = GRPCConnection(
                         tlsConnection: realityConnection,
                         configuration: grpcConfig,
@@ -962,7 +968,7 @@ nonisolated class ProxyClient {
         if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
             let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
             let tlsClient = TLSClient(configuration: grpcTLSConfig)
-            self.tlsClient = tlsClient
+            self.own(tlsClient)
 
             let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
@@ -971,7 +977,7 @@ nonisolated class ProxyClient {
                 }
                 switch result {
                 case .success(let tlsConnection):
-                    self.tlsConnection = tlsConnection
+                    self.own(tlsConnection)
                     let grpcConnection = GRPCConnection(
                         tlsConnection: tlsConnection,
                         configuration: grpcConfig,
@@ -1002,7 +1008,7 @@ nonisolated class ProxyClient {
             )
         } else {
             let transport = NWTCPTransport()
-            self.connection = transport
+            self.own(transport)
             transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                 if let error {
                     completion(.failure(error))
@@ -1029,7 +1035,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        self.grpcConnection = grpcConnection
+        own(grpcConnection)
 
         grpcConnection.performSetup { [weak self] error in
             if let error {
@@ -1205,6 +1211,7 @@ nonisolated class ProxyClient {
             xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .combined, uploadFactory: uploadFactory
         ) { [weak self] result in
             guard let self else {
+                if case .success(let xhttpConnection) = result { xhttpConnection.cancel() }
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
@@ -1212,7 +1219,7 @@ nonisolated class ProxyClient {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let xhttpConnection):
-                self.xhttpConnection = xhttpConnection
+                self.own(xhttpConnection)
                 self.performXHTTPSetup(
                     xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData, completion: completion
@@ -1270,6 +1277,7 @@ nonisolated class ProxyClient {
             xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .uploadOnly, uploadFactory: nil
         ) { [weak self] uploadResult in
             guard let self else {
+                if case .success(let uploadLeg) = uploadResult { uploadLeg.cancel() }
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
@@ -1277,25 +1285,29 @@ nonisolated class ProxyClient {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let uploadLeg):
+                // The download leg later re-owns this as coordinator (`uploadChannel`);
+                // the double-cancel is idempotent.
+                self.own(uploadLeg)
                 self.dialXHTTPLeg(
                     endpoint: self.downloadXHTTPEndpoint(downloadSettings), httpVersion: downloadHTTPVersion,
                     route: .direct, xhttp: downloadSettings.xhttp, mode: mode, sessionId: sessionId,
                     role: .downloadOnly, uploadFactory: nil
                 ) { [weak self] downloadResult in
                     guard let self else {
+                        // Deallocation never fires the registry, so dispose both legs by hand.
+                        uploadLeg.cancel()
+                        if case .success(let downloadLeg) = downloadResult { downloadLeg.cancel() }
                         completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                         return
                     }
                     switch downloadResult {
                     case .failure(let error):
-                        // The upload leg never joined xhttpConnection, so a later cancel()
-                        // can't reach it — tear it down here to avoid a leak.
                         uploadLeg.cancel()
                         completion(.failure(error))
                     case .success(let downloadLeg):
                         // Download leg is the coordinator; it owns the upload leg.
                         downloadLeg.uploadChannel = uploadLeg
-                        self.xhttpConnection = downloadLeg
+                        self.own(downloadLeg)
                         self.performXHTTPSetup(
                             xhttpConnection: downloadLeg, command: command,
                             destinationHost: destinationHost, destinationPort: destinationPort,
@@ -1589,7 +1601,7 @@ nonisolated class ProxyClient {
                 completion(.success(.byteStream(TransportClosures(tunnel: tunnel))))
             } else {
                 let transport = NWTCPTransport()
-                retainedXHTTPObjects.append(transport)
+                own(transport)
                 transport.connect(host: host, port: port) { error in
                     if let error { completion(.failure(error)); return }
                     completion(.success(.byteStream(TransportClosures(tcp: transport))))
@@ -1597,7 +1609,7 @@ nonisolated class ProxyClient {
             }
         case .tls(let tlsConfig):
             let client = TLSClient(configuration: sanitizedXHTTPTLSConfiguration(from: tlsConfig, httpVersion: httpVersion))
-            retainedXHTTPObjects.append(client)
+            own(client)
             let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
                 completion(result.map { .byteStream(TransportClosures(tls: $0)) })
             }
@@ -1608,7 +1620,7 @@ nonisolated class ProxyClient {
             }
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
-            retainedXHTTPObjects.append(client)
+            own(client)
             let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
                 completion(result.map { .byteStream(TransportClosures(tls: $0)) })
             }

@@ -218,6 +218,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
             self.queue.async {
                 if let error {
                     self.state = .closed
+                    self.transport.cancel()
                     self.updatePoolSnapshot()
                     self.completeReadyCallbacks(error)
                     return

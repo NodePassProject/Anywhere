@@ -23,6 +23,7 @@ extension ProxyClient {
         }
 
         let tlsClient = TLSClient(configuration: tlsConfig)
+        own(tlsClient)
 
         let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
@@ -31,8 +32,7 @@ extension ProxyClient {
             }
             switch result {
             case .success(let tlsConnection):
-                self.tlsClient = tlsClient
-                self.tlsConnection = tlsConnection
+                self.own(tlsConnection)
                 let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
                 self.wrapTrojan(
                     over: tlsProxyConnection,

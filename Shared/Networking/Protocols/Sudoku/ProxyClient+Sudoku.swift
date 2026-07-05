@@ -25,6 +25,7 @@ extension ProxyClient {
             initialTunnel: tunnel,
             directDialHost: directDialHost
         )
+        own(factory)
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {

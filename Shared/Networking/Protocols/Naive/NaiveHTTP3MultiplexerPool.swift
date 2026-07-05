@@ -104,8 +104,13 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
     /// Removes closed/stream-blocked muxes (age-based eviction is the base's). Must hold ``lock``.
     private func pruneDead(key: String) {
         multiplexers[key]?.removeAll { multiplexer in
-            if multiplexer.isClosed || multiplexer.poolIsStreamBlocked {
+            if multiplexer.isClosed {
                 lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                return true
+            }
+            if multiplexer.poolIsStreamBlocked && !multiplexer.hasActiveStreams {
+                lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                multiplexer.close()
                 return true
             }
             return false

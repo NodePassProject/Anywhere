@@ -62,7 +62,7 @@ extension ProxyClient {
             wrapAndComplete(tunnel)
         } else {
             let transport = NWUDPTransport()
-            self.udpTransport = transport
+            self.own(transport)
             transport.connect(host: directDialHost,
                            port: configuration.serverPort,
                            completionQueue: .global()) { error in

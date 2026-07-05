@@ -96,6 +96,7 @@ extension ProxyClient {
             configuration: naiveConfig,
             destination: destination
         ) { [self] stream in
+            own(stream)
             stream.openTunnel { [self] error in
                 if let error {
                     stream.close()
@@ -135,9 +136,10 @@ extension ProxyClient {
     }
 
     private func openTunnelAndWrap(
-        _ tunnel: NaiveTunnel,
+        _ tunnel: NaiveTunnelAdapter,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        own(tunnel)
         tunnel.openTunnel { error in
             if let error {
                 tunnel.close()

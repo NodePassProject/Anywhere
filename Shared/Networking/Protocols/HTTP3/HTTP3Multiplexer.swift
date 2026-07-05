@@ -446,7 +446,8 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
         for stream in activeStreams {
             stream.handleSessionError(error)
         }
-
+        
+        quic.close()
         onClose?()
     }
 }

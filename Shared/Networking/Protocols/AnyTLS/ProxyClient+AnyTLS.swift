@@ -70,13 +70,18 @@ extension ProxyClient {
             return
         }
 
-        client.acquireStream { result in
+        client.acquireStream { [weak self] result in
             switch result {
             case .failure(let error):
                 logger.debug("[AnyTLS] acquireStream failed: \(error.localizedDescription)")
                 completion(.failure(error))
 
             case .success(let stream):
+                guard let self, self.own(stream) else {
+                    stream.cancel()
+                    completion(.failure(ProxyError.connectionFailed("Client released during connect")))
+                    return
+                }
                 logger.debug("[AnyTLS] stream opened sid=\(stream.sid) cmd=\(command)")
                 switch command {
                 case .tcp:
