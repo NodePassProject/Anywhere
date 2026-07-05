@@ -43,6 +43,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
         connectHost: String,
         destination: String,
         mode: NowhereTCPRelayMode = .tcp,
+        flowHeader: NowhereProtocol.FlowHeader? = nil,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let key = Key(
@@ -77,7 +78,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
             return pool
         }
         replaced?.closeAll()
-        pool.acquire(destination: destination, mode: mode, completion: completion)
+        pool.acquire(destination: destination, mode: mode, flowHeader: flowHeader, completion: completion)
     }
 
     func closeAll() {
@@ -142,6 +143,7 @@ nonisolated private final class NowhereTCPConnectionPool {
     func acquire(
         destination: String,
         mode: NowhereTCPRelayMode,
+        flowHeader: NowhereProtocol.FlowHeader?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         var selected: NowhereTCPConnection?
@@ -191,20 +193,20 @@ nonisolated private final class NowhereTCPConnectionPool {
 
         if let selected {
             selected.setPreparedCloseHandler(nil)
-            selected.activate(destination: destination, mode: mode) { [weak self] error in
+            selected.activate(destination: destination, mode: mode, flowHeader: flowHeader) { [weak self] error in
                 if error != nil {
                     selected.cancel()
                     guard let self else {
                         completion(.failure(ProxyError.connectionFailed("Nowhere TCP pool closed during acquire")))
                         return
                     }
-                    self.openFresh(destination: destination, mode: mode, completion: completion)
+                    self.openFresh(destination: destination, mode: mode, flowHeader: flowHeader, completion: completion)
                 } else {
-                    completion(.success(Self.proxyConnection(selected, mode: mode)))
+                    completion(.success(Self.proxyConnection(selected, mode: mode, flowHeader: flowHeader)))
                 }
             }
         } else {
-            openFresh(destination: destination, mode: mode, completion: completion)
+            openFresh(destination: destination, mode: mode, flowHeader: flowHeader, completion: completion)
         }
     }
 
@@ -229,6 +231,7 @@ nonisolated private final class NowhereTCPConnectionPool {
     private func openFresh(
         destination: String,
         mode: NowhereTCPRelayMode,
+        flowHeader: NowhereProtocol.FlowHeader?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let connection = NowhereTCPConnection(
@@ -236,25 +239,29 @@ nonisolated private final class NowhereTCPConnectionPool {
             connectHost: connectHost,
             tunnel: nil
         )
-        connection.openFresh(destination: destination, mode: mode) { error in
+        connection.openFresh(destination: destination, mode: mode, flowHeader: flowHeader) { error in
             if let error {
                 connection.cancel()
                 completion(.failure(error))
             } else {
-                completion(.success(Self.proxyConnection(connection, mode: mode)))
+                completion(.success(Self.proxyConnection(connection, mode: mode, flowHeader: flowHeader)))
             }
         }
     }
 
     private static func proxyConnection(
         _ connection: NowhereTCPConnection,
-        mode: NowhereTCPRelayMode
+        mode: NowhereTCPRelayMode,
+        flowHeader: NowhereProtocol.FlowHeader?
     ) -> ProxyConnection {
         switch mode {
         case .tcp:
             return connection
         case .udp:
-            return NowhereTCPUDPConnection(inner: connection)
+            return NowhereTCPUDPConnection(
+                inner: connection,
+                expectsAck: flowHeader?.role == .attach
+            )
         }
     }
 

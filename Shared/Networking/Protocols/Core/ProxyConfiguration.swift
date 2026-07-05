@@ -112,7 +112,8 @@ enum Outbound: Hashable {
     case nowhere(
         key: String,
         spec: String?,
-        net: NowhereNetwork,
+        uplink: NowhereNetwork,
+        downlink: NowhereNetwork,
         pool: Int,
         securityLayer: GenericSecurityLayer
     )
@@ -244,7 +245,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         switch outbound {
         case .trojan(_, let security):           security
         case .anytls(_, _, _, _, let security):  security
-        case .nowhere(_, _, _, _, let security): security
+        case .nowhere(_, _, _, _, _, let security): security
         default:                                 .none
         }
     }
@@ -254,10 +255,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         switch outboundProtocol {
         case .hysteria:         tag = "QUIC"
         case .nowhere:
-            switch nowhereNetwork {
-            case .tcp:          tag = nil
-            case .udp:          tag = "QUIC"
-            }
+            tag = nowhereUplink == .udp || nowhereDownlink == .udp ? "QUIC" : nil
         case .vless:
             switch xrayTransportLayer {
             case .raw:          tag = nil
@@ -276,10 +274,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         switch outboundProtocol {
         case .hysteria:         tag = "TLS"
         case .nowhere:
-            switch nowhereNetwork {
-            case .tcp:          tag = "TLS"
-            case .udp:          tag = "TLS"
-            }
+            tag = "TLS"
         case .vless:
             switch xraySecurityLayer {
             case .none:         tag = nil
@@ -320,20 +315,25 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         return alpn.count == 1 && alpn[0].caseInsensitiveCompare("h3") == .orderedSame
     }
 
-    var nowhereNetwork: NowhereNetwork {
-        if case .nowhere(_, _, let net, _, _) = outbound { return net }
+    var nowhereUplink: NowhereNetwork {
+        if case .nowhere(_, _, let uplink, _, _, _) = outbound { return uplink }
+        return .udp
+    }
+
+    var nowhereDownlink: NowhereNetwork {
+        if case .nowhere(_, _, _, let downlink, _, _) = outbound { return downlink }
         return .udp
     }
 
     var nowherePool: Int {
-        if case .nowhere(_, _, _, let pool, _) = outbound { return pool }
+        if case .nowhere(_, _, _, _, let pool, _) = outbound { return pool }
         return 0
     }
     
     func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
         if isXHTTPOverHTTP3 { return .udp }
         if outboundProtocol == .nowhere {
-            switch nowhereNetwork {
+            switch nowhereUplink {
             case .udp:
                 return .udp
             case .tcp:
@@ -401,7 +401,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps
         case hysteriaObfs, hysteriaObfsPassword, hysteriaObfsMinPacketSize, hysteriaObfsMaxPacketSize
         case hysteriaSNI
-        case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN, nowhereTLS, net, pool
+        case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN, nowhereTLS, net, up, down, pool
         case trojanPassword, trojanTLS
         case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
         case ssPassword, ssMethod
@@ -494,27 +494,42 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let alpnString = try container.decodeIfPresent(String.self, forKey: .nowhereALPN)
             let alpn = alpnString.flatMap { $0.isEmpty ? nil : [$0] } ?? legacyTLS?.alpn
             let rawNetwork = try container.decodeIfPresent(String.self, forKey: .net)
-            let network: NowhereNetwork
-            if rawNetwork?.isEmpty != false {
-                network = .udp
-            } else if let parsed = rawNetwork.flatMap(NowhereNetwork.init(rawValue:)) {
-                network = parsed
-            } else {
+            let rawUp = try container.decodeIfPresent(String.self, forKey: .up)
+            let rawDown = try container.decodeIfPresent(String.self, forKey: .down)
+            if rawNetwork != nil && (rawUp != nil || rawDown != nil) {
                 throw DecodingError.dataCorruptedError(
-                    forKey: .net,
-                    in: container,
-                    debugDescription: "Invalid Nowhere net value"
+                    forKey: .net, in: container,
+                    debugDescription: "Nowhere net cannot be combined with up/down"
                 )
             }
+            let legacy = rawNetwork.flatMap(NowhereNetwork.init(rawValue:))
+            if rawNetwork?.isEmpty == false && legacy == nil {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .net, in: container, debugDescription: "Invalid Nowhere net value"
+                )
+            }
+            let uplink = rawUp.flatMap(NowhereNetwork.init(rawValue:)) ?? legacy ?? .udp
+            let downlink = rawDown.flatMap(NowhereNetwork.init(rawValue:)) ?? legacy ?? .udp
+            if rawUp?.isEmpty == false && NowhereNetwork(rawValue: rawUp!) == nil {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .up, in: container, debugDescription: "Invalid Nowhere up value"
+                )
+            }
+            if rawDown?.isEmpty == false && NowhereNetwork(rawValue: rawDown!) == nil {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .down, in: container, debugDescription: "Invalid Nowhere down value"
+                )
+            }
+            let supportsPreconnect = uplink == .tcp && downlink == .tcp
             let pool: Int
             if !container.contains(.pool) {
-                pool = network == .tcp ? NowherePool.enabledDefault : 0
+                pool = supportsPreconnect ? NowherePool.enabledDefault : 0
             } else if try container.decodeNil(forKey: .pool) {
-                pool = network == .tcp ? NowherePool.enabledDefault : 0
+                pool = supportsPreconnect ? NowherePool.enabledDefault : 0
             } else if let value = try? container.decode(Int.self, forKey: .pool) {
                 pool = value
             } else if let raw = try? container.decode(String.self, forKey: .pool), raw.isEmpty {
-                pool = network == .tcp ? NowherePool.enabledDefault : 0
+                pool = supportsPreconnect ? NowherePool.enabledDefault : 0
             } else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .pool,
@@ -522,7 +537,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                     debugDescription: "Invalid Nowhere pool value"
                 )
             }
-            guard NowherePool.validRange.contains(pool) else {
+            guard !supportsPreconnect || NowherePool.validRange.contains(pool) else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .pool,
                     in: container,
@@ -531,9 +546,10 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             }
             outbound = .nowhere(
                 key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? "",
-                spec: try container.decodeIfPresent(String.self, forKey: .nowhereSpec),
-                net: network,
-                pool: pool,
+                spec: NowhereProtocol.normalizedSpec(try container.decodeIfPresent(String.self, forKey: .nowhereSpec)),
+                uplink: uplink,
+                downlink: downlink,
+                pool: supportsPreconnect ? pool : 0,
                 securityLayer: .tls(TLSConfiguration(
                     serverName: (explicitSNI?.isEmpty == false ? explicitSNI : nil)
                         ?? legacyTLS?.serverName
@@ -648,14 +664,15 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 }
             }
             try container.encode(sni, forKey: .hysteriaSNI)
-        case .nowhere(let key, let spec, let net, let pool, let securityLayer):
+        case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: serverAddress)
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(key, forKey: .nowhereKey)
-            try container.encodeIfPresent(spec, forKey: .nowhereSpec)
-            try container.encode(net.rawValue, forKey: .net)
-            if net == .tcp {
+            try container.encode(NowhereProtocol.normalizedSpec(spec), forKey: .nowhereSpec)
+            try container.encode(uplink.rawValue, forKey: .up)
+            try container.encode(downlink.rawValue, forKey: .down)
+            if uplink == .tcp && downlink == .tcp {
                 try container.encode(pool, forKey: .pool)
             }
             try container.encode(tls.serverName, forKey: .nowhereSNI)

@@ -18,6 +18,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
 
     private let session: NowhereSession
     private let destination: String
+    private let flowHeader: NowhereProtocol.FlowHeader?
 
     private var _state: State = .idle
     private var state: State {
@@ -37,9 +38,10 @@ nonisolated final class NowhereConnection: ProxyConnection {
     private var pendingQuicBytes = 0
     private var openCompletion: ((Error?) -> Void)?
 
-    init(session: NowhereSession, destination: String) {
+    init(session: NowhereSession, destination: String, flowHeader: NowhereProtocol.FlowHeader? = nil) {
         self.session = session
         self.destination = destination
+        self.flowHeader = flowHeader
         super.init()
     }
 
@@ -78,10 +80,18 @@ nonisolated final class NowhereConnection: ProxyConnection {
         state = .handshaking
         let frame: Data
         do {
-            frame = try NowhereProtocol.encodeTCPRequest(
-                address: destination,
-                protocolSpec: session.protocolSpec
-            )
+            if let flowHeader {
+                frame = try NowhereProtocol.encodeFlowRequest(
+                    header: flowHeader,
+                    target: destination,
+                    protocolSpec: session.protocolSpec
+                )
+            } else {
+                frame = try NowhereProtocol.encodeTCPRequest(
+                    address: destination,
+                    protocolSpec: session.protocolSpec
+                )
+            }
         } catch {
             fail(error)
             return
@@ -250,13 +260,15 @@ nonisolated final class NowhereConnection: ProxyConnection {
 nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: NowhereTCPConnection
+    private var expectsAck: Bool
 
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
 
-    init(inner: NowhereTCPConnection) {
+    init(inner: NowhereTCPConnection, expectsAck: Bool = false) {
         self.inner = inner
+        self.expectsAck = expectsAck
         super.init()
     }
 
@@ -283,6 +295,12 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
     override func receive(completion: @escaping (Data?, Error?) -> Void) {
         udpLock.lock()
         if let packet = extractUDPPacket() {
+            if packet.isEmpty && expectsAck {
+                expectsAck = false
+                udpLock.unlock()
+                receive(completion: completion)
+                return
+            }
             udpLock.unlock()
             completion(packet, nil)
             return
@@ -312,6 +330,12 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
             self.udpLock.lock()
             self.udpBuffer.append(data)
             if let packet = self.extractUDPPacket() {
+                if packet.isEmpty && self.expectsAck {
+                    self.expectsAck = false
+                    self.udpLock.unlock()
+                    self.receive(completion: completion)
+                    return
+                }
                 self.udpLock.unlock()
                 completion(packet, nil)
             } else {
@@ -379,7 +403,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
         do {
             auth = try NowhereProtocol.makeAuthFrame(
                 key: configuration.key,
-                protocolSpec: configuration.protocolSpec
+                protocolSpec: configuration.protocolSpec,
+                sessionID: configuration.sessionID
             )
         } catch {
             completion(error)
@@ -392,14 +417,16 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
     func openFresh(
         destination: String,
         mode: NowhereTCPRelayMode = .tcp,
+        flowHeader: NowhereProtocol.FlowHeader? = nil,
         completion: @escaping (Error?) -> Void
     ) {
         let bootstrap: Data
         do {
             bootstrap = try NowhereProtocol.makeAuthFrame(
                 key: configuration.key,
-                protocolSpec: configuration.protocolSpec
-            ) + requestPayload(destination: destination, mode: mode)
+                protocolSpec: configuration.protocolSpec,
+                sessionID: configuration.sessionID
+            ) + requestPayload(destination: destination, mode: mode, flowHeader: flowHeader)
         } catch {
             completion(error)
             return
@@ -411,11 +438,12 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
     func activate(
         destination: String,
         mode: NowhereTCPRelayMode = .tcp,
+        flowHeader: NowhereProtocol.FlowHeader? = nil,
         completion: @escaping (Error?) -> Void
     ) {
         let request: Data
         do {
-            request = try requestPayload(destination: destination, mode: mode)
+            request = try requestPayload(destination: destination, mode: mode, flowHeader: flowHeader)
         } catch {
             completion(error)
             return
@@ -451,7 +479,18 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
         }
     }
 
-    private func requestPayload(destination: String, mode: NowhereTCPRelayMode) throws -> Data {
+    private func requestPayload(
+        destination: String,
+        mode: NowhereTCPRelayMode,
+        flowHeader: NowhereProtocol.FlowHeader?
+    ) throws -> Data {
+        if let flowHeader {
+            return try NowhereProtocol.encodeFlowRequest(
+                header: flowHeader,
+                target: destination,
+                protocolSpec: configuration.protocolSpec
+            )
+        }
         switch mode {
         case .tcp:
             return try NowhereProtocol.encodeTCPRequest(
@@ -699,5 +738,46 @@ nonisolated final class NowhereTCPConnection: ProxyConnection {
         resources.2?(NowhereError.streamClosed)
         resources.3?(nil, NowhereError.streamClosed)
         resources.4?()
+    }
+}
+
+/// Presents one logical proxy flow while retaining independent carrier halves.
+nonisolated final class NowhereDirectionalConnection: ProxyConnection {
+    private let uplink: ProxyConnection
+    private let downlink: ProxyConnection
+
+    init(uplink: ProxyConnection, downlink: ProxyConnection) {
+        self.uplink = uplink
+        self.downlink = downlink
+        super.init()
+    }
+
+    override var isConnected: Bool { uplink.isConnected && downlink.isConnected }
+    override var outerTLSVersion: TLSVersion? { uplink.outerTLSVersion ?? downlink.outerTLSVersion }
+    override var deliversDatagrams: Bool { uplink.deliversDatagrams || downlink.deliversDatagrams }
+
+    override func send(data: Data, completion: @escaping (Error?) -> Void) {
+        uplink.send(data: data, completion: completion)
+    }
+
+    override func send(data: Data) { uplink.send(data: data) }
+
+    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+        uplink.sendRaw(data: data, completion: completion)
+    }
+
+    override func sendRaw(data: Data) { uplink.sendRaw(data: data) }
+
+    override func receive(completion: @escaping (Data?, Error?) -> Void) {
+        downlink.receive(completion: completion)
+    }
+
+    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+        downlink.receiveRaw(completion: completion)
+    }
+
+    override func cancel() {
+        uplink.cancel()
+        if uplink !== downlink { downlink.cancel() }
     }
 }

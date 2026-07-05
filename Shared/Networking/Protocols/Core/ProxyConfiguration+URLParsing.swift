@@ -147,7 +147,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parses `nowhere://<key>@host:port?net=udp|tcp&spec=...&sni=...&alpn=...&pool=0..9#name`.
+    /// Parses `nowhere://<key>@host:port?up=udp|tcp&down=udp|tcp&spec=...&pool=0..9#name`.
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let body = try splitLinkBody(url, scheme: "nowhere://", label: "Nowhere")
         let parameters = body.parameters
@@ -157,24 +157,34 @@ extension ProxyConfiguration {
             throw ProxyError.invalidURL("Missing Nowhere key")
         }
 
-        let spec = parameters["spec"].flatMap { $0.isEmpty ? nil : $0 }
-        let rawNetwork = parameters["net"] ?? ""
-        let network: NowhereNetwork
-        if rawNetwork.isEmpty {
-            network = .udp
-        } else if let parsed = NowhereNetwork(rawValue: rawNetwork) {
-            network = parsed
-        } else {
+        let spec = NowhereProtocol.normalizedSpec(parameters["spec"])
+        let rawNetwork = parameters["net"]
+        let rawUp = parameters["up"]
+        let rawDown = parameters["down"]
+        if rawNetwork != nil && (rawUp != nil || rawDown != nil) {
+            throw ProxyError.invalidURL("Nowhere net cannot be combined with up/down")
+        }
+        let legacy = rawNetwork.flatMap(NowhereNetwork.init(rawValue:))
+        if let rawNetwork, !rawNetwork.isEmpty, legacy == nil {
             throw ProxyError.invalidURL("Invalid Nowhere net value")
         }
-        if network == .udp, parameters["pool"] != nil {
-            throw ProxyError.invalidURL("Nowhere pool is only valid with net=tcp")
+        guard rawUp == nil || rawUp!.isEmpty || NowhereNetwork(rawValue: rawUp!) != nil else {
+            throw ProxyError.invalidURL("Invalid Nowhere up value")
+        }
+        guard rawDown == nil || rawDown!.isEmpty || NowhereNetwork(rawValue: rawDown!) != nil else {
+            throw ProxyError.invalidURL("Invalid Nowhere down value")
+        }
+        let uplink = rawUp.flatMap(NowhereNetwork.init(rawValue:)) ?? legacy ?? .udp
+        let downlink = rawDown.flatMap(NowhereNetwork.init(rawValue:)) ?? legacy ?? .udp
+        let supportsPreconnect = uplink == .tcp && downlink == .tcp
+        if !supportsPreconnect, parameters["pool"] != nil {
+            throw ProxyError.invalidURL("Nowhere pool requires TCP upload and download")
         }
         let rawPool = parameters["pool"] ?? ""
         let pool: Int
         if rawPool.isEmpty {
-            pool = network == .tcp ? NowherePool.enabledDefault : 0
-        } else if let parsed = Int(rawPool), NowherePool.validRange.contains(parsed) {
+            pool = supportsPreconnect ? NowherePool.enabledDefault : 0
+        } else if let parsed = Int(rawPool), NowherePool.validRange.contains(parsed), supportsPreconnect {
             pool = parsed
         } else {
             throw ProxyError.invalidURL("Invalid Nowhere pool value")
@@ -192,7 +202,8 @@ extension ProxyConfiguration {
             outbound: .nowhere(
                 key: key,
                 spec: spec,
-                net: network,
+                uplink: uplink,
+                downlink: downlink,
                 pool: pool,
                 securityLayer: .tls(tlsConfiguration)
             )

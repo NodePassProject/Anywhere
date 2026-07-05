@@ -74,9 +74,10 @@ struct ProxyEditorView: View {
     @State private var hysteriaSNI = ""
     
     @State private var nowhereKey = ""
-    @State private var nowhereSpec = ""
-    @State private var nowhereNetwork: NowhereNetwork = .udp
-    @State private var nowherePoolEnabled = true
+    @State private var nowhereSpec = NowhereProtocol.defaultSpec
+    @State private var nowhereUplink: NowhereNetwork = .udp
+    @State private var nowhereDownlink: NowhereNetwork = .udp
+    @State private var nowherePreconnectEnabled = true
     @State private var nowherePoolSliderValue = Double(NowherePool.enabledDefault)
     @State private var nowhereSNI = ""
     @State private var nowhereALPN = ""
@@ -161,7 +162,7 @@ struct ProxyEditorView: View {
         if isNowhere {
             return !nowhereKey.isEmpty
             && nowhereKey.utf8.count <= 255
-            && nowhereSpec.utf8.count <= 255
+            && NowhereProtocol.normalizedSpec(nowhereSpec).utf8.count <= 255
             && nowhereALPN.utf8.count <= 255
         }
         if isTrojan {
@@ -339,7 +340,7 @@ struct ProxyEditorView: View {
                     TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                 }
                 LabeledContent {
-                    TextField("Spec", text: $nowhereSpec)
+                    TextField(String("auto"), text: $nowhereSpec)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -619,28 +620,32 @@ struct ProxyEditorView: View {
             }
         } else if isNowhere {
             Section("Network") {
-                Picker(selection: $nowhereNetwork) {
+                Picker(selection: $nowhereUplink) {
                     Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
                     Text(verbatim: "UDP").tag(NowhereNetwork.udp)
                 } label: {
-                    TextWithColorfulIcon(title: "Network", comment: nil, systemName: "globe", foregroundColor: .white, backgroundColor: .blue)
+                    TextWithColorfulIcon(title: "Upload", comment: nil, systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                 }
-                if nowhereNetwork == .tcp {
-                    Toggle(isOn: $nowherePoolEnabled) {
-                        TextWithColorfulIcon(title: "Preconnect", comment: nil, systemName: "link.badge.plus", foregroundColor: .white, backgroundColor: .orange)
+                Picker(selection: $nowhereDownlink) {
+                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
+                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
+                } label: {
+                    TextWithColorfulIcon(title: "Download", comment: nil, systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                }
+                if nowhereUplink == .tcp && nowhereDownlink == .tcp {
+                    Toggle(isOn: $nowherePreconnectEnabled) {
+                        TextWithColorfulIcon(title: "Preconnect", comment: nil, systemName: "bolt.horizontal.circle.fill", foregroundColor: .white, backgroundColor: .green)
                     }
-                    if nowherePoolEnabled {
+                    if nowherePreconnectEnabled {
                         Slider(
                             value: $nowherePoolSliderValue,
                             in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
                         ) {
                             Text("Connections")
                         } minimumValueLabel: {
-                            Image(systemName: "dial.low")
-                                .foregroundStyle(.secondary)
+                            Image(systemName: "dial.low").foregroundStyle(.secondary)
                         } maximumValueLabel: {
-                            Image(systemName: "dial.high")
-                                .foregroundStyle(.secondary)
+                            Image(systemName: "dial.high").foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1107,12 +1112,13 @@ struct ProxyEditorView: View {
                 }
             }
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let net, let pool, let securityLayer):
+        case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             nowhereKey = key
-            nowhereSpec = spec ?? ""
-            nowhereNetwork = net
-            nowherePoolEnabled = net == .tcp ? pool > 0 : true
+            nowhereSpec = NowhereProtocol.normalizedSpec(spec)
+            nowhereUplink = uplink
+            nowhereDownlink = downlink
+            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
             nowherePoolSliderValue = Double(pool > 0 ? pool : NowherePool.enabledDefault)
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
@@ -1330,8 +1336,8 @@ struct ProxyEditorView: View {
                 sni: sni
             )
         case .nowhere:
-            let spec = nowhereSpec.isEmpty ? nil : nowhereSpec
-            let pool = nowhereNetwork == .tcp && nowherePoolEnabled
+            let spec = NowhereProtocol.normalizedSpec(nowhereSpec)
+            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
                 ? min(
                     NowherePool.sliderRange.upperBound,
                     max(NowherePool.sliderRange.lowerBound, Int(nowherePoolSliderValue.rounded()))
@@ -1342,7 +1348,8 @@ struct ProxyEditorView: View {
             outbound = .nowhere(
                 key: nowhereKey,
                 spec: spec,
-                net: nowhereNetwork,
+                uplink: nowhereUplink,
+                downlink: nowhereDownlink,
                 pool: pool,
                 securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
             )

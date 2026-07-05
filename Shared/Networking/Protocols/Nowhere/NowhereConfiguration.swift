@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Security
 
 enum NowhereNetwork: String, Codable, CaseIterable {
     case udp
@@ -18,13 +19,26 @@ enum NowherePool {
     static let enabledDefault = 5
 }
 
+struct NowhereTransportIdentityKey: Hashable {
+    let configurationID: UUID
+    let proxyHost: String
+    let proxyPort: UInt16
+    let key: String
+    let spec: String?
+    let uplink: NowhereNetwork
+    let downlink: NowhereNetwork
+    let tls: TLSConfiguration
+}
+
 struct NowhereConfiguration: Hashable {
     let proxyHost: String
     let proxyPort: UInt16
     let key: String
     let spec: String?
-    let net: NowhereNetwork
+    let uplink: NowhereNetwork
+    let downlink: NowhereNetwork
     let pool: Int
+    let sessionID: Data
     let tls: TLSConfiguration
     let protocolSpec: NowhereProtocol.EffectiveSpec
 
@@ -33,25 +47,82 @@ struct NowhereConfiguration: Hashable {
         proxyPort: UInt16,
         key: String,
         spec: String?,
-        net: NowhereNetwork,
+        uplink: NowhereNetwork,
+        downlink: NowhereNetwork,
         pool: Int,
+        sessionID: Data,
         tls: TLSConfiguration
     ) throws {
-        guard NowherePool.validRange.contains(pool) else {
+        let supportsPreconnect = uplink == .tcp && downlink == .tcp
+        guard (!supportsPreconnect && pool == 0)
+                || (supportsPreconnect && NowherePool.validRange.contains(pool)) else {
             throw ProxyError.protocolError("Invalid Nowhere pool value")
         }
-        let effectiveSpec = spec.flatMap { $0.isEmpty ? nil : $0 } ?? NowhereProtocol.defaultSpec
+        guard sessionID.count == 16 else {
+            throw ProxyError.protocolError("Invalid Nowhere session ID")
+        }
+        let effectiveSpec = NowhereProtocol.normalizedSpec(spec)
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
         self.key = key
         self.spec = effectiveSpec
-        self.net = net
+        self.uplink = uplink
+        self.downlink = downlink
         self.pool = pool
+        self.sessionID = sessionID
         self.tls = tls
         self.protocolSpec = try NowhereProtocol.buildEffectiveSpec(
             key: key,
             spec: effectiveSpec,
             alpn: tls.alpn?.first
         )
+    }
+}
+
+nonisolated final class NowhereTransportIdentityRegistry {
+    static let shared = NowhereTransportIdentityRegistry()
+
+    private struct State {
+        let sessionID: Data
+        var nextFlowID: UInt64
+    }
+
+    private let lock = UnfairLock()
+    private var states: [NowhereTransportIdentityKey: State] = [:]
+
+    private init() {}
+
+    func identity(for identityKey: NowhereTransportIdentityKey) throws -> Data {
+        try lock.withLock {
+            if let state = states[identityKey] { return state.sessionID }
+            var bytes = Data(count: 16)
+            let status = bytes.withUnsafeMutableBytes { raw -> Int32 in
+                guard let base = raw.baseAddress else { return errSecAllocate }
+                return SecRandomCopyBytes(kSecRandomDefault, 16, base)
+            }
+            guard status == errSecSuccess else {
+                throw NowhereError.connectionFailed("Failed to generate session ID")
+            }
+            states[identityKey] = State(sessionID: bytes, nextFlowID: 1)
+            return bytes
+        }
+    }
+
+    func nextFlowID(for identityKey: NowhereTransportIdentityKey) throws -> UInt64 {
+        _ = try identity(for: identityKey)
+        return try lock.withLock {
+            var state = states[identityKey]!
+            let value = state.nextFlowID
+            guard value != UInt64.max else {
+                throw NowhereError.connectionFailed("Nowhere flow ID space exhausted")
+            }
+            state.nextFlowID = value + 1
+            states[identityKey] = state
+            return value
+        }
+    }
+
+    func reset() {
+        lock.withLock { states.removeAll(keepingCapacity: false) }
     }
 }

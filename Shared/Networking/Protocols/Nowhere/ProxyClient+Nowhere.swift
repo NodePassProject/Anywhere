@@ -17,7 +17,7 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .nowhere(let key, let spec, let net, let pool, let securityLayer) = configuration.outbound else {
+        guard case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound else {
             completion(.failure(ProxyError.protocolError("Invalid Nowhere configuration")))
             return
         }
@@ -25,16 +25,30 @@ extension ProxyClient {
             completion(.failure(ProxyError.protocolError("Nowhere TLS configuration not set")))
             return
         }
+        let normalizedSpec = NowhereProtocol.normalizedSpec(spec)
 
         let nwConfig: NowhereConfiguration
+        let identityKey = NowhereTransportIdentityKey(
+            configurationID: configuration.id,
+            proxyHost: configuration.serverAddress,
+            proxyPort: configuration.serverPort,
+            key: key,
+            spec: normalizedSpec,
+            uplink: uplink,
+            downlink: downlink,
+            tls: tls
+        )
         do {
+            let sessionID = try NowhereTransportIdentityRegistry.shared.identity(for: identityKey)
             nwConfig = try NowhereConfiguration(
                 proxyHost: configuration.serverAddress,
                 proxyPort: configuration.serverPort,
                 key: key,
-                spec: spec,
-                net: net,
+                spec: normalizedSpec,
+                uplink: uplink,
+                downlink: downlink,
                 pool: pool,
+                sessionID: sessionID,
                 tls: tls
             )
         } catch {
@@ -45,11 +59,33 @@ extension ProxyClient {
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
 
-        if net != .tcp || pool == 0 || tunnel != nil {
+        let asymmetric = uplink != downlink
+        if asymmetric, tunnel != nil || configuration.chain?.isEmpty == false {
+            completion(.failure(ProxyError.protocolError("Asymmetric Nowhere carriers do not support proxy chains")))
+            return
+        }
+
+        if uplink != .tcp || downlink != .tcp || pool == 0 || tunnel != nil {
             NowhereTCPConnectionPoolRegistry.shared.disable(configurationID: configuration.id)
         }
 
-        if net == .tcp {
+        if asymmetric {
+            do {
+                let flowID = try NowhereTransportIdentityRegistry.shared.nextFlowID(for: identityKey)
+                connectAsymmetricNowhere(
+                    nwConfig: nwConfig,
+                    command: command,
+                    destination: destination,
+                    flowID: flowID,
+                    completion: completion
+                )
+            } catch {
+                completion(.failure(error))
+            }
+            return
+        }
+
+        if uplink == .tcp {
             let mode: NowhereTCPRelayMode
             switch command {
             case .tcp:
@@ -116,6 +152,135 @@ extension ProxyClient {
 
         let client = NowhereClient.shared(for: nwConfig)
         dispatchNowhere(client: client, command: command, destination: destination, completion: completion)
+    }
+
+    private func connectAsymmetricNowhere(
+        nwConfig: NowhereConfiguration,
+        command: ProxyCommand,
+        destination: String,
+        flowID: UInt64,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let kind: NowhereProtocol.FlowKind
+        let mode: NowhereTCPRelayMode
+        switch command {
+        case .tcp, .mux:
+            kind = .tcp
+            mode = .tcp
+        case .udp:
+            kind = .udp
+            mode = .udp
+        }
+        let open = NowhereProtocol.FlowHeader(
+            role: .open, flowID: flowID, kind: kind,
+            uplink: nwConfig.uplink, downlink: nwConfig.downlink
+        )
+        let attach = NowhereProtocol.FlowHeader(
+            role: .attach, flowID: flowID, kind: kind,
+            uplink: nwConfig.uplink, downlink: nwConfig.downlink
+        )
+        let lock = UnfairLock()
+        var upResult: Result<ProxyConnection, Error>?
+        var downResult: Result<ProxyConnection, Error>?
+        var finished = false
+
+        func receive(_ result: Result<ProxyConnection, Error>, isUplink: Bool) {
+            let outcome: Result<ProxyConnection, Error>? = lock.withLock { () -> Result<ProxyConnection, Error>? in
+                guard !finished else {
+                    if case .success(let connection) = result { connection.cancel() }
+                    return nil
+                }
+                if isUplink { upResult = result } else { downResult = result }
+                guard let upResult, let downResult else { return nil }
+                finished = true
+                switch (upResult, downResult) {
+                case (.success(let up), .success(let down)):
+                    return .success(NowhereDirectionalConnection(uplink: up, downlink: down))
+                case (.failure(let error), .success(let down)):
+                    down.cancel(); return .failure(error)
+                case (.success(let up), .failure(let error)):
+                    up.cancel(); return .failure(error)
+                case (.failure(let error), .failure(_)):
+                    return .failure(error)
+                }
+            }
+            if let outcome { completion(outcome) }
+        }
+
+        openAsymmetricHalf(
+            nwConfig: nwConfig, destination: destination, mode: mode,
+            header: open, carrier: nwConfig.uplink
+        ) { receive($0, isUplink: true) }
+        openAsymmetricHalf(
+            nwConfig: nwConfig, destination: destination, mode: mode,
+            header: attach, carrier: nwConfig.downlink
+        ) { receive($0, isUplink: false) }
+    }
+
+    private func openAsymmetricHalf(
+        nwConfig: NowhereConfiguration,
+        destination: String,
+        mode: NowhereTCPRelayMode,
+        header: NowhereProtocol.FlowHeader,
+        carrier: NowhereNetwork,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        if carrier == .tcp {
+            NowhereTCPConnectionPoolRegistry.shared.acquire(
+                configurationID: configuration.id,
+                configuration: nwConfig,
+                connectHost: directDialHost,
+                destination: destination,
+                mode: mode,
+                flowHeader: header,
+                completion: completion
+            )
+            return
+        }
+
+        let client = NowhereClient.shared(for: nwConfig)
+        if header.kind == .tcp {
+            client.openTCPHalf(
+                destination: destination,
+                header: header,
+                isDefaultProxy: isDefaultProxy,
+                completion: completion
+            )
+            return
+        }
+        if header.role == .open {
+            client.openUDP(
+                destination: destination,
+                flowID: header.flowID,
+                downlink: header.downlink,
+                isDefaultProxy: isDefaultProxy,
+                completion: completion
+            )
+            return
+        }
+
+        client.openUDP(
+            destination: destination,
+            flowID: header.flowID,
+            downlink: header.downlink,
+            isDefaultProxy: isDefaultProxy
+        ) { udpResult in
+            switch udpResult {
+            case .failure(let error): completion(.failure(error))
+            case .success(let udp):
+                client.openTCPHalf(
+                    destination: destination,
+                    header: header,
+                    isDefaultProxy: self.isDefaultProxy
+                ) { controlResult in
+                    switch controlResult {
+                    case .failure(let error): udp.cancel(); completion(.failure(error))
+                    case .success(let control):
+                        completion(.success(NowhereDirectionalConnection(uplink: control, downlink: udp)))
+                    }
+                }
+            }
+        }
     }
 
     private func dispatchNowhere(

@@ -147,7 +147,8 @@ nonisolated final class NowhereSession {
         do {
             frame = try NowhereProtocol.makeAuthFrame(
                 key: configuration.key,
-                protocolSpec: configuration.protocolSpec
+                protocolSpec: configuration.protocolSpec,
+                sessionID: configuration.sessionID
             )
         } catch {
             failSession(error)
@@ -223,8 +224,15 @@ nonisolated final class NowhereSession {
 
     private func handleDatagram(_ data: Data) {
         guard let message = NowhereProtocol.decodeUDPDatagram(data, protocolSpec: configuration.protocolSpec),
-              message.type == NowhereProtocol.UDPType.response.rawValue else { return }
-        udpSessions[message.flowID]?.handleIncomingDatagram(message.payload)
+              let connection = udpSessions[message.flowID] else { return }
+        if message.type == NowhereProtocol.UDPType.openAck.rawValue {
+            connection.handleOpenAck()
+        } else if message.type == NowhereProtocol.UDPType.data.rawValue
+                    || message.type == NowhereProtocol.UDPType.response.rawValue {
+            connection.handleIncomingDatagram(message.payload)
+        } else if message.type == NowhereProtocol.UDPType.compactClose.rawValue {
+            connection.handleSessionClose()
+        }
     }
 
     func openTCPStream(for connection: NowhereConnection, completion: @escaping (Int64?, Error?) -> Void) {
@@ -271,7 +279,11 @@ nonisolated final class NowhereSession {
         }
     }
 
-    func registerUDPSession(_ connection: NowhereUDPConnection, completion: @escaping (Result<UInt64, Error>) -> Void) {
+    func registerUDPSession(
+        _ connection: NowhereUDPConnection,
+        requestedFlowID: UInt64? = nil,
+        completion: @escaping (Result<UInt64, Error>) -> Void
+    ) {
         let body = { [weak self] in
             guard let self else {
                 completion(.failure(NowhereError.streamClosed))
@@ -285,11 +297,17 @@ nonisolated final class NowhereSession {
                 completion(.failure(NowhereError.connectionFailed("UDP flow pool exhausted")))
                 return
             }
-            var flowID = self.nextUDPFlowID
+            var flowID = requestedFlowID ?? self.nextUDPFlowID
+            guard flowID != 0, self.udpSessions[flowID] == nil else {
+                completion(.failure(NowhereError.connectionFailed("UDP flow ID collision")))
+                return
+            }
             while flowID == 0 || self.udpSessions[flowID] != nil {
                 flowID = flowID == UInt64.max ? 1 : flowID + 1
             }
-            self.nextUDPFlowID = flowID == UInt64.max ? 1 : flowID + 1
+            if requestedFlowID == nil {
+                self.nextUDPFlowID = flowID == UInt64.max ? 1 : flowID + 1
+            }
             self.udpSessions[flowID] = connection
             self._poolLock.lock()
             self._poolUDPCount += 1
