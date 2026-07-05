@@ -6,13 +6,13 @@
 //
 
 import Foundation
+import Synchronization
 
 final class TunneledHTTP1Exchange {
 
     // MARK: Active-exchange registry (keeps the exchange alive across async I/O)
 
-    private static let registryLock = UnfairLock()
-    private static var active: [ObjectIdentifier: TunneledHTTP1Exchange] = [:]
+    private static let active = Mutex<[ObjectIdentifier: TunneledHTTP1Exchange]>([:])
 
     // MARK: Inputs
 
@@ -74,7 +74,7 @@ final class TunneledHTTP1Exchange {
 
     func start() {
         queue.async { [self] in
-            Self.registryLock.withLock { Self.active[ObjectIdentifier(self)] = self }
+            Self.active.withLock { $0[ObjectIdentifier(self)] = self }
             armTimers()
             sendRequest()
         }
@@ -356,7 +356,7 @@ final class TunneledHTTP1Exchange {
         MITMScriptHTTPClient.releaseInFlight(reservedBytes)
         reservedBytes = 0
         teardown()
-        Self.registryLock.withLock { Self.active[ObjectIdentifier(self)] = nil }
+        Self.active.withLock { $0[ObjectIdentifier(self)] = nil }
         completion(result)
     }
 

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 enum NowhereTCPRelayMode {
     case tcp
@@ -25,11 +26,10 @@ nonisolated final class NowhereConnection: ProxyConnection {
         get { _state }
         set {
             _state = newValue
-            readyLock.withLock { _isReady = (newValue == .ready) }
+            _isReady.store(newValue == .ready, ordering: .relaxed)
         }
     }
-    private let readyLock = UnfairLock()
-    private var _isReady = false
+    private let _isReady = Atomic<Bool>(false)
 
     private var streamID: Int64 = -1
     private var readClosed = false
@@ -46,7 +46,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 
     override var isConnected: Bool {
-        readyLock.withLock { _isReady }
+        _isReady.load(ordering: .relaxed)
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }
@@ -260,11 +260,10 @@ nonisolated final class NowhereConnection: ProxyConnection {
 nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: NowhereTCPConnection
+    /// Whether the first framed packet is an empty ACK to swallow; guarded by `udpState`.
     private var expectsAck: Bool
 
-    var udpBuffer = Data()
-    var udpBufferOffset = 0
-    let udpLock = UnfairLock()
+    let udpState = Mutex(UDPFramingState())
 
     init(inner: NowhereTCPConnection, expectsAck: Bool = false) {
         self.inner = inner
@@ -292,21 +291,31 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
         inner.sendRaw(data: data)
     }
 
-    override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        udpLock.lock()
-        if let packet = extractUDPPacket() {
-            if packet.isEmpty && expectsAck {
-                expectsAck = false
-                udpLock.unlock()
-                receive(completion: completion)
-                return
-            }
-            udpLock.unlock()
-            completion(packet, nil)
-            return
+    private enum PacketStep {
+        case deliver(Data)
+        case retryAfterAck
+        case needMore
+    }
+
+    /// Pops the next framed packet, swallowing the one-shot empty ACK; call inside `udpState.withLock`.
+    private func nextPacketStep(_ state: inout UDPFramingState) -> PacketStep {
+        guard let packet = extractUDPPacket(from: &state) else { return .needMore }
+        if packet.isEmpty && expectsAck {
+            expectsAck = false
+            return .retryAfterAck
         }
-        udpLock.unlock()
-        receiveMore(completion: completion)
+        return .deliver(packet)
+    }
+
+    override func receive(completion: @escaping (Data?, Error?) -> Void) {
+        switch udpState.withLock({ nextPacketStep(&$0) }) {
+        case .deliver(let packet):
+            completion(packet, nil)
+        case .retryAfterAck:
+            receive(completion: completion)
+        case .needMore:
+            receiveMore(completion: completion)
+        }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -327,28 +336,23 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
                 completion(nil, nil)
                 return
             }
-            self.udpLock.lock()
-            self.udpBuffer.append(data)
-            if let packet = self.extractUDPPacket() {
-                if packet.isEmpty && self.expectsAck {
-                    self.expectsAck = false
-                    self.udpLock.unlock()
-                    self.receive(completion: completion)
-                    return
-                }
-                self.udpLock.unlock()
+            let step = self.udpState.withLock { state -> PacketStep in
+                state.buffer.append(data)
+                return self.nextPacketStep(&state)
+            }
+            switch step {
+            case .deliver(let packet):
                 completion(packet, nil)
-            } else {
-                self.udpLock.unlock()
+            case .retryAfterAck:
+                self.receive(completion: completion)
+            case .needMore:
                 self.receiveMore(completion: completion)
             }
         }
     }
 
     override func cancel() {
-        udpLock.lock()
-        clearUDPBuffer()
-        udpLock.unlock()
+        udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
     }
 }

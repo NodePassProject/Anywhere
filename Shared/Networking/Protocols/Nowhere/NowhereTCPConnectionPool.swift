@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated final class NowhereTCPConnectionPoolRegistry {
 
@@ -32,8 +33,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
         let pool: NowhereTCPConnectionPool
     }
 
-    private let lock = UnfairLock()
-    private var entries: [UUID: Entry] = [:]
+    private let entries = Mutex<[UUID: Entry]>([:])
 
     private init() {}
 
@@ -63,7 +63,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
         )
 
         var replaced: NowhereTCPConnectionPool?
-        let pool: NowhereTCPConnectionPool = lock.withLock {
+        let pool: NowhereTCPConnectionPool = entries.withLock { entries in
             if let entry = entries[configurationID], entry.key == key {
                 entry.pool.resize(to: configuration.pool)
                 return entry.pool
@@ -82,7 +82,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
     }
 
     func closeAll() {
-        let pools: [NowhereTCPConnectionPool] = lock.withLock {
+        let pools: [NowhereTCPConnectionPool] = entries.withLock { entries in
             let snapshot = entries.values.map(\.pool)
             entries.removeAll(keepingCapacity: false)
             return snapshot
@@ -91,7 +91,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
     }
 
     func disable(configurationID: UUID) {
-        let pool = lock.withLock { entries.removeValue(forKey: configurationID)?.pool }
+        let pool = entries.withLock { $0.removeValue(forKey: configurationID)?.pool }
         pool?.closeAll()
     }
 }
@@ -104,36 +104,39 @@ nonisolated private final class NowhereTCPConnectionPool {
         qos: .utility
     )
 
+    private struct State {
+        var idle: [NowhereTCPConnection] = []
+        var preparing: [ObjectIdentifier: NowhereTCPConnection] = [:]
+        var expirations: [ObjectIdentifier: DispatchWorkItem] = [:]
+        var targetSize: Int
+        var closed = false
+    }
+
     private let configuration: NowhereConfiguration
     private let connectHost: String
-    private let lock = UnfairLock()
-    private var idle: [NowhereTCPConnection] = []
-    private var preparing: [ObjectIdentifier: NowhereTCPConnection] = [:]
-    private var expirations: [ObjectIdentifier: DispatchWorkItem] = [:]
-    private var targetSize: Int
-    private var closed = false
+    private let state: Mutex<State>
 
     init(configuration: NowhereConfiguration, connectHost: String, targetSize: Int) {
         self.configuration = configuration
         self.connectHost = connectHost
-        self.targetSize = targetSize
+        self.state = Mutex(State(targetSize: targetSize))
     }
 
     func resize(to newSize: Int) {
         var excess: [NowhereTCPConnection] = []
-        lock.lock()
-        targetSize = newSize
-        while idle.count + preparing.count > newSize, let entry = preparing.first {
-            preparing.removeValue(forKey: entry.key)
-            cancelExpirationLocked(for: entry.value)
-            excess.append(entry.value)
+        state.withLock { state in
+            state.targetSize = newSize
+            while state.idle.count + state.preparing.count > newSize, let entry = state.preparing.first {
+                state.preparing.removeValue(forKey: entry.key)
+                cancelExpirationLocked(for: entry.value, in: &state)
+                excess.append(entry.value)
+            }
+            while state.idle.count > newSize {
+                let connection = state.idle.removeFirst()
+                cancelExpirationLocked(for: connection, in: &state)
+                excess.append(connection)
+            }
         }
-        while idle.count > newSize {
-            let connection = idle.removeFirst()
-            cancelExpirationLocked(for: connection)
-            excess.append(connection)
-        }
-        lock.unlock()
         for connection in excess {
             connection.setPreparedCloseHandler(nil)
             connection.cancel()
@@ -149,23 +152,23 @@ nonisolated private final class NowhereTCPConnectionPool {
         var selected: NowhereTCPConnection?
         var stale: [NowhereTCPConnection] = []
         var unavailable = false
-        let replenishments: [NowhereTCPConnection] = lock.withLock {
-            guard !closed else {
+        let replenishments: [NowhereTCPConnection] = state.withLock { state in
+            guard !state.closed else {
                 unavailable = true
                 return []
             }
-            while let candidate = idle.popLast() {
+            while let candidate = state.idle.popLast() {
                 if candidate.isPrepared {
-                    cancelExpirationLocked(for: candidate)
+                    cancelExpirationLocked(for: candidate, in: &state)
                     selected = candidate
                     break
                 }
-                cancelExpirationLocked(for: candidate)
+                cancelExpirationLocked(for: candidate, in: &state)
                 stale.append(candidate)
             }
-            let warmCount = idle.count + preparing.count
+            let warmCount = state.idle.count + state.preparing.count
             let requestedCount = selected == nil ? (warmCount == 0 ? 1 : 0) : 2
-            let count = min(requestedCount, max(0, targetSize - warmCount))
+            let count = min(requestedCount, max(0, state.targetSize - warmCount))
             var connections: [NowhereTCPConnection] = []
             connections.reserveCapacity(count)
             for _ in 0..<count {
@@ -174,8 +177,8 @@ nonisolated private final class NowhereTCPConnectionPool {
                     connectHost: connectHost,
                     tunnel: nil
                 )
-                preparing[ObjectIdentifier(connection)] = connection
-                armExpirationLocked(for: connection)
+                state.preparing[ObjectIdentifier(connection)] = connection
+                armExpirationLocked(for: connection, in: &state)
                 connections.append(connection)
             }
             return connections
@@ -211,15 +214,15 @@ nonisolated private final class NowhereTCPConnectionPool {
     }
 
     func closeAll() {
-        let connections: [NowhereTCPConnection] = lock.withLock {
-            guard !closed else { return [] }
-            closed = true
-            targetSize = 0
-            let snapshot = idle + Array(preparing.values)
-            idle.removeAll(keepingCapacity: false)
-            preparing.removeAll(keepingCapacity: false)
-            for expiration in expirations.values { expiration.cancel() }
-            expirations.removeAll(keepingCapacity: false)
+        let connections: [NowhereTCPConnection] = state.withLock { state in
+            guard !state.closed else { return [] }
+            state.closed = true
+            state.targetSize = 0
+            let snapshot = state.idle + Array(state.preparing.values)
+            state.idle.removeAll(keepingCapacity: false)
+            state.preparing.removeAll(keepingCapacity: false)
+            for expiration in state.expirations.values { expiration.cancel() }
+            state.expirations.removeAll(keepingCapacity: false)
             return Array(snapshot)
         }
         for connection in connections {
@@ -285,14 +288,14 @@ nonisolated private final class NowhereTCPConnectionPool {
             }
         }
 
-        let keep: Bool = lock.withLock {
-            let wasPreparing = preparing.removeValue(forKey: ObjectIdentifier(connection)) != nil
-            guard wasPreparing, error == nil, !closed,
-                  idle.count < targetSize, connection.isPrepared else {
-                cancelExpirationLocked(for: connection)
+        let keep: Bool = state.withLock { state in
+            let wasPreparing = state.preparing.removeValue(forKey: ObjectIdentifier(connection)) != nil
+            guard wasPreparing, error == nil, !state.closed,
+                  state.idle.count < state.targetSize, connection.isPrepared else {
+                cancelExpirationLocked(for: connection, in: &state)
                 return false
             }
-            idle.append(connection)
+            state.idle.append(connection)
             return true
         }
 
@@ -305,37 +308,37 @@ nonisolated private final class NowhereTCPConnectionPool {
     }
 
     private func evict(_ connection: NowhereTCPConnection) {
-        lock.withLock {
-            idle.removeAll { $0 === connection }
-            cancelExpirationLocked(for: connection)
+        state.withLock { state in
+            state.idle.removeAll { $0 === connection }
+            cancelExpirationLocked(for: connection, in: &state)
         }
     }
 
-    private func armExpirationLocked(for connection: NowhereTCPConnection) {
+    private func armExpirationLocked(for connection: NowhereTCPConnection, in state: inout State) {
         let identifier = ObjectIdentifier(connection)
         let expiration = DispatchWorkItem { [weak self, weak connection] in
             guard let self, let connection else { return }
             self.expire(connection)
         }
-        expirations[identifier] = expiration
+        state.expirations[identifier] = expiration
         Self.expiryQueue.asyncAfter(
             deadline: .now() + Self.warmConnectionTTL,
             execute: expiration
         )
     }
 
-    private func cancelExpirationLocked(for connection: NowhereTCPConnection) {
-        expirations.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
+    private func cancelExpirationLocked(for connection: NowhereTCPConnection, in state: inout State) {
+        state.expirations.removeValue(forKey: ObjectIdentifier(connection))?.cancel()
     }
 
     private func expire(_ connection: NowhereTCPConnection) {
-        let shouldCancel: Bool = lock.withLock {
+        let shouldCancel: Bool = state.withLock { state in
             let identifier = ObjectIdentifier(connection)
-            guard expirations.removeValue(forKey: identifier) != nil else { return false }
-            let wasPreparing = preparing.removeValue(forKey: identifier) != nil
-            let idleCount = idle.count
-            idle.removeAll { $0 === connection }
-            return wasPreparing || idle.count != idleCount
+            guard state.expirations.removeValue(forKey: identifier) != nil else { return false }
+            let wasPreparing = state.preparing.removeValue(forKey: identifier) != nil
+            let idleCount = state.idle.count
+            state.idle.removeAll { $0 === connection }
+            return wasPreparing || state.idle.count != idleCount
         }
         guard shouldCancel else { return }
         connection.setPreparedCloseHandler(nil)

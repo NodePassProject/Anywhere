@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - HTTPUpgradeConnection
 
@@ -21,18 +22,19 @@ nonisolated class HTTPUpgradeConnection {
     // MARK: State
 
     private let configuration: HTTPUpgradeConfiguration
-    /// Leftover data received after the HTTP 101 response headers.
-    private var leftoverBuffer = Data()
-    private let lock = UnfairLock()
-    private var _isConnected = false
+
+    private struct ConnectionState {
+        var isConnected = false
+        /// Leftover data received after the HTTP 101 response headers.
+        var leftoverBuffer = Data()
+    }
+
+    private let state: Mutex<ConnectionState>
 
     static let chromeUserAgent = ProxyUserAgent.chrome
 
     var isConnected: Bool {
-        lock.lock()
-        let connected = _isConnected
-        lock.unlock()
-        return connected
+        state.withLock { $0.isConnected }
     }
 
     // MARK: - Initializers
@@ -42,7 +44,7 @@ nonisolated class HTTPUpgradeConnection {
         self.transportSend = transport.send
         self.transportReceive = transport.receive
         self.transportCancel = transport.cancel
-        self._isConnected = true
+        self.state = Mutex(ConnectionState(isConnected: true))
     }
 
     convenience init(transport: NWTCPTransport, configuration: HTTPUpgradeConfiguration) {
@@ -108,22 +110,26 @@ nonisolated class HTTPUpgradeConnection {
                 return
             }
 
-            self.lock.lock()
-            self.leftoverBuffer.append(data)
+            let headerData: Data? = self.state.withLock { state in
+                state.leftoverBuffer.append(data)
 
-            let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
-            guard let range = self.leftoverBuffer.range(of: headerEnd) else {
-                self.lock.unlock()
+                let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+                guard let range = state.leftoverBuffer.range(of: headerEnd) else {
+                    return nil
+                }
+
+                let header = Data(state.leftoverBuffer[state.leftoverBuffer.startIndex..<range.lowerBound])
+                let leftover = state.leftoverBuffer[range.upperBound...]
+                state.leftoverBuffer = Data(leftover)
+                return header
+            }
+
+            guard let headerData else {
                 self.receiveUpgradeResponse(completion: completion)
                 return
             }
 
-            let headerData = self.leftoverBuffer[self.leftoverBuffer.startIndex..<range.lowerBound]
-            let leftover = self.leftoverBuffer[range.upperBound...]
-            self.leftoverBuffer = Data(leftover)
-            self.lock.unlock()
-
-            guard let headerString = String(data: Data(headerData), encoding: .utf8) else {
+            guard let headerString = String(data: headerData, encoding: .utf8) else {
                 completion(HTTPUpgradeError.upgradeFailed("Cannot decode response headers"))
                 return
             }
@@ -175,15 +181,16 @@ nonisolated class HTTPUpgradeConnection {
 
     /// Receives raw data; the first call drains bytes buffered past the 101 response headers.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        if !leftoverBuffer.isEmpty {
-            let data = leftoverBuffer
-            leftoverBuffer.removeAll(keepingCapacity: true)
-            lock.unlock()
-            completion(data, nil)
+        let buffered: Data? = state.withLock { state in
+            guard !state.leftoverBuffer.isEmpty else { return nil }
+            let data = state.leftoverBuffer
+            state.leftoverBuffer.removeAll(keepingCapacity: true)
+            return data
+        }
+        if let buffered {
+            completion(buffered, nil)
             return
         }
-        lock.unlock()
 
         transportReceive { data, _, error in
             if let error {
@@ -199,10 +206,10 @@ nonisolated class HTTPUpgradeConnection {
     }
 
     func cancel() {
-        lock.lock()
-        _isConnected = false
-        leftoverBuffer.removeAll()
-        lock.unlock()
+        state.withLock {
+            $0.isConnected = false
+            $0.leftoverBuffer.removeAll()
+        }
         transportCancel()
     }
 }

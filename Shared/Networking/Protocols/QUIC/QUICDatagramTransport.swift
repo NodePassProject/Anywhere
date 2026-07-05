@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 /// Terminal failures MUST surface through `errorHandler` so QUIC fails fast rather than idling on
 /// keep-alive PINGs; `startReceiving` delivers exactly one whole, non-empty datagram per call (use
@@ -25,9 +26,12 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
     private let connection: ProxyConnection
 
     /// Guards `errorHandler` so it fires at most once across send- and receive-side failures.
-    private let failureLock = UnfairLock()
-    private var failureHandler: ((Error?) -> Void)?
-    private var failed = false
+    private struct FailureState {
+        var handler: ((Error?) -> Void)?
+        var failed = false
+    }
+
+    private let failureState = Mutex(FailureState())
 
     init(connection: ProxyConnection) {
         self.connection = connection
@@ -77,7 +81,7 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
 
     func startReceiving(handler: @escaping (Data) -> Void,
                         errorHandler: @escaping (Error?) -> Void) {
-        failureLock.withLock { self.failureHandler = errorHandler }
+        failureState.withLock { $0.handler = errorHandler }
         connection.startReceiving(handler: handler, errorHandler: { [weak self] err in
             self?.surfaceFailure(err)
         })
@@ -87,13 +91,13 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
         connection.cancel()
     }
 
-    /// Forwards the latched `errorHandler` exactly once.
+    /// Forwards the latched `errorHandler` exactly once; taken out under the lock, invoked outside.
     private func surfaceFailure(_ error: Error?) {
-        let handler: ((Error?) -> Void)? = failureLock.withLock {
-            guard !failed else { return nil }
-            failed = true
-            let h = failureHandler
-            failureHandler = nil
+        let handler: ((Error?) -> Void)? = failureState.withLock { state in
+            guard !state.failed else { return nil }
+            state.failed = true
+            let h = state.handler
+            state.handler = nil
             return h
         }
         handler?(error)

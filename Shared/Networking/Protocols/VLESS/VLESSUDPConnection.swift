@@ -6,14 +6,13 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: ProxyConnection
 
-    var udpBuffer = Data()
-    var udpBufferOffset = 0
-    let udpLock = UnfairLock()
+    let udpState = Mutex(UDPFramingState())
 
     init(inner: ProxyConnection) {
         self.inner = inner
@@ -44,13 +43,10 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
     // MARK: - Receive: pull one framed packet at a time.
 
     override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        udpLock.lock()
-        if let packet = extractUDPPacket() {
-            udpLock.unlock()
+        if let packet = udpState.withLock({ extractUDPPacket(from: &$0) }) {
             completion(packet, nil)
             return
         }
-        udpLock.unlock()
         receiveMore(completion: completion)
     }
 
@@ -73,14 +69,13 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
                 return
             }
 
-            self.udpLock.lock()
-            self.udpBuffer.append(data)
-
-            if let packet = self.extractUDPPacket() {
-                self.udpLock.unlock()
+            let packet = self.udpState.withLock { state -> Data? in
+                state.buffer.append(data)
+                return self.extractUDPPacket(from: &state)
+            }
+            if let packet {
                 completion(packet, nil)
             } else {
-                self.udpLock.unlock()
                 self.receiveMore(completion: completion)
             }
         }
@@ -89,9 +84,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
     // MARK: - Cancel
 
     override func cancel() {
-        udpLock.lock()
-        clearUDPBuffer()
-        udpLock.unlock()
+        udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
     }
 

@@ -7,6 +7,7 @@
 
 import Foundation
 import NetworkExtension
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
 
@@ -14,48 +15,46 @@ extension TunnelStack {
 
     // MARK: - Output Batching
     //
-    // Two producers append under ``outputBufferLock`` (lwIP callbacks on
+    // Two producers append under the ``outputBuffer`` Mutex (lwIP callbacks on
     // ``lwipQueue``, Swift UDP/ICMP builders on ``udpQueue``); the appender
     // that finds no drain in flight kicks one ``drainOutputLoop`` on
     // ``outputQueue``. Per-packet pbuf/heap releases still fire on ``lwipQueue``.
 
     /// Drains the output buffer with back-to-back writePackets calls, each
     /// capped at tunnelMaxPacketsPerWrite (utun's empirical per-call ceiling —
-    /// exceeding it trips ENOSPC). ``outputDrainInFlight`` flips back false
-    /// under the lock, atomic with the empty check, so a concurrent appender
-    /// can't see "drain in flight" after the loop has decided to exit.
+    /// exceeding it trips ENOSPC). ``OutputBufferState/drainInFlight`` flips
+    /// back false under the lock, atomic with the empty check, so a concurrent
+    /// appender can't see "drain in flight" after the loop has decided to exit.
     func drainOutputLoop() {
         let cap = TunnelConstants.tunnelMaxPacketsPerWrite
         while true {
             var packets: [Data] = []
             var protocols: [NSNumber] = []
             var releases: [PendingRelease] = []
-
-            var queueDepth = 0
-            outputBufferLock.withLock {
-                let pending = outputPackets.count
-                queueDepth = pending
+            
+            outputBuffer.withLock { buffer in
+                let pending = buffer.packets.count
                 if pending == 0 {
-                    outputDrainInFlight = false
+                    buffer.drainInFlight = false
                     return
                 }
                 if pending <= cap {
-                    packets = outputPackets
-                    protocols = outputProtocols
-                    releases = pendingReleases
-                    outputPackets = []
-                    outputProtocols = []
-                    pendingReleases = []
-                    outputPackets.reserveCapacity(cap)
-                    outputProtocols.reserveCapacity(cap)
-                    pendingReleases.reserveCapacity(cap)
+                    packets = buffer.packets
+                    protocols = buffer.protocols
+                    releases = buffer.releases
+                    buffer.packets = []
+                    buffer.protocols = []
+                    buffer.releases = []
+                    buffer.packets.reserveCapacity(cap)
+                    buffer.protocols.reserveCapacity(cap)
+                    buffer.releases.reserveCapacity(cap)
                 } else {
-                    packets = Array(outputPackets.prefix(cap))
-                    protocols = Array(outputProtocols.prefix(cap))
-                    releases = Array(pendingReleases.prefix(cap))
-                    outputPackets.removeFirst(cap)
-                    outputProtocols.removeFirst(cap)
-                    pendingReleases.removeFirst(cap)
+                    packets = Array(buffer.packets.prefix(cap))
+                    protocols = Array(buffer.protocols.prefix(cap))
+                    releases = Array(buffer.releases.prefix(cap))
+                    buffer.packets.removeFirst(cap)
+                    buffer.protocols.removeFirst(cap)
+                    buffer.releases.removeFirst(cap)
                 }
             }
             
@@ -75,15 +74,15 @@ extension TunnelStack {
     }
 
     /// Appends a Swift-built IP packet to the output buffer and kicks the drain
-    /// if idle; ``noopRelease`` keeps ``pendingReleases`` index-aligned.
+    /// if idle; ``noopRelease`` keeps ``OutputBufferState/releases`` index-aligned.
     func enqueueOutbound(_ packet: Data, isIPv6: Bool) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
-        let needsKick: Bool = outputBufferLock.withLock {
-            outputPackets.append(packet)
-            outputProtocols.append(proto)
-            pendingReleases.append(Self.noopRelease)
-            if outputDrainInFlight { return false }
-            outputDrainInFlight = true
+        let needsKick: Bool = outputBuffer.withLock { buffer in
+            buffer.packets.append(packet)
+            buffer.protocols.append(proto)
+            buffer.releases.append(Self.noopRelease)
+            if buffer.drainInFlight { return false }
+            buffer.drainInFlight = true
             return true
         }
         if needsKick {

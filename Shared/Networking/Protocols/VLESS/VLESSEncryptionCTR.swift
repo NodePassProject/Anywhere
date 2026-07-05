@@ -7,13 +7,14 @@
 
 import Foundation
 import CommonCrypto
+import Synchronization
 
 /// AES-256-CTR keystream for VLESS encryption's `xorpub`/`random` modes:
 /// key = BLAKE3-derive(context "VLESS", key), 16-byte IV as the initial
 /// big-endian counter. Stateful — one instance per direction.
 final class VLESSEncryptionCTR {
-    private var cryptor: CCCryptorRef?
-    private let lock = UnfairLock()
+    /// The cryptor advances its keystream on every update, so access is serialized.
+    private let cryptor: Mutex<CCCryptorRef?>
 
     init(key: Data, iv: Data) throws {
         guard iv.count == 16 else {
@@ -42,19 +43,21 @@ final class VLESSEncryptionCTR {
         guard status == kCCSuccess, let ref else {
             throw VLESSEncryptionError.framingError("CCCryptorCreateWithMode failed: \(status)")
         }
-        self.cryptor = ref
+        self.cryptor = Mutex(ref)
     }
 
     deinit {
-        if let cryptor {
-            CCCryptorRelease(cryptor)
+        cryptor.withLock { cryptor in
+            if let cryptor {
+                CCCryptorRelease(cryptor)
+            }
         }
     }
 
     /// Advance the keystream by `data.count` bytes and return the XOR'd output.
     func process(_ data: Data) -> Data {
         if data.isEmpty { return data }
-        return lock.withLock {
+        return cryptor.withLock { cryptor in
             let count = data.count
             var output = Data(count: count)
             var dataOutMoved: Int = 0
@@ -75,7 +78,7 @@ final class VLESSEncryptionCTR {
     /// XOR keystream bytes directly into a mutable buffer, avoiding an extra copy.
     func processInPlace(_ buffer: UnsafeMutableRawBufferPointer) {
         if buffer.count == 0 { return }
-        lock.withLock {
+        cryptor.withLock { cryptor in
             var dataOutMoved: Int = 0
             _ = CCCryptorUpdate(
                 cryptor,

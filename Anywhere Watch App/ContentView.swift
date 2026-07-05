@@ -131,6 +131,7 @@ private struct PowerButton: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .handGestureShortcut(.primaryAction)
         .disabled(isDisabled || isTransitioning)
     }
 }

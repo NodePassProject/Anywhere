@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Callbacks")
 
@@ -48,9 +49,9 @@ extension TunnelStack {
     func registerCallbacks() {
         // Output: lwIP → tunnel packet flow, batched. `Data(bytesNoCopy:)` with
         // a `.none` deallocator lets writePackets read lwIP's memory directly;
-        // ``pendingReleases`` is the actual owner, and releases must stay on
-        // lwipQueue (pbuf_free/mem_free mutate freelists with no locking under
-        // NO_SYS=1).
+        // ``OutputBufferState/releases`` is the actual owner, and releases must
+        // stay on lwipQueue (pbuf_free/mem_free mutate freelists with no locking
+        // under NO_SYS=1).
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let shared = TunnelStack.shared, let data, let release else { return }
             let byteCount = Int(len)
@@ -58,12 +59,12 @@ extension TunnelStack {
             let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .none)
             let proto: NSNumber = isIPv6 != 0 ? TunnelStack.ipv6Proto : TunnelStack.ipv4Proto
             let pending = TunnelStack.PendingRelease(ctx: releaseCtx, fn: release)
-            let needsKick: Bool = shared.outputBufferLock.withLock {
-                shared.outputPackets.append(packet)
-                shared.outputProtocols.append(proto)
-                shared.pendingReleases.append(pending)
-                if shared.outputDrainInFlight { return false }
-                shared.outputDrainInFlight = true
+            let needsKick: Bool = shared.outputBuffer.withLock { buffer in
+                buffer.packets.append(packet)
+                buffer.protocols.append(proto)
+                buffer.releases.append(pending)
+                if buffer.drainInFlight { return false }
+                buffer.drainInFlight = true
                 return true
             }
             if needsKick {

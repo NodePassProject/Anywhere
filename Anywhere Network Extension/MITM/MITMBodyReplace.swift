@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
@@ -72,18 +73,13 @@ enum MITMBodyReplace {
         qos: .userInitiated
     )
 
-    private static let inFlightLock = UnfairLock()
-    private static var substitutionInFlight = false
+    private static let substitutionInFlight = Atomic<Bool>(false)
 
     /// Runs one substitution under the soft budget; nil on timeout or while a prior runaway is still burning.
     private static func boundedReplace(_ text: String, op: CompiledOp) -> String? {
-        inFlightLock.lock()
-        if substitutionInFlight {
-            inFlightLock.unlock()
-            return nil
-        }
-        substitutionInFlight = true
-        inFlightLock.unlock()
+        guard substitutionInFlight.compareExchange(
+            expected: false, desired: true, ordering: .sequentiallyConsistent
+        ).exchanged else { return nil }
 
         let resultBox = ResultBox()
         let done = DispatchSemaphore(value: 0)
@@ -95,9 +91,7 @@ enum MITMBodyReplace {
                     op.template.expand(output: match.output)
                 }
             }
-            inFlightLock.lock()
-            substitutionInFlight = false
-            inFlightLock.unlock()
+            substitutionInFlight.store(false, ordering: .sequentiallyConsistent)
             done.signal()
         }
         // The semaphore establishes happens-before for the unsynchronized resultBox.

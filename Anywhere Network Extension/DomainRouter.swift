@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "DomainRouter")
 
@@ -291,90 +292,88 @@ class DomainRouter {
         case bypass = 3
     }
 
-    private var tiers: [TierMatchers] = Tier.allCases.map { _ in TierMatchers() }
+    /// `tiers` + `configurationMap`, guarded as one unit (lookups run on both the lwIP and UDP
+    /// queues); reloads hold the lock across the whole compile so a lookup never sees a half-built tier.
+    private struct RoutingState {
+        var tiers: [TierMatchers] = Tier.allCases.map { _ in TierMatchers() }
+        var configurationMap: [UUID: ProxyConfiguration] = [:]
 
-    private var configurationMap: [UUID: ProxyConfiguration] = [:]
+        // MARK: Streaming ingestion
 
-    /// Guards `tiers` + `configurationMap` (lookups run on both the lwIP and UDP queues);
-    /// reloads hold the lock across the whole compile so a lookup never sees a half-built tier.
-    private let routingLock = UnfairLock()
+        mutating func ingestConfigurations(_ slice: Data) {
+            guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else { return }
+            for (key, configuration) in configurations {
+                guard let configurationId = UUID(uuidString: key) else { continue }
+                configurationMap[configurationId] = configuration
+            }
+        }
+
+        mutating func reserveCIDRv4(tierIndex: Int, additionalPrefixes: Int) {
+            tiers[tierIndex].reserveIPv4(additionalPrefixes: additionalPrefixes)
+        }
+
+        mutating func reserveCIDRv6(tierIndex: Int, additionalPrefixes: Int) {
+            tiers[tierIndex].reserveIPv6(additionalPrefixes: additionalPrefixes)
+        }
+
+        mutating func ingestRule(tierIndex: Int, action: RouteTarget, type: RoutingRuleType,
+                                 valueStart: Int, length: Int, base: UnsafeBufferPointer<UInt8>) {
+            switch type {
+            case .domainSuffix:
+                tiers[tierIndex].collectSuffix(offset: valueStart, length: length, action: action)
+            case .domainKeyword:
+                tiers[tierIndex].insertKeyword(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self), action: action)
+            case .ipCIDR:
+                if let parsed = DomainRouter.parseIPv4CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
+                    tiers[tierIndex].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
+                }
+            case .ipCIDR6:
+                if let parsed = DomainRouter.parseIPv6CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
+                    tiers[tierIndex].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
+                }
+            }
+        }
+    }
+
+    private let routingState = Mutex(RoutingState())
 
     // MARK: - Loading
 
     /// Clears all rules and configurations (e.g. when switching to global mode).
     func reset() {
-        routingLock.withLock { resetUnlocked() }
+        routingState.withLock { $0 = RoutingState() }
     }
 
-    /// Caller must hold ``routingLock``.
-    private func resetUnlocked() {
-        tiers = Tier.allCases.map { _ in TierMatchers() }
-        configurationMap.removeAll()
-    }
-
-    /// Compiles rules from the App Group routing file into per-tier matchers under `routingLock`.
+    /// Compiles rules from the App Group routing file into per-tier matchers; the whole
+    /// rebuild deliberately runs inside one critical section.
     func loadRoutingConfiguration() {
-        routingLock.withLock { loadRoutingConfigurationLocked() }
+        routingState.withLock { state in
+            Self.loadRoutingConfigurationLocked(into: &state)
+        }
     }
 
-    private func loadRoutingConfigurationLocked() {
-        resetUnlocked()
+    private static func loadRoutingConfigurationLocked(into state: inout RoutingState) {
+        state = RoutingState()
 
         guard let data = AWCore.getRoutingData() else {
             logger.debug("[DomainRouter] No routing data available")
             return
         }
-        
+
         do {
             try data.withUnsafeBytes { raw in
                 let base = raw.bindMemory(to: UInt8.self)
-                var reader = RoutingBinaryReader(bytes: base, data: data, owner: self)
-                try reader.run()
-                for i in tiers.indices { tiers[i].finalize(base: base) }
+                var reader = RoutingBinaryReader(bytes: base, data: data)
+                try reader.run(state: &state)
+                for i in state.tiers.indices { state.tiers[i].finalize(base: base) }
             }
         } catch {
-            resetUnlocked()
+            state = RoutingState()
             logger.error("[DomainRouter] Routing payload parse failed: \(error)")
             return
         }
 
-        logger.debug("[DomainRouter] Loaded tiers — user: \(self.tiers[Tier.user.rawValue].domainRuleCount)+\(self.tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(self.tiers[Tier.adBlock.rawValue].domainRuleCount)+\(self.tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(self.tiers[Tier.builtIn.rawValue].domainRuleCount)+\(self.tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(self.tiers[Tier.bypass.rawValue].domainRuleCount)+\(self.tiers[Tier.bypass.rawValue].ipRuleCount); \(self.configurationMap.count) configurations")
-    }
-
-    // MARK: - Streaming ingestion
-    
-    fileprivate func ingestConfigurations(_ slice: Data) {
-        guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else { return }
-        for (key, configuration) in configurations {
-            guard let configurationId = UUID(uuidString: key) else { continue }
-            configurationMap[configurationId] = configuration
-        }
-    }
-    
-    fileprivate func reserveCIDRv4(tierIndex: Int, additionalPrefixes: Int) {
-        tiers[tierIndex].reserveIPv4(additionalPrefixes: additionalPrefixes)
-    }
-
-    fileprivate func reserveCIDRv6(tierIndex: Int, additionalPrefixes: Int) {
-        tiers[tierIndex].reserveIPv6(additionalPrefixes: additionalPrefixes)
-    }
-
-    fileprivate func ingestRule(tierIndex: Int, action: RouteTarget, type: RoutingRuleType,
-                                valueStart: Int, length: Int, base: UnsafeBufferPointer<UInt8>) {
-        switch type {
-        case .domainSuffix:
-            tiers[tierIndex].collectSuffix(offset: valueStart, length: length, action: action)
-        case .domainKeyword:
-            tiers[tierIndex].insertKeyword(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self), action: action)
-        case .ipCIDR:
-            if let parsed = Self.parseIPv4CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
-                tiers[tierIndex].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
-            }
-        case .ipCIDR6:
-            if let parsed = Self.parseIPv6CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
-                tiers[tierIndex].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
-            }
-        }
+        logger.debug("[DomainRouter] Loaded tiers — user: \(state.tiers[Tier.user.rawValue].domainRuleCount)+\(state.tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(state.tiers[Tier.adBlock.rawValue].domainRuleCount)+\(state.tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(state.tiers[Tier.builtIn.rawValue].domainRuleCount)+\(state.tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(state.tiers[Tier.bypass.rawValue].domainRuleCount)+\(state.tiers[Tier.bypass.rawValue].ipRuleCount); \(state.configurationMap.count) configurations")
     }
 
     // MARK: - Payload reader
@@ -384,34 +383,32 @@ class DomainRouter {
 
         let bytes: UnsafeBufferPointer<UInt8>
         let data: Data
-        let owner: DomainRouter
         private var cursor = 0
         private var count: Int { bytes.count }
-        
-        init(bytes: UnsafeBufferPointer<UInt8>, data: Data, owner: DomainRouter) {
+
+        init(bytes: UnsafeBufferPointer<UInt8>, data: Data) {
             self.bytes = bytes
             self.data = data
-            self.owner = owner
         }
 
-        mutating func run() throws {
+        mutating func run(state: inout RoutingState) throws {
             try expectMagic()
 
             let configLength = Int(try u32())
             let configStart = cursor
             try advance(configLength)
             if configLength > 0 {
-                owner.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
+                state.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
             }
 
             var remainingEntries = try u32()
             while remainingEntries > 0 {
-                try readEntry()
+                try readEntry(state: &state)
                 remainingEntries -= 1
             }
         }
 
-        private mutating func readEntry() throws {
+        private mutating func readEntry(state: inout RoutingState) throws {
             guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw ReadError.malformed }
             let action = try readAction()
 
@@ -429,13 +426,13 @@ class DomainRouter {
                 try advance(length)
                 if let type = RoutingRuleType(rawValue: Int(typeByte)) {
                     if type == .ipCIDR, !reservedV4 {
-                        owner.reserveCIDRv4(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
+                        state.reserveCIDRv4(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
                         reservedV4 = true
                     } else if type == .ipCIDR6, !reservedV6 {
-                        owner.reserveCIDRv6(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
+                        state.reserveCIDRv6(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
                         reservedV6 = true
                     }
-                    owner.ingestRule(tierIndex: Int(tier.rawValue), action: action, type: type,
+                    state.ingestRule(tierIndex: Int(tier.rawValue), action: action, type: type,
                                      valueStart: valueStart, length: length, base: bytes)
                 }
                 remainingRules -= 1
@@ -497,35 +494,33 @@ class DomainRouter {
     // MARK: - Matching (public API)
 
     var hasRules: Bool {
-        routingLock.withLock {
-            for i in tiers.indices where !tiers[i].isEmpty { return true }
+        routingState.withLock { state in
+            for i in state.tiers.indices where !state.tiers[i].isEmpty { return true }
             return false
         }
     }
 
     /// Matches a domain by walking tiers in priority order. First hit wins.
+    /// Iterates by index so the per-tier `TierMatchers` value isn't copied on each lookup.
     func matchDomain(_ domain: String) -> RouteTarget? {
         guard !domain.isEmpty else { return nil }
         // Lowercase once and share the UTF-8 bytes across tiers.
         var lowered = Self.asciiLowercasedIfNeeded(domain)
-        return routingLock.withLock {
-            lowered.withUTF8 { matchDomainBytes($0) }
+        return routingState.withLock { state in
+            lowered.withUTF8 { bytes -> RouteTarget? in
+                for i in state.tiers.indices {
+                    if let action = state.tiers[i].lookupDomain(bytes) { return action }
+                }
+                return nil
+            }
         }
-    }
-
-    /// Iterates by index so the per-tier `TierMatchers` value isn't copied on each lookup.
-    private func matchDomainBytes(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteTarget? {
-        for i in tiers.indices {
-            if let action = tiers[i].lookupDomain(bytes) { return action }
-        }
-        return nil
     }
 
     /// Matches an IP address against per-tier CIDR tries in priority order.
     func matchIP(_ ip: String) -> RouteTarget? {
         guard !ip.isEmpty else { return nil }
 
-        return routingLock.withLock { () -> RouteTarget? in
+        return routingState.withLock { state -> RouteTarget? in
             if ip.contains(":") {
                 var address = in6_addr()
                 guard inet_pton(AF_INET6, ip, &address) == 1 else { return nil }
@@ -533,14 +528,14 @@ class DomainRouter {
                 let (hi, lo) = withUnsafeBytes(of: &address) { raw -> (UInt64, UInt64) in
                     CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
                 }
-                for i in tiers.indices {
-                    if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
+                for i in state.tiers.indices {
+                    if let action = state.tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
                 }
                 return nil
             } else {
                 guard let ipv4Address = Self.parseIPv4(ip) else { return nil }
-                for i in tiers.indices {
-                    if let action = tiers[i].lookupIPv4(ipv4Address) { return action }
+                for i in state.tiers.indices {
+                    if let action = state.tiers[i].lookupIPv4(ipv4Address) { return action }
                 }
                 return nil
             }
@@ -553,7 +548,7 @@ class DomainRouter {
         case .direct, .reject:
             return nil
         case .proxy(let id):
-            return routingLock.withLock { configurationMap[id] }
+            return routingState.withLock { $0.configurationMap[id] }
         }
     }
 

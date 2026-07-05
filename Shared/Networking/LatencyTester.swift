@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "LatencyTester")
 
@@ -179,24 +180,23 @@ nonisolated enum LatencyTester {
 
     /// Cancellation hook that fails whichever phase is currently awaiting.
     private final class PendingResumer: @unchecked Sendable {
-        private let lock = UnfairLock()
-        private var hook: ((Error) -> Void)?
+        private let hook = Mutex<((Error) -> Void)?>(nil)
 
         func install(_ hook: @escaping (Error) -> Void) {
-            lock.lock(); defer { lock.unlock() }
-            self.hook = hook
+            self.hook.withLock { $0 = hook }
         }
 
         func clear() {
-            lock.lock(); defer { lock.unlock() }
-            hook = nil
+            hook.withLock { $0 = nil }
         }
 
         func cancel() {
-            lock.lock()
-            let capturedHook = hook
-            hook = nil
-            lock.unlock()
+            // Take the hook out under the lock; invoke it outside.
+            let capturedHook = hook.withLock { hook -> ((Error) -> Void)? in
+                let captured = hook
+                hook = nil
+                return captured
+            }
             capturedHook?(CancellationError())
         }
     }
@@ -204,19 +204,19 @@ nonisolated enum LatencyTester {
     /// One-shot continuation wrapper; the second resume is a no-op, so a cancel
     /// during a hung send/receive can't double-resume or leak the continuation.
     private final class OneShotResumer<T>: @unchecked Sendable {
-        private let lock = UnfairLock()
-        private var continuation: CheckedContinuation<T, Error>?
+        private let continuation = Mutex<CheckedContinuation<T, Error>?>(nil)
 
         func arm(_ continuation: CheckedContinuation<T, Error>) {
-            lock.lock(); defer { lock.unlock() }
-            self.continuation = continuation
+            self.continuation.withLock { $0 = continuation }
         }
 
         func resume(_ result: Result<T, Error>) {
-            lock.lock()
-            let snapshotContinuation = continuation
-            continuation = nil
-            lock.unlock()
+            // Take the continuation out under the lock; resume it outside.
+            let snapshotContinuation = continuation.withLock { continuation -> CheckedContinuation<T, Error>? in
+                let snapshot = continuation
+                continuation = nil
+                return snapshot
+            }
             snapshotContinuation?.resume(with: result)
         }
     }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMSession")
 
@@ -31,16 +32,18 @@ final class MITMSession {
         let queue: DispatchQueue
         var onSendToClient: ((Data, ((Error?) -> Void)?) -> Void)?
 
-        private let lock = UnfairLock()
-        private var buffer = Data()
-        private var pending: ((Data?, Bool, Error?) -> Void)?
-        private var closed = false
-        /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
-        /// the client stay open so an in-flight response still drains — matching the non-MITM path,
-        /// which keeps pumping downlink after a client FIN. `closed` (forceCancel) blocks both sides.
-        private var receiveClosed = false
+        private struct State {
+            var buffer = Data()
+            var pending: ((Data?, Bool, Error?) -> Void)?
+            var closed = false
+            /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
+            /// the client stay open so an in-flight response still drains — matching the non-MITM path,
+            /// which keeps pumping downlink after a client FIN. `closed` (forceCancel) blocks both sides.
+            var receiveClosed = false
+        }
+        private let state = Mutex(State())
 
-        var isTransportReady: Bool { !closed }
+        var isTransportReady: Bool { state.withLock { !$0.closed } }
 
         init(queue: DispatchQueue) {
             self.queue = queue
@@ -50,7 +53,7 @@ final class MITMSession {
 
         func send(data: Data, completion: @escaping (Error?) -> Void) {
             queue.async { [self] in
-                guard !closed else {
+                guard !state.withLock({ $0.closed }) else {
                     completion(TransportError.notConnected)
                     return
                 }
@@ -64,65 +67,70 @@ final class MITMSession {
 
         func send(data: Data) {
             queue.async { [self] in
-                guard !closed else { return }
+                guard !state.withLock({ $0.closed }) else { return }
                 onSendToClient?(data, nil)
             }
         }
 
         func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
-            lock.lock()
-            if !buffer.isEmpty {
-                let data = buffer
-                buffer = Data()
-                lock.unlock()
-                completion(data, false, nil)
-                return
+            // Extract under the lock; the completion is invoked outside it.
+            let immediate: (Data?, Bool)? = state.withLock { state in
+                if !state.buffer.isEmpty {
+                    let data = state.buffer
+                    state.buffer = Data()
+                    return (data, false)
+                }
+                if state.closed || state.receiveClosed {
+                    return (nil, true)
+                }
+                state.pending = completion
+                return nil
             }
-            if closed || receiveClosed {
-                lock.unlock()
-                completion(nil, true, nil)
-                return
+            if let (data, isComplete) = immediate {
+                completion(data, isComplete, nil)
             }
-            pending = completion
-            lock.unlock()
         }
 
         func forceCancel() {
-            lock.lock()
-            closed = true
-            let callback = pending
-            pending = nil
-            buffer = Data()
-            lock.unlock()
+            // Capture the stored callback under the lock; invoke it after.
+            let callback = state.withLock { state -> ((Data?, Bool, Error?) -> Void)? in
+                state.closed = true
+                let callback = state.pending
+                state.pending = nil
+                state.buffer = Data()
+                return callback
+            }
             callback?(nil, true, nil)
         }
 
         // MARK: External Inputs
 
         func feedFromClient(_ data: Data) {
-            lock.lock()
-            if closed || receiveClosed {
-                lock.unlock()
-                return
+            // Capture the stored callback under the lock; invoke it after.
+            let callback = state.withLock { state -> ((Data?, Bool, Error?) -> Void)? in
+                if state.closed || state.receiveClosed {
+                    return nil
+                }
+                if let callback = state.pending {
+                    state.pending = nil
+                    return callback
+                }
+                state.buffer.append(data)
+                return nil
             }
-            if let callback = pending {
-                pending = nil
-                lock.unlock()
-                callback(data, false, nil)
-                return
-            }
-            buffer.append(data)
-            lock.unlock()
+            callback?(data, false, nil)
         }
 
         func endOfClient() {
-            lock.lock()
-            receiveClosed = true
-            let callback = pending
-            pending = nil
-            let pendingBuffer = buffer
-            buffer = Data()
-            lock.unlock()
+            // Capture the stored callback + buffered bytes under the lock; invoke after.
+            let (callback, pendingBuffer) = state.withLock { state -> (((Data?, Bool, Error?) -> Void)?, Data) in
+                state.receiveClosed = true
+                let callback = state.pending
+                state.pending = nil
+                let pendingBuffer = state.buffer
+                state.buffer = Data()
+                return (callback, pendingBuffer)
+            }
             if let callback {
                 if pendingBuffer.isEmpty {
                     callback(nil, true, nil)

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
@@ -147,50 +148,45 @@ struct CompiledMITMRuleSet {
 
 /// Domain-suffix matching is most-specific-wins via a trie of reversed labels.
 final class MITMRewritePolicy {
-    private var trie = FlatLabelTrie<Int16>()
-    private var compiledSets: [CompiledMITMRuleSet] = []
-    private var setCount: Int = 0
+    private struct PolicyState {
+        var trie = FlatLabelTrie<Int16>()
+        var compiledSets: [CompiledMITMRuleSet] = []
+        var setCount: Int = 0
 
-    /// Compiled gate regexes keyed by pattern, carried across reloads so an unchanged pattern isn't
-    /// recompiled.
-    private var gateCache: [String: MITMGateRegex] = [:]
-
-    /// Guards trie + setCount + gateCache; reload holds it across the full rebuild so lookups never see a half-built trie.
-    private let lock = UnfairLock()
-
-    /// lwIP fast path: keeps the no-rules case at a single bool check.
-    var hasRules: Bool { lock.withLock { setCount > 0 } }
-
-    func reset() {
-        lock.withLock { resetUnlocked() }
+        /// Compiled gate regexes keyed by pattern, carried across reloads so an unchanged pattern isn't
+        /// recompiled.
+        var gateCache: [String: MITMGateRegex] = [:]
     }
 
-    /// Caller must hold `lock`. Snapshot `gateCache` before calling if the compiled regexes are to be
-    /// reused across the rebuild — this drops them.
-    private func resetUnlocked() {
-        trie = FlatLabelTrie<Int16>()
-        compiledSets = []
-        setCount = 0
-        gateCache.removeAll()
+    /// Guards trie + setCount + gateCache; reload holds the lock across the full rebuild so lookups never see a half-built trie.
+    private let state = Mutex(PolicyState())
+
+    /// lwIP fast path: keeps the no-rules case at a single bool check.
+    var hasRules: Bool { state.withLock { $0.setCount > 0 } }
+
+    func reset() {
+        // Drops `gateCache` too; `load` snapshots it first so compiled regexes carry across reloads.
+        state.withLock { $0 = PolicyState() }
     }
 
     /// Replaces the rule set table. Bad rules are dropped (logged) without
     /// dropping their set; on duplicate suffixes the later set wins.
     func load(ruleSets: [MITMRuleSet]) {
         var scopedRules: [(scope: UUID, rules: [CompiledMITMRule])] = []
-        lock.withLock {
-            let previousGates = gateCache
-            resetUnlocked()
+        // The whole rebuild — including gate regex compilation — deliberately runs under the lock.
+        state.withLock { state in
+            let previousGates = state.gateCache
+            state = PolicyState()
             var newGates: [String: MITMGateRegex] = [:]
             for set in ruleSets {
                 // Disabled sets stay in activeIDs so toggling off preserves the script-store bucket.
                 guard set.enabled else { continue }
-                if let compiled = insertUnlocked(set, previousGates: previousGates, newGates: &newGates) {
+                if let compiled = insert(set, into: &state, previousGates: previousGates, newGates: &newGates) {
                     scopedRules.append((scope: set.id, rules: compiled))
                 }
             }
-            gateCache = newGates
-            trie.freeze()
+            state.gateCache = newGates
+            state.trie.freeze()
         }
         // Purge JS engine state for deleted sets; edited sets (stable id) keep theirs.
         let activeIDs = Set(ruleSets.map { $0.id })
@@ -207,11 +203,12 @@ final class MITMRewritePolicy {
         }
     }
 
-    /// Inserts one rule set and returns its compiled rules, or nil without a usable suffix. Caller must hold `lock`.
-    /// Reuses a gate from `newGates` (this reload) or `previousGates` (last reload) before compiling, so each
-    /// distinct pattern is compiled at most once.
-    private func insertUnlocked(
+    /// Inserts one rule set into `state` and returns its compiled rules, or nil without a usable suffix.
+    /// Runs inside `load`'s withLock. Reuses a gate from `newGates` (this reload) or `previousGates`
+    /// (last reload) before compiling, so each distinct pattern is compiled at most once.
+    private func insert(
         _ set: MITMRuleSet,
+        into state: inout PolicyState,
         previousGates: [String: MITMGateRegex],
         newGates: inout [String: MITMGateRegex]
     ) -> [CompiledMITMRule]? {
@@ -237,8 +234,8 @@ final class MITMRewritePolicy {
         }
 
         for suffix in suffixes {
-            guard compiledSets.count < Int(Int16.max) else {
-                logger.warning("MITM suffix table full (\(compiledSets.count) entries)")
+            guard state.compiledSets.count < Int(Int16.max) else {
+                logger.warning("MITM suffix table full (\(state.compiledSets.count) entries)")
                 break
             }
             let payload = CompiledMITMRuleSet(
@@ -246,10 +243,10 @@ final class MITMRewritePolicy {
                 domainSuffix: suffix,
                 rules: compiledRules
             )
-            let payloadID = Int16(compiledSets.count)
-            compiledSets.append(payload)
-            if trie.insert(suffix: suffix, payload: payloadID) {
-                setCount += 1
+            let payloadID = Int16(state.compiledSets.count)
+            state.compiledSets.append(payload)
+            if state.trie.insert(suffix: suffix, payload: payloadID) {
+                state.setCount += 1
             } else {
                 // Later set (user-list order) wins; log so the override is never silent.
                 logger.warning("duplicate domain suffix \"\(suffix)\": rule set \"\(set.name)\" overrides an earlier set's rules for it")
@@ -266,12 +263,12 @@ final class MITMRewritePolicy {
     func set(for host: String) -> CompiledMITMRuleSet? {
         guard !host.isEmpty else { return nil }
         var lowered = host.lowercased()
-        return lock.withLock { () -> CompiledMITMRuleSet? in
-            guard setCount > 0 else { return nil }
-            guard let id = lowered.withUTF8({ trie.lookup($0) }) else { return nil }
+        return state.withLock { state -> CompiledMITMRuleSet? in
+            guard state.setCount > 0 else { return nil }
+            guard let id = lowered.withUTF8({ state.trie.lookup($0) }) else { return nil }
             let index = Int(id)
-            guard index >= 0, index < compiledSets.count else { return nil }
-            return compiledSets[index]
+            guard index >= 0, index < state.compiledSets.count else { return nil }
+            return state.compiledSets[index]
         }
     }
 

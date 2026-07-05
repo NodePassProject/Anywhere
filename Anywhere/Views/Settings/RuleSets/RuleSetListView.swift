@@ -46,11 +46,7 @@ struct RuleSetListView: View {
             if !customRuleSets.isEmpty {
                 Section("Custom") {
                     ForEach(customRuleSets) { customRuleSet in
-                        NavigationLink {
-                            CustomRuleSetDetailView(customRuleSetId: customRuleSet.id)
-                        } label: {
-                            ruleSetRow(for: customRuleSet)
-                        }
+                        customRuleSetLink(for: customRuleSet)
                     }
                     .onDelete { offsets in
                         customRuleSets.remove(atOffsets: offsets)
@@ -186,6 +182,14 @@ struct RuleSetListView: View {
         }
         if store.customRuleSets.map(\.id) != localIds {
             store.reorderCustomRuleSets(customRuleSets)
+        }
+    }
+
+    private func customRuleSetLink(for customRuleSet: CustomRoutingRuleSet) -> some View {
+        NavigationLink {
+            CustomRuleSetDetailView(customRuleSetId: customRuleSet.id)
+        } label: {
+            ruleSetRow(for: customRuleSet)
         }
     }
 

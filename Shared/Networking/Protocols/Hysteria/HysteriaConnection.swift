@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaConnection")
 
@@ -17,18 +18,17 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     private let destination: String
 
     /// Confined to `session.queue`. The setter mirrors readiness into the
-    /// lock-protected `_isReady` so `isConnected` can be read from any queue
+    /// atomic `_isReady` so `isConnected` can be read from any queue
     /// without a sync hop onto `session.queue`.
     private var _state: State = .idle
     private var state: State {
         get { _state }
         set {
             _state = newValue
-            readyLock.withLock { _isReady = (newValue == .ready) }
+            _isReady.store(newValue == .ready, ordering: .relaxed)
         }
     }
-    private let readyLock = UnfairLock()
-    private var _isReady = false
+    private let _isReady = Atomic<Bool>(false)
 
     private var streamID: Int64 = -1
 
@@ -51,7 +51,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     }
 
     override var isConnected: Bool {
-        readyLock.withLock { _isReady }
+        _isReady.load(ordering: .relaxed)
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }

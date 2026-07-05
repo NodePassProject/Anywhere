@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 enum NowhereError: Error, LocalizedError {
     case notReady
@@ -54,23 +55,21 @@ nonisolated final class NowhereSession {
     private var idleCloseWorkItem: DispatchWorkItem?
     private static let idleCloseDelay: DispatchTimeInterval = .seconds(60)
 
-    private let _poolLock = UnfairLock()
-    private var _poolIsClosed = false
-    private var _poolTCPCount = 0
-    private var _poolUDPCount = 0
+    private struct PoolState {
+        var isClosed = false
+        var tcpCount = 0
+        var udpCount = 0
+    }
+    private let _poolState = Mutex(PoolState())
 
     var protocolSpec: NowhereProtocol.EffectiveSpec { configuration.protocolSpec }
 
     var isClosed: Bool {
-        _poolLock.lock()
-        defer { _poolLock.unlock() }
-        return _poolIsClosed
+        _poolState.withLock { $0.isClosed }
     }
 
     var hasActiveConnections: Bool {
-        _poolLock.lock()
-        defer { _poolLock.unlock() }
-        return _poolTCPCount > 0 || _poolUDPCount > 0
+        _poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
     }
 
     init(configuration: NowhereConfiguration, transport: QUICDatagramTransport? = nil) {
@@ -215,9 +214,7 @@ nonisolated final class NowhereSession {
             return
         }
         guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
-        _poolLock.lock()
-        _poolTCPCount = max(0, _poolTCPCount - 1)
-        _poolLock.unlock()
+        _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
         updateIdleCloseTimer()
         connection.handleStreamTermination(error: error)
     }
@@ -247,9 +244,7 @@ nonisolated final class NowhereSession {
                 return
             }
             self.tcpStreams[sid] = connection
-            self._poolLock.lock()
-            self._poolTCPCount += 1
-            self._poolLock.unlock()
+            self._poolState.withLock { $0.tcpCount += 1 }
             self.updateIdleCloseTimer()
             completion(sid, nil)
         }
@@ -271,9 +266,7 @@ nonisolated final class NowhereSession {
         queue.async { [weak self] in
             guard let self else { return }
             if self.tcpStreams.removeValue(forKey: sid) != nil {
-                self._poolLock.lock()
-                self._poolTCPCount = max(0, self._poolTCPCount - 1)
-                self._poolLock.unlock()
+                self._poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
                 self.updateIdleCloseTimer()
             }
         }
@@ -309,9 +302,7 @@ nonisolated final class NowhereSession {
                 self.nextUDPFlowID = flowID == UInt64.max ? 1 : flowID + 1
             }
             self.udpSessions[flowID] = connection
-            self._poolLock.lock()
-            self._poolUDPCount += 1
-            self._poolLock.unlock()
+            self._poolState.withLock { $0.udpCount += 1 }
             self.updateIdleCloseTimer()
             completion(.success(flowID))
         }
@@ -322,9 +313,7 @@ nonisolated final class NowhereSession {
         queue.async { [weak self] in
             guard let self else { return }
             if self.udpSessions.removeValue(forKey: flowID) != nil {
-                self._poolLock.lock()
-                self._poolUDPCount = max(0, self._poolUDPCount - 1)
-                self._poolLock.unlock()
+                self._poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
                 self.updateIdleCloseTimer()
             }
         }
@@ -343,16 +332,12 @@ nonisolated final class NowhereSession {
         idleCloseWorkItem = nil
 
         guard state == .ready else { return }
-        _poolLock.lock()
-        let total = _poolTCPCount + _poolUDPCount
-        _poolLock.unlock()
+        let total = _poolState.withLock { $0.tcpCount + $0.udpCount }
         guard total == 0 else { return }
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self._poolLock.lock()
-            let liveCount = self._poolTCPCount + self._poolUDPCount
-            self._poolLock.unlock()
+            let liveCount = self._poolState.withLock { $0.tcpCount + $0.udpCount }
             guard liveCount == 0, self.state == .ready else { return }
             self.close()
         }
@@ -369,11 +354,11 @@ nonisolated final class NowhereSession {
             self.idleCloseWorkItem = nil
             self.quic.bidiCreditHandler = nil
 
-            self._poolLock.lock()
-            self._poolIsClosed = true
-            self._poolTCPCount = 0
-            self._poolUDPCount = 0
-            self._poolLock.unlock()
+            self._poolState.withLock { state in
+                state.isClosed = true
+                state.tcpCount = 0
+                state.udpCount = 0
+            }
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()
@@ -402,11 +387,11 @@ nonisolated final class NowhereSession {
             self.idleCloseWorkItem = nil
             self.quic.bidiCreditHandler = nil
 
-            self._poolLock.lock()
-            self._poolIsClosed = true
-            self._poolTCPCount = 0
-            self._poolUDPCount = 0
-            self._poolLock.unlock()
+            self._poolState.withLock { state in
+                state.isClosed = true
+                state.tcpCount = 0
+                state.udpCount = 0
+            }
 
             let callbacks = self.readyCallbacks
             self.readyCallbacks.removeAll()

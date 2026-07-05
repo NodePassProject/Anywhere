@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 /// UDP-over-AnyTLS wrapper: after the UoT request `[isConnect=1][SocksaddrSerializer(dest)]`,
 /// every datagram in either direction is `[length BE u16][payload]`.
@@ -13,9 +14,7 @@ nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable 
 
     private let inner: AnyTLSStream
 
-    var udpBuffer = Data()
-    var udpBufferOffset = 0
-    let udpLock = UnfairLock()
+    let udpState = Mutex(UDPFramingState())
 
     init(inner: AnyTLSStream) {
         self.inner = inner
@@ -46,13 +45,10 @@ nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable 
     // MARK: - Receive
 
     override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        udpLock.lock()
-        if let packet = extractUDPPacket() {
-            udpLock.unlock()
+        if let packet = udpState.withLock({ extractUDPPacket(from: &$0) }) {
             completion(packet, nil)
             return
         }
-        udpLock.unlock()
         receiveMore(completion: completion)
     }
 
@@ -74,22 +70,20 @@ nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable 
                 completion(nil, nil)
                 return
             }
-            self.udpLock.lock()
-            self.udpBuffer.append(data)
-            if let packet = self.extractUDPPacket() {
-                self.udpLock.unlock()
+            let packet = self.udpState.withLock { state -> Data? in
+                state.buffer.append(data)
+                return self.extractUDPPacket(from: &state)
+            }
+            if let packet {
                 completion(packet, nil)
             } else {
-                self.udpLock.unlock()
                 self.receiveMore(completion: completion)
             }
         }
     }
 
     override func cancel() {
-        udpLock.lock()
-        clearUDPBuffer()
-        udpLock.unlock()
+        udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
     }
 }

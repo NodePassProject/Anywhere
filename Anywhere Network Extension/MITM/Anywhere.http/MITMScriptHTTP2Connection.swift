@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2")
 
@@ -113,14 +114,16 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// Called once when the origin is discovered to be HTTP/1.1-only, so the pool can cache it.
     var onNegotiatedHTTP1: (() -> Void)?
 
-    // MARK: Pool-visible snapshot (guarded by `poolLock`, read off-queue by the pool)
+    // MARK: Pool-visible snapshot (held in a Mutex, read off-queue by the pool)
 
-    private let poolLock = UnfairLock()
-    private var poolState: State = .idle
-    /// `streams.count + poolReserved`, so a slot claimed by an in-flight `perform` isn't lost to `updatePoolSnapshot`.
-    private var poolStreamCount = 0
-    private var poolReserved = 0
-    private var poolMaxConcurrent: UInt32 = ownMaxConcurrentStreams
+    private struct PoolSnapshot {
+        var state: State = .idle
+        /// `streams.count + reserved`, so a slot claimed by an in-flight `perform` isn't lost to `updatePoolSnapshot`.
+        var streamCount = 0
+        var reserved = 0
+        var maxConcurrent: UInt32 = MITMScriptHTTP2Connection.ownMaxConcurrentStreams
+    }
+    private let poolSnapshot = Mutex(PoolSnapshot())
 
     // MARK: Init
 
@@ -132,36 +135,36 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
 
     // MARK: - Multiplexer
 
-    var isClosed: Bool { poolLock.withLock { poolState == .closed } }
-    var activeStreamCount: Int { poolLock.withLock { poolStreamCount } }
-    var poolIsGoingAway: Bool { poolLock.withLock { poolState == .goingAway } }
+    var isClosed: Bool { poolSnapshot.withLock { $0.state == .closed } }
+    var activeStreamCount: Int { poolSnapshot.withLock { $0.streamCount } }
+    var poolIsGoingAway: Bool { poolSnapshot.withLock { $0.state == .goingAway } }
 
     /// Atomically checks capacity and reserves a stream slot; accepts in-progress connections so a
     /// burst of requests coalesces behind one handshake. The caller MUST follow up with `perform`,
     /// which releases the reservation exactly once.
     func tryReserveStream() -> Bool {
-        poolLock.withLock {
-            switch poolState {
+        poolSnapshot.withLock { snapshot in
+            switch snapshot.state {
             case .idle, .connecting, .prefaceSent, .ready: break
             case .goingAway, .closed: return false
             }
-            guard poolStreamCount < Int(poolMaxConcurrent) else { return false }
-            poolReserved += 1
-            poolStreamCount += 1
+            guard snapshot.streamCount < Int(snapshot.maxConcurrent) else { return false }
+            snapshot.reserved += 1
+            snapshot.streamCount += 1
             return true
         }
     }
 
     private func releaseReservation() {
-        poolLock.withLock { if poolReserved > 0 { poolReserved -= 1 } }
+        poolSnapshot.withLock { if $0.reserved > 0 { $0.reserved -= 1 } }
     }
 
     /// Must be called on `queue`.
     private func updatePoolSnapshot() {
-        poolLock.withLock {
-            poolState = state
-            poolStreamCount = streams.count + poolReserved
-            poolMaxConcurrent = maxConcurrentStreams
+        poolSnapshot.withLock { snapshot in
+            snapshot.state = state
+            snapshot.streamCount = streams.count + snapshot.reserved
+            snapshot.maxConcurrent = maxConcurrentStreams
         }
     }
 

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexer")
 
@@ -17,35 +18,39 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private let outerTLSVersion: TLSVersion?
     private let passwordHash: Data
 
-    private let lock = UnfairLock()
+    /// Fields guarded by `lock`.
+    private struct State {
+        /// Mutable so cmdUpdatePaddingScheme can swap it.
+        var padding: AnyTLSPaddingScheme
 
-    /// Mutable so cmdUpdatePaddingScheme can swap it.
-    private var padding: AnyTLSPaddingScheme
+        var streams: [UInt32: AnyTLSStream] = [:]
+        var nextStreamID: UInt32 = 0
+        var peerVersion: UInt8 = 0
 
-    private var streams: [UInt32: AnyTLSStream] = [:]
-    private var nextStreamID: UInt32 = 0
-    private var peerVersion: UInt8 = 0
+        var packetCounter: UInt32 = 0
+        var sendPadding: Bool = true
 
-    private var packetCounter: UInt32 = 0
-    private var sendPadding: Bool = true
+        /// While true, writes accumulate in `outboundBuffer` so cmdSettings+cmdSYN+SocksAddr
+        /// land in one TLS record.
+        var buffering: Bool = true
+        var outboundBuffer: Data = Data()
 
-    /// While true, writes accumulate in `outboundBuffer` so cmdSettings+cmdSYN+SocksAddr
-    /// land in one TLS record.
-    private var buffering: Bool = true
-    private var outboundBuffer: Data = Data()
+        var synDoneTimer: DispatchSourceTimer?
+
+        /// Buffer for partial inbound frames (TLS records don't align with AnyTLS frames).
+        var recvBuffer = Data()
+
+        var closed: Bool = false
+
+        /// Set while an acquire has claimed this mux for serial reuse (before its stream opens).
+        var reserved: Bool = false
+    }
+
+    private let lock: Mutex<State>
 
     var seq: UInt64 = 0
 
     private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSSessionTimerQueue)
-    private var synDoneTimer: DispatchSourceTimer?
-
-    /// Buffer for partial inbound frames (TLS records don't align with AnyTLS frames).
-    private var recvBuffer = Data()
-
-    private var closed: Bool = false
-
-    /// Set while an acquire has claimed this mux for serial reuse (before its stream opens).
-    private var reserved: Bool = false
 
     var onClose: (() -> Void)?
 
@@ -55,33 +60,35 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         self.inner = inner
         self.outerTLSVersion = inner.outerTLSVersion
         self.passwordHash = passwordHash
-        self.padding = padding
+        self.lock = Mutex(State(padding: padding))
     }
 
     // MARK: - Capacity
 
-    var isAlive: Bool { lock.withLock { !closed } }
-    var isClosed: Bool { lock.withLock { closed } }
-    var activeStreamCount: Int { lock.withLock { streams.count } }
+    var isAlive: Bool { lock.withLock { !$0.closed } }
+    var isClosed: Bool { lock.withLock { $0.closed } }
+    var activeStreamCount: Int { lock.withLock { $0.streams.count } }
 
     /// Atomically claims a live, unreserved, stream-free multiplexer for serial reuse;
     /// returns false otherwise. Released via ``releaseReservation()`` when the stream ends.
     func tryReserveStream() -> Bool {
-        lock.withLock {
-            guard !closed, !reserved, streams.isEmpty else { return false }
-            reserved = true
+        lock.withLock { state in
+            guard !state.closed, !state.reserved, state.streams.isEmpty else { return false }
+            state.reserved = true
             return true
         }
     }
 
     func releaseReservation() {
-        lock.withLock { reserved = false }
+        lock.withLock { $0.reserved = false }
     }
 
     // MARK: - Lifecycle
 
     /// packetCounter intentionally stays 0 here so the padding schedule aligns with the server.
     func start() {
+        // Snapshot; the scheme can't change before startReadLoop() arms inbound handling.
+        let padding = lock.withLock { $0.padding }
         var prologue = Data()
         prologue.append(passwordHash)
         let paddingLen: Int
@@ -119,20 +126,22 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         startReadLoop()
     }
 
-    private func armSynDoneTimerLocked() {
-        synDoneTimer?.cancel()
+    /// Must be called with `lock` held (inside a `withLock` on it).
+    private func armSynDoneTimerLocked(_ state: inout State) {
+        state.synDoneTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: timerQueue)
         timer.schedule(deadline: .now() + .seconds(3))
         timer.setEventHandler { [weak self] in
             self?.close(error: ProxyError.connectionFailed("AnyTLS SYN-ACK timeout"))
         }
         timer.resume()
-        synDoneTimer = timer
+        state.synDoneTimer = timer
     }
 
-    private func cancelSynDoneTimerLocked() {
-        synDoneTimer?.cancel()
-        synDoneTimer = nil
+    /// Must be called with `lock` held (inside a `withLock` on it).
+    private func cancelSynDoneTimerLocked(_ state: inout State) {
+        state.synDoneTimer?.cancel()
+        state.synDoneTimer = nil
     }
 
     // MARK: - Streams
@@ -140,45 +149,45 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     /// Opens a new logical stream; the caller's first write (the destination address)
     /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
     func openStream() -> AnyTLSStream? {
-        lock.lock()
-        if closed {
-            lock.unlock()
+        typealias Opened = (stream: AnyTLSStream, sid: UInt32, armWatchdog: Bool,
+                            bufferedBytes: Int, peerVersion: UInt8)
+        let opened: Opened? = lock.withLock { (state: inout State) -> Opened? in
+            if state.closed {
+                return nil
+            }
+            state.nextStreamID &+= 1
+            if state.nextStreamID == 0 { state.nextStreamID = 1 }    // skip 0 (reserved for control)
+            let sid = state.nextStreamID
+            let stream = AnyTLSStream(sid: sid, multiplexer: self, outerTLSVersion: outerTLSVersion)
+            state.streams[sid] = stream
+
+            // v2 watchdog: close the multiplexer if no SYNACK within 3 s (cleared on cmdSYNACK).
+            let armWatchdog = sid >= 2 && state.peerVersion >= 2
+            if armWatchdog {
+                armSynDoneTimerLocked(&state)
+            }
+            return (stream, sid, armWatchdog, state.outboundBuffer.count, state.peerVersion)
+        }
+        guard let opened else {
             logger.debug("[AnyTLSMultiplexer] openStream rejected — multiplexer closed")
             return nil
         }
-        nextStreamID &+= 1
-        if nextStreamID == 0 { nextStreamID = 1 }    // skip 0 (reserved for control)
-        let sid = nextStreamID
-        let stream = AnyTLSStream(sid: sid, multiplexer: self, outerTLSVersion: outerTLSVersion)
-        streams[sid] = stream
 
-        // v2 watchdog: close the multiplexer if no SYNACK within 3 s (cleared on cmdSYNACK).
-        let armWatchdog = sid >= 2 && peerVersion >= 2
-        if armWatchdog {
-            armSynDoneTimerLocked()
-        }
-        let bufferedBytes = outboundBuffer.count
-        let peerVersionSnapshot = peerVersion
-        lock.unlock()
+        logger.debug("[AnyTLSMultiplexer] openStream sid=\(opened.sid) peerVersion=\(opened.peerVersion) watchdog=\(opened.armWatchdog) buffered=\(opened.bufferedBytes)B")
 
-        logger.debug("[AnyTLSMultiplexer] openStream sid=\(sid) peerVersion=\(peerVersionSnapshot) watchdog=\(armWatchdog) buffered=\(bufferedBytes)B")
-
-        let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: sid, length: 0)
+        let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: opened.sid, length: 0)
         writeConnLocked(synFrame, completion: { _ in })
 
-        lock.lock()
-        buffering = false
-        lock.unlock()
-        return stream
+        lock.withLock { $0.buffering = false }
+        return opened.stream
     }
 
     func removeStream(sid: UInt32) {
-        lock.lock()
-        guard !closed, let stream = streams.removeValue(forKey: sid) else {
-            lock.unlock()
-            return
+        let removed: AnyTLSStream? = lock.withLock { state in
+            guard !state.closed else { return nil }
+            return state.streams.removeValue(forKey: sid)
         }
-        lock.unlock()
+        guard let stream = removed else { return }
 
         let finFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdFIN, sid: sid, length: 0)
         writeConnLocked(finFrame, completion: { _ in })
@@ -219,50 +228,72 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     /// Padding-aware writer: buffers while `buffering`, otherwise slices output per the
     /// padding schedule, topping up with cmdWaste.
     private func writeConnLocked(_ bytes: Data, completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        if closed {
-            lock.unlock()
+        /// Follow-up decided under the lock; sends and completions run after it drops.
+        enum Action {
+            case rejected
+            case buffered(total: Int)
+            case sendRaw(pending: Data, prependedBufferSize: Int)
+            case sendRawPaddingOff(pending: Data, packet: UInt32, stop: UInt32)
+            case sendScheduled(pending: Data, packet: UInt32, prependedBufferSize: Int, schedule: [Int])
+        }
+
+        let action: Action = lock.withLock { (state: inout State) -> Action in
+            if state.closed {
+                return .rejected
+            }
+            if state.buffering {
+                state.outboundBuffer.append(bytes)
+                return .buffered(total: state.outboundBuffer.count)
+            }
+            var pending = bytes
+            let prependedBufferSize = state.outboundBuffer.count
+            if !state.outboundBuffer.isEmpty {
+                pending = state.outboundBuffer + pending
+                state.outboundBuffer.removeAll(keepingCapacity: false)
+            }
+
+            if !state.sendPadding {
+                return .sendRaw(pending: pending, prependedBufferSize: prependedBufferSize)
+            }
+
+            state.packetCounter &+= 1
+            let packet = state.packetCounter
+            let scheme = state.padding
+            if packet >= scheme.stop {
+                state.sendPadding = false
+                return .sendRawPaddingOff(pending: pending, packet: packet, stop: scheme.stop)
+            }
+            let schedule = scheme.generateRecordPayloadSizes(packet: packet)
+            return .sendScheduled(pending: pending, packet: packet,
+                                  prependedBufferSize: prependedBufferSize, schedule: schedule)
+        }
+
+        let pending: Data
+        let schedule: [Int]
+        switch action {
+        case .rejected:
             logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
             completion(ProxyError.connectionFailed("AnyTLS multiplexer closed"))
             return
-        }
-        if buffering {
-            outboundBuffer.append(bytes)
-            let total = outboundBuffer.count
-            lock.unlock()
+        case .buffered(let total):
             logger.debug("[AnyTLSMultiplexer] writeConn buffered \(bytes.count)B (total=\(total)B)")
             completion(nil)
             return
-        }
-        var pending = bytes
-        let prependedBufferSize = outboundBuffer.count
-        if !outboundBuffer.isEmpty {
-            pending = outboundBuffer + pending
-            outboundBuffer.removeAll(keepingCapacity: false)
-        }
-
-        if !sendPadding {
-            lock.unlock()
+        case .sendRaw(let raw, let prependedBufferSize):
             if prependedBufferSize > 0 {
-                logger.debug("[AnyTLSMultiplexer] writeConn flush+raw \(pending.count)B (was buffered=\(prependedBufferSize))")
+                logger.debug("[AnyTLSMultiplexer] writeConn flush+raw \(raw.count)B (was buffered=\(prependedBufferSize))")
             }
-            inner.send(data: pending, completion: completion)
+            inner.send(data: raw, completion: completion)
             return
-        }
-
-        packetCounter &+= 1
-        let packet = packetCounter
-        let scheme = padding
-        if packet >= scheme.stop {
-            sendPadding = false
-            lock.unlock()
-            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) ≥ stop=\(scheme.stop) — sending raw, padding off")
-            inner.send(data: pending, completion: completion)
+        case .sendRawPaddingOff(let raw, let packet, let stop):
+            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) ≥ stop=\(stop) — sending raw, padding off")
+            inner.send(data: raw, completion: completion)
             return
+        case .sendScheduled(let scheduledPending, let packet, let prependedBufferSize, let scheduledSizes):
+            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) bytes=\(scheduledPending.count) (was buffered=\(prependedBufferSize)) schedule=\(scheduledSizes)")
+            pending = scheduledPending
+            schedule = scheduledSizes
         }
-        let schedule = scheme.generateRecordPayloadSizes(packet: packet)
-        lock.unlock()
-        logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) bytes=\(pending.count) (was buffered=\(prependedBufferSize)) schedule=\(schedule)")
 
         if schedule.isEmpty {
             inner.send(data: pending, completion: completion)
@@ -338,18 +369,19 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     // MARK: - Demux
 
     private func handleInbound(_ data: Data) {
-        lock.lock()
-        recvBuffer.appendCompacting(data)
-        var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
-        while recvBuffer.count >= AnyTLSProtocol.headerSize {
-            guard let header = AnyTLSProtocol.decodeFrameHeader(recvBuffer) else { break }
-            let totalLen = AnyTLSProtocol.headerSize + Int(header.length)
-            if recvBuffer.count < totalLen { break }
-            let payload = recvBuffer.subdata(in: AnyTLSProtocol.headerSize..<totalLen)
-            recvBuffer.removeSubrange(0..<totalLen)
-            dispatched.append((header.cmd, header.sid, payload))
+        let dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = lock.withLock { state in
+            state.recvBuffer.appendCompacting(data)
+            var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
+            while state.recvBuffer.count >= AnyTLSProtocol.headerSize {
+                guard let header = AnyTLSProtocol.decodeFrameHeader(state.recvBuffer) else { break }
+                let totalLen = AnyTLSProtocol.headerSize + Int(header.length)
+                if state.recvBuffer.count < totalLen { break }
+                let payload = state.recvBuffer.subdata(in: AnyTLSProtocol.headerSize..<totalLen)
+                state.recvBuffer.removeSubrange(0..<totalLen)
+                dispatched.append((header.cmd, header.sid, payload))
+            }
+            return dispatched
         }
-        lock.unlock()
 
         for frame in dispatched {
             routeFrame(cmd: frame.cmd, sid: frame.sid, payload: frame.payload)
@@ -359,9 +391,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private func routeFrame(cmd: UInt8, sid: UInt32, payload: Data) {
         switch cmd {
         case AnyTLSProtocol.cmdPSH:
-            lock.lock()
-            let stream = streams[sid]
-            lock.unlock()
+            let stream = lock.withLock { $0.streams[sid] }
             if stream == nil {
                 logger.warning("[AnyTLSMultiplexer] cmdPSH for unknown sid=\(sid) (\(payload.count)B) — dropping")
             } else {
@@ -370,23 +400,21 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             stream?.deliverData(payload)
 
         case AnyTLSProtocol.cmdSYNACK:
-            lock.lock()
-            cancelSynDoneTimerLocked()
-            let stream = streams[sid]
-            lock.unlock()
+            let stream = lock.withLock { (state: inout State) -> AnyTLSStream? in
+                cancelSynDoneTimerLocked(&state)
+                return state.streams[sid]
+            }
             if !payload.isEmpty {
                 let message = String(data: payload, encoding: .utf8) ?? "<binary>"
                 logger.debug("[AnyTLSMultiplexer] cmdSYNACK error sid=\(sid): \(message)")
                 stream?.deliverClose(error: ProxyError.protocolError("AnyTLS remote: \(message)"))
-                lock.withLock { streams[sid] = nil }
+                lock.withLock { $0.streams[sid] = nil }
             } else {
                 logger.debug("[AnyTLSMultiplexer] cmdSYNACK ok sid=\(sid)")
             }
 
         case AnyTLSProtocol.cmdFIN:
-            lock.lock()
-            let stream = streams.removeValue(forKey: sid)
-            lock.unlock()
+            let stream = lock.withLock { $0.streams.removeValue(forKey: sid) }
             logger.debug("[AnyTLSMultiplexer] cmdFIN sid=\(sid) (had stream=\(stream != nil))")
             stream?.deliverClose(error: nil)
 
@@ -396,7 +424,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         case AnyTLSProtocol.cmdServerSettings:
             let map = AnyTLSProtocol.decodeStringMap(payload)
             if let v = map["v"], let parsed = UInt8(v) {
-                lock.withLock { peerVersion = parsed }
+                lock.withLock { $0.peerVersion = parsed }
                 logger.debug("[AnyTLSMultiplexer] cmdServerSettings peerVersion=\(parsed) keys=\(Array(map.keys))")
             } else {
                 logger.warning("[AnyTLSMultiplexer] cmdServerSettings missing or invalid v: \(map)")
@@ -409,7 +437,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
         case AnyTLSProtocol.cmdUpdatePaddingScheme:
             if let new = AnyTLSPaddingScheme.parse(payload) {
-                lock.withLock { padding = new }
+                lock.withLock { $0.padding = new }
                 logger.debug("[AnyTLSMultiplexer] cmdUpdatePaddingScheme applied md5=\(new.md5Hex) stop=\(new.stop)")
             } else {
                 logger.warning("[AnyTLSMultiplexer] cmdUpdatePaddingScheme: failed to parse payload (\(payload.count)B)")
@@ -432,15 +460,17 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     /// Idempotent; a non-nil error propagates to every live stream.
     func close(error: Error? = nil) {
-        lock.lock()
-        guard !closed else { lock.unlock(); return }
-        closed = true
-        reserved = false
-        cancelSynDoneTimerLocked()
-        let liveStreams = Array(streams.values)
-        streams.removeAll(keepingCapacity: false)
-        outboundBuffer.removeAll(keepingCapacity: false)
-        lock.unlock()
+        let liveStreams: [AnyTLSStream]? = lock.withLock { (state: inout State) -> [AnyTLSStream]? in
+            guard !state.closed else { return nil }
+            state.closed = true
+            state.reserved = false
+            cancelSynDoneTimerLocked(&state)
+            let live = Array(state.streams.values)
+            state.streams.removeAll(keepingCapacity: false)
+            state.outboundBuffer.removeAll(keepingCapacity: false)
+            return live
+        }
+        guard let liveStreams else { return }
 
         let reasonText = error.map { $0.localizedDescription } ?? "clean"
         logger.debug("[AnyTLSMultiplexer] close seq=\(seq) streams=\(liveStreams.count) reason=\(reasonText)")
@@ -453,6 +483,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     deinit {
         // Reclaim the SYN-done watchdog if the multiplexer was dropped without close().
-        synDoneTimer?.cancel()
+        lock.withLock { $0.synDoneTimer?.cancel() }
     }
 }

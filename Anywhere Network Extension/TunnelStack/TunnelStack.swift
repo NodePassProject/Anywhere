@@ -7,6 +7,7 @@
 
 import Foundation
 import NetworkExtension
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack")
 
@@ -67,20 +68,23 @@ class TunnelStack {
     static let ipv4Proto = NSNumber(value: AF_INET)
     static let ipv6Proto = NSNumber(value: AF_INET6)
 
-    /// Guards ``outputPackets``, ``outputProtocols``, ``pendingReleases``, and
-    /// ``outputDrainInFlight``.
-    let outputBufferLock = UnfairLock()
-    /// Pending IP packets to ship to utun. Protected by ``outputBufferLock``.
-    var outputPackets: [Data] = []
-    /// Per-packet protocol family (AF_INET / AF_INET6). Protected by ``outputBufferLock``.
-    var outputProtocols: [NSNumber] = []
-    /// Sole owners of the buffers backing ``outputPackets`` (their ``Data``
-    /// uses a `.none` deallocator). Index-aligned with ``outputPackets``;
-    /// releases fire on ``lwipQueue``. Protected by ``outputBufferLock``.
-    var pendingReleases: [PendingRelease] = []
-    /// True while a drain loop is running on ``outputQueue``; appenders only
-    /// kick a new loop when false. Protected by ``outputBufferLock``.
-    var outputDrainInFlight = false
+    /// Output batching state, guarded as one unit so ``packets``/``protocols``/
+    /// ``releases`` stay index-aligned and the drain flag flips atomically with
+    /// the empty check.
+    struct OutputBufferState {
+        /// Pending IP packets to ship to utun.
+        var packets: [Data] = []
+        /// Per-packet protocol family (AF_INET / AF_INET6).
+        var protocols: [NSNumber] = []
+        /// Sole owners of the buffers backing ``packets`` (their ``Data``
+        /// uses a `.none` deallocator). Index-aligned with ``packets``;
+        /// releases fire on ``lwipQueue``.
+        var releases: [PendingRelease] = []
+        /// True while a drain loop is running on ``outputQueue``; appenders only
+        /// kick a new loop when false.
+        var drainInFlight = false
+    }
+    let outputBuffer = Mutex(OutputBufferState())
 
     /// ``fn(ctx)`` must run on ``lwipQueue``: `pbuf_free` and `mem_free`
     /// mutate per-pool freelists with no locking under NO_SYS=1.
@@ -90,7 +94,7 @@ class TunnelStack {
     }
 
     /// Release placeholder for Swift-owned output packets; required so
-    /// ``pendingReleases`` stays index-aligned with ``outputPackets``.
+    /// ``OutputBufferState/releases`` stays index-aligned with ``OutputBufferState/packets``.
     static let noopRelease = PendingRelease(ctx: nil, fn: { _ in })
 
     // Settings read from App Group UserDefaults at start/restart and
@@ -157,17 +161,16 @@ class TunnelStack {
 
     /// Per-target traffic counters. Payload bytes, not wire bytes (headers,
     /// ACKs, retransmits excluded). Written from ``lwipQueue``/``udpQueue``,
-    /// read from the NE message handler — every access takes ``countersLock``.
-    private let countersLock = UnfairLock()
-    private var _byteCounts = TrafficByteCounts()
+    /// read from the NE message handler — every access goes through the Mutex.
+    private let _byteCounts = Mutex(TrafficByteCounts())
     func addBytesIn(_ n: Int64, target: RouteTarget) {
-        countersLock.withLock { _byteCounts.add(bytesIn: n, target: target) }
+        _byteCounts.withLock { $0.add(bytesIn: n, target: target) }
     }
     func addBytesOut(_ n: Int64, target: RouteTarget) {
-        countersLock.withLock { _byteCounts.add(bytesOut: n, target: target) }
+        _byteCounts.withLock { $0.add(bytesOut: n, target: target) }
     }
     /// Snapshot of all per-target counters, read once per stats poll.
-    var byteCounts: TrafficByteCounts { countersLock.withLock { _byteCounts } }
+    var byteCounts: TrafficByteCounts { _byteCounts.withLock { $0 } }
 
     // MARK: - Live Connection Counts
     //
@@ -198,32 +201,30 @@ class TunnelStack {
         let summary: String
     }
 
-    private let logLock = UnfairLock()
-    private var logEntries: [LogEntry] = []
+    private let logEntries = Mutex<[LogEntry]>([])
 
     func appendLog(_ message: String, level: LogLevel) {
         let now = CFAbsoluteTimeGetCurrent()
-        logLock.lock()
-        logEntries.append(LogEntry(timestamp: now, level: level, message: message))
-        compactLogs(now: now)
-        logLock.unlock()
+        logEntries.withLock { entries in
+            entries.append(LogEntry(timestamp: now, level: level, message: message))
+            Self.compactLogs(&entries, now: now)
+        }
     }
 
     func fetchLogs() -> [LogEntry] {
         let now = CFAbsoluteTimeGetCurrent()
-        logLock.lock()
-        compactLogs(now: now)
-        let result = logEntries
-        logLock.unlock()
-        return result
+        return logEntries.withLock { entries in
+            Self.compactLogs(&entries, now: now)
+            return entries
+        }
     }
 
-    /// Prunes by age, then by count. Caller must hold `logLock`.
-    private func compactLogs(now: CFAbsoluteTime) {
+    /// Prunes by age, then by count.
+    private static func compactLogs(_ entries: inout [LogEntry], now: CFAbsoluteTime) {
         let cutoff = now - TunnelConstants.logRetentionInterval
-        logEntries.removeAll { $0.timestamp < cutoff }
-        if logEntries.count > TunnelConstants.logMaxEntries {
-            logEntries.removeFirst(logEntries.count - TunnelConstants.logMaxEntries)
+        entries.removeAll { $0.timestamp < cutoff }
+        if entries.count > TunnelConstants.logMaxEntries {
+            entries.removeFirst(entries.count - TunnelConstants.logMaxEntries)
         }
     }
 
@@ -235,7 +236,7 @@ class TunnelStack {
     //
     // The UDP path on ``udpQueue`` needs config that ``lwipQueue`` owns and
     // mutates; reading the stored properties cross-queue would race, so
-    // ``lwipQueue`` publishes an immutable snapshot under ``udpConfigLock``
+    // ``lwipQueue`` publishes an immutable snapshot through a Mutex
     // on every change.
 
     /// Immutable view of the config the UDP path needs, published on change.
@@ -249,8 +250,7 @@ class TunnelStack {
         let advertiseIPv6ToApps: Bool
         let mitmEnabled: Bool
     }
-    private let udpConfigLock = UnfairLock()
-    private var _udpConfig = UDPConfig(
+    private let _udpConfig = Mutex(UDPConfig(
         configuration: nil,
         configurationID: nil,
         blockUDP: false,
@@ -258,10 +258,10 @@ class TunnelStack {
         blockWebRTC: true,
         advertiseIPv6ToApps: false,
         mitmEnabled: false
-    )
+    ))
 
     /// Current UDP config snapshot; callable from any queue.
-    func udpConfig() -> UDPConfig { udpConfigLock.withLock { _udpConfig } }
+    func udpConfig() -> UDPConfig { _udpConfig.withLock { $0 } }
 
     /// Whether `id` is the default outbound configuration; safe from any queue.
     func isDefaultConfiguration(_ id: UUID) -> Bool {
@@ -279,21 +279,20 @@ class TunnelStack {
             advertiseIPv6ToApps: advertiseIPv6ToApps,
             mitmEnabled: mitmEnabled
         )
-        udpConfigLock.withLock { _udpConfig = snapshot }
+        _udpConfig.withLock { $0 = snapshot }
     }
 
     // Reflector snapshot: the read-callback thread reads it while ``lwipQueue``
-    // reloads it; an immutable value under a lock, read once per inbound batch.
-    private let reflectorLock = UnfairLock()
-    private var _reflector = Reflector.inactive
+    // reloads it; an immutable value behind a Mutex, read once per inbound batch.
+    private let _reflector = Mutex(Reflector.inactive)
 
     /// Current reflector snapshot; callable from any queue.
-    func reflector() -> Reflector { reflectorLock.withLock { _reflector } }
+    func reflector() -> Reflector { _reflector.withLock { $0 } }
 
     /// Rebuilds and publishes the reflector. Must be called on ``lwipQueue``.
     func publishReflector() {
         let snapshot = reflectionEnabled ? Reflector(addresses: reflectionAddresses) : .inactive
-        reflectorLock.withLock { _reflector = snapshot }
+        _reflector.withLock { $0 = snapshot }
     }
 
     /// Hashable 5-tuple key for UDP flows. Addresses are inline raw bytes

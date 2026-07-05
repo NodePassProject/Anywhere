@@ -7,6 +7,7 @@
 
 import Foundation
 import NetworkExtension
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Lifecycle")
 
@@ -184,16 +185,16 @@ extension TunnelStack {
         timeoutTimer = nil
         scheduler.cancelAll()
 
-        outputBufferLock.withLock {
-            outputPackets.removeAll(keepingCapacity: true)
-            outputProtocols.removeAll(keepingCapacity: true)
+        outputBuffer.withLock { buffer in
+            buffer.packets.removeAll(keepingCapacity: true)
+            buffer.protocols.removeAll(keepingCapacity: true)
             // The release fns are the only owners (.none deallocator); calling
             // them synchronously is safe — we're on `lwipQueue`.
-            for r in pendingReleases {
+            for r in buffer.releases {
                 r.fn(r.ctx)
             }
-            pendingReleases.removeAll(keepingCapacity: true)
-            outputDrainInFlight = false
+            buffer.releases.removeAll(keepingCapacity: true)
+            buffer.drainInFlight = false
         }
 
         reclaimAllOutboundPools()

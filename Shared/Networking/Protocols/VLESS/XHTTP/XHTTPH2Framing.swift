@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - HTTP/2 Frame Codec (RFC 7540 §4)
 //
@@ -67,15 +68,19 @@ enum H2Framing {
     }
 }
 
-/// Read buffer is independent of connection state and guarded by its own lock, so both the
+/// Read buffer is independent of connection state and guarded by its own mutex, so both the
 /// 1:1 and shared-multiplexing H2 paths can drive one.
 nonisolated final class H2FrameReader {
     private let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     private let maxBufferSize: Int
-    private let lock = UnfairLock()
-    private var buffer = Data()
-    /// Consecutive synchronous parses; trampolined every 16th to bound recursion depth.
-    private var depth = 0
+
+    private struct ReadState {
+        var buffer = Data()
+        /// Consecutive synchronous parses; trampolined every 16th to bound recursion depth.
+        var depth = 0
+    }
+
+    private let state = Mutex(ReadState())
 
     init(maxBufferSize: Int, receive: @escaping (@escaping (Data?, Bool, Error?) -> Void) -> Void) {
         self.maxBufferSize = maxBufferSize
@@ -84,54 +89,65 @@ nonisolated final class H2FrameReader {
 
     /// Yields the next complete frame, reading from the transport as needed.
     func readFrame(completion: @escaping (Result<H2Framing.Frame, Error>) -> Void) {
-        lock.lock()
-        if let frame = H2Framing.parseFrame(from: &buffer) {
-            depth += 1
-            let trampoline = depth >= 16
-            if trampoline { depth = 0 }
-            lock.unlock()
+        enum Step {
+            case parsed(H2Framing.Frame, trampoline: Bool)
+            case needMore
+        }
+        let step: Step = state.withLock { state in
+            if let frame = H2Framing.parseFrame(from: &state.buffer) {
+                state.depth += 1
+                let trampoline = state.depth >= 16
+                if trampoline { state.depth = 0 }
+                return .parsed(frame, trampoline: trampoline)
+            }
+            state.depth = 0
+            return .needMore
+        }
+
+        switch step {
+        case .parsed(let frame, let trampoline):
             if trampoline {
                 DispatchQueue.global().async { completion(.success(frame)) }
             } else {
                 completion(.success(frame))
             }
-            return
-        }
-        depth = 0
-        lock.unlock()
-
-        receive { [weak self] data, _, error in
-            guard let self else {
-                completion(.failure(XHTTPError.connectionClosed))
-                return
+        case .needMore:
+            receive { [weak self] data, _, error in
+                guard let self else {
+                    completion(.failure(XHTTPError.connectionClosed))
+                    return
+                }
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                guard let data, !data.isEmpty else {
+                    // Clean transport FIN at a frame boundary is graceful end of stream, not a
+                    // failure — consumers convert this to EOF.
+                    completion(.failure(XHTTPError.streamEnded))
+                    return
+                }
+                let overflowed = self.state.withLock { state -> Bool in
+                    state.buffer.append(data)
+                    if state.buffer.count > self.maxBufferSize {
+                        state.buffer.removeAll()
+                        return true
+                    }
+                    return false
+                }
+                if overflowed {
+                    completion(.failure(XHTTPError.connectionClosed))
+                    return
+                }
+                self.readFrame(completion: completion)
             }
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let data, !data.isEmpty else {
-                // Clean transport FIN at a frame boundary is graceful end of stream, not a
-                // failure — consumers convert this to EOF.
-                completion(.failure(XHTTPError.streamEnded))
-                return
-            }
-            self.lock.lock()
-            self.buffer.append(data)
-            if self.buffer.count > self.maxBufferSize {
-                self.buffer.removeAll()
-                self.lock.unlock()
-                completion(.failure(XHTTPError.connectionClosed))
-                return
-            }
-            self.lock.unlock()
-            self.readFrame(completion: completion)
         }
     }
 
     func reset() {
-        lock.lock()
-        buffer = Data()
-        depth = 0
-        lock.unlock()
+        state.withLock {
+            $0.buffer = Data()
+            $0.depth = 0
+        }
     }
 }

@@ -7,6 +7,7 @@
 
 import Foundation
 import Security
+import Synchronization
 
 enum NowhereNetwork: String, Codable, CaseIterable {
     case udp
@@ -87,13 +88,12 @@ nonisolated final class NowhereTransportIdentityRegistry {
         var nextFlowID: UInt64
     }
 
-    private let lock = UnfairLock()
-    private var states: [NowhereTransportIdentityKey: State] = [:]
+    private let states = Mutex<[NowhereTransportIdentityKey: State]>([:])
 
     private init() {}
 
     func identity(for identityKey: NowhereTransportIdentityKey) throws -> Data {
-        try lock.withLock {
+        try states.withLock { states in
             if let state = states[identityKey] { return state.sessionID }
             var bytes = Data(count: 16)
             let status = bytes.withUnsafeMutableBytes { raw -> Int32 in
@@ -110,7 +110,7 @@ nonisolated final class NowhereTransportIdentityRegistry {
 
     func nextFlowID(for identityKey: NowhereTransportIdentityKey) throws -> UInt64 {
         _ = try identity(for: identityKey)
-        return try lock.withLock {
+        return try states.withLock { states in
             var state = states[identityKey]!
             let value = state.nextFlowID
             guard value != UInt64.max else {
@@ -123,6 +123,6 @@ nonisolated final class NowhereTransportIdentityRegistry {
     }
 
     func reset() {
-        lock.withLock { states.removeAll(keepingCapacity: false) }
+        states.withLock { $0.removeAll(keepingCapacity: false) }
     }
 }

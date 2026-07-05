@@ -44,7 +44,7 @@ class ConfigurationStore {
         let previous = loadedBlob
         let outcome = await Task.detached(priority: .utility) {
             () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
-            let data = await JSONBlobStore.shared.load(.configurations)
+            let data = JSONBlobStore.shared.load(.configurations)
             guard data != previous else { return nil }
             let split = Self.decodeSplit(from: data)
             return (data, split.live, split.tombstones)

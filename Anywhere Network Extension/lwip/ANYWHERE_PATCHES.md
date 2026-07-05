@@ -190,7 +190,7 @@ After the patch, `TF_ACK_NOW` accumulates per PCB through the batch
 to one ACK packet per PCB. For a typical upload that concentrates on a
 single connection, that drops ACK rate from ~1900/s to ~85/s at the
 same throughput, with all the per-packet machinery (netif_output,
-outputBufferLock, drainOutputLoop, writePackets, batched release)
+outputBuffer, drainOutputLoop, writePackets, batched release)
 scaled down proportionally.
 
 **What is unaffected:**

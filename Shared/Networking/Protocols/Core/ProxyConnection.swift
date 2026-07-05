@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - ProxyConnectionProtocol
 
@@ -33,12 +34,11 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
 
     // MARK: Traffic Statistics
 
-    private var _bytesSent: Int64 = 0
-    private var _bytesReceived: Int64 = 0
-    private let statsLock = UnfairLock()
+    private let _bytesSent = Atomic<Int64>(0)
+    private let _bytesReceived = Atomic<Int64>(0)
 
-    var bytesSent: Int64 { statsLock.withLock { _bytesSent } }
-    var bytesReceived: Int64 { statsLock.withLock { _bytesReceived } }
+    var bytesSent: Int64 { _bytesSent.load(ordering: .relaxed) }
+    var bytesReceived: Int64 { _bytesReceived.load(ordering: .relaxed) }
 
     var isConnected: Bool {
         fatalError("Subclass must override isConnected")
@@ -47,14 +47,14 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
     // MARK: Send
 
     func send(data: Data, completion: @escaping (Error?) -> Void) {
-        statsLock.withLock { _bytesSent &+= Int64(data.count) }
+        _bytesSent.wrappingAdd(Int64(data.count), ordering: .relaxed)
         sendRaw(data: data) { error in
             completion(error)
         }
     }
 
     func send(data: Data) {
-        statsLock.withLock { _bytesSent &+= Int64(data.count) }
+        _bytesSent.wrappingAdd(Int64(data.count), ordering: .relaxed)
         sendRaw(data: data)
     }
 
@@ -71,7 +71,7 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         receiveRaw { [weak self] data, error in
             if let self, let data, !data.isEmpty {
-                self.statsLock.withLock { self._bytesReceived &+= Int64(data.count) }
+                self._bytesReceived.wrappingAdd(Int64(data.count), ordering: .relaxed)
             }
             completion(data, error)
         }

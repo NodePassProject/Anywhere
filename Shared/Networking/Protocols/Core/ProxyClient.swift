@@ -6,23 +6,21 @@
 //
 
 import Foundation
+import Synchronization
 
-private final class TeardownCounter: @unchecked Sendable {
-    private let lock = UnfairLock()
-    private var remaining: Int
+private final class TeardownCounter: Sendable {
+    private let remaining: Atomic<Int>
     private let completion: @Sendable () -> Void
 
     init(remaining: Int, completion: @escaping @Sendable () -> Void) {
-        self.remaining = remaining
+        self.remaining = Atomic(remaining)
         self.completion = completion
     }
 
     func decrement() {
-        lock.lock()
-        remaining -= 1
-        let done = remaining == 0
-        lock.unlock()
-        if done { completion() }
+        if remaining.wrappingSubtract(1, ordering: .sequentiallyConsistent).newValue == 0 {
+            completion()
+        }
     }
 }
 
@@ -32,9 +30,12 @@ nonisolated class ProxyClient {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
     
-    private var ownedResources: [any ProxyClientOwned] = []
-    private let ownedLock = UnfairLock()
-    private var ownedCancelled = false
+    private struct OwnedState {
+        var resources: [any ProxyClientOwned] = []
+        var cancelled = false
+    }
+
+    private let ownedState = Mutex(OwnedState())
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
     var tunnel: ProxyConnection?
@@ -72,15 +73,16 @@ nonisolated class ProxyClient {
     /// even mid-dial.
     @discardableResult
     func own(_ resource: any ProxyClientOwned) -> Bool {
-        ownedLock.lock()
-        if ownedCancelled {
-            ownedLock.unlock()
-            resource.releaseOwned()
-            return false
+        let accepted: Bool = ownedState.withLock { state in
+            guard !state.cancelled else { return false }
+            state.resources.append(resource)
+            return true
         }
-        ownedResources.append(resource)
-        ownedLock.unlock()
-        return true
+        if !accepted {
+            // Outside the lock, as before: the release may do arbitrary work.
+            resource.releaseOwned()
+        }
+        return accepted
     }
 
     /// Wraps a connect completion so the delivered connection is client-owned before
@@ -389,11 +391,12 @@ nonisolated class ProxyClient {
 
     /// Fires `completion` once every underlying socket has fully torn down (fd closed).
     func cancel(completion: @escaping @Sendable () -> Void) {
-        ownedLock.lock()
-        ownedCancelled = true
-        let owned = ownedResources
-        ownedResources.removeAll()
-        ownedLock.unlock()
+        let owned: [any ProxyClientOwned] = ownedState.withLock { state in
+            state.cancelled = true
+            let owned = state.resources
+            state.resources.removeAll()
+            return owned
+        }
 
         // A chain link's inbound tunnel belongs to the client that produced it; drop the reference only.
         tunnel = nil

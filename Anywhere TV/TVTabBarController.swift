@@ -12,15 +12,16 @@ class TVTabBarController: UITabBarController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        let home = UINavigationController(rootViewController: TVHomeViewController())
-        home.tabBarItem = UITabBarItem(title: String(localized: "Home"), image: UIImage(systemName: "house"), tag: 0)
-
-        let proxies = UINavigationController(rootViewController: TVProxiesPageViewController())
-        proxies.tabBarItem = UITabBarItem(title: String(localized: "Proxies"), image: UIImage(systemName: "network"), tag: 1)
-
-        let settings = UINavigationController(rootViewController: TVSettingsViewController())
-        settings.tabBarItem = UITabBarItem(title: String(localized: "Settings"), image: UIImage(systemName: "gearshape"), tag: 2)
-
-        viewControllers = [home, proxies, settings]
+        tabs = [
+            UITab(title: String(localized: "Home"), image: UIImage(systemName: "house"), identifier: "home") { _ in
+                UINavigationController(rootViewController: TVHomeViewController())
+            },
+            UITab(title: String(localized: "Proxies"), image: UIImage(systemName: "network"), identifier: "proxies") { _ in
+                UINavigationController(rootViewController: TVProxiesPageViewController())
+            },
+            UITab(title: String(localized: "Settings"), image: UIImage(systemName: "gearshape"), identifier: "settings") { _ in
+                UINavigationController(rootViewController: TVSettingsViewController())
+            }
+        ]
     }
 }

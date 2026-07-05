@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import Security
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
@@ -29,8 +30,7 @@ extension QUICSessionTicket {
 }
 
 enum QUICSessionTicketCache {
-    private static let lock = UnfairLock()
-    private static var cache: [String: QUICSessionTicket] = [:]
+    private static let cache = Mutex<[String: QUICSessionTicket]>([:])
     private static let maxEntries = 64
 
     private static func key(serverName: String, alpn: [String]) -> String {
@@ -39,27 +39,26 @@ enum QUICSessionTicketCache {
 
     static func lookup(serverName: String, alpn: [String]) -> QUICSessionTicket? {
         let k = key(serverName: serverName, alpn: alpn)
-        lock.lock(); defer { lock.unlock() }
-        return cache[k]
+        return cache.withLock { $0[k] }
     }
 
     static func store(_ ticket: QUICSessionTicket, serverName: String, alpn: [String]) {
         let k = key(serverName: serverName, alpn: alpn)
-        lock.lock(); defer { lock.unlock() }
-        cache[k] = ticket
-        guard cache.count > maxEntries else { return }
-        let now = CFAbsoluteTimeGetCurrent()
-        cache = cache.filter { now - $0.value.issued < Double($0.value.lifetime) }
-        while cache.count > maxEntries,
-              let oldest = cache.min(by: { $0.value.issued < $1.value.issued })?.key {
-            cache.removeValue(forKey: oldest)
+        cache.withLock { cache in
+            cache[k] = ticket
+            guard cache.count > maxEntries else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            cache = cache.filter { now - $0.value.issued < Double($0.value.lifetime) }
+            while cache.count > maxEntries,
+                  let oldest = cache.min(by: { $0.value.issued < $1.value.issued })?.key {
+                cache.removeValue(forKey: oldest)
+            }
         }
     }
 
     static func invalidate(serverName: String, alpn: [String]) {
         let k = key(serverName: serverName, alpn: alpn)
-        lock.lock(); defer { lock.unlock() }
-        cache.removeValue(forKey: k)
+        cache.withLock { _ = $0.removeValue(forKey: k) }
     }
 }
 

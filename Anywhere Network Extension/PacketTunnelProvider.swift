@@ -56,9 +56,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 try await setTunnelNetworkSettings(settings)
                 
 #if os(iOS)
-                if #available(iOS 18.0, *) {
-                    ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
-                }
+                ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
                 
                 self.tunnelStack.start(packetFlow: self.packetFlow,
@@ -129,9 +127,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func stopTunnel(with reason: NEProviderStopReason) async {
 #if os(iOS)
-        if #available(iOS 18.0, *) {
-            ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
-        }
+        ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
         
         statsRecorder.stop()
@@ -381,7 +377,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private static func unsatisfiedSuffix(_ path: Network.NWPath) -> String {
-        guard #available(iOS 14.2, tvOS 17.0, *) else { return "" }
         let reason: String?
         switch path.unsatisfiedReason {
         case .notAvailable:

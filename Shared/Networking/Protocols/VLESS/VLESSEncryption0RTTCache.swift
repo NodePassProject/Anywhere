@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 /// Process-wide cache of 0-RTT resumption tickets, keyed by
 /// `(host, port, encryption config)` so differing configs don't collide.
@@ -21,8 +22,7 @@ final class VLESSEncryption0RTTCache {
         let expire: CFAbsoluteTime
     }
 
-    private let lock = UnfairLock()
-    private var entries: [String: Entry] = [:]
+    private let entries = Mutex<[String: Entry]>([:])
 
     private init() {}
 
@@ -32,7 +32,7 @@ final class VLESSEncryption0RTTCache {
     }
 
     func lookup(key: String) -> Entry? {
-        lock.withLock {
+        entries.withLock { entries in
             guard let entry = entries[key] else { return nil }
             if entry.expire <= CFAbsoluteTimeGetCurrent() {
                 entries.removeValue(forKey: key)
@@ -44,7 +44,7 @@ final class VLESSEncryption0RTTCache {
 
     /// Stores a fresh ticket; the latest 1-RTT handshake always wins.
     func store(key: String, pfsKey: Data, ticket: Data, expire: CFAbsoluteTime) {
-        lock.withLock {
+        entries.withLock { entries in
             entries[key] = Entry(pfsKey: pfsKey, ticket: ticket, expire: expire)
         }
     }
@@ -52,7 +52,7 @@ final class VLESSEncryption0RTTCache {
     /// Drops the entry only if its pfsKey still matches, so a newer ticket from a
     /// concurrent 1-RTT handshake isn't stomped.
     func invalidate(key: String, matching pfsKey: Data) {
-        lock.withLock {
+        entries.withLock { entries in
             guard let entry = entries[key], entry.pfsKey == pfsKey else { return }
             entries.removeValue(forKey: key)
         }
@@ -60,6 +60,6 @@ final class VLESSEncryption0RTTCache {
 
     /// Wired to VPN disconnect so a fresh connect doesn't reuse stale tickets.
     func clear() {
-        lock.withLock { entries.removeAll(keepingCapacity: false) }
+        entries.withLock { $0.removeAll(keepingCapacity: false) }
     }
 }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 /// Default outbound proxy only. Handshake subtraction is global, so timings are
 /// approximate under concurrent dials; clamped at zero.
@@ -21,18 +22,21 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
         case handshakeNoDial
     }
 
-    private let lock = UnfairLock()
-    /// Parked until a default-proxy handshake promotes it — the socket can't
-    /// know its route at dial time.
-    private var pendingDialMs: Int?
-    private var dialMs: Int?
-    private var handshakeMs: Int?
-    private var dialTotalMs = 0
-    private var dialSampleCount = 0
-    private var handshakeTotalMs = 0
-    private var handshakeSampleCount = 0
-    /// >0 while a latency-test probe is running; recording is suppressed.
-    private var suspendDepth = 0
+    private struct State {
+        /// Parked until a default-proxy handshake promotes it — the socket can't
+        /// know its route at dial time.
+        var pendingDialMs: Int?
+        var dialMs: Int?
+        var handshakeMs: Int?
+        var dialTotalMs = 0
+        var dialSampleCount = 0
+        var handshakeTotalMs = 0
+        var handshakeSampleCount = 0
+        /// >0 while a latency-test probe is running; recording is suppressed.
+        var suspendDepth = 0
+    }
+
+    private let state = Mutex(State())
 
     struct Snapshot {
         let dialMs: Int?
@@ -44,72 +48,70 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
     /// No-op while recording is suspended.
     func record(_ metric: Metric, _ duration: Duration) {
         let ms = max(0, duration.milliseconds)
-        lock.lock()
-        if suspendDepth == 0 {
+        state.withLock { state in
+            guard state.suspendDepth == 0 else { return }
             switch metric {
             case .dial:
-                pendingDialMs = ms
+                state.pendingDialMs = ms
             case .handshake:
                 // Commit pending dial and post-TCP remainder for the same
                 // connection; consume the dial so it isn't double-counted.
                 let remainder: Int
-                if let dial = pendingDialMs {
-                    pendingDialMs = nil
-                    dialMs = dial
-                    dialTotalMs += dial
-                    dialSampleCount += 1
+                if let dial = state.pendingDialMs {
+                    state.pendingDialMs = nil
+                    state.dialMs = dial
+                    state.dialTotalMs += dial
+                    state.dialSampleCount += 1
                     remainder = max(0, ms - dial)
                 } else {
                     remainder = ms
                 }
-                handshakeMs = remainder
-                handshakeTotalMs += remainder
-                handshakeSampleCount += 1
+                state.handshakeMs = remainder
+                state.handshakeTotalMs += remainder
+                state.handshakeSampleCount += 1
             case .handshakeNoDial:
                 // QUIC: clear the dial gauge so a stale pending dial is never paired.
-                dialMs = nil
-                handshakeMs = ms
-                handshakeTotalMs += ms
-                handshakeSampleCount += 1
+                state.dialMs = nil
+                state.handshakeMs = ms
+                state.handshakeTotalMs += ms
+                state.handshakeSampleCount += 1
             }
         }
-        lock.unlock()
     }
 
     /// Re-entrant; pair with `resumeRecording()`.
     func suspendRecording() {
-        lock.lock()
-        suspendDepth += 1
-        lock.unlock()
+        state.withLock { $0.suspendDepth += 1 }
     }
 
     func resumeRecording() {
-        lock.lock()
-        if suspendDepth > 0 { suspendDepth -= 1 }
-        lock.unlock()
+        state.withLock { state in
+            if state.suspendDepth > 0 { state.suspendDepth -= 1 }
+        }
     }
 
     func snapshot() -> Snapshot {
-        lock.lock()
-        defer { lock.unlock() }
-        return Snapshot(
-            dialMs: dialMs,
-            handshakeMs: handshakeMs,
-            avgDialMs: dialSampleCount > 0 ? dialTotalMs / dialSampleCount : nil,
-            avgHandshakeMs: handshakeSampleCount > 0 ? handshakeTotalMs / handshakeSampleCount : nil
-        )
+        state.withLock { state in
+            Snapshot(
+                dialMs: state.dialMs,
+                handshakeMs: state.handshakeMs,
+                avgDialMs: state.dialSampleCount > 0 ? state.dialTotalMs / state.dialSampleCount : nil,
+                avgHandshakeMs: state.handshakeSampleCount > 0 ? state.handshakeTotalMs / state.handshakeSampleCount : nil
+            )
+        }
     }
 
     func reset() {
-        lock.lock()
-        pendingDialMs = nil
-        dialMs = nil
-        handshakeMs = nil
-        dialTotalMs = 0
-        dialSampleCount = 0
-        handshakeTotalMs = 0
-        handshakeSampleCount = 0
-        lock.unlock()
+        // Leaves `suspendDepth` untouched — a reset must not cancel an active suspension.
+        state.withLock { state in
+            state.pendingDialMs = nil
+            state.dialMs = nil
+            state.handshakeMs = nil
+            state.dialTotalMs = 0
+            state.dialSampleCount = 0
+            state.handshakeTotalMs = 0
+            state.handshakeSampleCount = 0
+        }
     }
 }
 

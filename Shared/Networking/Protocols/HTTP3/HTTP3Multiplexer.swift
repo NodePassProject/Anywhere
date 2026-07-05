@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
 
@@ -61,21 +62,30 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     /// RFC 9297: true when the peer enables H3_DATAGRAM (required for CONNECT-UDP).
     private(set) var peerSupportsH3Datagram = false
 
-    // Pool-visible state, accessed under _poolLock from arbitrary threads; must not
+    // Pool-visible state, accessed under `_poolState` from arbitrary threads; must not
     // touch `streams` or other queue-protected state.
-    private let _poolLock = UnfairLock()
-    private(set) var isClosed = false
-    /// True when ngtcp2 signals STREAM_ID_BLOCKED; the pool creates a new multiplexer instead.
-    private(set) var poolIsStreamBlocked = false
-    private var _poolStreamCount = 0
-    private var _reservedStreams = 0
+    private struct PoolState {
+        var isClosed = false
+        /// True when ngtcp2 signals STREAM_ID_BLOCKED; the pool creates a new multiplexer instead.
+        var isStreamBlocked = false
+        var streamCount = 0
+        var reservedStreams = 0
+    }
+    private let _poolState = Mutex(PoolState())
     /// Must match `QUICTuning.naive.initialMaxStreamsBidi`; undersizing forces premature multiplexer churn.
     private let maxConcurrentStreams = 512
 
+    var isClosed: Bool {
+        _poolState.withLock { $0.isClosed }
+    }
+
+    /// True when ngtcp2 signals STREAM_ID_BLOCKED; the pool creates a new multiplexer instead.
+    var poolIsStreamBlocked: Bool {
+        _poolState.withLock { $0.isStreamBlocked }
+    }
+
     var hasActiveStreams: Bool {
-        _poolLock.lock()
-        defer { _poolLock.unlock() }
-        return _poolStreamCount > 0 || _reservedStreams > 0
+        _poolState.withLock { $0.streamCount > 0 || $0.reservedStreams > 0 }
     }
 
     // MARK: - Init
@@ -91,29 +101,27 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     // MARK: - Pool Interface
 
     func tryReserveStream() -> Bool {
-        _poolLock.lock()
-        defer { _poolLock.unlock() }
-        guard !isClosed && !poolIsStreamBlocked else { return false }
-        let count = _poolStreamCount + _reservedStreams
-        guard count < maxConcurrentStreams else { return false }
-        _reservedStreams += 1
-        return true
+        _poolState.withLock { state in
+            guard !state.isClosed && !state.isStreamBlocked else { return false }
+            let count = state.streamCount + state.reservedStreams
+            guard count < maxConcurrentStreams else { return false }
+            state.reservedStreams += 1
+            return true
+        }
     }
 
     /// Reserves a slot bypassing `maxConcurrentStreams` when the pool is at its hard
     /// cap; ngtcp2's STREAM_ID_BLOCKED and the caller's retry path handle backpressure.
     func forceReserveStream() -> Bool {
-        _poolLock.lock()
-        defer { _poolLock.unlock() }
-        guard !isClosed && !poolIsStreamBlocked else { return false }
-        _reservedStreams += 1
-        return true
+        _poolState.withLock { state in
+            guard !state.isClosed && !state.isStreamBlocked else { return false }
+            state.reservedStreams += 1
+            return true
+        }
     }
 
     var activeStreamCount: Int {
-        _poolLock.lock()
-        defer { _poolLock.unlock() }
-        return _poolStreamCount + _reservedStreams
+        _poolState.withLock { $0.streamCount + $0.reservedStreams }
     }
 
     // MARK: - Stream Creation
@@ -121,10 +129,10 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     /// Converts a reserved slot into an active stream. Non-pooled callers skip this.
     func noteStreamStarted() {
         // Called on queue
-        _poolLock.lock()
-        _reservedStreams = max(0, _reservedStreams - 1)
-        _poolStreamCount += 1
-        _poolLock.unlock()
+        _poolState.withLock { state in
+            state.reservedStreams = max(0, state.reservedStreams - 1)
+            state.streamCount += 1
+        }
     }
 
     func registerStream(_ stream: any HTTP3StreamHandler, streamID: Int64) {
@@ -134,9 +142,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     func removeStream(_ stream: any HTTP3StreamHandler) {
         if let sid = stream.quicStreamID {
             if streams.removeValue(forKey: sid) != nil {
-                _poolLock.lock()
-                _poolStreamCount = max(0, _poolStreamCount - 1)
-                _poolLock.unlock()
+                _poolState.withLock { $0.streamCount = max(0, $0.streamCount - 1) }
             }
         }
 
@@ -147,10 +153,10 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
 
     /// Called when openBidiStream fails (STREAM_ID_BLOCKED).
     func markStreamBlocked() {
-        _poolLock.lock()
-        poolIsStreamBlocked = true
-        _poolStreamCount = max(0, _poolStreamCount - 1)
-        _poolLock.unlock()
+        _poolState.withLock { state in
+            state.isStreamBlocked = true
+            state.streamCount = max(0, state.streamCount - 1)
+        }
     }
 
     // MARK: - Connection Lifecycle
@@ -389,9 +395,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
         guard state == .ready else { return }
         state = .draining
 
-        _poolLock.lock()
-        poolIsStreamBlocked = true
-        _poolLock.unlock()
+        _poolState.withLock { $0.isStreamBlocked = true }
 
         logger.debug("[HTTP3Multiplexer] Received GOAWAY, draining \(streams.count) active streams")
 
@@ -410,11 +414,11 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             guard self.state != .closed else { return }
             self.state = .closed
 
-            self._poolLock.lock()
-            self.isClosed = true
-            self._poolStreamCount = 0
-            self._reservedStreams = 0
-            self._poolLock.unlock()
+            self._poolState.withLock { state in
+                state.isClosed = true
+                state.streamCount = 0
+                state.reservedStreams = 0
+            }
 
             let activeStreams = Array(self.streams.values)
             self.streams.removeAll()
@@ -431,11 +435,11 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
         guard state != .closed else { return }
         state = .closed
 
-        _poolLock.lock()
-        isClosed = true
-        _poolStreamCount = 0
-        _reservedStreams = 0
-        _poolLock.unlock()
+        _poolState.withLock { state in
+            state.isClosed = true
+            state.streamCount = 0
+            state.reservedStreams = 0
+        }
 
         let callbacks = readyCallbacks
         readyCallbacks.removeAll()

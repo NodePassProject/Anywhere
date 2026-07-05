@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 extension ProxyClient {
     /// Connects through a Nowhere server. The iOS TUN stack already splits
@@ -179,31 +180,35 @@ extension ProxyClient {
             role: .attach, flowID: flowID, kind: kind,
             uplink: nwConfig.uplink, downlink: nwConfig.downlink
         )
-        let lock = UnfairLock()
-        var upResult: Result<ProxyConnection, Error>?
-        var downResult: Result<ProxyConnection, Error>?
-        var finished = false
+        struct JoinState {
+            var upResult: Result<ProxyConnection, Error>?
+            var downResult: Result<ProxyConnection, Error>?
+            var finished = false
+        }
+        let join = Mutex(JoinState())
 
         func receive(_ result: Result<ProxyConnection, Error>, isUplink: Bool) {
-            let outcome: Result<ProxyConnection, Error>? = lock.withLock { () -> Result<ProxyConnection, Error>? in
-                guard !finished else {
-                    if case .success(let connection) = result { connection.cancel() }
-                    return nil
+            // The loser half is cancelled outside the lock.
+            let (outcome, discard): (Result<ProxyConnection, Error>?, ProxyConnection?) = join.withLock { state in
+                guard !state.finished else {
+                    if case .success(let connection) = result { return (nil, connection) }
+                    return (nil, nil)
                 }
-                if isUplink { upResult = result } else { downResult = result }
-                guard let upResult, let downResult else { return nil }
-                finished = true
+                if isUplink { state.upResult = result } else { state.downResult = result }
+                guard let upResult = state.upResult, let downResult = state.downResult else { return (nil, nil) }
+                state.finished = true
                 switch (upResult, downResult) {
                 case (.success(let up), .success(let down)):
-                    return .success(NowhereDirectionalConnection(uplink: up, downlink: down))
+                    return (.success(NowhereDirectionalConnection(uplink: up, downlink: down)), nil)
                 case (.failure(let error), .success(let down)):
-                    down.cancel(); return .failure(error)
+                    return (.failure(error), down)
                 case (.success(let up), .failure(let error)):
-                    up.cancel(); return .failure(error)
+                    return (.failure(error), up)
                 case (.failure(let error), .failure(_)):
-                    return .failure(error)
+                    return (.failure(error), nil)
                 }
             }
+            discard?.cancel()
             if let outcome { completion(outcome) }
         }
 
@@ -327,24 +332,23 @@ extension ProxyClient {
             configuration: nwConfig,
             chainSignature: chainSignature,
             builder: { builderCompletion in
-                var holders: [ProxyClient] = []
-                let holdersLock = UnfairLock()
+                let holders = Mutex<[ProxyClient]>([])
                 ProxyClient.buildDetachedChainTunnel(
                     chain: chain,
                     hopCommands: cascadeCommands,
                     finalDestination: (nwServerAddress, nwServerPort),
                     useResolvedAddressForDirectDial: useResolvedAddress,
                     track: { client in
-                        holdersLock.withLock { holders.append(client) }
+                        holders.withLock { $0.append(client) }
                     }
                 ) { result in
                     switch result {
                     case .success(let chainTunnel):
-                        let snapshot = holdersLock.withLock { holders }
+                        let snapshot = holders.withLock { $0 }
                         let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
                         builderCompletion(.success((transport, snapshot)))
                     case .failure(let error):
-                        let snapshot = holdersLock.withLock { holders }
+                        let snapshot = holders.withLock { $0 }
                         for c in snapshot { c.cancel() }
                         builderCompletion(.failure(error))
                     }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - BrutalCongestionControl
 
@@ -153,29 +154,22 @@ nonisolated final class BrutalCongestionControl {
 
 // MARK: - Registry keyed by the `ngtcp2_cc *` the trampolines receive.
 
-private let brutalRegistryLock = UnfairLock()
-private var brutalRegistry: [OpaquePointer: BrutalCongestionControl] = [:]
+private let brutalRegistry = Mutex<[OpaquePointer: BrutalCongestionControl]>([:])
 
 extension BrutalCongestionControl {
     /// Call once per connection.
     static func register(_ brutal: BrutalCongestionControl, for cc: OpaquePointer) {
-        brutalRegistryLock.lock()
-        brutalRegistry[cc] = brutal
-        brutalRegistryLock.unlock()
+        brutalRegistry.withLock { $0[cc] = brutal }
     }
 
     static func unregister(cc: OpaquePointer) {
-        brutalRegistryLock.lock()
-        brutalRegistry.removeValue(forKey: cc)
-        brutalRegistryLock.unlock()
+        brutalRegistry.withLock { _ = $0.removeValue(forKey: cc) }
     }
 }
 
 private func brutalForCC(_ cc: OpaquePointer?) -> BrutalCongestionControl? {
     guard let cc else { return nil }
-    brutalRegistryLock.lock()
-    defer { brutalRegistryLock.unlock() }
-    return brutalRegistry[cc]
+    return brutalRegistry.withLock { $0[cc] }
 }
 
 // MARK: - @_cdecl trampolines (called by ngtcp2 via the CC callback table)

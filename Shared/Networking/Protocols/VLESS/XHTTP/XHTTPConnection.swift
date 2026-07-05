@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "XHTTPConnection")
 
@@ -653,8 +654,7 @@ nonisolated final class XHTTPXMUXMultiplexerLease {
     private weak var manager: XHTTPXMUXMultiplexerManager?
     /// Strong so the connection outlives all its sessions, even after the pool retires it.
     private let client: XHTTPXMUXMultiplexerClient
-    private var released = false
-    private let lock = UnfairLock()
+    private let released = Mutex(false)
 
     init(connection: XHTTPXMUXMultiplexerPoolable, manager: XHTTPXMUXMultiplexerManager, client: XHTTPXMUXMultiplexerClient) {
         self.connection = connection
@@ -669,10 +669,12 @@ nonisolated final class XHTTPXMUXMultiplexerLease {
 
     /// Releases this session's concurrency slot. Idempotent.
     func release() {
-        lock.lock()
-        if released { lock.unlock(); return }
-        released = true
-        lock.unlock()
+        let alreadyReleased: Bool = released.withLock { released in
+            if released { return true }
+            released = true
+            return false
+        }
+        if alreadyReleased { return }
         manager?.releaseSlot(client)
     }
 }
@@ -712,7 +714,7 @@ nonisolated final class XHTTPXMUXMultiplexerClient {
     }
 }
 
-/// All state is guarded by `lock`.
+/// All state is guarded by the `clients` mutex.
 nonisolated final class XHTTPXMUXMultiplexerManager {
     private let config: XHTTPXMUXMultiplexerConfiguration
     /// `maxConcurrency` range rolled once at creation, fixed for the manager's lifetime.
@@ -720,8 +722,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     /// `maxConnections` resolved once at creation.
     private let connections: Int
     private let newConnection: (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void
-    private var clients: [XHTTPXMUXMultiplexerClient] = []
-    private let lock = UnfairLock()
+    private let clients = Mutex<[XHTTPXMUXMultiplexerClient]>([])
     
     fileprivate weak var registry: XHTTPXMUXMultiplexerRegistry?
     fileprivate var registryKey: String?
@@ -736,70 +737,76 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     /// Acquires a slot, reusing a pooled connection or dialing a new one per policy.
     /// Completes with nil if a freshly-dialed connection fails.
     func acquire(completion: @escaping (XHTTPXMUXMultiplexerLease?) -> Void) {
-        // Prune retired clients; tear down those with no active sessions left.
-        lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
+        // Prune retired clients; tear down those with no active sessions left.
         var retiredIdle: [XHTTPXMUXMultiplexerPoolable] = []
-        clients.removeAll { client in
-            guard client.isRetired(now: now) else { return false }
-            if client.openUsage == 0, let connection = client.connection { retiredIdle.append(connection) }
-            return true
+        clients.withLock { clients in
+            clients.removeAll { client in
+                guard client.isRetired(now: now) else { return false }
+                if client.openUsage == 0, let connection = client.connection { retiredIdle.append(connection) }
+                return true
+            }
         }
-        lock.unlock()
         for connection in retiredIdle { connection.poolClose() }
 
-        lock.lock()
-        if let client = selectReusable() {
-            client.openUsage += 1
-            if client.leftUsage > 0 { client.leftUsage -= 1 }
-            switch client.state {
-            case .ready:
-                let connection = client.connection!
-                lock.unlock()
-                completion(makeLease(connection, client))
-            case .dialing:
-                // Share this still-dialing connection once its dial resolves.
-                client.waiters.append { [weak self, weak client] connection in
-                    guard let self, let client, let connection else { completion(nil); return }
-                    completion(self.makeLease(connection, client))
+        // The follow-up (completion / new dial) runs after the lock is released.
+        let followUp: () -> Void = clients.withLock { clients in
+            if let client = selectReusable(in: clients) {
+                client.openUsage += 1
+                if client.leftUsage > 0 { client.leftUsage -= 1 }
+                switch client.state {
+                case .ready:
+                    let connection = client.connection!
+                    return { completion(self.makeLease(connection, client)) }
+                case .dialing:
+                    // Share this still-dialing connection once its dial resolves.
+                    client.waiters.append { [weak self, weak client] connection in
+                        guard let self, let client, let connection else { completion(nil); return }
+                        completion(self.makeLease(connection, client))
+                    }
+                    return {}
+                case .failed:
+                    return { completion(nil) }
                 }
-                lock.unlock()
-            case .failed:
-                lock.unlock()
-                completion(nil)
             }
-            return
+
+            // Policy requires a new pooled connection.
+            let reuseRand = config.cMaxReuseTimes.random()
+            let leftUsage = reuseRand > 0 ? reuseRand - 1 : -1
+            let reqRand = config.hMaxRequestTimes.random()
+            let leftRequests = reqRand > 0 ? reqRand : Int.max
+            let secsRand = config.hMaxReusableSecs.random()
+            let unreusableAt: CFAbsoluteTime? = secsRand > 0 ? now + Double(secsRand) : nil
+
+            let client = XHTTPXMUXMultiplexerClient(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
+            client.openUsage = 1
+            clients.append(client)
+            return { self.dialNewConnection(for: client, completion: completion) }
         }
+        followUp()
+    }
 
-        // Policy requires a new pooled connection.
-        let reuseRand = config.cMaxReuseTimes.random()
-        let leftUsage = reuseRand > 0 ? reuseRand - 1 : -1
-        let reqRand = config.hMaxRequestTimes.random()
-        let leftRequests = reqRand > 0 ? reqRand : Int.max
-        let secsRand = config.hMaxReusableSecs.random()
-        let unreusableAt: CFAbsoluteTime? = secsRand > 0 ? now + Double(secsRand) : nil
-
-        let client = XHTTPXMUXMultiplexerClient(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
-        client.openUsage = 1
-        clients.append(client)
-        lock.unlock()
-
+    /// Dials a new pooled connection for `client`. Runs outside the lock.
+    private func dialNewConnection(for client: XHTTPXMUXMultiplexerClient, completion: @escaping (XHTTPXMUXMultiplexerLease?) -> Void) {
         newConnection { [weak self, weak client] connection in
             guard let self, let client else { completion(nil); return }
-            self.lock.lock()
-            let waiters = client.waiters
-            client.waiters.removeAll()
             var drained = false
+            let waiters: [(XHTTPXMUXMultiplexerPoolable?) -> Void] = self.clients.withLock { clients in
+                let waiters = client.waiters
+                client.waiters.removeAll()
+                if let connection {
+                    client.connection = connection
+                    client.state = .ready
+                } else {
+                    client.state = .failed
+                    clients.removeAll { $0 === client }
+                    drained = clients.isEmpty
+                }
+                return waiters
+            }
             if let connection {
-                client.connection = connection
-                client.state = .ready
-                self.lock.unlock()
                 completion(self.makeLease(connection, client))
             } else {
-                client.state = .failed
-                self.clients.removeAll { $0 === client }
-                drained = self.clients.isEmpty
-                self.lock.unlock()
                 completion(nil)
             }
             for waiter in waiters { waiter(connection) }
@@ -809,7 +816,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     }
 
     /// Selects a reusable pooled connection (lock held); nil ⇒ dial a new connection.
-    private func selectReusable() -> XHTTPXMUXMultiplexerClient? {
+    private func selectReusable(in clients: [XHTTPXMUXMultiplexerClient]) -> XHTTPXMUXMultiplexerClient? {
         if clients.isEmpty { return nil }
         if connections > 0 && clients.count < connections { return nil }
         let eligible = concurrency > 0 ? clients.filter { $0.openUsage < concurrency } : clients
@@ -822,43 +829,43 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     }
 
     func releaseSlot(_ client: XHTTPXMUXMultiplexerClient) {
-        lock.lock()
-        if client.openUsage > 0 { client.openUsage -= 1 }
-        // A retired connection with no remaining sessions is dropped and torn down.
-        let shouldClose = client.openUsage == 0 && client.isRetired(now: CFAbsoluteTimeGetCurrent())
-        if shouldClose { clients.removeAll { $0 === client } }
-        let drained = clients.isEmpty
-        lock.unlock()
+        var shouldClose = false
+        let drained: Bool = clients.withLock { clients in
+            if client.openUsage > 0 { client.openUsage -= 1 }
+            // A retired connection with no remaining sessions is dropped and torn down.
+            shouldClose = client.openUsage == 0 && client.isRetired(now: CFAbsoluteTimeGetCurrent())
+            if shouldClose { clients.removeAll { $0 === client } }
+            return clients.isEmpty
+        }
         if shouldClose { client.connection?.poolClose() }
         // Last session for this destination ended; ask the registry to drop the shell.
         if drained { registry?.evictIfEmpty(self) }
     }
 
     func noteRequest(_ client: XHTTPXMUXMultiplexerClient) {
-        lock.lock()
-        if client.leftRequests > 0 && client.leftRequests != Int.max { client.leftRequests -= 1 }
-        lock.unlock()
+        clients.withLock { _ in
+            if client.leftRequests > 0 && client.leftRequests != Int.max { client.leftRequests -= 1 }
+        }
     }
 
     fileprivate func hasNoClients() -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return clients.isEmpty
+        clients.withLock { $0.isEmpty }
     }
 
     /// Closes every pooled connection and empties the pool (called by the registry's `reclaim()`).
     func closeAll() {
-        lock.lock()
-        let pooledConnections = clients.compactMap { $0.connection }
-        clients.removeAll()
-        lock.unlock()
+        let pooledConnections: [XHTTPXMUXMultiplexerPoolable] = clients.withLock { clients in
+            let pooled = clients.compactMap { $0.connection }
+            clients.removeAll()
+            return pooled
+        }
         for connection in pooledConnections { connection.poolClose() }
     }
 }
 
 nonisolated final class XHTTPXMUXMultiplexerRegistry {
     static let shared = XHTTPXMUXMultiplexerRegistry()
-    private var managers: [String: XHTTPXMUXMultiplexerManager] = [:]
-    private let lock = UnfairLock()
+    private let managers = Mutex<[String: XHTTPXMUXMultiplexerManager]>([:])
     private init() {}
 
     /// The factory is destination-bound and must not capture per-session/per-flow state.
@@ -867,25 +874,28 @@ nonisolated final class XHTTPXMUXMultiplexerRegistry {
         config: XHTTPXMUXMultiplexerConfiguration,
         makeFactory: () -> (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void
     ) -> XHTTPXMUXMultiplexerManager {
-        lock.lock()
-        defer { lock.unlock() }
-        if let existing = managers[key] { return existing }
-        let manager = XHTTPXMUXMultiplexerManager(config: config, newConnection: makeFactory())
-        manager.registry = self
-        manager.registryKey = key
-        managers[key] = manager
-        return manager
+        // Built before taking the lock so the caller's factory closure never runs under it;
+        // discarded unused when a manager already exists for this key.
+        let factory = makeFactory()
+        return managers.withLock { managers in
+            if let existing = managers[key] { return existing }
+            let manager = XHTTPXMUXMultiplexerManager(config: config, newConnection: factory)
+            manager.registry = self
+            manager.registryKey = key
+            managers[key] = manager
+            return manager
+        }
     }
 
     /// Drops `manager` once its pool has fully drained, so an idle destination doesn't
     /// retain a manager shell (config + factory closure + key) for the process lifetime.
     fileprivate func evictIfEmpty(_ manager: XHTTPXMUXMultiplexerManager) {
         guard let key = manager.registryKey else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        guard managers[key] === manager else { return }   // already replaced/removed
-        if manager.hasNoClients() {
-            managers.removeValue(forKey: key)
+        managers.withLock { managers in
+            guard managers[key] === manager else { return }   // already replaced/removed
+            if manager.hasNoClients() {
+                managers.removeValue(forKey: key)
+            }
         }
     }
 }
@@ -894,10 +904,11 @@ extension XHTTPXMUXMultiplexerRegistry: TransportPool {
     /// Drops every pooled connection so XHTTP doesn't reuse a socket the kernel killed
     /// during sleep/path-change.
     func reclaim() {
-        lock.lock()
-        let allManagers = Array(managers.values)
-        managers.removeAll()
-        lock.unlock()
+        let allManagers: [XHTTPXMUXMultiplexerManager] = managers.withLock { managers in
+            let all = Array(managers.values)
+            managers.removeAll()
+            return all
+        }
         for manager in allManagers { manager.closeAll() }
     }
 }
@@ -955,28 +966,31 @@ nonisolated final class XHTTPH2Stream {
     func close() { connection?.removeStream(self) }
 }
 
-/// One always-on read loop demuxes frames to per-stream buffers. State under `lock`.
+/// One always-on read loop demuxes frames to per-stream buffers. State under the `state` mutex.
 nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     private let transportSend: (Data, @escaping (Error?) -> Void) -> Void
     private let transportCancel: () -> Void
     /// Demuxes the shared socket into H2 frames; one always-on read loop drives it.
     private let frameReader: H2FrameReader
 
-    private let lock = UnfairLock()
-    private var streams: [UInt32: XHTTPH2Stream] = [:]
-    private var nextStreamId: UInt32 = 1
-    private var closedFlag = false
-    /// Holds dial objects (TLS/Reality client) alive for the connection's lifetime.
-    private var retained: [AnyObject] = []
+    nonisolated private struct State {
+        var streams: [UInt32: XHTTPH2Stream] = [:]
+        var nextStreamId: UInt32 = 1
+        var closedFlag = false
+        /// Holds dial objects (TLS/Reality client) alive for the connection's lifetime.
+        var retained: [AnyObject] = []
 
-    // Peer flow-control windows (for our sends).
-    private var peerConnWindow = 65535
-    private var peerInitialWindow = 65535
-    private var maxFrameSize = 16384
-    private var flowResumptions: [() -> Void] = []
+        // Peer flow-control windows (for our sends).
+        var peerConnWindow = 65535
+        var peerInitialWindow = 65535
+        var maxFrameSize = 16384
+        var flowResumptions: [() -> Void] = []
 
-    // Local receive-window accounting (replenished as sessions consume data).
-    private var connReceiveConsumed = 0
+        // Local receive-window accounting (replenished as sessions consume data).
+        var connReceiveConsumed = 0
+    }
+
+    private let state = Mutex(State())
     private static let localStreamWindow = 4_194_304          // 4 MB
     private static let localConnWindow: UInt32 = 1_073_741_824 // 1 GB
     private static let maxReadBuffer = 8_388_608               // 8 MB
@@ -989,10 +1003,10 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
 
     /// Keeps a dial-time object (TLS/Reality client) alive for the connection's lifetime.
     func retain(_ object: AnyObject) {
-        lock.lock(); retained.append(object); lock.unlock()
+        state.withLock { $0.retained.append(object) }
     }
 
-    var isPoolClosed: Bool { lock.lock(); defer { lock.unlock() }; return closedFlag }
+    var isPoolClosed: Bool { state.withLock { $0.closedFlag } }
     func poolClose() { cancel() }
 
     // MARK: Setup
@@ -1062,9 +1076,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
                 }
             case .success(let f):
                 self.routeFrame(f)
-                self.lock.lock()
-                let closed = self.closedFlag
-                self.lock.unlock()
+                let closed = self.state.withLock { $0.closedFlag }
                 if !closed { self.startPump() }
             }
         }
@@ -1106,28 +1118,24 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
 
     private func handleData(streamId: UInt32, flags: UInt8, payload: Data) {
         let endStream = flags & XHTTPConnection.h2FlagEndStream != 0
-        lock.lock()
-        guard let stream = streams[streamId] else {
-            // Unknown/closed stream: still replenish the connection window so peers keep flowing.
-            connReceiveConsumed += payload.count
-            let windowUpdateFrame = connWindowUpdateLocked()
-            lock.unlock()
-            if let windowUpdateFrame { transportSend(windowUpdateFrame) { _ in } }
-            return
+        let work: (() -> Void)? = state.withLock { state in
+            guard let stream = state.streams[streamId] else {
+                // Unknown/closed stream: still replenish the connection window so peers keep flowing.
+                state.connReceiveConsumed += payload.count
+                guard let windowUpdateFrame = connWindowUpdateLocked(&state) else { return nil }
+                return { self.transportSend(windowUpdateFrame) { _ in } }
+            }
+            if stream.draining {
+                state.connReceiveConsumed += payload.count
+                stream.receiveConsumed += payload.count
+                let updates = windowUpdatesLocked(stream, &state)
+                if endStream { state.streams.removeValue(forKey: streamId) }
+                return { for windowUpdate in updates { self.transportSend(windowUpdate) { _ in } } }
+            }
+            if !payload.isEmpty { stream.receiveBuffer.append(payload) }
+            if endStream { stream.ended = true }
+            return makeDeliveryLocked(stream, &state)
         }
-        if stream.draining {
-            connReceiveConsumed += payload.count
-            stream.receiveConsumed += payload.count
-            let updates = windowUpdatesLocked(stream)
-            if endStream { streams.removeValue(forKey: streamId) }
-            lock.unlock()
-            for windowUpdate in updates { transportSend(windowUpdate) { _ in } }
-            return
-        }
-        if !payload.isEmpty { stream.receiveBuffer.append(payload) }
-        if endStream { stream.ended = true }
-        let work = makeDeliveryLocked(stream)
-        lock.unlock()
         work?()
     }
 
@@ -1135,13 +1143,13 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         // A non-200 response means the request was rejected (e.g. a 400 on a detached download GET
         // whose session the server can't pair). Surface it as an explicit error.
         if let statusError = Self.h2StatusError(payload) {
-            lock.lock()
-            guard let stream = streams[streamId] else { lock.unlock(); return }
-            if stream.failure == nil {
-                stream.failure = XHTTPError.setupFailed("shared H2 stream \(streamId): \(statusError)")
+            let work: (() -> Void)? = state.withLock { state in
+                guard let stream = state.streams[streamId] else { return nil }
+                if stream.failure == nil {
+                    stream.failure = XHTTPError.setupFailed("shared H2 stream \(streamId): \(statusError)")
+                }
+                return makeDeliveryLocked(stream, &state)
             }
-            let work = makeDeliveryLocked(stream)
-            lock.unlock()
             work?()
             return
         }
@@ -1151,37 +1159,39 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     }
 
     private func handleEnd(streamId: UInt32) {
-        lock.lock()
-        guard let stream = streams[streamId] else { lock.unlock(); return }
-        if stream.draining { streams.removeValue(forKey: streamId); lock.unlock(); return }
-        stream.ended = true
-        let work = makeDeliveryLocked(stream)
-        lock.unlock()
+        let work: (() -> Void)? = state.withLock { state in
+            guard let stream = state.streams[streamId] else { return nil }
+            if stream.draining { state.streams.removeValue(forKey: streamId); return nil }
+            stream.ended = true
+            return makeDeliveryLocked(stream, &state)
+        }
         work?()
     }
 
     private func handleConnWindowUpdate(_ payload: Data) {
         guard payload.count >= 4 else { return }
         let increment = Int(readUInt32(payload) & 0x7FFFFFFF)
-        lock.lock()
-        peerConnWindow += increment
-        let resumptions = flowResumptions; flowResumptions.removeAll()
-        lock.unlock()
+        let resumptions: [() -> Void] = state.withLock { state in
+            state.peerConnWindow += increment
+            let resumptions = state.flowResumptions; state.flowResumptions.removeAll()
+            return resumptions
+        }
         for r in resumptions { r() }
     }
 
     private func handleStreamWindowUpdate(streamId: UInt32, payload: Data) {
         guard payload.count >= 4 else { return }
         let inc = Int(readUInt32(payload) & 0x7FFFFFFF)
-        lock.lock()
-        streams[streamId]?.sendWindow += inc
-        let resumptions = flowResumptions; flowResumptions.removeAll()
-        lock.unlock()
+        let resumptions: [() -> Void] = state.withLock { state in
+            state.streams[streamId]?.sendWindow += inc
+            let resumptions = state.flowResumptions; state.flowResumptions.removeAll()
+            return resumptions
+        }
         for r in resumptions { r() }
     }
 
     /// Lock held. Hands buffered data/EOF/error to a waiting receiver; returns the work to run after unlock.
-    private func makeDeliveryLocked(_ stream: XHTTPH2Stream) -> (() -> Void)? {
+    private func makeDeliveryLocked(_ stream: XHTTPH2Stream, _ state: inout State) -> (() -> Void)? {
         guard let pending = stream.pendingReceive else { return nil }
         if let failure = stream.failure {
             stream.pendingReceive = nil
@@ -1191,9 +1201,9 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
             let data = stream.receiveBuffer
             stream.receiveBuffer = Data()
             stream.pendingReceive = nil
-            connReceiveConsumed += data.count
+            state.connReceiveConsumed += data.count
             stream.receiveConsumed += data.count
-            let updates = windowUpdatesLocked(stream)
+            let updates = windowUpdatesLocked(stream, &state)
             return { [weak self] in
                 for u in updates { self?.transportSend(u) { _ in } }
                 pending(data, nil)
@@ -1201,7 +1211,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
         }
         if stream.ended {
             stream.pendingReceive = nil
-            streams.removeValue(forKey: stream.streamId)
+            state.streams.removeValue(forKey: stream.streamId)
             return { pending(nil, nil) }
         }
         return nil
@@ -1210,101 +1220,114 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     // MARK: Send
 
     func sendHeaders(streamId: UInt32, headerBlock: Data, endStream: Bool, completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        if closedFlag { lock.unlock(); completion(XHTTPError.connectionClosed); return }
-        let flags = XHTTPConnection.h2FlagEndHeaders | (endStream ? XHTTPConnection.h2FlagEndStream : 0)
-        let f = frame(type: XHTTPConnection.h2FrameHeaders, flags: flags, streamId: streamId, payload: headerBlock)
-        lock.unlock()
+        let f: Data? = state.withLock { state in
+            if state.closedFlag { return nil }
+            let flags = XHTTPConnection.h2FlagEndHeaders | (endStream ? XHTTPConnection.h2FlagEndStream : 0)
+            return frame(type: XHTTPConnection.h2FrameHeaders, flags: flags, streamId: streamId, payload: headerBlock)
+        }
+        guard let f else { completion(XHTTPError.connectionClosed); return }
         transportSend(f, completion)
     }
 
     func sendData(stream: XHTTPH2Stream, data: Data, offset: Int, endStream: Bool, completion: @escaping (Error?) -> Void) {
         if offset >= data.count {
             guard endStream else { completion(nil); return }
-            lock.lock()
-            if closedFlag { lock.unlock(); completion(XHTTPError.connectionClosed); return }
-            let f = frame(type: XHTTPConnection.h2FrameData, flags: XHTTPConnection.h2FlagEndStream, streamId: stream.streamId, payload: Data())
-            lock.unlock()
+            let f: Data? = state.withLock { state in
+                if state.closedFlag { return nil }
+                return frame(type: XHTTPConnection.h2FrameData, flags: XHTTPConnection.h2FlagEndStream, streamId: stream.streamId, payload: Data())
+            }
+            guard let f else { completion(XHTTPError.connectionClosed); return }
             transportSend(f, completion)
             return
         }
-        lock.lock()
-        if closedFlag { lock.unlock(); completion(XHTTPError.connectionClosed); return }
-        let window = min(peerConnWindow, stream.sendWindow)
-        guard window > 0 else {
-            flowResumptions.append { [weak self] in
-                self?.sendData(stream: stream, data: data, offset: offset, endStream: endStream, completion: completion)
-            }
-            lock.unlock()
-            return
-        }
-        var frames = Data()
-        var current = offset
-        var remainingWindow = window
-        while current < data.count {
-            let chunk = min(data.count - current, min(maxFrameSize, remainingWindow))
-            guard chunk > 0 else { break }
-            let isLast = (current + chunk) >= data.count
-            let flags: UInt8 = (isLast && endStream) ? XHTTPConnection.h2FlagEndStream : 0
-            frames.append(frame(type: XHTTPConnection.h2FrameData, flags: flags, streamId: stream.streamId,
-                                payload: Data(data[data.startIndex + current ..< data.startIndex + current + chunk])))
-            current += chunk
-            remainingWindow -= chunk
-        }
-        let sent = window - remainingWindow
-        peerConnWindow -= sent
-        stream.sendWindow -= sent
-        lock.unlock()
 
-        let nextOffset = current
-        transportSend(frames) { [weak self] error in
-            if let error { completion(error); return }
-            if nextOffset < data.count {
-                self?.sendData(stream: stream, data: data, offset: nextOffset, endStream: endStream, completion: completion)
-            } else {
-                completion(nil)
+        enum SendAction {
+            case closed
+            case parked
+            case send(frames: Data, nextOffset: Int)
+        }
+        let action: SendAction = state.withLock { state in
+            if state.closedFlag { return .closed }
+            let window = min(state.peerConnWindow, stream.sendWindow)
+            guard window > 0 else {
+                state.flowResumptions.append { [weak self] in
+                    self?.sendData(stream: stream, data: data, offset: offset, endStream: endStream, completion: completion)
+                }
+                return .parked
+            }
+            var frames = Data()
+            var current = offset
+            var remainingWindow = window
+            while current < data.count {
+                let chunk = min(data.count - current, min(state.maxFrameSize, remainingWindow))
+                guard chunk > 0 else { break }
+                let isLast = (current + chunk) >= data.count
+                let flags: UInt8 = (isLast && endStream) ? XHTTPConnection.h2FlagEndStream : 0
+                frames.append(frame(type: XHTTPConnection.h2FrameData, flags: flags, streamId: stream.streamId,
+                                    payload: Data(data[data.startIndex + current ..< data.startIndex + current + chunk])))
+                current += chunk
+                remainingWindow -= chunk
+            }
+            let sent = window - remainingWindow
+            state.peerConnWindow -= sent
+            stream.sendWindow -= sent
+            return .send(frames: frames, nextOffset: current)
+        }
+
+        switch action {
+        case .closed:
+            completion(XHTTPError.connectionClosed)
+        case .parked:
+            break
+        case .send(let frames, let nextOffset):
+            transportSend(frames) { [weak self] error in
+                if let error { completion(error); return }
+                if nextOffset < data.count {
+                    self?.sendData(stream: stream, data: data, offset: nextOffset, endStream: endStream, completion: completion)
+                } else {
+                    completion(nil)
+                }
             }
         }
     }
 
     func receive(stream: XHTTPH2Stream, completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        if closedFlag, stream.receiveBuffer.isEmpty, !stream.ended, stream.failure == nil {
-            lock.unlock(); completion(nil, XHTTPError.connectionClosed); return
+        let work: (() -> Void)? = state.withLock { state in
+            if state.closedFlag, stream.receiveBuffer.isEmpty, !stream.ended, stream.failure == nil {
+                return { completion(nil, XHTTPError.connectionClosed) }
+            }
+            stream.pendingReceive = completion
+            return makeDeliveryLocked(stream, &state)
         }
-        stream.pendingReceive = completion
-        let work = makeDeliveryLocked(stream)
-        lock.unlock()
         work?()
     }
 
     // MARK: Streams
 
     func openStream() -> XHTTPH2Stream {
-        lock.lock()
-        let id = nextStreamId
-        nextStreamId += 2
-        let stream = XHTTPH2Stream(streamId: id, connection: self, sendWindow: peerInitialWindow)
-        streams[id] = stream
-        lock.unlock()
-        return stream
+        state.withLock { state in
+            let id = state.nextStreamId
+            state.nextStreamId += 2
+            let stream = XHTTPH2Stream(streamId: id, connection: self, sendWindow: state.peerInitialWindow)
+            state.streams[id] = stream
+            return stream
+        }
     }
 
     func drain(stream: XHTTPH2Stream) {
-        lock.lock()
-        stream.draining = true
-        stream.receiveBuffer = Data()
-        lock.unlock()
+        state.withLock { _ in
+            stream.draining = true
+            stream.receiveBuffer = Data()
+        }
     }
 
     func removeStream(_ stream: XHTTPH2Stream) {
-        lock.lock()
-        let known = streams[stream.streamId] != nil
-        streams.removeValue(forKey: stream.streamId)
-        let ended = stream.ended
-        let closed = closedFlag
-        lock.unlock()
-        if known, !ended, !closed {
+        let shouldReset: Bool = state.withLock { state in
+            let known = state.streams[stream.streamId] != nil
+            state.streams.removeValue(forKey: stream.streamId)
+            return known && !stream.ended && !state.closedFlag
+        }
+        if shouldReset {
             var code = Data(count: 4); code[3] = 0x08 // CANCEL
             transportSend(frame(type: XHTTPConnection.h2FrameRstStream, flags: 0, streamId: stream.streamId, payload: code)) { _ in }
         }
@@ -1316,19 +1339,21 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
     /// receive (e.g. a clean transport FIN of the shared H2 connection); a non-nil error
     /// surfaces as a failure.
     private func failAll(_ error: Error?) {
-        lock.lock()
-        if closedFlag { lock.unlock(); return }
-        closedFlag = true
-        let pendings = streams.values.compactMap { $0.pendingReceive }
-        streams.removeAll()
-        // Sends parked on flow control; each re-enters `sendData`, sees the closed connection,
-        // and completes with `.connectionClosed` rather than hanging forever.
-        let resumptions = flowResumptions
-        flowResumptions.removeAll()
-        lock.unlock()
+        let handoff: (pendings: [(Data?, Error?) -> Void], resumptions: [() -> Void])? = state.withLock { state in
+            if state.closedFlag { return nil }
+            state.closedFlag = true
+            let pendings = state.streams.values.compactMap { $0.pendingReceive }
+            state.streams.removeAll()
+            // Sends parked on flow control; each re-enters `sendData`, sees the closed connection,
+            // and completes with `.connectionClosed` rather than hanging forever.
+            let resumptions = state.flowResumptions
+            state.flowResumptions.removeAll()
+            return (pendings: pendings, resumptions: resumptions)
+        }
+        guard let handoff else { return }
         frameReader.reset()
-        for resume in resumptions { resume() }
-        for p in pendings { p(nil, error) }
+        for resume in handoff.resumptions { resume() }
+        for p in handoff.pendings { p(nil, error) }
         transportCancel()
     }
 
@@ -1344,31 +1369,31 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable {
             let id = (UInt16(payload[index]) << 8) | UInt16(payload[index + 1])
             let value = (UInt32(payload[index + 2]) << 24) | (UInt32(payload[index + 3]) << 16)
                     | (UInt32(payload[index + 4]) << 8) | UInt32(payload[index + 5])
-            lock.lock()
-            if id == 0x04 { // INITIAL_WINDOW_SIZE
-                let delta = Int(value) - peerInitialWindow
-                peerInitialWindow = Int(value)
-                for s in streams.values { s.sendWindow += delta }
-            } else if id == 0x05 { // MAX_FRAME_SIZE
-                maxFrameSize = Int(value)
+            state.withLock { state in
+                if id == 0x04 { // INITIAL_WINDOW_SIZE
+                    let delta = Int(value) - state.peerInitialWindow
+                    state.peerInitialWindow = Int(value)
+                    for s in state.streams.values { s.sendWindow += delta }
+                } else if id == 0x05 { // MAX_FRAME_SIZE
+                    state.maxFrameSize = Int(value)
+                }
             }
-            lock.unlock()
             index += 6
         }
     }
 
     /// Conn-level WINDOW_UPDATE once >= 50% of the advertised window is consumed. Lock held.
-    private func connWindowUpdateLocked() -> Data? {
-        guard connReceiveConsumed >= Int(Self.localConnWindow) / 2 else { return nil }
-        let inc = UInt32(connReceiveConsumed)
-        connReceiveConsumed = 0
+    private func connWindowUpdateLocked(_ state: inout State) -> Data? {
+        guard state.connReceiveConsumed >= Int(Self.localConnWindow) / 2 else { return nil }
+        let inc = UInt32(state.connReceiveConsumed)
+        state.connReceiveConsumed = 0
         return frame(type: XHTTPConnection.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: uint32Data(inc))
     }
 
     /// Conn + stream WINDOW_UPDATEs as thresholds are crossed. Lock held.
-    private func windowUpdatesLocked(_ stream: XHTTPH2Stream) -> [Data] {
+    private func windowUpdatesLocked(_ stream: XHTTPH2Stream, _ state: inout State) -> [Data] {
         var out: [Data] = []
-        if let c = connWindowUpdateLocked() { out.append(c) }
+        if let c = connWindowUpdateLocked(&state) { out.append(c) }
         if stream.receiveConsumed >= Self.localStreamWindow / 2, !stream.ended {
             let inc = UInt32(stream.receiveConsumed)
             stream.receiveConsumed = 0
@@ -1395,15 +1420,18 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
     private let underlyingReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     private let underlyingCancel: () -> Void
 
-    private let lock = UnfairLock()
-    private var outstanding = 0       // POSTs written minus responses fully parsed
-    private var dirty = false         // unparseable/unexpected response → never reuse
-    private var closed = false
-    private var retained: [AnyObject] = []
+    nonisolated private enum ParseState { case headers; case body(Int) }
 
-    private enum ParseState { case headers; case body(Int) }
-    private var parseState: ParseState = .headers
-    private var parseBuffer = Data()
+    nonisolated private struct State {
+        var outstanding = 0       // POSTs written minus responses fully parsed
+        var dirty = false         // unparseable/unexpected response → never reuse
+        var closed = false
+        var retained: [AnyObject] = []
+        var parseState: ParseState = .headers
+        var parseBuffer = Data()
+    }
+
+    private let state = Mutex(State())
 
     /// Lease for the current session; refreshed on each pool acquire.
     var lease: XHTTPXMUXMultiplexerLease?
@@ -1416,15 +1444,17 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
     }
 
     /// Keeps a dial-time object (TLS/Reality client) alive for the connection's lifetime.
-    func retain(_ object: AnyObject) { lock.lock(); retained.append(object); lock.unlock() }
+    func retain(_ object: AnyObject) { state.withLock { $0.retained.append(object) } }
 
-    var isPoolClosed: Bool { lock.lock(); defer { lock.unlock() }; return closed || dirty }
+    var isPoolClosed: Bool { state.withLock { $0.closed || $0.dirty } }
 
     func poolClose() {
-        lock.lock()
-        if closed { lock.unlock(); return }
-        closed = true
-        lock.unlock()
+        let alreadyClosed: Bool = state.withLock { state in
+            if state.closed { return true }
+            state.closed = true
+            return false
+        }
+        if alreadyClosed { return }
         underlyingCancel()
     }
 
@@ -1434,7 +1464,7 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
         TransportClosures(
             send: { [weak self] data, completion in
                 guard let self else { completion(XHTTPError.connectionClosed); return }
-                self.lock.lock(); self.outstanding += 1; self.lock.unlock()
+                self.state.withLock { $0.outstanding += 1 }
                 self.underlyingSend(data, completion)
             },
             receive: { completion in
@@ -1446,12 +1476,13 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
     }
 
     private func releaseToPool() {
-        lock.lock()
-        // Only a fully-drained, well-framed connection may be reused.
-        if dirty || outstanding != 0 || !parseBuffer.isEmpty { dirty = true }
-        let lease = self.lease
-        self.lease = nil
-        lock.unlock()
+        let lease: XHTTPXMUXMultiplexerLease? = state.withLock { state in
+            // Only a fully-drained, well-framed connection may be reused.
+            if state.dirty || state.outstanding != 0 || !state.parseBuffer.isEmpty { state.dirty = true }
+            let lease = self.lease
+            self.lease = nil
+            return lease
+        }
         lease?.release()
     }
 
@@ -1461,15 +1492,15 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
         underlyingReceive { [weak self] data, isComplete, error in
             guard let self else { return }
             if error != nil {
-                self.lock.lock(); self.closed = true; self.lock.unlock()
+                self.state.withLock { $0.closed = true }
                 return
             }
             if let data, !data.isEmpty { self.consume(data) }
             if isComplete {
-                self.lock.lock(); self.closed = true; self.lock.unlock()
+                self.state.withLock { $0.closed = true }
                 return
             }
-            self.lock.lock(); let stop = self.closed; self.lock.unlock()
+            let stop = self.state.withLock { $0.closed }
             if !stop { self.startDrain() }
         }
     }
@@ -1477,45 +1508,45 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable {
     /// Counts completed responses (Content-Length framed). Anything it can't frame marks the
     /// connection unreusable rather than risk mis-framing a reused socket.
     private func consume(_ data: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-        if dirty || closed { return }
-        parseBuffer.append(data)
-        while true {
-            switch parseState {
-            case .headers:
-                guard let r = parseBuffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) else { return }
-                let headerData = Data(parseBuffer[parseBuffer.startIndex..<r.lowerBound])
-                parseBuffer = Data(parseBuffer[r.upperBound...])
-                guard let header = String(data: headerData, encoding: .ascii), header.hasPrefix("HTTP/1.") else {
-                    dirty = true; return
+        state.withLock { state in
+            if state.dirty || state.closed { return }
+            state.parseBuffer.append(data)
+            while true {
+                switch state.parseState {
+                case .headers:
+                    guard let r = state.parseBuffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) else { return }
+                    let headerData = Data(state.parseBuffer[state.parseBuffer.startIndex..<r.lowerBound])
+                    state.parseBuffer = Data(state.parseBuffer[r.upperBound...])
+                    guard let header = String(data: headerData, encoding: .ascii), header.hasPrefix("HTTP/1.") else {
+                        state.dirty = true; return
+                    }
+                    let lower = header.lowercased()
+                    if lower.contains("transfer-encoding:"), lower.contains("chunked") {
+                        state.dirty = true; return
+                    }
+                    guard let length = Self.contentLength(in: header) else {
+                        // No Content-Length and not chunked → connection-delimited → can't reuse.
+                        state.dirty = true; return
+                    }
+                    if length == 0 { completeResponseLocked(&state) } else { state.parseState = .body(length) }
+                case .body(let remaining):
+                    guard !state.parseBuffer.isEmpty else { return }
+                    let take = min(remaining, state.parseBuffer.count)
+                    state.parseBuffer.removeFirst(take)
+                    state.parseBuffer = state.parseBuffer.isEmpty ? Data() : Data(state.parseBuffer)
+                    let left = remaining - take
+                    if left == 0 { state.parseState = .headers; completeResponseLocked(&state) }
+                    else { state.parseState = .body(left); return }
                 }
-                let lower = header.lowercased()
-                if lower.contains("transfer-encoding:"), lower.contains("chunked") {
-                    dirty = true; return
-                }
-                guard let length = Self.contentLength(in: header) else {
-                    // No Content-Length and not chunked → connection-delimited → can't reuse.
-                    dirty = true; return
-                }
-                if length == 0 { completeResponseLocked() } else { parseState = .body(length) }
-            case .body(let remaining):
-                guard !parseBuffer.isEmpty else { return }
-                let take = min(remaining, parseBuffer.count)
-                parseBuffer.removeFirst(take)
-                parseBuffer = parseBuffer.isEmpty ? Data() : Data(parseBuffer)
-                let left = remaining - take
-                if left == 0 { parseState = .headers; completeResponseLocked() }
-                else { parseState = .body(left); return }
             }
         }
     }
 
     /// Lock held.
-    private func completeResponseLocked() {
-        parseState = .headers
-        if outstanding <= 0 { dirty = true; return } // unexpected/extra response
-        outstanding -= 1
+    private func completeResponseLocked(_ state: inout State) {
+        state.parseState = .headers
+        if state.outstanding <= 0 { state.dirty = true; return } // unexpected/extra response
+        state.outstanding -= 1
     }
 
     private static func contentLength(in header: String) -> Int? {

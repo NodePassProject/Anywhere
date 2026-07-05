@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 final class MITMScriptHTTPClient {
     static let shared = MITMScriptHTTPClient()
@@ -16,21 +17,31 @@ final class MITMScriptHTTPClient {
     /// Cross-fetch ceiling on buffered response bytes; keeps concurrent fetches well under the NE's ~50 MiB budget.
     static let maxGlobalInFlightBytes: Int = 16 * 1024 * 1024
 
-    private static let inFlightLock = UnfairLock()
-    private static var inFlightBytes = 0
+    private static let inFlightBytes = Atomic<Int>(0)
 
     static func reserveInFlight(_ count: Int) -> Bool {
-        inFlightLock.lock(); defer { inFlightLock.unlock() }
-        guard inFlightBytes + count <= maxGlobalInFlightBytes else { return false }
-        inFlightBytes += count
-        return true
+        var current = inFlightBytes.load(ordering: .relaxed)
+        while current + count <= maxGlobalInFlightBytes {
+            let (exchanged, original) = inFlightBytes.weakCompareExchange(
+                expected: current, desired: current + count, ordering: .relaxed
+            )
+            if exchanged { return true }
+            current = original
+        }
+        return false
     }
 
     /// Clamped at 0 to guard against double-release.
     static func releaseInFlight(_ count: Int) {
         guard count > 0 else { return }
-        inFlightLock.lock(); defer { inFlightLock.unlock() }
-        inFlightBytes = max(0, inFlightBytes - count)
+        var current = inFlightBytes.load(ordering: .relaxed)
+        while true {
+            let (exchanged, original) = inFlightBytes.weakCompareExchange(
+                expected: current, desired: max(0, current - count), ordering: .relaxed
+            )
+            if exchanged { return }
+            current = original
+        }
     }
 
     struct Response {

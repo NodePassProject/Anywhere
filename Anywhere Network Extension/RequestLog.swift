@@ -6,13 +6,13 @@
 //
 
 import Foundation
+import Synchronization
 
 final class RequestLog {
 
     typealias Entry = TunnelRequestEntry
 
-    private let lock = UnfairLock()
-    private var entries: [Entry] = []
+    private let entries = Mutex<[Entry]>([])
 
     /// Records one routing decision; `host` is the domain if known, else the IP literal.
     func record(
@@ -31,24 +31,22 @@ final class RequestLog {
             routeTarget: routeTarget,
             viaDefault: viaDefault
         )
-        lock.lock()
-        entries.append(entry)
-        compact(now: now)
-        lock.unlock()
+        entries.withLock { entries in
+            entries.append(entry)
+            Self.compact(&entries, now: now)
+        }
     }
 
     /// Returns all entries within the retention window; safe from any thread.
     func snapshot() -> [Entry] {
         let now = CFAbsoluteTimeGetCurrent()
-        lock.lock()
-        compact(now: now)
-        let result = entries
-        lock.unlock()
-        return result
+        return entries.withLock { entries in
+            Self.compact(&entries, now: now)
+            return entries
+        }
     }
 
-    /// Caller must hold `lock`.
-    private func compact(now: CFAbsoluteTime) {
+    private static func compact(_ entries: inout [Entry], now: CFAbsoluteTime) {
         let cutoff = now - TunnelConstants.requestLogRetentionInterval
         entries.removeAll { $0.timestamp < cutoff }
         if entries.count > TunnelConstants.requestLogMaxEntries {

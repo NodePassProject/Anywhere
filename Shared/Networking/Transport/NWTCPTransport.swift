@@ -7,6 +7,7 @@
 
 import Foundation
 import Network
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NWTCPTransport")
 
@@ -56,19 +57,18 @@ nonisolated func nwHost(fromIPLiteral ip: String) -> NWEndpoint.Host? {
 
 /// Process-wide count of TCP dials in flight (connect issued, not yet resolved).
 nonisolated enum DialGauge {
-    private static let lock = UnfairLock()
-    private nonisolated(unsafe) static var count = 0
+    private static let count = Atomic<Int>(0)
 
     static var inFlight: Int {
-        lock.withLock { count }
+        count.load(ordering: .relaxed)
     }
 
     static func increment() {
-        lock.withLock { count += 1 }
+        count.wrappingAdd(1, ordering: .relaxed)
     }
 
     static func decrement() {
-        lock.withLock { count -= 1 }
+        count.wrappingSubtract(1, ordering: .relaxed)
     }
 }
 
@@ -80,14 +80,17 @@ nonisolated enum DialGate {
     /// observed ENOMEM collapse (~250 in-flight dials).
     static let maxConcurrentDials = 64
 
-    private static let lock = UnfairLock()
-    private nonisolated(unsafe) static var active = 0
-    private nonisolated(unsafe) static var nextTicket: UInt64 = 0
-    private nonisolated(unsafe) static var waiters: [(ticket: UInt64, start: @Sendable () -> Void)] = []
+    private struct State {
+        var active = 0
+        var nextTicket: UInt64 = 0
+        var waiters: [(ticket: UInt64, start: @Sendable () -> Void)] = []
+    }
+
+    private static let state = Mutex(State())
 
     /// (dialing now, queued) — sampled by failure diagnostics.
     static var stats: (active: Int, queued: Int) {
-        lock.withLock { (active, waiters.count) }
+        state.withLock { ($0.active, $0.waiters.count) }
     }
 
     /// Claims a slot: returns nil when one is free (the caller proceeds
@@ -95,32 +98,32 @@ nonisolated enum DialGate {
     /// ticket. A queued `start` runs exactly once, when a slot frees, unless
     /// cancelled first — and then owns the slot the same way.
     static func acquire(_ start: @escaping @Sendable () -> Void) -> UInt64? {
-        lock.withLock { () -> UInt64? in
-            if active < maxConcurrentDials {
-                active += 1
+        state.withLock { (state: inout State) -> UInt64? in
+            if state.active < maxConcurrentDials {
+                state.active += 1
                 return nil
             }
-            nextTicket += 1
-            waiters.append((nextTicket, start))
-            return nextTicket
+            state.nextTicket += 1
+            state.waiters.append((state.nextTicket, start))
+            return state.nextTicket
         }
     }
 
     /// Removes a queued waiter. Returns false when it already started (or never
     /// existed) — its closure then owns the slot and must release it.
     static func cancelWaiter(_ ticket: UInt64) -> Bool {
-        lock.withLock {
-            guard let index = waiters.firstIndex(where: { $0.ticket == ticket }) else { return false }
-            waiters.remove(at: index)
+        state.withLock { state in
+            guard let index = state.waiters.firstIndex(where: { $0.ticket == ticket }) else { return false }
+            state.waiters.remove(at: index)
             return true
         }
     }
 
     /// Releases a slot: hands it to the newest waiter, or lowers `active`.
     static func release() {
-        let next = lock.withLock { () -> (@Sendable () -> Void)? in
-            if let waiter = waiters.popLast() { return waiter.start }
-            active -= 1
+        let next = state.withLock { (state: inout State) -> (@Sendable () -> Void)? in
+            if let waiter = state.waiters.popLast() { return waiter.start }
+            state.active -= 1
             return nil
         }
         // Outside the lock; the closure hops to its transport's queue.
@@ -155,17 +158,20 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
     // MARK: State
 
-    private let stateLock = UnfairLock()
-    private var _state: State = .setup
+    /// Fields guarded by `stateLock`.
+    private struct Protected {
+        var state: State = .setup
+        /// Completions awaiting full teardown.
+        var teardownCompletions: [@Sendable () -> Void] = []
+        /// Set once teardown has finished.
+        var teardownComplete = false
+    }
 
-    /// Completions awaiting full teardown. Protected by `stateLock`.
-    private var teardownCompletions: [@Sendable () -> Void] = []
-    /// Set once teardown has finished. Protected by `stateLock`.
-    private var teardownComplete = false
+    private let stateLock = Mutex(Protected())
 
     /// The current state of the transport. Thread-safe.
     var state: State {
-        stateLock.withLock { _state }
+        stateLock.withLock { $0.state }
     }
 
     // MARK: Concurrency
@@ -248,7 +254,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
             guard let nwPort = NWEndpoint.Port(rawValue: port) else {
                 let error = TransportError.connectionFailed("Invalid port \(port)")
                 stateLock.withLock {
-                    if case .setup = _state { _state = .failed(error) }
+                    if case .setup = $0.state { $0.state = .failed(error) }
                 }
                 completion(error)
                 return
@@ -374,16 +380,16 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     func forceCancel(completion: @escaping @Sendable () -> Void) {
         enum Action { case startTeardown, queue, fireImmediately }
 
-        let action: Action = stateLock.withLock { () -> Action in
-            if teardownComplete {
+        let action: Action = stateLock.withLock { (protected: inout Protected) -> Action in
+            if protected.teardownComplete {
                 return .fireImmediately
             }
-            if case .cancelled = _state {
-                teardownCompletions.append(completion)
+            if case .cancelled = protected.state {
+                protected.teardownCompletions.append(completion)
                 return .queue
             }
-            _state = .cancelled
-            teardownCompletions.append(completion)
+            protected.state = .cancelled
+            protected.teardownCompletions.append(completion)
             return .startTeardown
         }
 
@@ -413,10 +419,10 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     }
 
     private func notifyTeardownComplete() {
-        let completions: [@Sendable () -> Void] = stateLock.withLock {
-            teardownComplete = true
-            let pending = teardownCompletions
-            teardownCompletions.removeAll()
+        let completions: [@Sendable () -> Void] = stateLock.withLock { protected in
+            protected.teardownComplete = true
+            let pending = protected.teardownCompletions
+            protected.teardownCompletions.removeAll()
             return pending
         }
         for completion in completions {
@@ -589,7 +595,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     /// Moves to `.failed` and notifies an in-flight receive. Must run on `queue`.
     private func failActive(with error: Error) {
         let changed: Bool = stateLock.withLock {
-            if case .ready = _state { _state = .failed(error); return true }
+            if case .ready = $0.state { $0.state = .failed(error); return true }
             return false
         }
         guard changed else { return }
@@ -647,8 +653,8 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     @discardableResult
     private func transitionFromSetup(to new: State) -> Bool {
         stateLock.withLock {
-            if case .setup = _state {
-                _state = new
+            if case .setup = $0.state {
+                $0.state = new
                 return true
             }
             return false

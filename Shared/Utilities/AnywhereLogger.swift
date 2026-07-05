@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 import os.log
 
 /// `info`+ also reach the bounded user-facing viewer; keep `info` low-volume or
@@ -13,8 +14,13 @@ import os.log
 nonisolated struct AnywhereLogger {
     private let osLogger: Logger
 
+    private static let _logSink = Mutex<((String, Level) -> Void)?>(nil)
+
     /// Set by the Network Extension at startup; nil in the main app.
-    static var logSink: ((String, Level) -> Void)?
+    static var logSink: ((String, Level) -> Void)? {
+        get { _logSink.withLock { $0 } }
+        set { _logSink.withLock { $0 = newValue } }
+    }
 
     /// Floor for `logSink` only; os.log receives every level regardless.
     static let minimumSinkLevel: Level = .info

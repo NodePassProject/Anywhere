@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated final class NowhereUDPConnection: ProxyConnection {
 
@@ -22,11 +23,10 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         get { _state }
         set {
             _state = newValue
-            readyLock.withLock { _isReady = (newValue == .ready) }
+            _isReady.store(newValue == .ready, ordering: .relaxed)
         }
     }
-    private let readyLock = UnfairLock()
-    private var _isReady = false
+    private let _isReady = Atomic<Bool>(false)
 
     private var flowID: UInt64 = 0
     private var packetQueue: [Data] = []
@@ -51,7 +51,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     }
 
     override var isConnected: Bool {
-        readyLock.withLock { _isReady }
+        _isReady.load(ordering: .relaxed)
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }

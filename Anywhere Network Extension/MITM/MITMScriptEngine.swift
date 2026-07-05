@@ -9,16 +9,15 @@ import Foundation
 import JavaScriptCore
 import CryptoKit
 import Security
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptEngine")
 
 /// Input-body bytes pinned by suspended async invocations, summed across all engines.
-private nonisolated(unsafe) var mitmScriptSuspendedBodyBytes: Int = 0
-private let mitmScriptSuspendedBodyLock = UnfairLock()
+nonisolated private let mitmScriptSuspendedBodyBytes = Atomic<Int>(0)
 
 /// In-flight Anywhere.http fetches across all engines, bounded by httpMaxConcurrentGlobal.
-private nonisolated(unsafe) var mitmScriptGlobalFetchCount: Int = 0
-private let mitmScriptGlobalFetchLock = UnfairLock()
+nonisolated private let mitmScriptGlobalFetchCount = Atomic<Int>(0)
 
 /// One JSContext per rule set, functions cached by source hash. JS cannot be preempted
 /// (the execution-time-limit SPI is App Review-flagged); a hung sync span trips MITMScriptWatchdog,
@@ -356,15 +355,11 @@ final class MITMScriptEngine {
     }
 
     private static func suspendedBodyBytes() -> Int {
-        mitmScriptSuspendedBodyLock.lock()
-        defer { mitmScriptSuspendedBodyLock.unlock() }
-        return mitmScriptSuspendedBodyBytes
+        mitmScriptSuspendedBodyBytes.load(ordering: .relaxed)
     }
 
     private static func addSuspendedBodyBytes(_ delta: Int) {
-        mitmScriptSuspendedBodyLock.lock()
-        mitmScriptSuspendedBodyBytes += delta
-        mitmScriptSuspendedBodyLock.unlock()
+        mitmScriptSuspendedBodyBytes.wrappingAdd(delta, ordering: .relaxed)
     }
 
     /// Runs ``source`` against one streaming frame; on failure emits the frame unchanged.
@@ -1616,7 +1611,7 @@ final class MITMScriptEngine {
         currentInvocation = inv
         defer { currentInvocation = nil }
         // The continuation runs synchronously — guard it: a `while(true)` after an await wedges here.
-        runUserScript("async script (Anywhere.http resume continuation)") {
+        _ = runUserScript("async script (Anywhere.http resume continuation)") {
             switch result {
             case .success(let response):
                 resolve?.call(withArguments: [Self.makeHTTPResponse(response, in: context)])
@@ -1697,19 +1692,21 @@ final class MITMScriptEngine {
     // MARK: Global Anywhere.http in-flight counter
 
     private static func reserveGlobalFetchSlot() {
-        mitmScriptGlobalFetchLock.lock()
-        mitmScriptGlobalFetchCount += 1
-        mitmScriptGlobalFetchLock.unlock()
+        mitmScriptGlobalFetchCount.wrappingAdd(1, ordering: .relaxed)
     }
     private static func releaseGlobalFetchSlot() {
-        mitmScriptGlobalFetchLock.lock()
-        if mitmScriptGlobalFetchCount > 0 { mitmScriptGlobalFetchCount -= 1 }
-        mitmScriptGlobalFetchLock.unlock()
+        // Clamped at zero, so a stray double release can't underflow.
+        var current = mitmScriptGlobalFetchCount.load(ordering: .relaxed)
+        while current > 0 {
+            let (exchanged, original) = mitmScriptGlobalFetchCount.weakCompareExchange(
+                expected: current, desired: current - 1, ordering: .relaxed
+            )
+            if exchanged { return }
+            current = original
+        }
     }
     private static func globalFetchCount() -> Int {
-        mitmScriptGlobalFetchLock.lock()
-        defer { mitmScriptGlobalFetchLock.unlock() }
-        return mitmScriptGlobalFetchCount
+        mitmScriptGlobalFetchCount.load(ordering: .relaxed)
     }
 
     // MARK: - Body bridging (static so closures don't capture self)
@@ -2082,29 +2079,31 @@ extension MITMScriptEngine {
 
     /// Process-wide registry of engines keyed by rule-set id. Serialization comes from the script
     /// queue, NOT the lwIP queue — calling apply/applyFrame there would race the shared JSContext.
-    private static var engines: [UUID: MITMScriptEngine] = [:]
-    private static var scopelessEngine: MITMScriptEngine?
-    private static let registryLock = UnfairLock()
+    private struct EngineRegistry {
+        var engines: [UUID: MITMScriptEngine] = [:]
+        var scopelessEngine: MITMScriptEngine?
+    }
+    private static let registry = Mutex(EngineRegistry())
 
     static func sharedEngine(forScope scope: UUID?) -> MITMScriptEngine {
-        registryLock.withLock { () -> MITMScriptEngine in
+        registry.withLock { registry -> MITMScriptEngine in
             guard let scope else {
-                if let engine = scopelessEngine { return engine }
+                if let engine = registry.scopelessEngine { return engine }
                 let engine = MITMScriptEngine()
-                scopelessEngine = engine
+                registry.scopelessEngine = engine
                 return engine
             }
-            if let engine = engines[scope] { return engine }
+            if let engine = registry.engines[scope] { return engine }
             let engine = MITMScriptEngine()
-            engines[scope] = engine
+            registry.engines[scope] = engine
             return engine
         }
     }
-    
+
     static func purgeEngines(activeIDs: Set<UUID>) {
-        let dropped: [MITMScriptEngine] = registryLock.withLock {
-            let removed = engines.filter { !activeIDs.contains($0.key) }.map { $0.value }
-            engines = engines.filter { activeIDs.contains($0.key) }
+        let dropped: [MITMScriptEngine] = registry.withLock { registry in
+            let removed = registry.engines.filter { !activeIDs.contains($0.key) }.map { $0.value }
+            registry.engines = registry.engines.filter { activeIDs.contains($0.key) }
             return removed
         }
         guard !dropped.isEmpty else { return }
@@ -2116,8 +2115,8 @@ extension MITMScriptEngine {
     /// Reload reset for the engines that survive ``purgeEngines``.
     static func resetCachesOnReload(keepByScope: [UUID: Set<Int>]) {
         MITMScriptTransform.scriptQueue.async {
-            let snapshot: [(engine: MITMScriptEngine, keep: Set<Int>)] = registryLock.withLock {
-                engines.map { (engine: $0.value, keep: keepByScope[$0.key] ?? []) }
+            let snapshot: [(engine: MITMScriptEngine, keep: Set<Int>)] = registry.withLock { registry in
+                registry.engines.map { (engine: $0.value, keep: keepByScope[$0.key] ?? []) }
             }
             for item in snapshot {
                 item.engine.resetOnReload(keepingCompiled: item.keep)

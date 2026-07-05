@@ -6,18 +6,22 @@
 //
 
 import Foundation
+import Synchronization
 
 /// Adapts a push-based `NWUDPTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
     private let transport: NWUDPTransport
 
-    private let recvLock = UnfairLock()
-    private var recvBuffer: [Data] = []
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var receiveError: Error?
-    private var startedReceiving = false
-    private var closed = false
+    private struct ReceiveState {
+        var recvBuffer: [Data] = []
+        var pendingReceive: ((Data?, Error?) -> Void)?
+        var receiveError: Error?
+        var startedReceiving = false
+        var closed = false
+    }
+
+    private let recvState = Mutex(ReceiveState())
 
     /// Bounds memory under a burst the consumer hasn't drained yet.
     private static let maxBufferedDatagrams = 1024
@@ -39,10 +43,39 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        recvLock.lock()
+        enum Action {
+            case deliver(Data)
+            case fail(Error)
+            case eof
+            case parked(stale: ((Data?, Error?) -> Void)?)
+        }
+        let (shouldStartReceiving, action): (Bool, Action) = recvState.withLock { state in
+            var shouldStartReceiving = false
+            if !state.startedReceiving {
+                state.startedReceiving = true
+                shouldStartReceiving = true
+            }
 
-        if !startedReceiving {
-            startedReceiving = true
+            if !state.recvBuffer.isEmpty {
+                return (shouldStartReceiving, .deliver(state.recvBuffer.removeFirst()))
+            }
+
+            if let error = state.receiveError {
+                state.receiveError = nil
+                return (shouldStartReceiving, .fail(error))
+            }
+
+            if state.closed {
+                return (shouldStartReceiving, .eof)
+            }
+
+            // Single-pending discipline: fail any stale overlapping receive instead of letting it hang.
+            let stale = state.pendingReceive
+            state.pendingReceive = completion
+            return (shouldStartReceiving, .parked(stale: stale))
+        }
+
+        if shouldStartReceiving {
             transport.startReceiving(handler: { [weak self] data in
                 self?.deliverIncoming(data)
             }, errorHandler: { [weak self] error in
@@ -50,40 +83,26 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
             })
         }
 
-        if !recvBuffer.isEmpty {
-            let next = recvBuffer.removeFirst()
-            recvLock.unlock()
+        switch action {
+        case .deliver(let next):
             completion(next, nil)
-            return
-        }
-
-        if let error = receiveError {
-            receiveError = nil
-            recvLock.unlock()
+        case .fail(let error):
             completion(nil, error)
-            return
-        }
-
-        if closed {
-            recvLock.unlock()
+        case .eof:
             completion(nil, nil)
-            return
+        case .parked(let stale):
+            stale?(nil, ProxyError.protocolError("overlapping receiveRaw on Direct UDP"))
         }
-
-        // Single-pending discipline: fail any stale overlapping receive instead of letting it hang.
-        let stale = pendingReceive
-        pendingReceive = completion
-        recvLock.unlock()
-        stale?(nil, ProxyError.protocolError("overlapping receiveRaw on Direct UDP"))
     }
 
     override func cancel() {
-        recvLock.lock()
-        closed = true
-        let parked = pendingReceive
-        pendingReceive = nil
-        recvBuffer.removeAll()
-        recvLock.unlock()
+        let parked = recvState.withLock { state -> ((Data?, Error?) -> Void)? in
+            state.closed = true
+            let parked = state.pendingReceive
+            state.pendingReceive = nil
+            state.recvBuffer.removeAll()
+            return parked
+        }
 
         transport.cancel()
         parked?(nil, nil)
@@ -92,37 +111,36 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
     // MARK: - Private
 
     private func deliverIncoming(_ data: Data) {
-        recvLock.lock()
-        if closed {
-            recvLock.unlock()
-            return
+        let callback = recvState.withLock { state -> ((Data?, Error?) -> Void)? in
+            if state.closed {
+                return nil
+            }
+            if let callback = state.pendingReceive {
+                state.pendingReceive = nil
+                return callback
+            }
+            // Drop-oldest when the consumer isn't keeping up — UDP is lossy.
+            if state.recvBuffer.count >= Self.maxBufferedDatagrams {
+                state.recvBuffer.removeFirst()
+            }
+            state.recvBuffer.append(data)
+            return nil
         }
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            recvLock.unlock()
-            callback(data, nil)
-            return
-        }
-        // Drop-oldest when the consumer isn't keeping up — UDP is lossy.
-        if recvBuffer.count >= Self.maxBufferedDatagrams {
-            recvBuffer.removeFirst()
-        }
-        recvBuffer.append(data)
-        recvLock.unlock()
+        callback?(data, nil)
     }
 
     private func deliverError(_ error: Error) {
-        recvLock.lock()
-        if closed {
-            recvLock.unlock()
-            return
+        let callback = recvState.withLock { state -> ((Data?, Error?) -> Void)? in
+            if state.closed {
+                return nil
+            }
+            let callback = state.pendingReceive
+            state.pendingReceive = nil
+            if callback == nil {
+                state.receiveError = error
+            }
+            return callback
         }
-        let callback = pendingReceive
-        pendingReceive = nil
-        if callback == nil {
-            receiveError = error
-        }
-        recvLock.unlock()
         callback?(nil, error)
     }
 }

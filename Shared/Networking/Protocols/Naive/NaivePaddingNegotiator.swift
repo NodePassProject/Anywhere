@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 enum NaivePaddingNegotiator {
 
@@ -71,21 +72,16 @@ enum NaivePaddingNegotiator {
     // MARK: - Padding Type Cache
 
     /// Negotiated padding type per server, enabling `fastopen` to skip the round-trip on reuse.
-    private static let cacheLock = UnfairLock()
-    private static var paddingTypeCache: [String: PaddingType] = [:]
+    private static let paddingTypeCache = Mutex<[String: PaddingType]>([:])
 
     static func cachedPaddingType(host: String, port: UInt16, sni: String) -> PaddingType? {
         let key = "\(host):\(port):\(sni)"
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        return paddingTypeCache[key]
+        return paddingTypeCache.withLock { $0[key] }
     }
 
     static func cachePaddingType(_ type: PaddingType, host: String, port: UInt16, sni: String) {
         let key = "\(host):\(port):\(sni)"
-        cacheLock.lock()
-        paddingTypeCache[key] = type
-        cacheLock.unlock()
+        paddingTypeCache.withLock { $0[key] = type }
     }
 
     // MARK: - Response Parsing

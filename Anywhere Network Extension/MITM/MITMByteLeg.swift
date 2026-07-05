@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 protocol MITMByteLeg: AnyObject {
     var negotiatedALPN: String { get }
@@ -26,9 +27,12 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
     let negotiatedALPN: String = ""
 
     private let transport: any RawTransport
-    private let lock = UnfairLock()
-    private var prepended = Data()
-    private var cancelled = false
+
+    private struct State {
+        var prepended = Data()
+        var cancelled = false
+    }
+    private let state = Mutex(State())
 
     init(transport: any RawTransport) {
         self.transport = transport
@@ -36,26 +40,27 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
 
     func prependToReceiveBuffer(_ data: Data) {
         guard !data.isEmpty else { return }
-        lock.lock()
-        prepended.append(data)
-        lock.unlock()
+        state.withLock { $0.prepended.append(data) }
     }
 
     func receive(completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        if !prepended.isEmpty {
-            let data = prepended
-            prepended = Data()
-            lock.unlock()
-            completion(data, nil)
+        // Extract under the lock; `completion` is invoked outside it.
+        let (buffered, isCancelled): (Data?, Bool) = state.withLock { state in
+            if !state.prepended.isEmpty {
+                let data = state.prepended
+                state.prepended = Data()
+                return (data, false)
+            }
+            return (nil, state.cancelled)
+        }
+        if let buffered {
+            completion(buffered, nil)
             return
         }
-        if cancelled {
-            lock.unlock()
+        if isCancelled {
             completion(nil, nil)
             return
         }
-        lock.unlock()
 
         transport.receive { data, isComplete, error in
             if let error {
@@ -79,10 +84,10 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
     }
 
     func cancel() {
-        lock.lock()
-        cancelled = true
-        prepended = Data()
-        lock.unlock()
+        state.withLock { state in
+            state.cancelled = true
+            state.prepended = Data()
+        }
         transport.forceCancel()
     }
 }

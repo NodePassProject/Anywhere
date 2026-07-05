@@ -6,12 +6,17 @@
 //
 
 import Foundation
+import Synchronization
+
+/// Buffered incoming bytes for UDP framing; wrapped in `UDPFramingCapable.udpState`.
+struct UDPFramingState {
+    var buffer = Data()
+    var bufferOffset = 0
+}
 
 /// UDP packets are length-prefixed with 2 bytes (big-endian)
 protocol UDPFramingCapable: AnyObject {
-    var udpBuffer: Data { get set }
-    var udpBufferOffset: Int { get set }
-    var udpLock: UnfairLock { get }
+    var udpState: Mutex<UDPFramingState> { get }
 }
 
 extension UDPFramingCapable {
@@ -24,30 +29,32 @@ extension UDPFramingCapable {
         return framedData
     }
 
-    func extractUDPPacket() -> Data? {
-        let available = udpBuffer.count - udpBufferOffset
+    /// Extracts one length-prefixed packet; call inside `udpState.withLock`.
+    func extractUDPPacket(from state: inout UDPFramingState) -> Data? {
+        let available = state.buffer.count - state.bufferOffset
         guard available >= 2 else { return nil }
 
-        let length = Int(UInt16(udpBuffer[udpBufferOffset]) << 8 | UInt16(udpBuffer[udpBufferOffset + 1]))
+        let length = Int(UInt16(state.buffer[state.bufferOffset]) << 8 | UInt16(state.buffer[state.bufferOffset + 1]))
         guard available >= 2 + length else { return nil }
 
-        let packetStart = udpBufferOffset + 2
+        let packetStart = state.bufferOffset + 2
         let packetEnd = packetStart + length
-        let packet = Data(udpBuffer[packetStart..<packetEnd])
+        let packet = Data(state.buffer[packetStart..<packetEnd])
 
-        udpBufferOffset = packetEnd
+        state.bufferOffset = packetEnd
 
         // Compact buffer periodically to avoid unbounded growth
-        if udpBufferOffset > 8192 {
-            udpBuffer.removeSubrange(0..<udpBufferOffset)
-            udpBufferOffset = 0
+        if state.bufferOffset > 8192 {
+            state.buffer.removeSubrange(0..<state.bufferOffset)
+            state.bufferOffset = 0
         }
 
         return packet
     }
 
-    func clearUDPBuffer() {
-        udpBuffer = Data()
-        udpBufferOffset = 0
+    /// Drops all buffered bytes; call inside `udpState.withLock`.
+    func clearUDPBuffer(_ state: inout UDPFramingState) {
+        state.buffer = Data()
+        state.bufferOffset = 0
     }
 }

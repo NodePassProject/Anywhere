@@ -7,6 +7,7 @@
 
 import Foundation
 import Network
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NWUDPTransport")
 
@@ -33,11 +34,10 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
 
     // MARK: State
 
-    private let stateLock = UnfairLock()
-    private var _state: State = .setup
+    private let stateLock = Mutex(State.setup)
 
     private var state: State {
-        stateLock.withLock { _state }
+        stateLock.withLock { $0 }
     }
 
     var isReady: Bool {
@@ -113,8 +113,8 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
                 case .ready:
                     // A racing cancel() wins: skip arming/reporting and let
                     // teardown fire the completion as "Cancelled".
-                    let didBecomeReady: Bool = self.stateLock.withLock {
-                        if case .setup = self._state { self._state = .ready; return true }
+                    let didBecomeReady: Bool = self.stateLock.withLock { state in
+                        if case .setup = state { state = .ready; return true }
                         return false
                     }
                     guard didBecomeReady else { return }
@@ -280,9 +280,9 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
     }
 
     private func latchCancelled() -> Bool {
-        stateLock.withLock {
-            if case .cancelled = _state { return false }
-            _state = .cancelled
+        stateLock.withLock { state in
+            if case .cancelled = state { return false }
+            state = .cancelled
             return true
         }
     }

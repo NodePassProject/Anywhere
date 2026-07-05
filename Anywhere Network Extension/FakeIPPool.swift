@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "FakeIPPool")
 
@@ -19,23 +20,72 @@ class FakeIPPool {
     // IPv6: 2001:db8::/96 (RFC 3849), offset in low 32 bits. Prefix must stay inside
     // the tunnel's routes (not bypassIPv6Routes) or fakes black-hole; rules out ULA.
 
-    /// Protects all mutable state.
-    private let lock = UnfairLock()
-
-    private var domainToOffset: [String: Int] = [:]
-    private var offsetToEntry: [Int: Entry] = [:]
-
     private class LRUNode {
         let offset: Int
         var prev: LRUNode?
         var next: LRUNode?
         init(offset: Int) { self.offset = offset }
     }
-    private var lruHead: LRUNode?  // most recently used
-    private var lruTail: LRUNode?  // least recently used
-    private var offsetToNode: [Int: LRUNode] = [:]
 
-    private var nextOffset = 1
+    /// All mutable state, guarded as one unit so the LRU invariant holds.
+    private struct State {
+        var domainToOffset: [String: Int] = [:]
+        var offsetToEntry: [Int: Entry] = [:]
+
+        var lruHead: LRUNode?  // most recently used
+        var lruTail: LRUNode?  // least recently used
+        var offsetToNode: [Int: LRUNode] = [:]
+
+        var nextOffset = 1
+
+        // MARK: LRU Doubly-Linked List (O(1) operations)
+
+        mutating func touchLRU(_ offset: Int) {
+            guard let node = offsetToNode[offset] else { return }
+            removeNode(node)
+            insertAtHead(node)
+        }
+
+        mutating func appendLRU(_ offset: Int) {
+            let node = LRUNode(offset: offset)
+            offsetToNode[offset] = node
+            insertAtHead(node)
+        }
+
+        mutating func evictLRU() -> Int {
+            guard let tail = lruTail else {
+                // Unreachable (pool is full ⇒ LRU nonempty); fall back rather than crash.
+                logger.debug("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
+                return 1
+            }
+            let offset = tail.offset
+            removeNode(tail)
+            offsetToNode.removeValue(forKey: offset)
+            if let entry = offsetToEntry.removeValue(forKey: offset) {
+                domainToOffset.removeValue(forKey: entry.domain)
+            }
+            return offset
+        }
+
+        mutating func removeNode(_ node: LRUNode) {
+            node.prev?.next = node.next
+            node.next?.prev = node.prev
+            if node === lruHead { lruHead = node.next }
+            if node === lruTail { lruTail = node.prev }
+            node.prev = nil
+            node.next = nil
+        }
+
+        mutating func insertAtHead(_ node: LRUNode) {
+            node.next = lruHead
+            node.prev = nil
+            lruHead?.prev = node
+            lruHead = node
+            if lruTail == nil { lruTail = node }
+        }
+    }
+
+    private let state = Mutex(State())
 
     // MARK: - Static Helpers
 
@@ -73,49 +123,42 @@ class FakeIPPool {
     // MARK: - Pool Operations
 
     func allocate(domain: String) -> Int {
-        lock.withLock {
-            if let offset = domainToOffset[domain] {
-                touchLRU(offset)
+        state.withLock { state in
+            if let offset = state.domainToOffset[domain] {
+                state.touchLRU(offset)
                 return offset
             }
 
             let offset: Int
-            if nextOffset <= TunnelConstants.fakeIPPoolSize {
-                offset = nextOffset
-                nextOffset += 1
+            if state.nextOffset <= TunnelConstants.fakeIPPoolSize {
+                offset = state.nextOffset
+                state.nextOffset += 1
             } else {
-                offset = evictLRU()
+                offset = state.evictLRU()
             }
 
-            domainToOffset[domain] = offset
-            offsetToEntry[offset] = Entry(domain: domain)
-            appendLRU(offset)
+            state.domainToOffset[domain] = offset
+            state.offsetToEntry[offset] = Entry(domain: domain)
+            state.appendLRU(offset)
 
             return offset
         }
     }
 
     func lookup(ip: String) -> Entry? {
-        lock.withLock {
+        state.withLock { state in
             guard let offset = ipToOffset(ip) else { return nil }
-            guard let entry = offsetToEntry[offset] else { return nil }
-            touchLRU(offset)
+            guard let entry = state.offsetToEntry[offset] else { return nil }
+            state.touchLRU(offset)
             return entry
         }
     }
 
     func reset() {
-        lock.withLock {
-            domainToOffset.removeAll()
-            offsetToEntry.removeAll()
-            offsetToNode.removeAll()
-            lruHead = nil
-            lruTail = nil
-            nextOffset = 1
-        }
+        state.withLock { $0 = State() }
     }
 
-    var count: Int { lock.withLock { domainToOffset.count } }
+    var count: Int { state.withLock { $0.domainToOffset.count } }
 
     // MARK: - IP ↔ Offset Conversion
 
@@ -178,49 +221,4 @@ class FakeIPPool {
         }
     }
 
-    // MARK: - LRU Doubly-Linked List (O(1) operations)
-
-    private func touchLRU(_ offset: Int) {
-        guard let node = offsetToNode[offset] else { return }
-        removeNode(node)
-        insertAtHead(node)
-    }
-
-    private func appendLRU(_ offset: Int) {
-        let node = LRUNode(offset: offset)
-        offsetToNode[offset] = node
-        insertAtHead(node)
-    }
-
-    private func evictLRU() -> Int {
-        guard let tail = lruTail else {
-            // Unreachable (pool is full ⇒ LRU nonempty); fall back rather than crash.
-            logger.debug("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
-            return 1
-        }
-        let offset = tail.offset
-        removeNode(tail)
-        offsetToNode.removeValue(forKey: offset)
-        if let entry = offsetToEntry.removeValue(forKey: offset) {
-            domainToOffset.removeValue(forKey: entry.domain)
-        }
-        return offset
-    }
-
-    private func removeNode(_ node: LRUNode) {
-        node.prev?.next = node.next
-        node.next?.prev = node.prev
-        if node === lruHead { lruHead = node.next }
-        if node === lruTail { lruTail = node.prev }
-        node.prev = nil
-        node.next = nil
-    }
-
-    private func insertAtHead(_ node: LRUNode) {
-        node.next = lruHead
-        node.prev = nil
-        lruHead?.prev = node
-        lruHead = node
-        if lruTail == nil { lruTail = node }
-    }
 }

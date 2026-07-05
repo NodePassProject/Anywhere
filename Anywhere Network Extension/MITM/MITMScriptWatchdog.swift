@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 /// Runs off the watched worker queue so it is never wedged behind the runaway it exists to catch.
 enum MITMWatchdogMonitor {
@@ -22,10 +23,12 @@ enum MITMScriptWatchdog {
     /// Coarse sampling interval; precision is irrelevant since a runaway never ends.
     private static let checkIntervalSeconds = 5
 
-    private static let lock = UnfairLock()
-    private static var spanStart: DispatchTime?
-    /// Script source string surfaced in the crash report to identify the offending rule.
-    private static var spanLabel = ""
+    private struct Span {
+        var start: DispatchTime?
+        /// Script source string surfaced in the crash report to identify the offending rule.
+        var label = ""
+    }
+    private static let span = Mutex(Span())
 
     /// Lazily started on the first begin().
     private static let sampler: DispatchSourceTimer = {
@@ -43,24 +46,21 @@ enum MITMScriptWatchdog {
     /// Marks a synchronous JS span as started; must be paired with end() (use `defer`) or a phantom span stays armed.
     static func begin(_ label: String) {
         _ = sampler
-        lock.lock()
-        spanStart = .now()
-        spanLabel = label
-        lock.unlock()
+        span.withLock { span in
+            span.start = .now()
+            span.label = label
+        }
     }
 
     static func end() {
-        lock.lock()
-        spanStart = nil
-        spanLabel = ""
-        lock.unlock()
+        span.withLock { span in
+            span.start = nil
+            span.label = ""
+        }
     }
 
     private static func checkInFlightSpan() {
-        lock.lock()
-        let start = spanStart
-        let label = spanLabel
-        lock.unlock()
+        let (start, label) = span.withLock { ($0.start, $0.label) }
         guard let start else { return }
         let elapsedNanos = DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds
         guard elapsedNanos >= UInt64(hardCapSeconds) * 1_000_000_000 else { return }

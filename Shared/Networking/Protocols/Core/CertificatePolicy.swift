@@ -8,51 +8,50 @@
 import Foundation
 import CryptoKit
 import Security
+import Synchronization
 
 nonisolated enum CertificatePolicy {
-    private static let lock = UnfairLock()
-    private static var _allowInsecure = AWCore.getAllowInsecure()
-    private static var _trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
+    private struct State {
+        var allowInsecure = AWCore.getAllowInsecure()
+        var trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
+        var observerRegistered = false
+    }
 
-    private static var observerRegistered = false
+    private static let state = Mutex(State())
 
     /// Idempotent.
     static func startObserving() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !observerRegistered else { return }
-        observerRegistered = true
+        state.withLock { state in
+            guard !state.observerRegistered else { return }
+            state.observerRegistered = true
 
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            nil,
-            { _, _, _, _, _ in
-                CertificatePolicy.reload()
-            },
-            AWNotificationCenter.Notification.certificatePolicyChanged,
-            nil,
-            .deliverImmediately
-        )
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                nil,
+                { _, _, _, _, _ in
+                    CertificatePolicy.reload()
+                },
+                AWNotificationCenter.Notification.certificatePolicyChanged,
+                nil,
+                .deliverImmediately
+            )
+        }
     }
 
     static func reload() {
-        lock.lock()
-        defer { lock.unlock() }
-        _allowInsecure = AWCore.getAllowInsecure()
-        _trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
+        state.withLock { state in
+            state.allowInsecure = AWCore.getAllowInsecure()
+            state.trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
+        }
     }
 
     static var allowInsecure: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return _allowInsecure
+        state.withLock { $0.allowInsecure }
     }
 
     /// SHA-256 fingerprints.
     private static var trustedFingerprints: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _trustedFingerprints
+        state.withLock { $0.trustedFingerprints }
     }
 
     // MARK: - Verification

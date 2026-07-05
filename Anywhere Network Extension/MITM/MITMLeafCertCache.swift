@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import Security
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
 
@@ -40,8 +41,7 @@ final class MITMLeafCertCache {
         autoreleaseFrequency: .workItem
     )
 
-    private let lock = UnfairLock()
-    private var entries: [String: CacheEntry] = [:]
+    private let entries = Mutex<[String: CacheEntry]>([:])
 
     private struct CacheEntry {
         let leaf: Leaf
@@ -70,22 +70,23 @@ final class MITMLeafCertCache {
     // MARK: - Internals
 
     private func cachedLeaf(for normalized: String) -> Leaf? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let entry = entries[normalized],
-              entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold else {
-            return nil
+        entries.withLock { entries in
+            guard let entry = entries[normalized],
+                  entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold else {
+                return nil
+            }
+            entries[normalized]?.lastAccess = Date()
+            return entry.leaf
         }
-        entries[normalized]?.lastAccess = Date()
-        return entry.leaf
     }
 
     private func mintAndStore(for normalized: String) throws -> Leaf {
+        // Minting stays outside the lock; only the cache insert is locked.
         let leaf = try mintLeaf(for: normalized)
-        lock.lock()
-        entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
-        evictIfNeededUnlocked()
-        lock.unlock()
+        entries.withLock { entries in
+            entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
+            Self.evictIfNeeded(&entries)
+        }
         return leaf
     }
 
@@ -119,7 +120,7 @@ final class MITMLeafCertCache {
         )
     }
 
-    private func evictIfNeededUnlocked() {
+    private static func evictIfNeeded(_ entries: inout [String: CacheEntry]) {
         // O(n) scan tolerated: only runs on a cache miss past the cap.
         while entries.count > Self.maxEntries {
             guard let oldest = entries.min(by: {

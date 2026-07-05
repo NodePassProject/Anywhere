@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated final class NowhereClient {
 
@@ -22,9 +23,12 @@ nonisolated final class NowhereClient {
         let sessionID: Data
     }
 
-    private static let registryLock = UnfairLock()
-    private static var registry: [Key: NowhereClient] = [:]
-    private static var pending: [Key: [(Result<NowhereClient, Error>) -> Void]] = [:]
+    private struct RegistryState {
+        var entries: [Key: NowhereClient] = [:]
+        /// Coalesces concurrent first-time builds for the same key.
+        var pending: [Key: [(Result<NowhereClient, Error>) -> Void]] = [:]
+    }
+    private static let registry = Mutex(RegistryState())
 
     static func shared(for configuration: NowhereConfiguration) -> NowhereClient {
         let key = Key(
@@ -39,17 +43,17 @@ nonisolated final class NowhereClient {
             chainSignature: "",
             sessionID: configuration.sessionID
         )
-        registryLock.lock()
-        defer { registryLock.unlock() }
-        if let existing = registry[key] { return existing }
-        let client = NowhereClient(
-            configuration: configuration,
-            transport: nil,
-            chainHolders: [],
-            poolKey: key
-        )
-        registry[key] = client
-        return client
+        return registry.withLock { state in
+            if let existing = state.entries[key] { return existing }
+            let client = NowhereClient(
+                configuration: configuration,
+                transport: nil,
+                chainHolders: [],
+                poolKey: key
+            )
+            state.entries[key] = client
+            return client
+        }
     }
 
     static func chained(
@@ -83,49 +87,60 @@ nonisolated final class NowhereClient {
             sessionID: configuration.sessionID
         )
 
-        registryLock.lock()
-        if let existing = registry[key] {
-            registryLock.unlock()
+        // Fast paths resolve under the lock; the completion itself fires outside.
+        var existing: NowhereClient?
+        var shouldBuild = false
+        registry.withLock { state in
+            if let client = state.entries[key] {
+                existing = client
+                return
+            }
+            if state.pending[key] != nil {
+                state.pending[key]?.append(completion)
+                return
+            }
+            state.pending[key] = [completion]
+            shouldBuild = true
+        }
+        if let existing {
             completion(.success(existing))
             return
         }
-        if pending[key] != nil {
-            pending[key]?.append(completion)
-            registryLock.unlock()
-            return
-        }
-        pending[key] = [completion]
-        registryLock.unlock()
+        guard shouldBuild else { return }
 
         builder { builderResult in
-            Self.registryLock.lock()
-            let queued = Self.pending.removeValue(forKey: key) ?? []
-            let outcome: Result<NowhereClient, Error>
-            switch builderResult {
-            case .success(let (transport, holders)):
-                let client = NowhereClient(
-                    configuration: configuration,
-                    transport: transport,
-                    chainHolders: holders,
-                    poolKey: key
-                )
-                Self.registry[key] = client
-                outcome = .success(client)
-            case .failure(let error):
-                outcome = .failure(error)
+            // Registry insert and waiter drain happen atomically; the coalesced
+            // completions fire after the lock is released.
+            let (queued, outcome): ([(Result<NowhereClient, Error>) -> Void], Result<NowhereClient, Error>) = Self.registry.withLock { state in
+                let queued = state.pending.removeValue(forKey: key) ?? []
+                switch builderResult {
+                case .success(let (transport, holders)):
+                    let client = NowhereClient(
+                        configuration: configuration,
+                        transport: transport,
+                        chainHolders: holders,
+                        poolKey: key
+                    )
+                    state.entries[key] = client
+                    return (queued, .success(client))
+                case .failure(let error):
+                    return (queued, .failure(error))
+                }
             }
-            Self.registryLock.unlock()
             for callback in queued { callback(outcome) }
         }
     }
 
     private let configuration: NowhereConfiguration
     private let transport: QUICDatagramTransport?
-    private var chainHolders: [ProxyClient]
     private let poolKey: Key?
-    private let lock = UnfairLock()
-    private var session: NowhereSession?
-    private var transportConsumed = false
+
+    private struct SessionState {
+        var session: NowhereSession? = nil
+        var transportConsumed = false
+        var chainHolders: [ProxyClient]
+    }
+    private let state: Mutex<SessionState>
 
     private init(
         configuration: NowhereConfiguration,
@@ -135,38 +150,52 @@ nonisolated final class NowhereClient {
     ) {
         self.configuration = configuration
         self.transport = transport
-        self.chainHolders = chainHolders
+        self.state = Mutex(SessionState(chainHolders: chainHolders))
         self.poolKey = poolKey
     }
 
     private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<NowhereSession, Error>) -> Void) {
-        lock.lock()
-        if let existing = session, !existing.isClosed {
-            lock.unlock()
+        enum Acquired {
+            case reuse(NowhereSession)
+            case transportSpent
+            case fresh(NowhereSession)
+        }
+        let acquired: Acquired = state.withLock { state in
+            if let existing = state.session, !existing.isClosed {
+                return .reuse(existing)
+            }
+
+            if transport != nil && state.transportConsumed {
+                if let key = poolKey {
+                    Self.registry.withLock { registryState in
+                        if registryState.entries[key] === self {
+                            registryState.entries.removeValue(forKey: key)
+                        }
+                    }
+                }
+                return .transportSpent
+            }
+
+            let newSession = NowhereSession(configuration: configuration, transport: transport)
+            state.session = newSession
+            if transport != nil { state.transportConsumed = true }
+            return .fresh(newSession)
+        }
+
+        let newSession: NowhereSession
+        switch acquired {
+        case .reuse(let existing):
             existing.ensureReady { error in
                 if let error { completion(.failure(error)) }
                 else { completion(.success(existing)) }
             }
             return
-        }
-
-        if transport != nil && transportConsumed {
-            if let key = poolKey {
-                Self.registryLock.lock()
-                if Self.registry[key] === self {
-                    Self.registry.removeValue(forKey: key)
-                }
-                Self.registryLock.unlock()
-            }
-            lock.unlock()
+        case .transportSpent:
             completion(.failure(NowhereError.streamClosed))
             return
+        case .fresh(let fresh):
+            newSession = fresh
         }
-
-        let newSession = NowhereSession(configuration: configuration, transport: transport)
-        session = newSession
-        if transport != nil { transportConsumed = true }
-        lock.unlock()
 
         newSession.onClose = { [weak self, weak newSession] in
             guard let self, let newSession else { return }
@@ -191,22 +220,21 @@ nonisolated final class NowhereClient {
     }
 
     private func handleSessionClose(_ closedSession: NowhereSession) {
-        lock.lock()
-        guard session === closedSession else {
-            lock.unlock()
-            return
-        }
-        session = nil
-        let holders = chainHolders
-        chainHolders = []
-        if transport != nil, let key = poolKey {
-            Self.registryLock.lock()
-            if Self.registry[key] === self {
-                Self.registry.removeValue(forKey: key)
+        let holders: [ProxyClient]? = state.withLock { state in
+            guard state.session === closedSession else { return nil }
+            state.session = nil
+            let holders = state.chainHolders
+            state.chainHolders = []
+            if transport != nil, let key = poolKey {
+                Self.registry.withLock { registryState in
+                    if registryState.entries[key] === self {
+                        registryState.entries.removeValue(forKey: key)
+                    }
+                }
             }
-            Self.registryLock.unlock()
+            return holders
         }
-        lock.unlock()
+        guard let holders else { return }
 
         for client in holders {
             client.cancel()
@@ -419,19 +447,20 @@ nonisolated final class NowhereClient {
     }
 
     private func invalidateSession() {
-        lock.lock()
-        let current = session
-        session = nil
-        let holders = chainHolders
-        chainHolders = []
-        if transport != nil, let key = poolKey {
-            Self.registryLock.lock()
-            if Self.registry[key] === self {
-                Self.registry.removeValue(forKey: key)
+        let (current, holders): (NowhereSession?, [ProxyClient]) = state.withLock { state in
+            let current = state.session
+            state.session = nil
+            let holders = state.chainHolders
+            state.chainHolders = []
+            if transport != nil, let key = poolKey {
+                Self.registry.withLock { registryState in
+                    if registryState.entries[key] === self {
+                        registryState.entries.removeValue(forKey: key)
+                    }
+                }
             }
-            Self.registryLock.unlock()
+            return (current, holders)
         }
-        lock.unlock()
 
         current?.close()
 
@@ -441,10 +470,11 @@ nonisolated final class NowhereClient {
     }
 
     static func closeAll() {
-        registryLock.lock()
-        let clients = Array(registry.values)
-        registry.removeAll(keepingCapacity: false)
-        registryLock.unlock()
+        let clients: [NowhereClient] = registry.withLock { state in
+            let clients = Array(state.entries.values)
+            state.entries.removeAll(keepingCapacity: false)
+            return clients
+        }
         for client in clients {
             client.invalidateSession()
         }

@@ -10,7 +10,6 @@ import NetworkExtension
 import SwiftUI
 import WidgetKit
 
-@available(iOS 18.0, *)
 struct VPNToggleControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(

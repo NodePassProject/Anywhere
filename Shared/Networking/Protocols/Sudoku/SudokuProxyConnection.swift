@@ -9,6 +9,7 @@ import Foundation
 import Darwin
 import CryptoKit
 import Security
+import Synchronization
 
 private let sudokuLogger = AnywhereLogger(category: "SudokuProxyConnection")
 private let sudokuObfsReadChunkSize = 128 * 1024
@@ -368,10 +369,14 @@ private struct SudokuTableCacheKey: Hashable {
 }
 
 private enum SudokuTableCache {
-    private static let lock = UnfairLock()
     private static let maxEntries = 16
-    private static var pairs: [SudokuTableCacheKey: SudokuTablePair] = [:]
-    private static var accessOrder: [SudokuTableCacheKey] = []
+
+    private struct State {
+        var pairs: [SudokuTableCacheKey: SudokuTablePair] = [:]
+        var accessOrder: [SudokuTableCacheKey] = []
+    }
+
+    private static let state = Mutex(State())
 
     static func pair(for config: SudokuNativeConfig) throws -> SudokuTablePair {
         let cacheKey = SudokuTableCacheKey(
@@ -379,9 +384,9 @@ private enum SudokuTableCache {
             asciiMode: config.asciiMode,
             customTable: config.selectedCustomTable
         )
-        return try lock.withLock {
-            if let pair = pairs[cacheKey] {
-                touch(cacheKey)
+        return try state.withLock { (state: inout State) -> SudokuTablePair in
+            if let pair = state.pairs[cacheKey] {
+                touch(cacheKey, in: &state)
                 return pair
             }
 
@@ -391,45 +396,45 @@ private enum SudokuTableCache {
                 customUplink: config.selectedCustomTable,
                 customDownlink: config.selectedCustomTable
             )
-            pairs[cacheKey] = pair
-            touch(cacheKey)
-            trimIfNeeded()
+            state.pairs[cacheKey] = pair
+            touch(cacheKey, in: &state)
+            trimIfNeeded(in: &state)
             return pair
         }
     }
 
-    private static func touch(_ key: SudokuTableCacheKey) {
-        accessOrder.removeAll { $0 == key }
-        accessOrder.append(key)
+    private static func touch(_ key: SudokuTableCacheKey, in state: inout State) {
+        state.accessOrder.removeAll { $0 == key }
+        state.accessOrder.append(key)
     }
 
-    private static func trimIfNeeded() {
-        while accessOrder.count > maxEntries, let evicted = accessOrder.first {
-            accessOrder.removeFirst()
-            pairs.removeValue(forKey: evicted)
+    private static func trimIfNeeded(in state: inout State) {
+        while state.accessOrder.count > maxEntries, let evicted = state.accessOrder.first {
+            state.accessOrder.removeFirst()
+            state.pairs.removeValue(forKey: evicted)
         }
     }
 }
 
 nonisolated final class SudokuTables {
-    private let pair: SudokuTablePair
-    private let lock = UnfairLock()
+    /// The mutex serializes uplink/downlink table access, exactly as the old lock did.
+    private let pair: Mutex<SudokuTablePair>
     let sendsTableHint: Bool
 
     init(config: SudokuNativeConfig) throws {
         sendsTableHint = config.sendsTableHint
-        pair = try SudokuTableCache.pair(for: config)
+        pair = Mutex(try SudokuTableCache.pair(for: config))
     }
 
     func withUplink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
-        try lock.withLock { try body(pair.uplink) }
+        try pair.withLock { try body($0.uplink) }
     }
 
     func withDownlink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
-        try lock.withLock { try body(pair.downlink) }
+        try pair.withLock { try body($0.downlink) }
     }
 
-    var hint: UInt32 { lock.withLock { pair.uplink.hint } }
+    var hint: UInt32 { pair.withLock { $0.uplink.hint } }
 }
 
 nonisolated final class BlockingProxyStream {
@@ -601,22 +606,27 @@ private extension Data {
 nonisolated final class SudokuConnectionFactory {
     private let configuration: ProxyConfiguration
     private let directDialHost: String
-    private let stateLock = UnfairLock()
-    private var initialTunnel: ProxyConnection?
-    private var retainedClients: [ProxyClient] = []
-    private var retainedTLSClients: [TLSClient] = []
-    private var retainedTransports: [NWTCPTransport] = []
-    private var connections: [ProxyConnection] = []
-    private var closed = false
+
+    /// Fields guarded by `stateLock`.
+    private struct State {
+        var initialTunnel: ProxyConnection?
+        var retainedClients: [ProxyClient] = []
+        var retainedTLSClients: [TLSClient] = []
+        var retainedTransports: [NWTCPTransport] = []
+        var connections: [ProxyConnection] = []
+        var closed = false
+    }
+
+    private let stateLock: Mutex<State>
 
     init(configuration: ProxyConfiguration, initialTunnel: ProxyConnection?, directDialHost: String) {
         self.configuration = configuration
-        self.initialTunnel = initialTunnel
+        self.stateLock = Mutex(State(initialTunnel: initialTunnel))
         self.directDialHost = directDialHost
     }
 
     func open(host: String, port: UInt16, useTLS: Bool, serverName: String?) throws -> BlockingProxyStream {
-        if stateLock.withLock({ closed }) { throw SudokuNativeError.closed }
+        if stateLock.withLock({ $0.closed }) { throw SudokuNativeError.closed }
         let sema = DispatchSemaphore(value: 0)
         var result: Result<ProxyConnection, Error>?
         openProxyConnection(host: host, port: port, useTLS: useTLS, serverName: serverName) { openResult in
@@ -646,7 +656,7 @@ nonisolated final class SudokuConnectionFactory {
         path: String,
         headers: [String: String]
     ) throws -> BlockingProxyStream {
-        if stateLock.withLock({ closed }) { throw SudokuNativeError.closed }
+        if stateLock.withLock({ $0.closed }) { throw SudokuNativeError.closed }
         let sema = DispatchSemaphore(value: 0)
         var result: Result<ProxyConnection, Error>?
         openProxyConnection(host: host, port: port, useTLS: useTLS, serverName: serverName) { openResult in
@@ -700,30 +710,30 @@ nonisolated final class SudokuConnectionFactory {
     }
 
     func closeAll() {
-        let toClose: [ProxyConnection]
-        let clients: [ProxyClient]
-        let tlsClients: [TLSClient]
-        let transports: [NWTCPTransport]
-        stateLock.lock()
-        if closed {
-            stateLock.unlock()
-            return
+        typealias Drained = (toClose: [ProxyConnection], clients: [ProxyClient],
+                             tlsClients: [TLSClient], transports: [NWTCPTransport])
+        let drained: Drained? = stateLock.withLock { (state: inout State) -> Drained? in
+            if state.closed {
+                return nil
+            }
+            state.closed = true
+            let toClose = state.connections + (state.initialTunnel.map { [$0] } ?? [])
+            let clients = state.retainedClients
+            let tlsClients = state.retainedTLSClients
+            let transports = state.retainedTransports
+            state.connections.removeAll()
+            state.retainedClients.removeAll()
+            state.retainedTLSClients.removeAll()
+            state.retainedTransports.removeAll()
+            state.initialTunnel = nil
+            return (toClose, clients, tlsClients, transports)
         }
-        closed = true
-        toClose = connections + (initialTunnel.map { [$0] } ?? [])
-        clients = retainedClients
-        tlsClients = retainedTLSClients
-        transports = retainedTransports
-        connections.removeAll()
-        retainedClients.removeAll()
-        retainedTLSClients.removeAll()
-        retainedTransports.removeAll()
-        initialTunnel = nil
-        stateLock.unlock()
-        for connection in toClose { connection.cancel() }
-        for client in clients { client.cancel() }
-        for client in tlsClients { client.cancel() }
-        for transport in transports { transport.forceCancel() }
+        guard let drained else { return }
+        // Cancels run outside the lock, as before.
+        for connection in drained.toClose { connection.cancel() }
+        for client in drained.clients { client.cancel() }
+        for client in drained.tlsClients { client.cancel() }
+        for transport in drained.transports { transport.forceCancel() }
     }
 
     private func openProxyConnection(
@@ -733,9 +743,9 @@ nonisolated final class SudokuConnectionFactory {
         serverName: String?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        if let tunnel = stateLock.withLock({ () -> ProxyConnection? in
-            let current = initialTunnel
-            initialTunnel = nil
+        if let tunnel = stateLock.withLock({ (state: inout State) -> ProxyConnection? in
+            let current = state.initialTunnel
+            state.initialTunnel = nil
             return current
         }) {
             completion(.success(tunnel))
@@ -815,61 +825,61 @@ nonisolated final class SudokuConnectionFactory {
     }
 
     private func retainClient(_ client: ProxyClient) -> Bool {
-        stateLock.withLock {
-            guard !closed else { return false }
-            retainedClients.append(client)
+        stateLock.withLock { state in
+            guard !state.closed else { return false }
+            state.retainedClients.append(client)
             return true
         }
     }
 
     private func retainTLSClient(_ client: TLSClient) -> Bool {
-        stateLock.withLock {
-            guard !closed else { return false }
-            retainedTLSClients.append(client)
+        stateLock.withLock { state in
+            guard !state.closed else { return false }
+            state.retainedTLSClients.append(client)
             return true
         }
     }
 
     private func releaseTLSClient(_ client: TLSClient) {
-        stateLock.withLock {
-            retainedTLSClients.removeAll { $0 === client }
+        stateLock.withLock { state in
+            state.retainedTLSClients.removeAll { $0 === client }
         }
     }
 
     private func retainTransport(_ transport: NWTCPTransport) -> Bool {
-        stateLock.withLock {
-            guard !closed else { return false }
-            retainedTransports.append(transport)
+        stateLock.withLock { state in
+            guard !state.closed else { return false }
+            state.retainedTransports.append(transport)
             return true
         }
     }
 
     private func releaseTransport(_ transport: NWTCPTransport) {
-        stateLock.withLock {
-            retainedTransports.removeAll { $0 === transport }
+        stateLock.withLock { state in
+            state.retainedTransports.removeAll { $0 === transport }
         }
     }
 
     private func retainConnection(_ connection: ProxyConnection) -> Bool {
-        stateLock.withLock {
-            guard !closed else { return false }
-            connections.append(connection)
+        stateLock.withLock { state in
+            guard !state.closed else { return false }
+            state.connections.append(connection)
             return true
         }
     }
 
     private func replaceConnection(_ old: ProxyConnection, with new: ProxyConnection) -> Bool {
-        stateLock.withLock {
-            connections.removeAll { $0 === old }
-            guard !closed else { return false }
-            connections.append(new)
+        stateLock.withLock { state in
+            state.connections.removeAll { $0 === old }
+            guard !state.closed else { return false }
+            state.connections.append(new)
             return true
         }
     }
 
     private func releaseConnection(_ connection: ProxyConnection) {
-        stateLock.withLock {
-            connections.removeAll { $0 === connection }
+        stateLock.withLock { state in
+            state.connections.removeAll { $0 === connection }
         }
     }
 }

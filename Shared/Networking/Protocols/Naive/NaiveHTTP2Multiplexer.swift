@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Multiplexer")
 
@@ -38,11 +39,13 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
 
     private(set) var state: State = .idle
 
-    // Pool-visible snapshot guarded by `_poolLock`: the pool reads off-queue, the multiplexer writes on `queue`.
-    private let _poolLock = UnfairLock()
-    private var _poolState: State = .idle
-    private var _poolStreamCount: Int = 0
-    private var _poolMaxConcurrent: UInt32 = 100
+    // Pool-visible snapshot behind its own mutex: the pool reads off-queue, the multiplexer writes on `queue`.
+    private struct PoolSnapshot {
+        var state: State = .idle
+        var streamCount: Int = 0
+        var maxConcurrent: UInt32 = 100
+    }
+    private let _poolSnapshot = Mutex(PoolSnapshot())
 
     /// Serial queue guarding all mutable multiplexer + stream state; `.userInitiated` to match the data-plane chain.
     let queue = DispatchQueue(label: AWCore.Identifier.http2SessionQueue, qos: .userInitiated)
@@ -88,7 +91,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
     // MARK: - Capacity
 
     /// Thread-safe count read off-queue by the idle sweep; don't use `streams.count` (queue-confined).
-    var activeStreamCount: Int { _poolLock.withLock { _poolStreamCount } }
+    var activeStreamCount: Int { _poolSnapshot.withLock { $0.streamCount } }
 
     /// Whether the multiplexer can accept another stream (on-queue only).
     var hasCapacity: Bool {
@@ -97,36 +100,36 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
 
     /// Thread-safe: whether this multiplexer appears closed to the pool.
     var isClosed: Bool {
-        _poolLock.withLock { _poolState == .closed }
+        _poolSnapshot.withLock { $0.state == .closed }
     }
 
     /// Thread-safe: whether this multiplexer has received GOAWAY.
     var poolIsGoingAway: Bool {
-        _poolLock.withLock { _poolState == .goingAway }
+        _poolSnapshot.withLock { $0.state == .goingAway }
     }
 
     /// Atomically checks capacity and reserves a stream slot; accepts in-progress multiplexers
     /// so burst requests coalesce behind one handshake. Caller must follow up with `openStream` on `queue`.
     func tryReserveStream() -> Bool {
-        _poolLock.withLock {
-            switch _poolState {
+        _poolSnapshot.withLock { snapshot in
+            switch snapshot.state {
             case .idle, .connecting, .prefaceSent, .ready:
                 break
             case .goingAway, .closed:
                 return false
             }
-            guard UInt32(_poolStreamCount) < _poolMaxConcurrent else { return false }
-            _poolStreamCount += 1
+            guard UInt32(snapshot.streamCount) < snapshot.maxConcurrent else { return false }
+            snapshot.streamCount += 1
             return true
         }
     }
 
     /// Syncs the pool-visible snapshot; must be called on `queue`.
     private func updatePoolSnapshot() {
-        _poolLock.withLock {
-            _poolState = state
-            _poolStreamCount = streams.count
-            _poolMaxConcurrent = maxConcurrentStreams
+        _poolSnapshot.withLock { snapshot in
+            snapshot.state = state
+            snapshot.streamCount = streams.count
+            snapshot.maxConcurrent = maxConcurrentStreams
         }
     }
 

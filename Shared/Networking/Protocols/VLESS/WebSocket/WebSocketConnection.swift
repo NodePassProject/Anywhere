@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - WebSocketConnection
 
@@ -21,11 +22,15 @@ nonisolated class WebSocketConnection {
     // MARK: State
 
     private let configuration: WebSocketConfiguration
-    private var receiveBuffer = Data()
-    private let lock = UnfairLock()
-    private var _isConnected = false
-    private var upgraded = false
-    private var heartbeatTimer: DispatchSourceTimer?
+
+    private struct ConnectionState {
+        var isConnected = false
+        var upgraded = false
+        var receiveBuffer = Data()
+        var heartbeatTimer: DispatchSourceTimer?
+    }
+
+    private let state: Mutex<ConnectionState>
 
     /// Caps receive buffer growth (1 MB) against a misbehaving server.
     private static let maxReceiveBufferSize = 1_048_576
@@ -33,7 +38,7 @@ nonisolated class WebSocketConnection {
     static let chromeUserAgent = ProxyUserAgent.chrome
 
     var isConnected: Bool {
-        lock.withLock { _isConnected }
+        state.withLock { $0.isConnected }
     }
 
     // MARK: - Initializers
@@ -43,7 +48,7 @@ nonisolated class WebSocketConnection {
         self.transportSend = transport.send
         self.transportReceive = transport.receive
         self.transportCancel = transport.cancel
-        self._isConnected = true
+        self.state = Mutex(ConnectionState(isConnected: true))
     }
 
     convenience init(transport: NWTCPTransport, configuration: WebSocketConfiguration) {
@@ -121,17 +126,17 @@ nonisolated class WebSocketConnection {
                 return
             }
 
-            let headerData: Data? = self.lock.withLock {
-                self.receiveBuffer.append(data)
+            let headerData: Data? = self.state.withLock { state in
+                state.receiveBuffer.append(data)
 
                 let headerEnd: Data = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
-                guard let range = self.receiveBuffer.range(of: headerEnd) else {
+                guard let range = state.receiveBuffer.range(of: headerEnd) else {
                     return nil
                 }
 
-                let header = Data(self.receiveBuffer[self.receiveBuffer.startIndex..<range.lowerBound])
-                let leftover = self.receiveBuffer[range.upperBound...]
-                self.receiveBuffer = Data(leftover)
+                let header = Data(state.receiveBuffer[state.receiveBuffer.startIndex..<range.lowerBound])
+                let leftover = state.receiveBuffer[range.upperBound...]
+                state.receiveBuffer = Data(leftover)
                 return header
             }
 
@@ -151,7 +156,7 @@ nonisolated class WebSocketConnection {
                 return
             }
 
-            self.lock.withLock { self.upgraded = true }
+            self.state.withLock { $0.upgraded = true }
             self.startHeartbeat()
             completion(nil)
         }
@@ -170,7 +175,7 @@ nonisolated class WebSocketConnection {
     }
 
     func receive(completion: @escaping (Data?, Error?) -> Void) {
-        if let result = lock.withLock({ tryExtractFrame() }) {
+        if let result = state.withLock({ tryExtractFrame(&$0) }) {
             handleFrameResult(result, completion: completion)
             return
         }
@@ -178,18 +183,18 @@ nonisolated class WebSocketConnection {
     }
 
     func cancel() {
-        lock.withLock {
-            _isConnected = false
-            receiveBuffer.removeAll()
-            heartbeatTimer?.cancel()
-            heartbeatTimer = nil
+        state.withLock {
+            $0.isConnected = false
+            $0.receiveBuffer.removeAll()
+            $0.heartbeatTimer?.cancel()
+            $0.heartbeatTimer = nil
         }
         transportCancel()
     }
 
     deinit {
         // Reclaim the heartbeat timer if dropped without cancel(); DispatchSource.cancel() is thread-safe.
-        heartbeatTimer?.cancel()
+        state.withLock { $0.heartbeatTimer?.cancel() }
     }
 
     // MARK: - Heartbeat (Ping Sender)
@@ -204,24 +209,24 @@ nonisolated class WebSocketConnection {
                        repeating: .seconds(Int(period)))
         timer.setEventHandler { [weak self] in
             guard let self, self.isConnected else {
-                self?.lock.withLock {
-                    self?.heartbeatTimer?.cancel()
-                    self?.heartbeatTimer = nil
+                self?.state.withLock {
+                    $0.heartbeatTimer?.cancel()
+                    $0.heartbeatTimer = nil
                 }
                 return
             }
             let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
             self.transportSend(pingFrame) { [weak self] error in
                 if error != nil {
-                    self?.lock.withLock {
-                        self?.heartbeatTimer?.cancel()
-                        self?.heartbeatTimer = nil
+                    self?.state.withLock {
+                        $0.heartbeatTimer?.cancel()
+                        $0.heartbeatTimer = nil
                     }
                 }
             }
         }
 
-        lock.withLock { heartbeatTimer = timer }
+        state.withLock { $0.heartbeatTimer = timer }
         timer.resume()
     }
 
@@ -274,9 +279,10 @@ nonisolated class WebSocketConnection {
         case close(UInt16, String)
     }
 
-    /// Tries to extract a complete frame from `receiveBuffer`. Must be called with `lock` held.
-    private func tryExtractFrame() -> FrameResult? {
-        guard receiveBuffer.count >= 2 else { return nil }
+    /// Tries to extract a complete frame from `receiveBuffer`. Call inside `state.withLock`.
+    private func tryExtractFrame(_ state: inout ConnectionState) -> FrameResult? {
+        guard state.receiveBuffer.count >= 2 else { return nil }
+        let receiveBuffer = state.receiveBuffer
 
         let byte0 = receiveBuffer[receiveBuffer.startIndex]
         let byte1 = receiveBuffer[receiveBuffer.startIndex + 1]
@@ -327,9 +333,9 @@ nonisolated class WebSocketConnection {
 
         // Copying the remainder into a new Data releases the original backing store.
         if totalFrameSize >= receiveBuffer.count {
-            receiveBuffer = Data()
+            state.receiveBuffer = Data()
         } else {
-            receiveBuffer = Data(receiveBuffer.suffix(from: receiveBuffer.startIndex + totalFrameSize))
+            state.receiveBuffer = Data(receiveBuffer.suffix(from: receiveBuffer.startIndex + totalFrameSize))
         }
 
         let opcode = byte0 & 0x0F
@@ -374,7 +380,7 @@ nonisolated class WebSocketConnection {
             closePayload.append(UInt8(code & 0xFF))
             let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
             transportSend(closeFrame) { _ in }
-            lock.withLock { _isConnected = false }
+            state.withLock { $0.isConnected = false }
             // A normal (1000) or no-status (1005) close is a graceful end-of-stream, not a
             // failure — surface it as EOF so callers half-close instead of resetting.
             if code == 1000 || code == 1005 {
@@ -408,15 +414,15 @@ nonisolated class WebSocketConnection {
                 case overflow
             }
 
-            let status: ExtractResult = self.lock.withLock {
-                self.receiveBuffer.append(data)
+            let status: ExtractResult = self.state.withLock { state in
+                state.receiveBuffer.append(data)
 
-                if self.receiveBuffer.count > Self.maxReceiveBufferSize {
-                    self.receiveBuffer.removeAll()
+                if state.receiveBuffer.count > Self.maxReceiveBufferSize {
+                    state.receiveBuffer.removeAll()
                     return .overflow
                 }
 
-                if let result = self.tryExtractFrame() {
+                if let result = self.tryExtractFrame(&state) {
                     return .frame(result)
                 }
                 return .needMore

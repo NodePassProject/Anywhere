@@ -104,7 +104,7 @@ struct MainTabView: View {
                     Image(systemName: "gearshape")
                 }
             }
-        } else if #available(iOS 18.0, *) {
+        } else {
             TabView(selection: $selectedTab) {
                 Tab(value: .home) {
                     NavigationStack {
@@ -130,27 +130,6 @@ struct MainTabView: View {
                 } label: {
                     Label("Settings", systemImage: "gearshape")
                 }
-            }
-        } else {
-            TabView(selection: $selectedTab) {
-                NavigationStack {
-                    HomeView()
-                }
-                .colorScheme(settings.homeColorScheme == .light ? .light : .dark)
-                .tabItem { Label("Home", image: "anywhere") }
-                .tag(AppTab.home)
-
-                NavigationStack {
-                    ProxiesPageView()
-                }
-                .tabItem { Label("Proxies", systemImage: "network") }
-                .tag(AppTab.proxies)
-
-                NavigationStack {
-                    SettingsView()
-                }
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(AppTab.settings)
             }
         }
     }

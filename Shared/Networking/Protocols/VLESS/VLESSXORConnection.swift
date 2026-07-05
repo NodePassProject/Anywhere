@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 /// Stream-XOR wrapper for VLESS encryption's `random` XOR mode. Per direction:
 /// skip N bytes → XOR the 5-byte record header → skip the decoded body → repeat.
@@ -13,22 +14,26 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     private let inner: ProxyConnection
 
     private let outCTR: VLESSEncryptionCTR
-    /// Nil until `installInboundCTR`: 0-RTT derives the inbound key from the first 16 server bytes.
-    private var inCTR: VLESSEncryptionCTR?
 
-    private var outSkip: Int
-    private var inSkip: Int
+    private struct SendState {
+        var outSkip: Int
+        /// XOR'd header bytes accumulated across call boundaries; decoded at 5 bytes.
+        var outHeader = Data()
+    }
 
-    /// XOR'd header bytes accumulated across call boundaries; decoded at 5 bytes.
-    private var outHeader = Data()
-    private var inHeader = Data()
+    private struct RecvState {
+        /// Nil until `installInboundCTR`: 0-RTT derives the inbound key from the first 16 server bytes.
+        var inCTR: VLESSEncryptionCTR?
+        var inSkip: Int
+        /// XOR'd header bytes accumulated across call boundaries; decoded at 5 bytes.
+        var inHeader = Data()
+        /// Bytes past the inSkip region that arrived before `inCTR` was set; stashed
+        /// verbatim and replayed through the state machine once it's installed.
+        var pendingPostSkip = Data()
+    }
 
-    /// Bytes past the inSkip region that arrived before `inCTR` was set; stashed
-    /// verbatim and replayed through the state machine once it's installed.
-    private var pendingPostSkip = Data()
-
-    private let sendLock = UnfairLock()
-    private let recvLock = UnfairLock()
+    private let sendState: Mutex<SendState>
+    private let recvState: Mutex<RecvState>
 
     init(inner: ProxyConnection,
          outCTR: VLESSEncryptionCTR,
@@ -37,9 +42,8 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
          inSkip: Int) {
         self.inner = inner
         self.outCTR = outCTR
-        self.inCTR = inCTR
-        self.outSkip = outSkip
-        self.inSkip = inSkip
+        self.sendState = Mutex(SendState(outSkip: outSkip))
+        self.recvState = Mutex(RecvState(inCTR: inCTR, inSkip: inSkip))
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -47,7 +51,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     /// Call once the 0-RTT path has derived the inbound key from the 16-byte server random.
     func installInboundCTR(_ ctr: VLESSEncryptionCTR) {
-        recvLock.withLock { self.inCTR = ctr }
+        recvState.withLock { $0.inCTR = ctr }
     }
 
     // MARK: Send
@@ -55,8 +59,8 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         if data.isEmpty { completion(nil); return }
         var bytes = [UInt8](data)
-        sendLock.withLock {
-            applyOutboundMask(&bytes)
+        sendState.withLock { state in
+            applyOutboundMask(&bytes, state: &state)
         }
         inner.sendRaw(data: Data(bytes), completion: completion)
     }
@@ -66,16 +70,17 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     }
 
     /// XORs each TLS-record header in place, leaving sealed bodies and the skip region alone.
-    private func applyOutboundMask(_ bytes: inout [UInt8]) {
+    /// Call inside `sendState.withLock`.
+    private func applyOutboundMask(_ bytes: inout [UInt8], state: inout SendState) {
         var offset = 0
         while offset < bytes.count {
-            if outSkip > 0 {
-                let consume = min(outSkip, bytes.count - offset)
-                outSkip -= consume
+            if state.outSkip > 0 {
+                let consume = min(state.outSkip, bytes.count - offset)
+                state.outSkip -= consume
                 offset += consume
                 continue
             }
-            let needed = 5 - outHeader.count
+            let needed = 5 - state.outHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
             bytes.withUnsafeMutableBufferPointer { pointer in
@@ -84,12 +89,12 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
                 )
                 outCTR.processInPlace(region)
             }
-            outHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
+            state.outHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
             offset += chunk
-            if outHeader.count == 5 {
-                let length = decodeHeaderLength(outHeader)
-                outHeader.removeAll(keepingCapacity: true)
-                outSkip = length
+            if state.outHeader.count == 5 {
+                let length = decodeHeaderLength(state.outHeader)
+                state.outHeader.removeAll(keepingCapacity: true)
+                state.outSkip = length
             } else {
                 break
             }
@@ -100,16 +105,17 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         // Drain stashed bytes first to preserve record-framing order.
-        recvLock.lock()
-        if !pendingPostSkip.isEmpty, inCTR != nil {
-            var data = pendingPostSkip
-            pendingPostSkip = Data()
-            applyInboundMaskLocked(&data)
-            recvLock.unlock()
-            completion(data, nil)
+        let stashed: Data? = recvState.withLock { state in
+            guard !state.pendingPostSkip.isEmpty, state.inCTR != nil else { return nil }
+            var data = state.pendingPostSkip
+            state.pendingPostSkip = Data()
+            applyInboundMask(&data, state: &state)
+            return data
+        }
+        if let stashed {
+            completion(stashed, nil)
             return
         }
-        recvLock.unlock()
 
         inner.receiveRaw { [weak self] data, error in
             guard let self else {
@@ -121,32 +127,32 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
                 completion(data, nil)
                 return
             }
-            self.recvLock.withLock {
-                self.applyInboundMaskLocked(&data)
+            self.recvState.withLock { state in
+                self.applyInboundMask(&data, state: &state)
             }
             completion(data, nil)
         }
     }
 
-    /// Inbound counterpart of `applyOutboundMask`. Caller must hold `recvLock`;
+    /// Inbound counterpart of `applyOutboundMask`. Call inside `recvState.withLock`;
     /// while `inCTR` is nil, bytes past the skip region are stashed and truncated.
-    private func applyInboundMaskLocked(_ data: inout Data) {
+    private func applyInboundMask(_ data: inout Data, state: inout RecvState) {
         guard data.count > 0 else { return }
         var bytes = [UInt8](data)
         var offset = 0
         while offset < bytes.count {
-            if inSkip > 0 {
-                let consume = min(inSkip, bytes.count - offset)
-                inSkip -= consume
+            if state.inSkip > 0 {
+                let consume = min(state.inSkip, bytes.count - offset)
+                state.inSkip -= consume
                 offset += consume
                 continue
             }
-            guard let inCTR else {
-                pendingPostSkip.append(contentsOf: bytes[offset..<bytes.count])
+            guard let inCTR = state.inCTR else {
+                state.pendingPostSkip.append(contentsOf: bytes[offset..<bytes.count])
                 bytes.removeSubrange(offset..<bytes.count)
                 break
             }
-            let needed = 5 - inHeader.count
+            let needed = 5 - state.inHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
             bytes.withUnsafeMutableBufferPointer { pointer in
@@ -155,12 +161,12 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
                 )
                 inCTR.processInPlace(region)
             }
-            inHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
+            state.inHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
             offset += chunk
-            if inHeader.count == 5 {
-                let length = decodeHeaderLength(inHeader)
-                inHeader.removeAll(keepingCapacity: true)
-                inSkip = length
+            if state.inHeader.count == 5 {
+                let length = decodeHeaderLength(state.inHeader)
+                state.inHeader.removeAll(keepingCapacity: true)
+                state.inSkip = length
             } else {
                 break
             }

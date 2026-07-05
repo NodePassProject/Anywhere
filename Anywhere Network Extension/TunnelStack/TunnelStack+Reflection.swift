@@ -16,7 +16,7 @@ extension TunnelStack {
     // valid: the IPv4 header sums the same words, TCP/UDP/ICMPv6 pseudo-headers
     // sum src+dst either way, and ICMPv4 doesn't cover addresses.
 
-    /// Published under ``reflectorLock`` on change, read once per inbound batch.
+    /// Published through the reflector Mutex on change, read once per inbound batch.
     struct Reflector {
         /// Packed `b0<<24 | b1<<16 | b2<<8 | b3`, matching the per-packet compare.
         let ipv4Addresses: [UInt32]

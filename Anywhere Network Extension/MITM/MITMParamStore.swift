@@ -6,19 +6,19 @@
 //
 
 import Foundation
+import Synchronization
 
 final class MITMParamStore {
     static let shared = MITMParamStore()
 
     /// scope (rule-set id) → (parameter name → resolved value).
-    private var table: [UUID: [String: String]] = [:]
-    private let lock = UnfairLock()
+    private let table = Mutex<[UUID: [String: String]]>([:])
 
     private init() {}
 
     /// Replaces the whole table (load rebuilds everything); drops empty maps.
     func replaceAll(_ entries: [(scope: UUID, values: [String: String])]) {
-        lock.withLock {
+        table.withLock { table in
             table.removeAll(keepingCapacity: true)
             for entry in entries where !entry.values.isEmpty {
                 table[entry.scope] = entry.values
@@ -27,14 +27,14 @@ final class MITMParamStore {
     }
 
     func get(scope: UUID, key: String) -> String? {
-        lock.withLock { table[scope]?[key] }
+        table.withLock { $0[scope]?[key] }
     }
 
     func keys(scope: UUID) -> [String] {
-        lock.withLock { Array(table[scope]?.keys ?? Dictionary<String, String>().keys) }
+        table.withLock { Array($0[scope]?.keys ?? Dictionary<String, String>().keys) }
     }
 
     func all(scope: UUID) -> [String: String] {
-        lock.withLock { table[scope] ?? [:] }
+        table.withLock { $0[scope] ?? [:] }
     }
 }

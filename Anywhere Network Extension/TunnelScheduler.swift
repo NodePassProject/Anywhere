@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 final class TunnelScheduler {
     private final class ScheduledTask {
@@ -45,8 +46,7 @@ final class TunnelScheduler {
         }
     }
     
-    private let lock = UnfairLock()
-    private var tasks: [ScheduledTask] = []
+    private let tasks = Mutex<[ScheduledTask]>([])
     
     func schedule(
         label: String, on queue: DispatchQueue,
@@ -63,20 +63,21 @@ final class TunnelScheduler {
         let task = ScheduledTask(label: label, queue: queue, interval: interval,
                                  timer: timer, handler: handler)
         timer.setEventHandler { [weak task] in task?.fire() }
-        lock.withLock { tasks.append(task) }
+        tasks.withLock { $0.append(task) }
         timer.resume()
     }
-    
+
     /// Catch-up pass for tasks that fell due while the device was frozen.
     func reconcile() {
-        let snapshot = lock.withLock { tasks }
+        // Snapshot under the lock, then act outside it.
+        let snapshot = tasks.withLock { $0 }
         for task in snapshot {
             task.queue.async { task.fireIfOverdue() }
         }
     }
-    
+
     func cancelAll() {
-        let removed: [ScheduledTask] = lock.withLock {
+        let removed: [ScheduledTask] = tasks.withLock { tasks in
             let current = tasks
             tasks = []
             return current

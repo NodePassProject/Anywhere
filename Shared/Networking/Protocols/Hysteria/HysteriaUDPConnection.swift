@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaUDPConnection")
 
@@ -24,11 +25,10 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         get { _state }
         set {
             _state = newValue
-            readyLock.withLock { _isReady = (newValue == .ready) }
+            _isReady.store(newValue == .ready, ordering: .relaxed)
         }
     }
-    private let readyLock = UnfairLock()
-    private var _isReady = false
+    private let _isReady = Atomic<Bool>(false)
 
     private var sessionID: UInt32 = 0
 
@@ -67,9 +67,9 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         super.init()
     }
 
-    /// Lock-guarded readiness mirror; callable from any queue.
+    /// Atomic readiness mirror; callable from any queue.
     override var isConnected: Bool {
-        readyLock.withLock { _isReady }
+        _isReady.load(ordering: .relaxed)
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }

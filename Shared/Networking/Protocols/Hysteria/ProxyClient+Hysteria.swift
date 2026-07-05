@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 extension ProxyClient {
     /// Connects through a Hysteria v2 server. Routes by chain context:
@@ -110,24 +111,23 @@ extension ProxyClient {
             // Builder must be self-free: one build is shared across concurrent
             // waiters and outlives any single caller's ProxyClient.
             builder: { builderCompletion in
-                var holders: [ProxyClient] = []
-                let holdersLock = UnfairLock()
+                let holders = Mutex<[ProxyClient]>([])
                 ProxyClient.buildDetachedChainTunnel(
                     chain: chain,
                     hopCommands: cascadeCommands,
                     finalDestination: (hyServerAddress, hyServerPort),
                     useResolvedAddressForDirectDial: useResolvedAddress,
                     track: { client in
-                        holdersLock.withLock { holders.append(client) }
+                        holders.withLock { $0.append(client) }
                     }
                 ) { result in
                     switch result {
                     case .success(let chainTunnel):
-                        let snapshot = holdersLock.withLock { holders }
+                        let snapshot = holders.withLock { $0 }
                         let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
                         builderCompletion(.success((transport, snapshot)))
                     case .failure(let error):
-                        let snapshot = holdersLock.withLock { holders }
+                        let snapshot = holders.withLock { $0 }
                         for c in snapshot { c.cancel() }
                         builderCompletion(.failure(error))
                     }

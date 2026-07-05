@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 extension ProxyClient {
     func connectWithSudoku(
@@ -117,10 +118,14 @@ private struct SudokuSharedMuxLease {
 }
 
 private enum SudokuSharedMuxPool {
-    private static let lock = UnfairLock()
     private static let maxEntries = 16
-    private static var clients: [SudokuSharedMuxKey: SudokuSharedMuxClient] = [:]
-    private static var accessOrder: [SudokuSharedMuxKey] = []
+
+    private struct State {
+        var clients: [SudokuSharedMuxKey: SudokuSharedMuxClient] = [:]
+        var accessOrder: [SudokuSharedMuxKey] = []
+    }
+
+    private static let state = Mutex(State())
 
     static func dialTCP(
         configuration: ProxyConfiguration,
@@ -129,16 +134,16 @@ private enum SudokuSharedMuxPool {
         port: UInt16
     ) throws -> SudokuSharedMuxLease {
         let key = SudokuSharedMuxKey(configuration: configuration, directDialHost: directDialHost)
-        let (shared, evicted) = lock.withLock { () -> (SudokuSharedMuxClient, [SudokuSharedMuxClient]) in
+        let (shared, evicted) = state.withLock { (state: inout State) -> (SudokuSharedMuxClient, [SudokuSharedMuxClient]) in
             let shared: SudokuSharedMuxClient
-            if let existing = clients[key] {
+            if let existing = state.clients[key] {
                 shared = existing
             } else {
                 shared = SudokuSharedMuxClient(configuration: configuration, directDialHost: directDialHost)
-                clients[key] = shared
+                state.clients[key] = shared
             }
-            touchLocked(key)
-            return (shared, trimIfNeededLocked())
+            touchLocked(key, in: &state)
+            return (shared, trimIfNeededLocked(&state))
         }
         for client in evicted { client.close() }
         shared.retainStream()
@@ -159,53 +164,53 @@ private enum SudokuSharedMuxPool {
     }
 
     private static func touch(_ key: SudokuSharedMuxKey) {
-        lock.withLock { touchLocked(key) }
+        state.withLock { touchLocked(key, in: &$0) }
     }
 
-    private static func touchLocked(_ key: SudokuSharedMuxKey) {
-        accessOrder.removeAll { $0 == key }
-        accessOrder.append(key)
+    private static func touchLocked(_ key: SudokuSharedMuxKey, in state: inout State) {
+        state.accessOrder.removeAll { $0 == key }
+        state.accessOrder.append(key)
     }
 
     private static func remove(key: SudokuSharedMuxKey, closing: Bool) {
-        let client = lock.withLock { () -> SudokuSharedMuxClient? in
-            accessOrder.removeAll { $0 == key }
-            return clients.removeValue(forKey: key)
+        let client = state.withLock { (state: inout State) -> SudokuSharedMuxClient? in
+            state.accessOrder.removeAll { $0 == key }
+            return state.clients.removeValue(forKey: key)
         }
         if closing { client?.close() }
     }
 
     private static func trimIfNeeded() {
-        let evicted = lock.withLock { trimIfNeededLocked() }
+        let evicted = state.withLock { trimIfNeededLocked(&$0) }
         for client in evicted { client.close() }
     }
 
-    private static func trimIfNeededLocked() -> [SudokuSharedMuxClient] {
+    private static func trimIfNeededLocked(_ state: inout State) -> [SudokuSharedMuxClient] {
         var evicted: [SudokuSharedMuxClient] = []
-        while clients.count > maxEntries {
-            guard let victim = accessOrder.first else { break }
-            guard let client = clients[victim] else {
-                accessOrder.removeFirst()
+        while state.clients.count > maxEntries {
+            guard let victim = state.accessOrder.first else { break }
+            guard let client = state.clients[victim] else {
+                state.accessOrder.removeFirst()
                 continue
             }
             if !client.canEvict {
-                accessOrder.removeFirst()
-                accessOrder.append(victim)
-                if !clients.values.contains(where: { $0.canEvict }) { break }
+                state.accessOrder.removeFirst()
+                state.accessOrder.append(victim)
+                if !state.clients.values.contains(where: { $0.canEvict }) { break }
                 continue
             }
-            accessOrder.removeFirst()
-            clients.removeValue(forKey: victim)
+            state.accessOrder.removeFirst()
+            state.clients.removeValue(forKey: victim)
             evicted.append(client)
         }
         return evicted
     }
-    
+
     static func reclaim() {
-        let victims = lock.withLock { () -> [SudokuSharedMuxClient] in
-            let all = Array(clients.values)
-            clients.removeAll()
-            accessOrder.removeAll()
+        let victims = state.withLock { (state: inout State) -> [SudokuSharedMuxClient] in
+            let all = Array(state.clients.values)
+            state.clients.removeAll()
+            state.accessOrder.removeAll()
             return all
         }
         for client in victims { client.close() }

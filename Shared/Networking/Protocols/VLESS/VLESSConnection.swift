@@ -6,15 +6,19 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated final class VLESSConnection: ProxyConnection {
 
     private let inner: ProxyConnection
 
-    /// Guards the response-header buffer below.
-    private let headerLock = UnfairLock()
-    private var responseHeaderReceived = false
-    private var pendingResponseBuffer = Data()
+    private struct HeaderState {
+        var responseHeaderReceived = false
+        var pendingResponseBuffer = Data()
+    }
+
+    /// Response-header parsing state.
+    private let headerState = Mutex(HeaderState())
 
     init(inner: ProxyConnection) {
         self.inner = inner
@@ -75,37 +79,33 @@ nonisolated final class VLESSConnection: ProxyConnection {
         var output: Data?
         var shouldReceiveMore = false
 
-        headerLock.lock()
-        if responseHeaderReceived {
-            output = data
-            headerLock.unlock()
-        } else {
-            pendingResponseBuffer.append(data)
-            let buffer = pendingResponseBuffer
-            if buffer.count < 2 {
-                shouldReceiveMore = true
-                headerLock.unlock()
-            } else if buffer[buffer.startIndex] != VLESSProtocol.version {
-                // Non-VLESS response preamble — treat buffered bytes as payload.
-                responseHeaderReceived = true
-                output = buffer
-                pendingResponseBuffer.removeAll(keepingCapacity: true)
-                headerLock.unlock()
+        headerState.withLock { state in
+            if state.responseHeaderReceived {
+                output = data
             } else {
-                let addonsLength = Int(buffer[buffer.index(buffer.startIndex, offsetBy: 1)])
-                let headerLength = 2 + addonsLength
-                if buffer.count < headerLength {
+                state.pendingResponseBuffer.append(data)
+                let buffer = state.pendingResponseBuffer
+                if buffer.count < 2 {
                     shouldReceiveMore = true
-                    headerLock.unlock()
+                } else if buffer[buffer.startIndex] != VLESSProtocol.version {
+                    // Non-VLESS response preamble — treat buffered bytes as payload.
+                    state.responseHeaderReceived = true
+                    output = buffer
+                    state.pendingResponseBuffer.removeAll(keepingCapacity: true)
                 } else {
-                    responseHeaderReceived = true
-                    if buffer.count > headerLength {
-                        output = Data(buffer.suffix(from: headerLength))
-                    } else {
+                    let addonsLength = Int(buffer[buffer.index(buffer.startIndex, offsetBy: 1)])
+                    let headerLength = 2 + addonsLength
+                    if buffer.count < headerLength {
                         shouldReceiveMore = true
+                    } else {
+                        state.responseHeaderReceived = true
+                        if buffer.count > headerLength {
+                            output = Data(buffer.suffix(from: headerLength))
+                        } else {
+                            shouldReceiveMore = true
+                        }
+                        state.pendingResponseBuffer.removeAll(keepingCapacity: true)
                     }
-                    pendingResponseBuffer.removeAll(keepingCapacity: true)
-                    headerLock.unlock()
                 }
             }
         }
