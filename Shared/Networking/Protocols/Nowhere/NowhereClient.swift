@@ -357,7 +357,8 @@ nonisolated final class NowhereClient {
                     session: session,
                     destination: destination,
                     requestedFlowID: flowID,
-                    downlink: downlink
+                    downlink: downlink,
+                    reopensExpiredFlow: false
                 )
                 connection.open { error in
                     if let error {

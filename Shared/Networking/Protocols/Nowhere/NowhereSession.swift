@@ -231,7 +231,7 @@ nonisolated final class NowhereSession {
                     || message.type == NowhereProtocol.UDPType.response.rawValue {
             connection.handleIncomingDatagram(message.payload)
         } else if message.type == NowhereProtocol.UDPType.compactClose.rawValue {
-            connection.handleSessionClose()
+            connection.handleFlowClose()
         }
     }
 
