@@ -15,6 +15,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     private let destination: String
     private let requestedFlowID: UInt64?
     private let downlink: NowhereNetwork
+    private let reopensExpiredFlow: Bool
 
     private var _state: State = .idle
     private var state: State {
@@ -38,12 +39,14 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         session: NowhereSession,
         destination: String,
         requestedFlowID: UInt64? = nil,
-        downlink: NowhereNetwork = .udp
+        downlink: NowhereNetwork = .udp,
+        reopensExpiredFlow: Bool = true
     ) {
         self.session = session
         self.destination = destination
         self.requestedFlowID = requestedFlowID
         self.downlink = downlink
+        self.reopensExpiredFlow = reopensExpiredFlow
         super.init()
     }
 
@@ -72,6 +75,15 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     }
 
     func handleOpenAck() { compactReady = true }
+
+    func handleFlowClose() {
+        guard state == .ready else { return }
+        if reopensExpiredFlow {
+            compactReady = false
+        } else {
+            handleSessionClose()
+        }
+    }
 
     func handleIncomingDatagram(_ payload: Data) {
         guard state != .closed, !payload.isEmpty else { return }
