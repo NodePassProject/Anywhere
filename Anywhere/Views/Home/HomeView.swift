@@ -19,9 +19,13 @@ struct HomeView: View {
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
-    
+
     @State private var connectionEffectsEnabled = false
-    
+
+    private static let horizontalPadding: CGFloat = 20
+    private static let paneSpacing: CGFloat = 20
+    private static let minControlPaneWidth: CGFloat = 320
+
     private var isLoading: Bool { !configStore.isLoaded }
 
     private var isConnected: Bool {
@@ -32,47 +36,27 @@ struct HomeView: View {
 
     private var experimentalEnabled: Bool { settings.experimentalEnabled }
 
+    private var showsDetail: Bool { isConnected && experimentalEnabled }
+
     var body: some View {
         ZStack {
             BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
 
             GeometryReader { geometry in
-                ScrollView {
-                    LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
-                        if isConnected && experimentalEnabled {
-                            Section {
-                                ConnectionStatsView()
-                            } header: {
-                                HStack {
-                                    powerButton
-                                        .matchedGeometryEffect(id: "powerButton", in: namespace)
-                                    configurationCard
-                                        .matchedGeometryEffect(id: "configurationCard", in: namespace)
-                                }
-                                .padding(.vertical, 8)
-                            }
-                        } else {
-                            VStack(spacing: 80) {
-                                VStack(spacing: 20) {
-                                    powerButton
-                                        .matchedGeometryEffect(id: "powerButton", in: namespace)
-                                    statusLabel
-                                }
-                                configurationCard
-                                    .matchedGeometryEffect(id: "configurationCard", in: namespace)
-                            }
-                            .frame(minHeight: geometry.size.height)
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
-                    .sensoryFeedback(trigger: isConnected) { _, _ in
-                        guard connectionEffectsEnabled else { return nil }
-                        return .impact
+                let contentWidth = geometry.size.width - 2 * Self.horizontalPadding
+                Group {
+                    if showsDetail && Self.allowsSideBySide(contentWidth: contentWidth) {
+                        sideBySideLayout(geometry: geometry, contentWidth: contentWidth)
+                    } else {
+                        stackedLayout
                     }
                 }
-                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+                .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
+                .sensoryFeedback(trigger: isConnected) { _, _ in
+                    guard connectionEffectsEnabled else { return nil }
+                    return .impact
+                }
             }
         }
         .sheet(isPresented: $showingAddSheet) {
@@ -99,11 +83,69 @@ struct HomeView: View {
         }
     }
 
+    // MARK: - Layouts
+    
+    private static func allowsSideBySide(contentWidth: CGFloat) -> Bool {
+        StatCardSize.columnCount(fitting: contentWidth) > ConnectionStatsView.maxColumnCount
+    }
+    
+    private var stackedLayout: some View {
+        DetailRevealScrollView(revealsDetail: showsDetail) {
+            connectionControls
+                .padding(.horizontal, Self.horizontalPadding)
+        } detail: {
+            ConnectionStatsView()
+                .padding(.top, 16)
+                .padding(.horizontal, Self.horizontalPadding)
+        }
+    }
+    
+    private func sideBySideLayout(geometry: GeometryProxy, contentWidth: CGFloat) -> some View {
+        // Give the stats pane what a fully grown grid needs, but never squeeze
+        // the controls pane below its minimum width.
+        let detailWidth = min(
+            StatCardSize.gridWidth(
+                columns: ConnectionStatsView.maxColumnCount,
+                unitLength: StatCardSize.maxUnitLength
+            ),
+            contentWidth - Self.minControlPaneWidth - Self.paneSpacing
+        )
+        return HStack(spacing: Self.paneSpacing) {
+            ScrollView {
+                connectionControls
+                    .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+
+            ScrollView {
+                ConnectionStatsView()
+                    .padding(.vertical, 16)
+                    .frame(minHeight: geometry.size.height)
+            }
+            .frame(width: detailWidth)
+            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+        .padding(.horizontal, Self.horizontalPadding)
+    }
+
+    private var connectionControls: some View {
+        VStack(spacing: 80) {
+            VStack(spacing: 20) {
+                powerButton
+                    .matchedGeometryEffect(id: "powerButton", in: namespace)
+                statusLabel
+                    .matchedGeometryEffect(id: "statusLabel", in: namespace)
+            }
+            configurationCard
+                .matchedGeometryEffect(id: "configurationCard", in: namespace)
+        }
+    }
+
     private var powerButton: some View {
         PowerButton(
             isConnected: isConnected,
             isTransitioning: isTransitioning,
-            isCompact: isConnected && experimentalEnabled,
             isLoading: isLoading,
             isDisabled: isLoading
                 || (viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations)
@@ -172,9 +214,10 @@ private struct BackgroundGradient: View {
 // MARK: - Power Button
 
 private struct PowerButton: View {
+    private static let circleDiameter: CGFloat = 140
+
     let isConnected: Bool
     let isTransitioning: Bool
-    let isCompact: Bool
     let isLoading: Bool
     let isDisabled: Bool
     let animatesChanges: Bool
@@ -189,7 +232,7 @@ private struct PowerButton: View {
                         .controlSize(.large)
                 } else {
                     Image(systemName: "power")
-                        .font(.system(size: isCompact ? 24 : 40, weight: .light))
+                        .font(.system(size: 40, weight: .light))
                 }
             }
             .contentShape(Circle())
@@ -198,25 +241,27 @@ private struct PowerButton: View {
         .disabled(isDisabled)
         .animation(animatesChanges ? Animation.easeInOut(duration: 0.6) : nil, value: isConnected)
     }
-    
+
     @ViewBuilder
     private var backgroundCircle: some View {
         if #available(iOS 27.0, *) {
-            Circle()
-                .fill(.clear)
-                .frame(width: isCompact ? 50 : 140)
+            glassCircle
                 .glassEffect(.regular, in: .circle)
         } else if #available(iOS 26.0, *) {
-            Circle()
-                .fill(.clear)
-                .frame(width: isCompact ? 50 : 140)
+            glassCircle
                 .glassEffect(.clear, in: .circle)
         } else {
             Circle()
                 .fill(.white.opacity(0.2))
-                .frame(width: isCompact ? 50 : 140)
+                .frame(width: Self.circleDiameter)
                 .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
         }
+    }
+
+    private var glassCircle: some View {
+        Circle()
+            .fill(.clear)
+            .frame(width: Self.circleDiameter)
     }
 }
 

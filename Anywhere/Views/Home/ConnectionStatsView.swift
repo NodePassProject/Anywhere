@@ -36,6 +36,7 @@ struct ConnectionStatsView: View {
         }
         .frame(minWidth: 110, maxWidth: .infinity)
         .environment(\.statCardUnitLength, Self.unitLength(for: availableWidth))
+        .animation(.default, value: rows)
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
         } action: { width in
@@ -73,13 +74,21 @@ struct ConnectionStatsView: View {
         return Self.packRows(units, columns: Self.columnCount(for: availableWidth))
     }
 
+    /// The grid never grows beyond this many columns; anything wider is better
+    /// spent on `HomeView`'s side-by-side layout.
+    static let maxColumnCount = 4
+
+    /// At or below this width the grid stays at two columns, each half the
+    /// available width (allowed to dip below `StatCardSize.minUnitLength`).
+    private static let compactWidthLimit: CGFloat = 330
+
     private static func columnCount(for width: CGFloat) -> Int {
-        guard width > 330 else { return 2 }
-        return max(2, Int((width + StatCardSize.spacing) / (StatCardSize.minUnitLength + StatCardSize.spacing)))
+        guard width > compactWidthLimit else { return 2 }
+        return min(maxColumnCount, max(2, StatCardSize.columnCount(fitting: width)))
     }
-    
+
     private static func unitLength(for width: CGFloat) -> CGFloat {
-        guard width > 330 else { return width / 2 }
+        guard width > compactWidthLimit else { return width / 2 }
         let columns = columnCount(for: width)
         let unit = (width - CGFloat(columns - 1) * StatCardSize.spacing) / CGFloat(columns)
         return min(max(unit, StatCardSize.minUnitLength), StatCardSize.maxUnitLength)
@@ -200,8 +209,18 @@ enum StatCardSize {
     
     static let minUnitLength: CGFloat = 160
     static let maxUnitLength: CGFloat = 200
-    
+
     static let spacing: CGFloat = 10
+
+    /// How many minimum-size unit columns fit in `width`, spacing included.
+    static func columnCount(fitting width: CGFloat) -> Int {
+        max(1, Int((width + spacing) / (minUnitLength + spacing)))
+    }
+
+    /// Total width spanned by `columns` unit columns, spacing included.
+    static func gridWidth(columns: Int, unitLength: CGFloat) -> CGFloat {
+        CGFloat(columns) * unitLength + CGFloat(columns - 1) * spacing
+    }
 
     var columnSpan: Int {
         switch self {
@@ -211,7 +230,7 @@ enum StatCardSize {
     }
 
     func width(unitLength: CGFloat) -> CGFloat {
-        CGFloat(columnSpan) * unitLength + CGFloat(columnSpan - 1) * Self.spacing
+        Self.gridWidth(columns: columnSpan, unitLength: unitLength)
     }
 }
 
