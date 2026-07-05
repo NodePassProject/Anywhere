@@ -179,7 +179,13 @@ nonisolated class ProxyClient {
             )
             return
         }
-        
+
+        if configuration.outboundProtocol == .nowhere,
+           configuration.nowhereUplink != configuration.nowhereDownlink {
+            completion(.failure(ProxyError.protocolError("Asymmetric Nowhere carriers do not support proxy chains")))
+            return
+        }
+
         if isQUICTransport {
             connectWithCommand(
                 command: command,

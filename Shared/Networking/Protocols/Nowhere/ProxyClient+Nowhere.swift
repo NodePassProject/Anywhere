@@ -226,15 +226,27 @@ extension ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         if carrier == .tcp {
-            NowhereTCPConnectionPoolRegistry.shared.acquire(
-                configurationID: configuration.id,
+            let connection = NowhereTCPConnection(
                 configuration: nwConfig,
                 connectHost: directDialHost,
-                destination: destination,
-                mode: mode,
-                flowHeader: header,
-                completion: completion
+                tunnel: nil
             )
+            connection.openFresh(destination: destination, mode: mode, flowHeader: header) { error in
+                if let error {
+                    connection.cancel()
+                    completion(.failure(error))
+                    return
+                }
+                switch mode {
+                case .tcp:
+                    completion(.success(connection))
+                case .udp:
+                    completion(.success(NowhereTCPUDPConnection(
+                        inner: connection,
+                        expectsAck: header.role == .attach
+                    )))
+                }
+            }
             return
         }
 
