@@ -44,6 +44,11 @@ enum NowhereProtocol {
     private static let authFrameLayoutLabel = Data("auth frame layout".utf8)
     private static let frameLayoutLabel = Data("proxy frame layout".utf8)
 
+    static func normalizedSpec(_ spec: String?) -> String {
+        let trimmed = spec?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? defaultSpec : trimmed
+    }
+
     enum AuthFrameElement: UInt8, Hashable {
         case magic
         case nonce
@@ -79,24 +84,36 @@ enum NowhereProtocol {
         case request = 1
         case response = 2
         case close = 3
+        case openData = 0x11
+        case openAck = 0x12
+        case data = 0x13
+        case compactClose = 0x14
     }
 
     struct UDPMessage {
         let type: UInt8
         let flowID: UInt64
-        let target: String
+        let target: String?
+        let downlink: NowhereNetwork?
         let payload: Data
+    }
+
+    enum FlowRole: UInt8 { case open = 1, attach = 2 }
+    enum FlowKind: UInt8 { case tcp = 1, udp = 2 }
+
+    struct FlowHeader {
+        let role: FlowRole
+        let flowID: UInt64
+        let kind: FlowKind
+        let uplink: NowhereNetwork
+        let downlink: NowhereNetwork
     }
 
     static func buildEffectiveSpec(key: String, spec: String?, alpn: String?) throws -> EffectiveSpec {
         let keyBytes = Data(key.utf8)
         try validateRequired(keyBytes, name: "shared key")
 
-        let effectiveSpec = if let spec, !spec.isEmpty {
-            try validateOptional(Data(spec.utf8), name: "spec")
-        } else {
-            Data(defaultSpec.utf8)
-        }
+        let effectiveSpec = try validateOptional(Data(normalizedSpec(spec).utf8), name: "spec")
 
         let specSalt = Data(SHA256.hash(data: effectiveSpec))
         let specPRK = hkdfExtract(salt: specSalt, input: effectiveSpec)
@@ -140,7 +157,10 @@ enum NowhereProtocol {
         )
     }
 
-    static func makeAuthFrame(key: String, protocolSpec: EffectiveSpec) throws -> Data {
+    static func makeAuthFrame(key: String, protocolSpec: EffectiveSpec, sessionID: Data) throws -> Data {
+        guard sessionID.count == 16 else {
+            throw NowhereError.connectionFailed("Invalid session ID")
+        }
         var nonce = Data(count: 32)
         let randomStatus = nonce.withUnsafeMutableBytes { raw -> Int32 in
             guard let pointer = raw.baseAddress else { return errSecAllocate }
@@ -150,6 +170,24 @@ enum NowhereProtocol {
             throw NowhereError.connectionFailed("Failed to generate auth nonce")
         }
 
+        return try makeAuthFrame(
+            key: key,
+            protocolSpec: protocolSpec,
+            sessionID: sessionID,
+            nonce: nonce
+        )
+    }
+
+    static func makeAuthFrame(
+        key: String,
+        protocolSpec: EffectiveSpec,
+        sessionID: Data,
+        nonce: Data
+    ) throws -> Data {
+        guard sessionID.count == 16, nonce.count == 32 else {
+            throw NowhereError.connectionFailed("Invalid authentication material")
+        }
+
         let padding = authPaddingBytes(protocolSpec: protocolSpec, nonce: nonce)
         var message = Data()
         message.append(protocolSpec.authInfo)
@@ -157,6 +195,7 @@ enum NowhereProtocol {
         message.append(nonce)
         message.append(protocolSpec.authPaddingLength)
         message.append(padding)
+        message.append(sessionID)
 
         let authKey = Data(SHA256.hash(data: Data(key.utf8)))
         let tag = HMAC<SHA256>.authenticationCode(
@@ -181,7 +220,30 @@ enum NowhereProtocol {
                 frame.append(contentsOf: tag)
             }
         }
+        frame.append(sessionID)
         return frame
+    }
+
+    static func encodeFlowHeader(_ header: FlowHeader) -> Data {
+        var out = Data(capacity: 14)
+        out.append(0xF1)
+        out.append(1)
+        out.append(header.role.rawValue)
+        out.append(uint64Bytes(header.flowID))
+        out.append(header.kind.rawValue)
+        out.append(header.uplink == .tcp ? 1 : 2)
+        out.append(header.downlink == .tcp ? 1 : 2)
+        return out
+    }
+
+    static func encodeFlowRequest(
+        header: FlowHeader,
+        target: String,
+        protocolSpec: EffectiveSpec
+    ) throws -> Data {
+        var out = encodeFlowHeader(header)
+        out.append(try encodeTCPRequest(address: target, protocolSpec: protocolSpec))
+        return out
     }
 
     private static func validateRequired(_ value: Data, name: String) throws {
@@ -320,6 +382,37 @@ enum NowhereProtocol {
         return out
     }
 
+    static func encodeUDPOpenData(
+        flowID: UInt64,
+        downlink: NowhereNetwork,
+        target: String,
+        payload: Data
+    ) throws -> Data {
+        guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
+        let targetBytes = try encodeTarget(target)
+        var out = Data(capacity: 10 + 1 + targetBytes.count + payload.count)
+        out.append(proxyFrameVersion)
+        out.append(UDPType.openData.rawValue)
+        out.append(uint64Bytes(flowID))
+        out.append(downlink == .tcp ? 1 : 2)
+        out.append(targetBytes)
+        out.append(payload)
+        return out
+    }
+
+    static func encodeUDPCompact(type: UDPType, flowID: UInt64, payload: Data = Data()) throws -> Data {
+        guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
+        guard type == .openAck || type == .data || type == .compactClose else {
+            throw NowhereError.connectionFailed("Invalid compact UDP type")
+        }
+        var out = Data(capacity: 10 + payload.count)
+        out.append(proxyFrameVersion)
+        out.append(type.rawValue)
+        out.append(uint64Bytes(flowID))
+        out.append(payload)
+        return out
+    }
+
     static func encodeUOTSetupTarget(_ target: String) throws -> Data {
         try encodeTarget(target)
     }
@@ -345,6 +438,15 @@ enum NowhereProtocol {
     }
 
     static func decodeUDPDatagram(_ data: Data, protocolSpec: EffectiveSpec) -> UDPMessage? {
+        if data.count >= 10, byte(data, at: 0) == proxyFrameVersion,
+           let compactType = UDPType(rawValue: byte(data, at: 1)),
+           compactType == .openAck || compactType == .data || compactType == .compactClose {
+            let flowID = readUInt64(data, at: 2)
+            guard flowID != 0 else { return nil }
+            let payload = data.subdata(in: data.index(data.startIndex, offsetBy: 10)..<data.endIndex)
+            if compactType != .data, !payload.isEmpty { return nil }
+            return UDPMessage(type: compactType.rawValue, flowID: flowID, target: nil, downlink: nil, payload: payload)
+        }
         guard data.count >= 12 else { return nil }
         var offset = 0
         var frameType: UInt8?
@@ -376,7 +478,7 @@ enum NowhereProtocol {
               let flowID,
               let target else { return nil }
         let payload = data.subdata(in: data.index(data.startIndex, offsetBy: offset)..<data.endIndex)
-        return UDPMessage(type: type, flowID: flowID, target: target, payload: payload)
+        return UDPMessage(type: type, flowID: flowID, target: target, downlink: nil, payload: payload)
     }
 
     static func udpHeaderSize(target: String, protocolSpec _: EffectiveSpec) -> Int {

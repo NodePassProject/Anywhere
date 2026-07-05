@@ -105,13 +105,13 @@ nonisolated class ProxyClient {
     
     var isQUICTransport: Bool {
         configuration.outboundProtocol == .hysteria
-            || (configuration.outboundProtocol == .nowhere && configuration.nowhereNetwork == .udp)
+            || (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
             || configuration.isXHTTPOverHTTP3
     }
     
     private var poolsQUICSession: Bool {
         configuration.outboundProtocol == .hysteria
-            || (configuration.outboundProtocol == .nowhere && configuration.nowhereNetwork == .udp)
+            || (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
     }
     
     private func handshakeTimed(

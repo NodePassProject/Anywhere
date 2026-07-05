@@ -13,6 +13,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     private let session: NowhereSession
     private let destination: String
+    private let requestedFlowID: UInt64?
+    private let downlink: NowhereNetwork
 
     private var _state: State = .idle
     private var state: State {
@@ -30,10 +32,18 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     private static let maxQueuedPackets = 1024
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var closureError: Error?
+    private var compactReady = false
 
-    init(session: NowhereSession, destination: String) {
+    init(
+        session: NowhereSession,
+        destination: String,
+        requestedFlowID: UInt64? = nil,
+        downlink: NowhereNetwork = .udp
+    ) {
         self.session = session
         self.destination = destination
+        self.requestedFlowID = requestedFlowID
+        self.downlink = downlink
         super.init()
     }
 
@@ -45,7 +55,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     override var deliversDatagrams: Bool { true }
 
     func open(completion: @escaping (Error?) -> Void) {
-        session.registerUDPSession(self) { [weak self] result in
+        session.registerUDPSession(self, requestedFlowID: requestedFlowID) { [weak self] result in
             guard let self else {
                 completion(NowhereError.streamClosed)
                 return
@@ -60,6 +70,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             }
         }
     }
+
+    func handleOpenAck() { compactReady = true }
 
     func handleIncomingDatagram(_ payload: Data) {
         guard state != .closed, !payload.isEmpty else { return }
@@ -95,10 +107,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     private func sendDatagramPayload(_ payload: Data, completion: @escaping (Error?) -> Void) {
         let maxSize = session.maxDatagramPayloadSize
-        let headerSize = NowhereProtocol.udpHeaderSize(
-            target: destination,
-            protocolSpec: session.protocolSpec
-        )
+        let headerSize = compactReady ? 10 : 13 + destination.utf8.count
         guard maxSize > headerSize else {
             completion(NowhereError.destinationTooLargeForDatagram(maxFrame: maxSize, headerSize: headerSize))
             return
@@ -110,13 +119,20 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
         let frame: Data
         do {
-            frame = try NowhereProtocol.encodeUDPDatagram(
-                type: .request,
-                flowID: flowID,
-                target: destination,
-                payload: payload,
-                protocolSpec: session.protocolSpec
-            )
+            if compactReady {
+                frame = try NowhereProtocol.encodeUDPCompact(
+                    type: .data,
+                    flowID: flowID,
+                    payload: payload
+                )
+            } else {
+                frame = try NowhereProtocol.encodeUDPOpenData(
+                    flowID: flowID,
+                    downlink: downlink,
+                    target: destination,
+                    payload: payload
+                )
+            }
         } catch {
             completion(error)
             return
@@ -165,12 +181,9 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     private func sendCloseFrame() {
         guard flowID != 0 else { return }
-        let frame = try? NowhereProtocol.encodeUDPDatagram(
-            type: .close,
-            flowID: flowID,
-            target: destination,
-            payload: Data(),
-            protocolSpec: session.protocolSpec
+        let frame = try? NowhereProtocol.encodeUDPCompact(
+            type: .compactClose,
+            flowID: flowID
         )
         if let frame {
             session.writeDatagram(frame) { _ in }
@@ -198,6 +211,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
+            self.session.releaseUDPSession(self.flowID)
             let callback = self.pendingReceive
             self.pendingReceive = nil
             callback?(nil, nil)

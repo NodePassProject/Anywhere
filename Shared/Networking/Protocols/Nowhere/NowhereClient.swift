@@ -14,10 +14,12 @@ nonisolated final class NowhereClient {
         let port: UInt16
         let key: String
         let spec: String?
-        let net: NowhereNetwork
+        let uplink: NowhereNetwork
+        let downlink: NowhereNetwork
         let sni: String
         let alpn: String
         let chainSignature: String
+        let sessionID: Data
     }
 
     private static let registryLock = UnfairLock()
@@ -30,10 +32,12 @@ nonisolated final class NowhereClient {
             port: configuration.proxyPort,
             key: configuration.key,
             spec: configuration.spec,
-            net: configuration.net,
+            uplink: configuration.uplink,
+            downlink: configuration.downlink,
             sni: configuration.tls.serverName,
             alpn: configuration.protocolSpec.effectiveALPN,
-            chainSignature: ""
+            chainSignature: "",
+            sessionID: configuration.sessionID
         )
         registryLock.lock()
         defer { registryLock.unlock() }
@@ -71,10 +75,12 @@ nonisolated final class NowhereClient {
             port: configuration.proxyPort,
             key: configuration.key,
             spec: configuration.spec,
-            net: configuration.net,
+            uplink: configuration.uplink,
+            downlink: configuration.downlink,
             sni: configuration.tls.serverName,
             alpn: configuration.protocolSpec.effectiveALPN,
-            chainSignature: chainSignature
+            chainSignature: chainSignature,
+            sessionID: configuration.sessionID
         )
 
         registryLock.lock()
@@ -211,6 +217,70 @@ nonisolated final class NowhereClient {
         openTCP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
     }
 
+    func openTCPHalf(
+        destination: String,
+        header: NowhereProtocol.FlowHeader,
+        isDefaultProxy: Bool,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        openTCPHalf(
+            destination: destination,
+            header: header,
+            retriesLeft: 1,
+            isDefaultProxy: isDefaultProxy,
+            completion: completion
+        )
+    }
+
+    private func openTCPHalf(
+        destination: String,
+        header: NowhereProtocol.FlowHeader,
+        retriesLeft: Int,
+        isDefaultProxy: Bool,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
+            switch result {
+            case .failure(let error):
+                if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                    self.openTCPHalf(
+                        destination: destination,
+                        header: header,
+                        retriesLeft: retriesLeft - 1,
+                        isDefaultProxy: isDefaultProxy,
+                        completion: completion
+                    )
+                } else {
+                    completion(.failure(error))
+                }
+            case .success(let session):
+                let connection = NowhereConnection(
+                    session: session,
+                    destination: destination,
+                    flowHeader: header
+                )
+                connection.open { error in
+                    if let error {
+                        connection.cancel()
+                        if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                            self.openTCPHalf(
+                                destination: destination,
+                                header: header,
+                                retriesLeft: retriesLeft - 1,
+                                isDefaultProxy: isDefaultProxy,
+                                completion: completion
+                            )
+                        } else {
+                            completion(.failure(error))
+                        }
+                    } else {
+                        completion(.success(connection))
+                    }
+                }
+            }
+        }
+    }
+
     private func openTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
         acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {
@@ -240,6 +310,76 @@ nonisolated final class NowhereClient {
 
     func openUDP(destination: String, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
         openUDP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
+    }
+
+    func openUDP(
+        destination: String,
+        flowID: UInt64,
+        downlink: NowhereNetwork,
+        isDefaultProxy: Bool,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        openUDP(
+            destination: destination,
+            flowID: flowID,
+            downlink: downlink,
+            retriesLeft: 1,
+            isDefaultProxy: isDefaultProxy,
+            completion: completion
+        )
+    }
+
+    private func openUDP(
+        destination: String,
+        flowID: UInt64,
+        downlink: NowhereNetwork,
+        retriesLeft: Int,
+        isDefaultProxy: Bool,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
+            switch result {
+            case .failure(let error):
+                if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                    self.openUDP(
+                        destination: destination,
+                        flowID: flowID,
+                        downlink: downlink,
+                        retriesLeft: retriesLeft - 1,
+                        isDefaultProxy: isDefaultProxy,
+                        completion: completion
+                    )
+                } else {
+                    completion(.failure(error))
+                }
+            case .success(let session):
+                let connection = NowhereUDPConnection(
+                    session: session,
+                    destination: destination,
+                    requestedFlowID: flowID,
+                    downlink: downlink
+                )
+                connection.open { error in
+                    if let error {
+                        connection.cancel()
+                        if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                            self.openUDP(
+                                destination: destination,
+                                flowID: flowID,
+                                downlink: downlink,
+                                retriesLeft: retriesLeft - 1,
+                                isDefaultProxy: isDefaultProxy,
+                                completion: completion
+                            )
+                        } else {
+                            completion(.failure(error))
+                        }
+                    } else {
+                        completion(.success(connection))
+                    }
+                }
+            }
+        }
     }
 
     private func openUDP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
@@ -302,6 +442,7 @@ nonisolated final class NowhereClient {
     static func closeAll() {
         registryLock.lock()
         let clients = Array(registry.values)
+        registry.removeAll(keepingCapacity: false)
         registryLock.unlock()
         for client in clients {
             client.invalidateSession()
@@ -315,6 +456,7 @@ extension NowhereClient {
         func reclaim() {
             NowhereClient.closeAll()
             NowhereTCPConnectionPoolRegistry.shared.closeAll()
+            NowhereTransportIdentityRegistry.shared.reset()
         }
     }
 }
