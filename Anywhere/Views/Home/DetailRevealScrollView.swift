@@ -31,7 +31,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
             ScrollView {
                 VStack(spacing: 0) {
                     fold
-                        .frame(minHeight: geometry.size.height)
+                        .frame(maxWidth: .infinity, minHeight: geometry.size.height)
                         .overlay(alignment: .bottom) {
                             if revealsDetail {
                                 PullUpIndicator()
