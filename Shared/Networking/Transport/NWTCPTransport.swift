@@ -11,48 +11,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NWTCPTransport")
 
-// MARK: - NWError handling
-
-nonisolated func mapNWError(_ error: NWError, op: TransportError.Operation) -> TransportError {
-    switch error {
-    case .posix(let code):
-        return .posixError(op, errno: code.rawValue)
-    case .dns:
-        return .resolutionFailed(error.localizedDescription)
-    default:
-        // .tls and any SDK-newer cases (e.g. .wifiAware) fold to a generic failure.
-        return .connectionFailed(error.localizedDescription)
-    }
-}
-
-nonisolated func isDefinitiveConnectError(_ error: NWError) -> Bool {
-    guard case .posix(let code) = error else { return false }
-    switch code {
-    case .ECONNREFUSED, .EHOSTUNREACH, .ENETUNREACH, .ECONNRESET,
-         .ETIMEDOUT, .EHOSTDOWN, .ENETDOWN, .EADDRNOTAVAIL, .EPFNOSUPPORT, .EAFNOSUPPORT:
-        return true
-    default:
-        return false
-    }
-}
-
-nonisolated func isResourceExhaustionError(_ error: NWError) -> Bool {
-    guard case .posix(let code) = error else { return false }
-    switch code {
-    case .ENOMEM, .ENOBUFS, .EMFILE, .ENFILE:
-        return true
-    default:
-        return false
-    }
-}
-
-nonisolated func nwHost(fromIPLiteral ip: String) -> NWEndpoint.Host? {
-    if ip.contains(":") {
-        return IPv6Address(ip).map { .ipv6($0) }
-    }
-    return IPv4Address(ip).map { .ipv4($0) }
-}
-
 // MARK: - NWTCPTransport
 
 nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
@@ -120,9 +78,8 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
     /// "host:port" for connect-phase diagnostics. Set once in `connect`.
     private var dialEndpointDescription = ""
 
-    /// Last non-definitive `.waiting` error seen during the dial, plus whether the
-    /// dial ever reached `.preparing`. `queue`-confined.
-    private var lastWaitingDescription: String?
+    /// Whether the dial ever reached `.preparing`; disambiguates the
+    /// dial-deadline diagnostic. `queue`-confined.
     private var sawPreparing = false
 
     /// Whether this transport's `NWConnection` is counted in `FlowGauge`.
@@ -178,14 +135,14 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
             dialTimer.start()
             armDialDeadline()
 
-            let endpointHost = nwHost(fromIPLiteral: host) ?? .name(host, nil)
+            let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
             let connection = NWConnection(to: .hostPort(host: endpointHost, port: nwPort),
                                           using: Self.makeParameters())
             self.connection = connection
             flowCounted = true
             FlowGauge.incrementTCP()
             connection.stateUpdateHandler = { [weak self] newState in
-                self?.handleConnectState(newState)
+                self?.handleConnectionState(newState)
             }
             connection.start(queue: queue)
         }
@@ -201,7 +158,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
                     return
                 }
                 connection.send(content: data, completion: .contentProcessed { error in
-                    completion(error.map { mapNWError($0, op: .send) })
+                    completion(error.map { $0.transportError(op: .send) })
                 })
             case .failed(let error):
                 completion(error)
@@ -332,13 +289,12 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
         FlowGauge.decrementTCP()
     }
 
-    /// Arms the wall-clock dial backstop on `queue`. Bounds time spent in
-    /// `.waiting`, which `connectionTimeout` (an active-handshake bound) does not.
+    /// Arms the wall-clock dial backstop on `queue`. Catches dials that hang
+    /// without ever reporting `.waiting`/`.failed`.
     private func armDialDeadline() {
         let deadline = DispatchWorkItem { [weak self] in
             guard let self, case .setup = self.state else { return }
-            let lastState = self.lastWaitingDescription
-                ?? (self.sawPreparing ? "preparing, no error reported" : "no state updates")
+            let lastState = self.sawPreparing ? "preparing, no error reported" : "no state updates"
             let message = "Dial deadline exceeded (\(Self.dialDeadlineSeconds)s; last state: \(lastState))"
             logger.debug("[TCP] \(message): \(self.dialEndpointDescription)")
             self.finishConnectFailure(TransportError.posixError(.connect, errno: ETIMEDOUT))
@@ -352,37 +308,23 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
         dialDeadline?.cancel()
         dialDeadline = nil
     }
-
-    /// Handles connect-phase state changes. `NWConnection` resolves the name and
-    /// races addresses; a definitive failure or the `connectionTimeout` drives
-    /// `.failed`. Must run on `queue`.
-    private func handleConnectState(_ newState: NWConnection.State) {
+    
+    private func handleConnectionState(_ newState: NWConnection.State) {
         switch newState {
         case .ready:
             handleConnectReady()
         case .failed(let error):
             logger.debug("[TCP] connect failed: \(error)")
-            if isResourceExhaustionError(error) {
+            if error.isResourceExhaustion {
                 FlowExhaustionBrake.shared.recordExhaustion()
             }
-            finishConnectFailure(mapNWError(error, op: .connect))
+            finishConnectFailure(error.transportError(op: .connect))
         case .waiting(let error):
-            if isDefinitiveConnectError(error) {
-                logger.debug("[TCP] connect unreachable: \(error)")
-                finishConnectFailure(mapNWError(error, op: .connect))
-            } else if isResourceExhaustionError(error) {
-                // Fail fast so the brake engages; a lingering `.waiting`
-                // would hide the exhaustion until the dial deadline.
-                logger.debug("[TCP] connect resource exhaustion: \(dialEndpointDescription): \(error)")
+            if error.isResourceExhaustion {
                 FlowExhaustionBrake.shared.recordExhaustion()
-                finishConnectFailure(mapNWError(error, op: .connect))
-            } else {
-                let description = Self.describeConnectWaiting(error)
-                if description != lastWaitingDescription {
-                    logger.debug("[TCP] connect \(dialEndpointDescription) \(description)")
-                    lastWaitingDescription = description
-                }
             }
+            logger.debug("[TCP] connect \(dialEndpointDescription) \(Self.describeConnectWaiting(error)); failing fast")
+            finishConnectFailure(error.transportError(op: .connect))
         case .preparing:
             sawPreparing = true
         default:
@@ -454,7 +396,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
             guard let self else { return }
             switch newState {
             case .failed(let error):
-                self.failActive(with: mapNWError(error, op: .receive))
+                self.failActive(with: error.transportError(op: .receive))
             case .cancelled:
                 self.notifyTeardownComplete()
             default:
@@ -500,7 +442,7 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
 
         if let error {
             pendingReceiveCompletion = nil
-            completion(nil, true, mapNWError(error, op: .receive))
+            completion(nil, true, error.transportError(op: .receive))
             return
         }
 

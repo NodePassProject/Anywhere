@@ -359,6 +359,7 @@
 				Networking/Transport/FlowExhaustionBrake.swift,
 				Networking/Transport/FlowGauge.swift,
 				Networking/Transport/NWTCPTransport.swift,
+				Networking/Transport/NWTransportHelpers.swift,
 				Networking/Transport/NWUDPTransport.swift,
 				Networking/Transport/QUICDatagramCarrier.swift,
 				Networking/Transport/RawTransport.swift,

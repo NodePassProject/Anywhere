@@ -10,11 +10,6 @@ import Network
 import Darwin
 import Dispatch
 
-// MARK: - QUICDatagramCarrier
-
-/// The direct UDP carrier for ngtcp2, backed by a connected `NWConnection.udp`.
-/// I/O runs inline on `queue` (ngtcp2 is single-threaded). Path identity is owned
-/// by `QUICConnection`, so this 4-tuple is cosmetic — `connect` fills a family `ANY`.
 nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     private typealias QUICError = QUICConnection.QUICError
@@ -112,17 +107,17 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 onReady()
             }
         case .failed(let error):
-            if isResourceExhaustionError(error) {
+            if error.isResourceExhaustion {
                 FlowExhaustionBrake.shared.recordExhaustion()
             }
             deliverError(error)
         case .waiting(let error):
-            if isResourceExhaustionError(error) {
-                // Fail fast so the brake engages; ngtcp2 gets the errno and
-                // tears down instead of waiting out its handshake timers.
+            if error.isResourceExhaustion {
                 FlowExhaustionBrake.shared.recordExhaustion()
-                deliverError(error)
-            } else if isDefinitiveConnectError(error) {
+            }
+            if ready, let onPathDown {
+                onPathDown()
+            } else {
                 deliverError(error)
             }
         default:

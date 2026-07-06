@@ -11,12 +11,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NWUDPTransport")
 
-// MARK: - NWUDPTransport
-
-/// UDP transport over a connected `NWConnection`. All callbacks and state
-/// transitions run on the internal `queue`; `send`, `startReceiving`, and `cancel`
-/// are safe from any thread. Datagrams arriving before `startReceiving` arms a
-/// handler are buffered (bounded) and flushed when it does.
 nonisolated final class NWUDPTransport: @unchecked Sendable {
 
     enum State {
@@ -107,7 +101,7 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
 
             // NWConnection resolves the name (or uses the IP literal directly),
             // adapting to network changes on its own.
-            let endpointHost = nwHost(fromIPLiteral: host) ?? .name(host, nil)
+            let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
             let connection = NWConnection(host: endpointHost, port: nwPort, using: .udp)
             self.connection = connection
             self.flowCounted = true
@@ -128,26 +122,22 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
                     self.armReceiveLoop(connection)
                     self.fireConnectCompletion(nil)
                 case .failed(let error):
-                    if isResourceExhaustionError(error) {
+                    if error.isResourceExhaustion {
                         FlowExhaustionBrake.shared.recordExhaustion()
                     }
-                    self.fireConnectCompletion(mapNWError(error, op: .connect))
+                    self.fireConnectCompletion(error.transportError(op: .connect))
                     // Post-ready failure: notify the receive side directly —
                     // `discard` nils `connection`, so in-flight receive
                     // callbacks bail on the identity guard and can't surface it.
-                    self.surfaceTerminalError(mapNWError(error, op: .receive))
+                    self.surfaceTerminalError(error.transportError(op: .receive))
                     self.discard(connection)
                 case .waiting(let error):
-                    // Resource exhaustion fails fast so the flow-exhaustion
-                    // brake engages; a lingering `.waiting` would hide it.
-                    if isResourceExhaustionError(error) {
+                    if error.isResourceExhaustion {
                         FlowExhaustionBrake.shared.recordExhaustion()
-                        self.fireConnectCompletion(mapNWError(error, op: .connect))
-                        self.discard(connection)
-                    } else if isDefinitiveConnectError(error) {
-                        self.fireConnectCompletion(mapNWError(error, op: .connect))
-                        self.discard(connection)
                     }
+                    self.fireConnectCompletion(error.transportError(op: .connect))
+                    self.surfaceTerminalError(error.transportError(op: .receive))
+                    self.discard(connection)
                 default:
                     break
                 }
@@ -197,13 +187,15 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
     }
 
     // MARK: - Receive
-
+    
     /// Handler fires on `handlerQueue`, or `queue` if nil. `errorHandler` fires
     /// once on a terminal receive failure; the loop then stops, so callers must
     /// treat it as terminal and close the flow.
-    func startReceiving(queue handlerQueue: DispatchQueue? = nil,
-                        handler: @escaping (Data) -> Void,
-                        errorHandler: ((Error) -> Void)? = nil) {
+    func startReceiving(
+        queue handlerQueue: DispatchQueue? = nil,
+        handler: @escaping (Data) -> Void,
+        errorHandler: ((Error) -> Void)? = nil
+    ) {
         queue.async { [weak self] in
             guard let self else { return }
             self.receiveHandler = handler
@@ -269,7 +261,7 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
     /// Surfaces a terminal receive error once, then stops the loop. Must run on
     /// `queue`.
     private func handleReceiveError(_ error: NWError) {
-        surfaceTerminalError(mapNWError(error, op: .receive))
+        surfaceTerminalError(error.transportError(op: .receive))
     }
 
     /// Delivers a terminal error to the receive-error handler at most once, then disarms
@@ -302,7 +294,7 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
                 return
             }
             connection.send(content: data, completion: .contentProcessed { error in
-                completion(error.map { mapNWError($0, op: .send) })
+                completion(error.map { $0.transportError(op: .send) })
             })
         }
     }
