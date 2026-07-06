@@ -178,6 +178,13 @@ class TCPConnection {
             lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.sniffDeadline, execute: deadline)
         }
     }
+    
+    deinit {
+        guard pendingAdmissionCounted else { return }
+        pendingAdmissionCounted = false
+        FlowGauge.decrementPendingTCP()
+        logger.error("[TCP] Connection deallocated with its admission still counted — teardown never ran. Recovered the FlowGauge count in deinit; a teardown path has regressed.")
+    }
 
     private func cancelSniffDeadline() {
         sniffDeadline?.cancel()

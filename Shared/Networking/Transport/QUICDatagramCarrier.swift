@@ -10,6 +10,8 @@ import Network
 import Darwin
 import Dispatch
 
+nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
+
 nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     private typealias QUICError = QUICConnection.QUICError
@@ -43,6 +45,13 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     init(queue: DispatchQueue) {
         self.queue = queue
+    }
+    
+    deinit {
+        guard let connection else { return }
+        FlowGauge.decrementUDP()
+        connection.cancel()
+        logger.error("[QUIC] Datagram carrier deallocated without close() — recovered the FlowGauge count and socket in deinit; a close() path has regressed.")
     }
 
     /// The egress interface type in use, or nil before `.ready`. Lets the owner

@@ -31,7 +31,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
         super.init()
     }
 
-    override var isConnected: Bool { transport.isReady }
+    override var isConnected: Bool { transport.isTransportReady }
     override var deliversDatagrams: Bool { true }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {

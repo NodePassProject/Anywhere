@@ -25,6 +25,19 @@ extension NWError {
         }
     }
 
+    /// Diagnostic description of a `.waiting` state report, decoding the
+    /// underlying errno/DNS code.
+    nonisolated var connectWaitingDescription: String {
+        switch self {
+        case .posix(let code):
+            return "waiting(errno \(code.rawValue): \(String(cString: strerror(code.rawValue))))"
+        case .dns(let code):
+            return "waiting(dns \(code))"
+        default:
+            return "waiting(\(localizedDescription))"
+        }
+    }
+
     /// Whether this error signals local resource exhaustion (memory, buffers,
     /// or file descriptors).
     nonisolated var isResourceExhaustion: Bool {
