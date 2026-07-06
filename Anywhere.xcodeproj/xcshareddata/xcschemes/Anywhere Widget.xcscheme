@@ -77,6 +77,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "CB71CDC22F837D11002B9E1D"
             BuildableName = "Anywhere Widget.appex"
+            BlueprintName = "Anywhere Widget"
             ReferencedContainer = "container:Anywhere.xcodeproj">
          </BuildableReference>
       </RemoteRunnable>

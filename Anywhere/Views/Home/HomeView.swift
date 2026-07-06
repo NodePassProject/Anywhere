@@ -14,17 +14,19 @@ struct HomeView: View {
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
-
-    @Namespace private var namespace
-
-    @State private var showingAddSheet = false
-    @State private var showingManualAddSheet = false
-
-    @State private var connectionEffectsEnabled = false
-
+    
     private static let horizontalPadding: CGFloat = 20
     private static let paneSpacing: CGFloat = 20
     private static let minControlPaneWidth: CGFloat = 320
+
+    @Namespace private var namespace
+
+    @State private var containerSize = CGSize.zero
+    
+    @State private var connectionEffectsEnabled = false
+    
+    @State private var showingAddSheet = false
+    @State private var showingManualAddSheet = false
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -43,21 +45,23 @@ struct HomeView: View {
             BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
 
-            GeometryReader { geometry in
-                let contentWidth = geometry.size.width - 2 * Self.horizontalPadding
-                Group {
-                    if showsDetail && Self.allowsSideBySide(contentWidth: contentWidth) {
-                        sideBySideLayout(geometry: geometry, contentWidth: contentWidth)
-                    } else {
-                        stackedLayout
-                    }
-                }
-                .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
-                .sensoryFeedback(trigger: isConnected) { _, _ in
-                    guard connectionEffectsEnabled else { return nil }
-                    return .impact
+            Group {
+                if showsDetail && Self.allowsSideBySide(contentWidth: contentWidth) {
+                    sideBySideLayout
+                } else {
+                    stackedLayout
                 }
             }
+            .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
+            .sensoryFeedback(trigger: isConnected) { _, _ in
+                guard connectionEffectsEnabled else { return nil }
+                return .impact
+            }
+        }
+        .onGeometryChange(for: CGSize.self) { proxy in
+            proxy.size
+        } action: { size in
+            containerSize = size
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -84,11 +88,15 @@ struct HomeView: View {
     }
 
     // MARK: - Layouts
-    
+
+    private var contentWidth: CGFloat {
+        containerSize.width - 2 * Self.horizontalPadding
+    }
+
     private static func allowsSideBySide(contentWidth: CGFloat) -> Bool {
         StatCardSize.columnCount(fitting: contentWidth) > ConnectionStatsView.maxColumnCount
     }
-    
+
     private var stackedLayout: some View {
         DetailRevealScrollView(revealsDetail: showsDetail) {
             connectionControls
@@ -100,7 +108,7 @@ struct HomeView: View {
         }
     }
     
-    private func sideBySideLayout(geometry: GeometryProxy, contentWidth: CGFloat) -> some View {
+    private var sideBySideLayout: some View {
         // Give the stats pane what a fully grown grid needs, but never squeeze
         // the controls pane below its minimum width.
         let detailWidth = min(
@@ -113,14 +121,14 @@ struct HomeView: View {
         return HStack(spacing: Self.paneSpacing) {
             ScrollView {
                 connectionControls
-                    .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+                    .frame(maxWidth: .infinity, minHeight: containerSize.height)
             }
             .scrollBounceBehavior(.basedOnSize, axes: .vertical)
 
             ScrollView {
                 ConnectionStatsView()
                     .padding(.vertical, 16)
-                    .frame(minHeight: geometry.size.height)
+                    .frame(minHeight: containerSize.height)
             }
             .frame(width: detailWidth)
             .scrollBounceBehavior(.basedOnSize, axes: .vertical)
@@ -397,4 +405,29 @@ private struct ProminentCapsule<Content: View>: View {
                 )
         }
     }
+}
+
+// MARK: - Previews
+
+#Preview("Connected") {
+    let settings = AppSettings.shared
+    settings.experimentalEnabled = true
+    
+    let viewModel = VPNViewModel()
+    viewModel.selectedConfiguration = ProxyConfiguration(
+        name: "🇺🇸 Los Angeles",
+        serverAddress: "203.0.113.10",
+        serverPort: 443,
+        outbound: .socks5(username: nil, password: nil)
+    )
+    viewModel.vpnStatus = .connected
+
+    return HomeView()
+        .environment(settings)
+        .environment(viewModel)
+        .environment(ConfigurationStore.shared)
+        .environment(ChainStore.shared)
+        .environment(SubscriptionStore.shared)
+        .environment(ConnectionStatsModel.previewSeeded())
+        .colorScheme(.dark)
 }

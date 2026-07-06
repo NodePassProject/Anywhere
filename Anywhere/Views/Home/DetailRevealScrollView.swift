@@ -12,9 +12,11 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
     private let fold: Fold
     private let detail: Detail
 
+    @State private var viewport = DetailRevealViewport()
     @State private var metrics = DetailRevealMetrics()
     @State private var scrollPosition = ScrollPosition()
     @State private var snapFeedbackCount = 0
+    @State private var isSettledOnDetail = false
 
     init(
         revealsDetail: Bool,
@@ -27,47 +29,56 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollView {
-                VStack(spacing: 0) {
-                    fold
-                        .frame(maxWidth: .infinity, minHeight: geometry.size.height)
-                        .overlay(alignment: .bottom) {
-                            if revealsDetail {
-                                PullUpIndicator()
-                                    .transition(.blurReplace)
-                            }
+        ScrollView {
+            VStack(spacing: 0) {
+                fold
+                    .frame(maxWidth: .infinity, minHeight: viewport.height)
+                    .overlay(alignment: .bottom) {
+                        if revealsDetail && !isSettledOnDetail {
+                            PullUpIndicator()
+                                .transition(.blurReplace)
                         }
-                        .padding(.bottom, geometry.safeAreaInsets.bottom)
-                        .onGeometryChange(for: CGRect.self) { proxy in
-                            proxy.frame(in: .scrollView)
-                        } action: { frame in
-                            metrics.foldHeight = frame.height
-                            metrics.offset = -frame.minY
-                            if frame.minY >= -DetailRevealSnapBehavior.boundaryTolerance {
-                                metrics.settledPage = .fold
-                            }
-                        }
-                        .id(DetailRevealPage.fold)
-
-                    if revealsDetail {
-                        detail
-                            .transition(.blurReplace)
-                            .id(DetailRevealPage.detail)
                     }
+                    .padding(.bottom, viewport.bottomInset)
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .scrollView)
+                    } action: { frame in
+                        metrics.foldHeight = frame.height
+                        metrics.offset = -frame.minY
+                        if frame.minY >= -DetailRevealSnapBehavior.boundaryTolerance {
+                            metrics.settledPage = .fold
+                            if isSettledOnDetail {
+                                withAnimation { isSettledOnDetail = false }
+                            }
+                        }
+                    }
+                    .id(DetailRevealPage.fold)
+
+                if revealsDetail {
+                    detail
+                        .transition(.blurReplace)
+                        .id(DetailRevealPage.detail)
                 }
             }
-            .scrollIndicators(.never)
-            .scrollTargetBehavior(DetailRevealSnapBehavior(
-                metrics: metrics,
-                isEnabled: revealsDetail
-            ))
-            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-            .scrollPosition($scrollPosition)
-            .onScrollPhaseChange { _, newPhase in
-                handlePhaseChange(newPhase)
-            }
-            .sensoryFeedback(.impact(weight: .light), trigger: snapFeedbackCount)
+        }
+        .scrollIndicators(.never)
+        .scrollTargetBehavior(DetailRevealSnapBehavior(
+            metrics: metrics,
+            isEnabled: revealsDetail
+        ))
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+        .scrollPosition($scrollPosition)
+        .onScrollPhaseChange { _, newPhase in
+            handlePhaseChange(newPhase)
+        }
+        .sensoryFeedback(.impact(weight: .light), trigger: snapFeedbackCount)
+        .onGeometryChange(for: DetailRevealViewport.self) { proxy in
+            DetailRevealViewport(
+                height: proxy.size.height,
+                bottomInset: proxy.safeAreaInsets.bottom
+            )
+        } action: { newViewport in
+            viewport = newViewport
         }
     }
 
@@ -75,7 +86,9 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
         switch phase {
         case .tracking, .interacting:
             metrics.pendingSnap = nil
+            metrics.snapInFlight = false
         case .decelerating, .idle:
+            if phase == .idle { metrics.snapInFlight = false }
             guard let page = metrics.pendingSnap else { return }
             metrics.pendingSnap = nil
             let isPageChange = page != metrics.settledPage
@@ -87,13 +100,22 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
     }
 
     private func snap(to page: DetailRevealPage, playFeedback: Bool) {
+        metrics.snapInFlight = true
+        withAnimation(.snappy(duration: 0.25, extraBounce: 0)) {
+            isSettledOnDetail = page == .detail
+        }
         Task { @MainActor in
             if playFeedback { snapFeedbackCount += 1 }
-            withAnimation(.snappy(duration: 0.3, extraBounce: 0)) {
-                scrollPosition.scrollTo(id: page, anchor: .top)
+            withAnimation(.snappy(duration: 0.25, extraBounce: 0)) {
+                scrollPosition.scrollTo(y: page == .detail ? metrics.commitOffset : 0)
             }
         }
     }
+}
+
+private nonisolated struct DetailRevealViewport: Equatable {
+    var height: CGFloat = 0
+    var bottomInset: CGFloat = 0
 }
 
 // MARK: - Snapping
@@ -112,6 +134,12 @@ private final class DetailRevealMetrics {
     var settledPage: DetailRevealPage = .fold
     /// Page picked for the gesture in flight; consumed when the finger lifts.
     var pendingSnap: DetailRevealPage?
+    /// Offset of the detail page boundary, stashed by the snap behavior so the
+    /// explicit snap animation can target it.
+    var commitOffset: CGFloat = 0
+    /// True while the explicit snap animation is driving the scroll; the snap
+    /// behavior stays passive so the two never fight.
+    var snapInFlight = false
 }
 
 private struct DetailRevealSnapBehavior: ScrollTargetBehavior {
@@ -122,7 +150,7 @@ private struct DetailRevealSnapBehavior: ScrollTargetBehavior {
     let isEnabled: Bool
 
     func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
-        guard isEnabled else { return }
+        guard isEnabled, !metrics.snapInFlight else { return }
 
         // Offset at which the detail page is flush with the top, capped by how
         // far the content can actually scroll.
@@ -130,6 +158,7 @@ private struct DetailRevealSnapBehavior: ScrollTargetBehavior {
             metrics.foldHeight,
             context.contentSize.height - context.containerSize.height
         )
+        metrics.commitOffset = max(commitOffset, 0)
         guard commitOffset > 0 else {
             metrics.pendingSnap = nil
             return
@@ -159,7 +188,10 @@ private struct DetailRevealSnapBehavior: ScrollTargetBehavior {
         }
 
         let page: DetailRevealPage = projected >= commitOffset / 2 ? .detail : .fold
-        target.rect.origin.y = page == .detail ? commitOffset : 0
+        // Freeze the native deceleration where it is; the explicit snap
+        // animation fired on the next phase change is the only thing that
+        // moves the scroll from here.
+        target.rect.origin.y = metrics.offset
         metrics.pendingSnap = page
     }
 }
