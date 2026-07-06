@@ -409,6 +409,7 @@ private struct ProminentCapsule<Content: View>: View {
 
 // MARK: - Previews
 
+#if DEBUG
 #Preview("Connected") {
     let settings = AppSettings.shared
     settings.experimentalEnabled = true
@@ -431,3 +432,4 @@ private struct ProminentCapsule<Content: View>: View {
         .environment(ConnectionStatsModel.previewSeeded())
         .colorScheme(.dark)
 }
+#endif
