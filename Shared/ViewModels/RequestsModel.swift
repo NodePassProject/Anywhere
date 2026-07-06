@@ -15,9 +15,16 @@ class RequestsModel {
     static let shared = RequestsModel()
 
     struct Entry: Identifiable, Equatable {
+        enum `Protocol`: String {
+            case tcp
+            case udp
+            case quic
+            case http
+        }
+        
         let id: UUID
         let timestamp: Date
-        let protocolName: String
+        let `protocol`: `Protocol`
         let host: String
         let port: UInt16
         let routeTarget: RouteTarget
@@ -72,10 +79,23 @@ class RequestsModel {
               let payload = try? JSONDecoder().decode(RequestsResponse.self, from: response) else { return }
 
         self.requests = payload.requests.map { entry in
-            Entry(
+            var `protocol`: Entry.`Protocol`
+            switch entry.protocol {
+            case .tcp:
+                `protocol` = .tcp
+            case .udp:
+                if entry.port == 443 {
+                    `protocol` = .quic
+                } else {
+                    `protocol` = .udp
+                }
+            case .http:
+                `protocol` = .http
+            }
+            return Entry(
                 id: entry.id,
                 timestamp: Date(timeIntervalSinceReferenceDate: entry.timestamp),
-                protocolName: entry.protocolName,
+                protocol: `protocol`,
                 host: entry.host,
                 port: entry.port,
                 routeTarget: entry.routeTarget,

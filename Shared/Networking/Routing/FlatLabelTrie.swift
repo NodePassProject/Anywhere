@@ -17,7 +17,7 @@ import Foundation
 // scan), which is more than fast enough at this scale and keeps the structure
 // tiny. Value type with COW arrays, so a frozen trie is safe for concurrent reads.
 
-fileprivate struct LOUDSBitVector {
+nonisolated fileprivate struct LOUDSBitVector {
     private(set) var words: ContiguousArray<UInt64> = []
     private(set) var rank: ContiguousArray<UInt32> = []      // rank[w] = #ones in words[0..<w]
     private(set) var nbits: Int = 0
@@ -98,7 +98,7 @@ fileprivate struct LOUDSBitVector {
 // the mostly-nil `[Payload?]` array (payloads are kept only at terminals),
 // roughly halving the footprint for large suffix sets while making lookups
 // faster than the old linear edge scan at high fan-out (e.g. many `*.com` rules).
-struct FlatLabelTrie<Payload> {
+nonisolated struct FlatLabelTrie<Payload> {
 
     // MARK: - Build state (dropped on freeze)
 
@@ -263,7 +263,7 @@ struct FlatLabelTrie<Payload> {
 // then BFS-flattens that arena into the LOUDS arrays. Peak memory tracks output,
 // not input. A given trie uses one path or the other; `insert`/`freeze` stay for MITM.
 
-extension FlatLabelTrie {
+nonisolated extension FlatLabelTrie {
     /// `offset`/`length` delimit the suffix's lowercased UTF-8 bytes in the
     /// `buildBulk` buffer; `order` (collection index) breaks ties between identical
     /// suffixes so the last-collected one wins, matching `insert`'s overwrite.
@@ -456,3 +456,8 @@ extension FlatLabelTrie {
         }
     }
 }
+
+// A frozen trie is immutable (`insert`/`buildBulk` trap or no-op after
+// `frozen` flips) and its scratch `BuildNode` tree is dropped, so sharing it
+// across isolation domains is safe; freeze before crossing.
+nonisolated extension FlatLabelTrie: @unchecked Sendable where Payload: Sendable {}

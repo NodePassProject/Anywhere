@@ -7850,6 +7850,9 @@
         }
       }
     },
+    "HTTP" : {
+      "shouldTranslate" : false
+    },
     "HTTP Mask" : {
       "comment" : "HTTP Mask for Sudoku protocol",
       "shouldTranslate" : false
@@ -12436,6 +12439,9 @@
           }
         }
       }
+    },
+    "QUIC" : {
+      "shouldTranslate" : false
     },
     "QUIC connections through proxies may cause instability and increased wait time." : {
       "localizations" : {

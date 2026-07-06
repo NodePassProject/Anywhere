@@ -184,7 +184,7 @@ extension TunnelStack {
                 case .direct:
                     routeTarget = .direct
                 case .reject:
-                    requestLog.record(protocolName: "UDP", host: dstIPString, port: datagram.dstPort, routeTarget: .reject)
+                    requestLog.record(protocol: .udp, host: dstIPString, port: datagram.dstPort, routeTarget: .reject)
                     logger.debug("[UDP] IP rejected by routing rule: \(dstIPString):\(datagram.dstPort)")
                     sendICMPPortUnreachable(
                         srcIP: srcIPData,
@@ -222,7 +222,7 @@ extension TunnelStack {
                 break
             }
         case .drop(let domain):
-            requestLog.record(protocolName: "UDP", host: domain, port: datagram.dstPort, routeTarget: .reject)
+            requestLog.record(protocol: .udp, host: domain, port: datagram.dstPort, routeTarget: .reject)
             sendICMPPortUnreachable(
                 srcIP: srcIPData,
                 srcPort: datagram.srcPort,
@@ -285,13 +285,7 @@ extension TunnelStack {
             logger.info("[UDP] flow pressure recovered; admitting new flows")
         }
 
-        requestLog.record(
-            protocolName: "UDP",
-            host: dstHost,
-            port: datagram.dstPort,
-            routeTarget: routeTarget,
-            viaDefault: viaDefault
-        )
+        requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: viaDefault)
 
         let flow = UDPFlow(
             flowKey: flowKey,

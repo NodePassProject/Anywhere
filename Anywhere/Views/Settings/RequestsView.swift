@@ -36,8 +36,14 @@ struct RequestsView: View {
                     }
                 }
             }
-            .onAppear { requestsModel.startPolling() }
-            .onDisappear { requestsModel.stopPolling() }
+            .onAppear {
+                requestsModel.startPolling()
+                RouteAttributor.shared.startReplaying()
+            }
+            .onDisappear {
+                requestsModel.stopPolling()
+                RouteAttributor.shared.stopReplaying()
+            }
     }
 
     @ViewBuilder
@@ -63,16 +69,16 @@ struct RequestsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         HStack(spacing: 4) {
-                            Text(entry.protocolName)
-                            Text("·")
-                            Text(label(for: entry))
-                            if let name = routeName(for: entry) {
-                                Text("·")
-                                Text(name).lineLimit(1).truncationMode(.tail)
-                            }
+                            TagBadge(text: label(for: entry.protocol), color: labelColor(for: entry.protocol))
+                            TagBadge(text: label(for: entry), color: labelColor(for: entry))
                         }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        if let detail = detailLine(for: entry) {
+                            Text(detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     }
                 }
                 .contextMenu {
@@ -112,6 +118,15 @@ struct RequestsView: View {
         case .proxy: entry.viaDefault ? "info.circle.fill" : "arrow.trianglehead.turn.up.right.circle.fill"
         }
     }
+    
+    private func label(for protocol: RequestsModel.Entry.`Protocol`) -> String {
+        switch `protocol` {
+        case .tcp: String(localized: "TCP")
+        case .udp: String(localized: "UDP")
+        case .quic: String(localized: "QUIC")
+        case .http: String(localized: "HTTP")
+        }
+    }
 
     private func label(for entry: RequestsModel.Entry) -> String {
         switch entry.routeTarget {
@@ -124,5 +139,30 @@ struct RequestsView: View {
     private func routeName(for entry: RequestsModel.Entry) -> String? {
         guard case .proxy = entry.routeTarget else { return nil }
         return entry.routeTarget.displayName(configStore: configStore, chainStore: chainStore)
+    }
+    
+    private func labelColor(for protocol: RequestsModel.Entry.`Protocol`) -> Color {
+        switch `protocol` {
+        case .tcp: .blue
+        case .udp: .pink
+        case .quic: .mint
+        case .http: .gray
+        }
+    }
+
+    private func labelColor(for entry: RequestsModel.Entry) -> Color {
+        switch entry.routeTarget {
+        case .direct: .green
+        case .reject: .red
+        case .proxy: entry.viaDefault ? .gray : .purple
+        }
+    }
+    
+    private func detailLine(for entry: RequestsModel.Entry) -> String? {
+        let ruleSetName = RouteAttributor.shared.ruleSetName(
+            forHost: entry.host, target: entry.routeTarget, viaDefault: entry.viaDefault
+        )
+        let parts = [routeName(for: entry), ruleSetName].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }

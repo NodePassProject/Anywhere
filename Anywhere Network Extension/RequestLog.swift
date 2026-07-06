@@ -16,7 +16,7 @@ final class RequestLog {
 
     /// Records one routing decision; `host` is the domain if known, else the IP literal.
     func record(
-        protocolName: String,
+        protocol: TunnelRequestProtocol,
         host: String,
         port: UInt16,
         routeTarget: RouteTarget,
@@ -25,7 +25,7 @@ final class RequestLog {
         let now = CFAbsoluteTimeGetCurrent()
         let entry = Entry(
             timestamp: now,
-            protocolName: protocolName,
+            protocol: `protocol`,
             host: host,
             port: port,
             routeTarget: routeTarget,

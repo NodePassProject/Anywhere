@@ -150,7 +150,6 @@ extension LatencyTestResponse {
 
 struct TunnelLogEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
-    /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).
     var timestamp: TimeInterval
     var level: TunnelLogLevel
     var message: String
@@ -164,14 +163,16 @@ enum TunnelLogLevel: String, Codable, Sendable, Hashable {
 
 struct TunnelRequestEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
-    /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).
     var timestamp: TimeInterval
-    /// Transport: "TCP" or "UDP".
-    var protocolName: String
-    /// Destination host: resolved domain when known (fake-IP/SNI), else literal IP.
+    var `protocol`: TunnelRequestProtocol
     var host: String
     var port: UInt16
     var routeTarget: RouteTarget
-    /// True when no rule matched and the default outbound handled this connection.
     var viaDefault: Bool
+}
+
+enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
+    case tcp
+    case udp
+    case http
 }

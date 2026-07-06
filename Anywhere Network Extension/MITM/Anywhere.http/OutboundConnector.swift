@@ -55,9 +55,7 @@ enum OutboundConnector {
         // The only place script `Anywhere.http` fetches reach the Requests log — they're the
         // extension's own outbound, not captured device traffic. A pooled HTTP/2 connection
         // logs once per dial, shared across its streams.
-        TunnelStack.shared?.requestLog.record(
-            protocolName: "HTTP", host: host, port: port, routeTarget: route, viaDefault: viaDefault
-        )
+        TunnelStack.shared?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault)
         switch route {
         case .reject:
             queue.async { completion(.failure(ConnectError.rejected(host))) }

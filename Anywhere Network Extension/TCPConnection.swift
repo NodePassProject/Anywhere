@@ -519,10 +519,10 @@ class TCPConnection {
         switch action {
         case .direct:
             routeTarget = .direct
-            stack.requestLog.record(protocolName: "TCP", host: sni, port: dstPort, routeTarget: .direct)
+            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .direct)
         case .reject:
             routeTarget = .reject
-            stack.requestLog.record(protocolName: "TCP", host: sni, port: dstPort, routeTarget: .reject)
+            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject)
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectWithTLSAlert()
         case .proxy(let id):
@@ -533,7 +533,7 @@ class TCPConnection {
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")
             }
-            stack.requestLog.record(protocolName: "TCP", host: sni, port: dstPort, routeTarget: .proxy(id))
+            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .proxy(id))
         }
     }
 
@@ -844,10 +844,7 @@ class TCPConnection {
             routeTarget = target
             self.configuration = configuration
         }
-        TunnelStack.shared?.requestLog.record(
-            protocolName: "TCP", host: host, port: port,
-            routeTarget: routeTarget, viaDefault: resolved.viaDefault
-        )
+        TunnelStack.shared?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: routeTarget, viaDefault: resolved.viaDefault)
         return resolved.route
     }
     
