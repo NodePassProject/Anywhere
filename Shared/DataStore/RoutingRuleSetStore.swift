@@ -295,9 +295,13 @@ class RoutingRuleSetStore {
         let snapshot = ruleSets
         let customSnapshot = customRuleSets
         
+        let defaultTargetId = (AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId())?.uuidString
+
+        var idsToResolve = snapshot.compactMap(\.assignedConfigurationId)
+        if let defaultTargetId { idsToResolve.append(defaultTargetId) }
         var resolvedTargets: [String: ProxyConfiguration] = [:]
-        for ruleSet in snapshot {
-            guard let assignedId = ruleSet.assignedConfigurationId,
+        for assignedId in idsToResolve {
+            guard resolvedTargets[assignedId] == nil,
                   let id = UUID(uuidString: assignedId) else { continue }
             if let direct = configurations.first(where: { $0.id == id }) {
                 resolvedTargets[assignedId] = direct
@@ -312,7 +316,7 @@ class RoutingRuleSetStore {
             var configurationsById: [String: ProxyConfiguration] = [:]
 
             for ruleSet in snapshot {
-                guard let assignedId = ruleSet.assignedConfigurationId else { continue }
+                guard let assignedId = ruleSet.assignedConfigurationId ?? defaultTargetId else { continue }
 
                 let rules: [RoutingRule]
                 if ruleSet.isCustom,

@@ -25,9 +25,8 @@ class VPNViewModel {
                 selectedChainId = nil
                 AWCore.setSelectedChainId(nil)
                 AWCore.setSelectedConfigurationId(selectedConfiguration?.id)
+                RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
             }
-            // Routing matchers are selection-independent, so no routingChanged is
-            // posted; the NE picks up the new default outbound via setConfiguration IPC.
             if vpnStatus == .connected, let selectedConfiguration {
                 sendConfigurationToTunnel(selectedConfiguration)
             }
@@ -147,7 +146,7 @@ class VPNViewModel {
         selectedChainId = chain.id
         AWCore.setSelectedChainId(chain.id)
         AWCore.setSelectedConfigurationId(nil)
-        // Routing matchers are unaffected by the default selection, so no routingChanged.
+        RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
         withoutSelectionPersistence { selectedConfiguration = resolved }
     }
 
