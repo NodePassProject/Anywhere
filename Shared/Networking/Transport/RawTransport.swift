@@ -20,6 +20,16 @@ protocol RawTransport: AnyObject {
     func receive(completion: @escaping (Data?, Bool, Error?) -> Void)
 
     func forceCancel()
+
+    /// Abortive teardown (RST rather than graceful close) for error paths —
+    /// a graceful close to a dead peer pins the kernel socket in FIN_WAIT.
+    func forceAbort()
+}
+
+extension RawTransport {
+    /// Layered transports fall back to their ordinary teardown; only the
+    /// socket-owning base transport distinguishes abortive close.
+    func forceAbort() { forceCancel() }
 }
 
 // MARK: - TransportError

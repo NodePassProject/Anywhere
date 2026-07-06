@@ -70,6 +70,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
         let connection = NWConnection(to: endpoint, using: .udp)
         self.connection = connection
+        // One kernel socket per carrier; `close()` balances the gauge.
+        FlowGauge.incrementUDP()
         connection.stateUpdateHandler = { [weak self] state in
             self?.handleState(state, for: connection)
         }
@@ -100,6 +102,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         switch state {
         case .ready:
             ready = true
+            FlowExhaustionBrake.shared.recordRecovery()
             if packetHandler != nil, !receiving {
                 receiving = true
                 armReceiving(connection)
@@ -109,9 +112,19 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 onReady()
             }
         case .failed(let error):
+            if isResourceExhaustionError(error) {
+                FlowExhaustionBrake.shared.recordExhaustion()
+            }
             deliverError(error)
         case .waiting(let error):
-            if isDefinitiveConnectError(error) { deliverError(error) }
+            if isResourceExhaustionError(error) {
+                // Fail fast so the brake engages; ngtcp2 gets the errno and
+                // tears down instead of waiting out its handshake timers.
+                FlowExhaustionBrake.shared.recordExhaustion()
+                deliverError(error)
+            } else if isDefinitiveConnectError(error) {
+                deliverError(error)
+            }
         default:
             break
         }
@@ -188,6 +201,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     func close() {
         if let connection {
             self.connection = nil
+            FlowGauge.decrementUDP()
             connection.stateUpdateHandler = nil
             connection.viabilityUpdateHandler = nil
             connection.betterPathUpdateHandler = nil

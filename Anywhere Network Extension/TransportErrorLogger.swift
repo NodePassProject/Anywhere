@@ -122,16 +122,20 @@ nonisolated enum TransportErrorLogger {
 
 // MARK: - DialDiagnostics
 
-/// Dial-pressure snapshots appended to TCP connect-failure logs.
+/// Kernel-flow-ledger snapshots appended to TCP connect-failure logs.
 nonisolated enum DialDiagnostics {
 
-    /// E.g. `dials=37 dialing=24 queued=13 blocked=8 tcp=124`. Must run on
-    /// lwipQueue: the PCB count and backoff cache are lwipQueue-confined.
+    /// E.g. `flows=312/384 pending=6 udp=96 lwip=205 brake=12s`. Must run on
+    /// lwipQueue (the PCB count is lwipQueue-confined).
     static func snapshot() -> String {
-        let gate = DialGate.stats
-        return "dials=\(DialGauge.inFlight) dialing=\(gate.active) queued=\(gate.queued) "
-            + "blocked=\(DialBackoffCache.shared.blockedCount) "
-            + "tcp=\(Int(lwip_bridge_active_tcp_count()))"
+        var parts = "flows=\(FlowGauge.live)/\(TunnelLimits.flowBudget) "
+            + "pending=\(FlowGauge.pendingTCP) udp=\(FlowGauge.liveUDP) "
+            + "lwip=\(Int(lwip_bridge_active_tcp_count()))"
+        let braked = FlowExhaustionBrake.shared.remainingSeconds
+        if braked > 0 {
+            parts += " brake=\(Int(braked.rounded(.up)))s"
+        }
+        return parts
     }
 }
 

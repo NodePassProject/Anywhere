@@ -356,6 +356,8 @@
 				Networking/Protocols/VLESS/XHTTP/XHTTPH3RequestStream.swift,
 				Networking/Protocols/VLESS/XHTTP/XHTTPProxyConnection.swift,
 				Networking/RuleResolver.swift,
+				Networking/Transport/FlowExhaustionBrake.swift,
+				Networking/Transport/FlowGauge.swift,
 				Networking/Transport/NWTCPTransport.swift,
 				Networking/Transport/NWUDPTransport.swift,
 				Networking/Transport/QUICDatagramCarrier.swift,

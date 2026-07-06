@@ -22,26 +22,55 @@ extension TunnelStack {
         }
     }
 
-    /// Caps ``udpFlows`` by evicting the flow with the smallest idle deadline —
+    /// The UDP flow cap in effect: shrinks under kernel flow pressure so a
+    /// UDP-heavy swarm sheds instead of pinning the whole budget. Enter/exit
+    /// watermarks differ (hysteresis). Run on ``udpQueue``.
+    func currentUDPFlowCap() -> Int {
+        let load = FlowGauge.admissionLoad
+        if udpPressureShedding {
+            if load < TunnelLimits.flowPressureExitWatermark {
+                udpPressureShedding = false
+                return TunnelLimits.udpMaxFlows
+            }
+            return TunnelLimits.udpMaxFlowsUnderPressure
+        }
+        if load >= TunnelLimits.flowPressureWatermark {
+            udpPressureShedding = true
+            return TunnelLimits.udpMaxFlowsUnderPressure
+        }
+        return TunnelLimits.udpMaxFlows
+    }
+
+    /// Caps ``udpFlows`` by evicting the flows with the smallest idle deadlines —
     /// unreplied flows time out sooner, so one-way NAT probes shed first.
     /// Run on ``udpQueue`` before each insert.
     func evictUDPFlowsToAdmit() {
-        // Runs before every insert and frees at most one slot, so a single pass suffices.
-        let cap = TunnelLimits.udpMaxFlows
+        let cap = currentUDPFlowCap()
         guard udpFlows.count >= cap else { return }
-
-        var victim: UDPFlow?
-        var victimDeadline = TimeInterval.greatestFiniteMagnitude
-        for flow in udpFlows.values {
-            let deadline = flow.idleDeadline
-            if deadline < victimDeadline { victimDeadline = deadline; victim = flow }
+        if !udpFlowCapWarned {
+            udpFlowCapWarned = true
+            logger.warning("[UDP] Flow table at capacity (\(cap)); evicting flows with least time left to bound memory")
         }
+        // Free one slot for the incoming flow — plus, under pressure, whatever
+        // it takes to get back under the shrunken cap.
+        shedUDPFlows(count: udpFlows.count - cap + 1)
+    }
 
-        if let victim {
-            if !udpFlowCapWarned {
-                udpFlowCapWarned = true
-                logger.warning("[UDP] Flow table at capacity (\(cap)); evicting flow with least time left to bound memory")
+    /// Closes up to ``TunnelLimits/udpShedBatchLimit`` of the flows with the
+    /// smallest idle deadlines — batched so a cap shrink drains over a few
+    /// passes instead of one teardown churn spike. Run on ``udpQueue``.
+    func shedUDPFlows(count: Int) {
+        let shedCount = min(count, TunnelLimits.udpShedBatchLimit)
+        guard shedCount > 0 else { return }
+        if shedCount == 1 {
+            if let victim = udpFlows.values.min(by: { $0.idleDeadline < $1.idleDeadline }) {
+                victim.close()
+                removeUDPFlow(victim)
             }
+            return
+        }
+        let victims = udpFlows.values.sorted { $0.idleDeadline < $1.idleDeadline }.prefix(shedCount)
+        for victim in victims {
             victim.close()
             removeUDPFlow(victim)
         }
@@ -234,6 +263,26 @@ extension TunnelStack {
                 udpPayloadLength: payload.count
             )
             return
+        }
+
+        // Shed new non-DNS flows while braking or above the UDP watermark.
+        // Silent drop: the app's own timeout is the backoff, where an ICMP
+        // reply would invite an instant retry. DNS is exempt so resolution
+        // survives pressure.
+        let sheddingNewFlows = FlowExhaustionBrake.shared.isBraking
+            || FlowGauge.admissionLoad >= TunnelLimits.udpFlowAdmissionWatermark
+        if sheddingNewFlows {
+            if datagram.dstPort != 53 {
+                if !udpShedWarned {
+                    udpShedWarned = true
+                    logger.warning("[UDP] dropping new flows: kernel flow pressure [flows=\(FlowGauge.live) udp=\(FlowGauge.liveUDP)]")
+                }
+                return
+            }
+            // DNS rides through without resetting the shed latch.
+        } else if udpShedWarned {
+            udpShedWarned = false
+            logger.info("[UDP] flow pressure recovered; admitting new flows")
         }
 
         requestLog.record(

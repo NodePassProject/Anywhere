@@ -55,6 +55,10 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
 
     private var connection: NWConnection?
 
+    /// Whether `connection` is counted in `FlowGauge`. `queue`-confined;
+    /// balanced exactly once by `releaseFlowCount`.
+    private var flowCounted = false
+
     /// Pending connect completion and the queue it fires on. Queue-confined;
     /// fired exactly once via `fireConnectCompletion` — on ready/failure, or as
     /// "Cancelled" from `teardown` when `cancel()` races the connect.
@@ -106,6 +110,8 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
             let endpointHost = nwHost(fromIPLiteral: host) ?? .name(host, nil)
             let connection = NWConnection(host: endpointHost, port: nwPort, using: .udp)
             self.connection = connection
+            self.flowCounted = true
+            FlowGauge.incrementUDP()
 
             connection.stateUpdateHandler = { [weak self] newState in
                 guard let self, self.connection === connection else { return }
@@ -118,15 +124,29 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
                         return false
                     }
                     guard didBecomeReady else { return }
+                    FlowExhaustionBrake.shared.recordRecovery()
                     self.armReceiveLoop(connection)
                     self.fireConnectCompletion(nil)
                 case .failed(let error):
+                    if isResourceExhaustionError(error) {
+                        FlowExhaustionBrake.shared.recordExhaustion()
+                    }
                     self.fireConnectCompletion(mapNWError(error, op: .connect))
-                    connection.cancel()
+                    // Post-ready failure: notify the receive side directly —
+                    // `discard` nils `connection`, so in-flight receive
+                    // callbacks bail on the identity guard and can't surface it.
+                    self.surfaceTerminalError(mapNWError(error, op: .receive))
+                    self.discard(connection)
                 case .waiting(let error):
-                    if isDefinitiveConnectError(error) {
+                    // Resource exhaustion fails fast so the flow-exhaustion
+                    // brake engages; a lingering `.waiting` would hide it.
+                    if isResourceExhaustionError(error) {
+                        FlowExhaustionBrake.shared.recordExhaustion()
                         self.fireConnectCompletion(mapNWError(error, op: .connect))
-                        connection.cancel()
+                        self.discard(connection)
+                    } else if isDefinitiveConnectError(error) {
+                        self.fireConnectCompletion(mapNWError(error, op: .connect))
+                        self.discard(connection)
                     }
                 default:
                     break
@@ -141,6 +161,25 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
             }
             connection.start(queue: self.queue)
         }
+    }
+
+    /// Discards a failed connection (pre- or post-ready): releases its flow
+    /// count and cancels it. Must run on `queue`.
+    private func discard(_ connection: NWConnection) {
+        if self.connection === connection {
+            self.connection = nil
+            releaseFlowCount()
+        }
+        connection.stateUpdateHandler = nil
+        connection.viabilityUpdateHandler = nil
+        connection.cancel()
+    }
+
+    /// Balances `FlowGauge` exactly once per transport. Must run on `queue`.
+    private func releaseFlowCount() {
+        guard flowCounted else { return }
+        flowCounted = false
+        FlowGauge.decrementUDP()
     }
 
     /// Fires the connect completion at most once, on its original completion
@@ -291,6 +330,7 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
     private func teardown() {
         if let connection {
             self.connection = nil
+            releaseFlowCount()
             connection.stateUpdateHandler = nil
             connection.viabilityUpdateHandler = nil
             connection.cancel()

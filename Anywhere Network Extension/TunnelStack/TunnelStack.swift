@@ -322,6 +322,19 @@ class TunnelStack {
     /// refused connection. Owned by ``lwipQueue``.
     var tcpConnectionCapWarned = false
 
+    /// Rising-edge latch for SYNs shed by the flow budget / exhaustion brake.
+    /// Owned by ``lwipQueue``.
+    var flowShedWarned = false
+
+    /// Rising-edge latch for UDP flows shed by the flow budget / exhaustion
+    /// brake. Owned by ``udpQueue``.
+    var udpShedWarned = false
+
+    /// Whether the UDP flow cap is shrunk to
+    /// ``TunnelLimits/udpMaxFlowsUnderPressure``; see ``currentUDPFlowCap()``.
+    /// Owned by ``udpQueue``.
+    var udpPressureShedding = false
+
     /// Shared Shadowsocks UDP sessions keyed by configuration id: one session
     /// serves every flow for that configuration. Owned by ``udpQueue``.
     var ssUDPSessions: [UUID: ShadowsocksUDPSession] = [:]

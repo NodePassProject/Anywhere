@@ -122,6 +122,10 @@ class TCPConnection {
     /// Logs this connection's terminal failure at most once.
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
 
+    /// Whether this connection is counted in `FlowGauge.pendingTCP`; settled
+    /// exactly once by `settlePendingAdmission()`. lwipQueue-confined.
+    private var pendingAdmissionCounted = true
+
     // MARK: Lifecycle
 
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
@@ -130,6 +134,7 @@ class TCPConnection {
          sniffSNI: Bool = false,
          hostIsResolvedDomain: Bool = false,
          lwipQueue: DispatchQueue) {
+        FlowGauge.incrementPendingTCP()
         self.pcb = pcb
         self.dstHost = dstHost
         self.dstPort = dstPort
@@ -431,7 +436,7 @@ class TCPConnection {
         // Suppress spurious error logs as in-flight callbacks unwind.
         failureReporter.markReported()
         closed = true
-        releaseProxy()
+        releaseProxy(abortive: true)
     }
 
     private var endpointDescription: String {
@@ -441,24 +446,19 @@ class TCPConnection {
     private func reportFailure(_ operation: String, error: Error) {
         failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
     }
-    
-    private static func isTimeoutClassError(_ error: Error) -> Bool {
-        guard let transportError = error as? TransportError else { return false }
-        if transportError.posixErrno == ETIMEDOUT { return true }
-        if case .connectionFailed(let message) = transportError,
-           message.hasPrefix(NWTCPTransport.dialDeadlinePrefix) {
-            return true
-        }
-        return false
+
+    /// Balances `FlowGauge.pendingTCP` exactly once — when the outbound dial
+    /// starts (the transport's own gauge count takes over) or on teardown.
+    /// Must run on lwipQueue.
+    private func settlePendingAdmission() {
+        guard pendingAdmissionCounted else { return }
+        pendingAdmissionCounted = false
+        FlowGauge.decrementPendingTCP()
     }
     
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
         failureReporter.report(operation: "Connect", endpoint: endpointDescription,
                                error: error, context: DialDiagnostics.snapshot())
-        // Only raw-IP direct dials feed the backoff cache.
-        if bypass, !hostIsResolvedDomain, Self.isTimeoutClassError(error) {
-            DialBackoffCache.shared.recordTimeout(host: dstHost)
-        }
         guard case TransportError.resolutionFailed = error else {
             abort()
             return
@@ -571,6 +571,7 @@ class TCPConnection {
     private func connectDirect() {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
+        settlePendingAdmission()
 
         let initialData: Data? = pendingData.isEmpty ? nil : pendingData
         if initialData != nil {
@@ -592,9 +593,6 @@ class TCPConnection {
                 if let error {
                     self.handleConnectFailure(error, bufferedClientData: initialData)
                     return
-                }
-                if !self.hostIsResolvedDomain {
-                    DialBackoffCache.shared.recordSuccess(host: self.dstHost)
                 }
                 self.handshakeTimer?.cancel()
                 self.handshakeTimer = nil
@@ -624,6 +622,7 @@ class TCPConnection {
     private func connectProxy() {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
+        settlePendingAdmission()
 
         // Protocols whose handshake carries a payload take pendingData as
         // initialData so the first bytes ride the handshake.
@@ -691,6 +690,7 @@ class TCPConnection {
 
     private func startMITMSession() {
         guard let stack = TunnelStack.shared else { abort(); return }
+        settlePendingAdmission()
         let sni = mitmSNI ?? dstHost
         
         let cache: MITMLeafCertCache?
@@ -1083,7 +1083,7 @@ class TCPConnection {
         closed = true
         flushPendingToLWIP()
         lwip_bridge_tcp_close(pcb)
-        releaseProxy()
+        releaseProxy(abortive: false)
         Unmanaged.passUnretained(self).release()
     }
 
@@ -1119,11 +1119,13 @@ class TCPConnection {
         guard !closed else { return }
         closed = true
         lwip_bridge_tcp_abort(pcb)
-        releaseProxy()
+        releaseProxy(abortive: true)
         Unmanaged.passUnretained(self).release()
     }
 
-    private func releaseProxy() {
+    /// `abortive` closes the outbound leg with RST instead of a graceful FIN.
+    private func releaseProxy(abortive: Bool = false) {
+        settlePendingAdmission()
         handshakeTimer?.cancel()
         handshakeTimer = nil
         // Mark settled so a dial resolving after teardown cancels its socket instead of completing.
@@ -1150,7 +1152,11 @@ class TCPConnection {
         uploadPipeline = UploadPipeline()
         mitmSession = nil
         session?.cancel(error: nil)
-        connection?.cancel()
+        if abortive {
+            connection?.abort()
+        } else {
+            connection?.cancel()
+        }
         client?.cancel()
     }
 }

@@ -230,8 +230,16 @@ extension TunnelStack {
             for key in keysToRemove {
                 self.udpFlows.removeValue(forKey: key)
             }
+            // Under kernel flow pressure, shed below the shrunken cap even
+            // with no inserts arriving — TCP alone can fill the budget, and
+            // eviction-on-insert never runs then. shedUDPFlows batches, so a
+            // large excess drains over successive sweeps.
+            let cap = self.currentUDPFlowCap()
+            if self.udpFlows.count > cap {
+                self.shedUDPFlows(count: self.udpFlows.count - cap)
+            }
             // Re-arm the flow-cap warning so a later storm logs its own rising edge.
-            if self.udpFlowCapWarned && self.udpFlows.count < TunnelLimits.udpMaxFlows {
+            if self.udpFlowCapWarned && self.udpFlows.count < cap {
                 self.udpFlowCapWarned = false
             }
         }

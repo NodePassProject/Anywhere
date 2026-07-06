@@ -38,19 +38,6 @@ enum TunnelConstants {
     /// (otherwise downlink degrades to stop-and-wait); half TCP_SND_BUF (lwipopts.h).
     static let drainLowWaterMark = 512 * 1360
 
-    // MARK: - Dial Backoff
-
-    /// Connect timeouts within ``dialBackoffStrikeWindow`` before SYNs to a
-    /// raw-IP direct destination fast-fail; two strikes so one transient
-    /// timeout can't block a legitimate host.
-    static let dialBackoffStrikeThreshold = 2
-    /// Window (seconds) in which timeout strikes accumulate.
-    static let dialBackoffStrikeWindow: TimeInterval = 120
-    /// How long (seconds) SYNs to a struck-out destination are RST'd immediately.
-    static let dialBackoffBlockInterval: TimeInterval = 45
-    /// Cap on destinations tracked by the dial backoff cache.
-    static let dialBackoffMaxEntries = 4096
-
     // MARK: - UDP Settings
 
     static let udpMaxBufferSize = 256 * 1024

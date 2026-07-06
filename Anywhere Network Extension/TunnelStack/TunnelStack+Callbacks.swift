@@ -97,13 +97,9 @@ extension TunnelStack {
                 if case .reject = shared.domainRouter.matchIP(dstIPString) {
                     return reject(host: dstIPString, reason: "IP rule")
                 }
-                if DialBackoffCache.shared.shouldFastFail(host: dstIPString),
-                   shared.wouldRouteDirect(ip: dstIPString) {
-                    return Int32(LWIP_BRIDGE_SYN_RESET)
-                }
-                return Int32(LWIP_BRIDGE_SYN_PASS)
+                return shared.admitSYN(rawIP: true)
             case .resolved:
-                return Int32(LWIP_BRIDGE_SYN_PASS)
+                return shared.admitSYN(rawIP: false)
             case .drop(let domain):
                 return reject(host: domain, reason: "fake-IP domain rule")
             case .unreachable:
@@ -252,15 +248,33 @@ extension TunnelStack {
         }
     }
 
-    // MARK: - Routing Helpers
-    
-    func wouldRouteDirect(ip: String) -> Bool {
-        if let action = domainRouter.matchIP(ip) {
-            if case .direct = action { return true }
-            return false
+    // MARK: - Flow Admission
+
+    /// Admits a TCP SYN against the kernel flow budget and the exhaustion
+    /// brake. Over budget the SYN is dropped, not RST — the client backs off
+    /// on kernel SYN retransmission, where an RST invites an instant retry.
+    /// Raw-IP destinations are swarm-shaped (P2P/PCDN peers) and yield at the
+    /// lower pressure watermark so they can't starve domain-routed traffic.
+    /// Runs on ``lwipQueue``.
+    func admitSYN(rawIP: Bool) -> Int32 {
+        let braking = FlowExhaustionBrake.shared.isBraking
+        let load = FlowGauge.admissionLoad
+        let watermark = rawIP ? TunnelLimits.flowPressureWatermark : TunnelLimits.flowBudget
+        if !braking && load < watermark {
+            // Clear the shed latch only once even raw-IP SYNs are admitted
+            // again, so alternating domain/raw-IP SYNs can't flap it.
+            if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
+                flowShedWarned = false
+                logger.info("[TCP] flow budget recovered; admitting SYNs [\(DialDiagnostics.snapshot())]")
+            }
+            return Int32(LWIP_BRIDGE_SYN_PASS)
         }
-        if case .direct = defaultRouteTarget { return true }
-        return false
+        if !flowShedWarned {
+            flowShedWarned = true
+            let reason = braking ? "exhaustion brake engaged" : "flow budget exhausted"
+            logger.warning("[TCP] dropping new SYNs: \(reason) [\(DialDiagnostics.snapshot())]")
+        }
+        return Int32(LWIP_BRIDGE_SYN_DROP)
     }
 
     // MARK: - Fake-IP Resolution

@@ -130,4 +130,10 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
     func cancel() {
         fatalError("Subclass must override cancel")
     }
+
+    /// Abortive teardown for error paths. Defaults to `cancel()`; subclasses
+    /// owning a raw socket override to close with RST.
+    func abort() {
+        cancel()
+    }
 }
