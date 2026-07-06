@@ -11,7 +11,5 @@
 	<array>
 		<string>remote-notification</string>
 	</array>
-	<key>UIObservationTrackingEnabled</key>
-	<true/>
 </dict>
 </plist>
