@@ -39,7 +39,7 @@ extension TunnelStack {
             startTimeoutTimer()
             scheduleUDPCleanup()
             startReadingPackets()
-            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[TunnelStack] Started")
         }
 
         startObservingSettings()
@@ -65,7 +65,7 @@ extension TunnelStack {
     /// Restarts the stack on the existing packet flow under the new configuration.
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         lwipQueue.async { [self] in
-            logger.info("[VPN] Configuration switched; reconnecting active connections")
+            logger.info("[VPN] Configuration switched")
             restartStack(configuration: newConfiguration)
         }
     }
@@ -76,7 +76,7 @@ extension TunnelStack {
         scheduler.reconcile()
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
-            logger.info("[VPN] Device wake: invalidating outbound proxy state")
+            logger.info("[VPN] Device wake")
             invalidateOutboundState(configuration: configuration)
         }
     }
@@ -87,7 +87,7 @@ extension TunnelStack {
     func suspendOutbound() {
         lwipQueue.async { [self] in
             guard running else { return }
-            logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
+            logger.info("[VPN] Path offline/sleep")
 
             reclaimAllOutboundPools()
             reclaimInstanceTransports(rebuildMultiplexerPool: false)
@@ -100,7 +100,7 @@ extension TunnelStack {
     func resumeOutbound() {
         lwipQueue.async { [self] in
             guard running, configuration != nil else { return }
-            logger.info("[VPN] Path restored: flushing DNS and rebuilding upstream transports")
+            logger.info("[VPN] Path restored")
             DNSResolver.shared.flush()
             reclaimInstanceTransports(rebuildMultiplexerPool: true)
         }
@@ -253,7 +253,7 @@ extension TunnelStack {
         lwip_bridge_init()
         startTimeoutTimer()
         scheduleUDPCleanup()
-        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), advertiseIPv6=\(advertiseIPv6ToApps), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[TunnelStack] Restarted")
     }
 
     // MARK: - Settings Observation
@@ -392,7 +392,7 @@ extension TunnelStack {
                 return
             }
             
-            logger.info("[VPN] Settings changed, reconnecting active connections")
+            logger.info("[VPN] Settings changed")
 
             // These toggles change tunnel network settings (routes/DNS);
             // re-apply them before restarting the stack.
@@ -411,7 +411,7 @@ extension TunnelStack {
         lwipQueue.async { [self] in
             guard running else { return }
             guard proxyMode == .rule else { return }
-            logger.info("[VPN] Routing changed; reloading rules in place")
+            logger.info("[VPN] Routing changed")
             domainRouter.loadRoutingConfiguration()
         }
     }
@@ -421,7 +421,7 @@ extension TunnelStack {
     fileprivate func handleMITMChanged() {
         lwipQueue.async { [self] in
             guard running else { return }
-            logger.info("[VPN] MITM settings changed; reloading matcher")
+            logger.info("[VPN] MITM settings changed")
             loadMITMSetting()
             // `mitmEnabled` gates the UDP/443 MITM decision via the snapshot;
             // republish so udpQueue sees the new toggle.

@@ -248,7 +248,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if outboundSuspended {
                 // Up edge: rebuild the transports suspendOutbound released; flush stale DNS.
                 outboundSuspended = false
-                logger.info("[VPN] Network path restored: \(Self.pathSummary(path)); rebuilding upstream transports")
+                logger.info("[VPN] Network path restored: \(Self.pathSummary(path))")
                 tunnelStack.resumeOutbound()
             } else if previousStatus == nil {
                 logger.info("[VPN] Network path ready: \(Self.pathSummary(path))")
@@ -263,20 +263,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .requiresConnection:
             // Dedupe repeated callbacks in the same state; nothing to recover onto yet.
             guard previousStatus != .requiresConnection else { return }
-            logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path)); active connections may pause")
+            logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path))")
             reasserting = true
 
         case .unsatisfied:
             // Idempotent on repeated unsatisfied callbacks.
             guard !outboundSuspended else { return }
             outboundSuspended = true
-            logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path)); releasing upstream transports")
+            logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path))")
             reasserting = true
             // Down edge: release dead upstream transports; rebuilt on the up edge.
             tunnelStack.suspendOutbound()
 
         @unknown default:
-            logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")
+            logger.warning("[VPN] Network path changed unexpectedly")
         }
     }
 
