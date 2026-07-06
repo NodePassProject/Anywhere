@@ -297,7 +297,7 @@ extension TunnelStack {
         guard FakeIPPool.isFakeIP(ip) else { return .passthrough }
 
         guard let entry = fakeIPPool.lookup(ip: ip) else {
-            logger.warning("[\(proto)] Fake IP not in pool (stale): \(ip):\(dstPort)")
+            logger.debug("[\(proto)] Fake IP not in pool (stale): \(ip):\(dstPort)")
             return .unreachable
         }
 
