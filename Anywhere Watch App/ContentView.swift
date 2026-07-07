@@ -148,18 +148,16 @@ private struct ConfigurationCapsule: View {
             Button {
                 showingPicker = true
             } label: {
-                HStack(spacing: 6) {
-                    Text(phone.snapshot?.selectedName ?? String(localized: "Not Configured"))
-                        .font(.footnote.weight(.medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                ProminentCapsule {
+                    HStack(spacing: 6) {
+                        Text(phone.snapshot?.selectedName ?? String(localized: "Not Configured"))
+                            .font(.footnote.weight(.medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Capsule().fill(.white.opacity(0.2)))
-                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
         } else {
