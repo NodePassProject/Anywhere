@@ -8,7 +8,6 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(VoyagerStore.self) private var voyagerStore
     @Environment(AppSettings.self) private var settings
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
@@ -21,7 +20,9 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                voyagerRow
+                VoyagerSettingsCard()
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(VoyagerCardBackground())
             }
             appSection
             vpnSection
@@ -220,26 +221,6 @@ struct SettingsView: View {
                 .padding(.vertical, 10)
             }
             .buttonStyle(.plain)
-        }
-    }
-
-    @ViewBuilder
-    private var voyagerRow: some View {
-        HStack {
-            TextWithColorfulIcon(title: "Anywhere Voyager", comment: nil, systemName: "sparkles", foregroundColor: .white, backgroundColor: Color(hex: 0x5060F0))
-            Spacer()
-            HStack {
-                if voyagerStore.isMember {
-                    Text("Member \(Image(systemName: "checkmark.seal.fill"))")
-                        .textCase(.uppercase)
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(Color(hex: 0x5060F0))
-                } else {
-                    JoinVoyagerButton {
-                        voyagerStore.isPresentingVoyagerView = true
-                    }
-                }
-            }
         }
     }
 
