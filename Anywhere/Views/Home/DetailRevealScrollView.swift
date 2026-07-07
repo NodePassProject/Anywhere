@@ -39,7 +39,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                                 .transition(.blurReplace)
                         }
                     }
-                    .padding(.bottom, viewport.bottomInset)
+                    .padding(.bottom, revealsDetail ? viewport.bottomInset : 0)
                     .onGeometryChange(for: CGRect.self) { proxy in
                         proxy.frame(in: .scrollView)
                     } action: { frame in
