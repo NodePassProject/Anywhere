@@ -66,11 +66,7 @@ struct ConnectionStatsView: View {
     }
 
     private var rows: [[StatUnit]] {
-        var units: [StatUnit] = [.upload, .download]
-        if stats.bytesOut > 0 || stats.bytesIn > 0 {
-            units.append(.route)
-        }
-        units += [.tcp, .udp, .memory, .sleepWake, .dial, .handshake]
+        let units: [StatUnit] = [.upload, .download, .route, .tcp, .udp, .memory, .sleepWake, .dial, .handshake]
         return Self.packRows(units, columns: Self.columnCount(for: availableWidth))
     }
 
@@ -335,7 +331,7 @@ private struct StatCardChrome: ViewModifier {
 
 // MARK: - Donut chart
 
-private struct DonutSegment: Identifiable {
+private struct DonutSegment: Identifiable, Hashable {
     let id: String
     let value: Double
     let color: Color
@@ -355,6 +351,7 @@ private struct DonutChart: View {
             .foregroundStyle(segment.color)
         }
         .chartLegend(.hidden)
+        .animation(.default, value: segments)
     }
 }
 
