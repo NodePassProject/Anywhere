@@ -10,7 +10,8 @@ import SwiftUI
 struct CustomizeThemeView: View {
     @Environment(VoyagerStore.self) private var voyagerStore
     @Bindable private var settings = AppSettings.shared
-    
+    @State private var screenAspectRatio: CGFloat = 393 / 852
+
     var body: some View {
         Form {
             if !voyagerStore.isMember {
@@ -89,6 +90,13 @@ struct CustomizeThemeView: View {
                 Text("Preview")
             }
         }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            let width = proxy.size.width + proxy.safeAreaInsets.leading + proxy.safeAreaInsets.trailing
+            let height = proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom
+            return height > 0 ? width / height : 393 / 852
+        } action: { newValue in
+            screenAspectRatio = newValue
+        }
         .navigationTitle("Theme")
         .toolbar {
             ToolbarItem {
@@ -140,12 +148,16 @@ struct CustomizeThemeView: View {
     }
     
     private func swatch(title: LocalizedStringKey, colors: [Color]) -> some View {
-        VStack {
+        let maxDimension: CGFloat = 170
+        let size = screenAspectRatio < 1
+            ? CGSize(width: maxDimension * screenAspectRatio, height: maxDimension)
+            : CGSize(width: maxDimension, height: maxDimension / screenAspectRatio)
+        return VStack {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(
                     LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
                 )
-                .frame(width: 393 * 0.2, height: 852 * 0.2)
+                .frame(width: size.width, height: size.height)
                 .overlay {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(.quaternary, lineWidth: 0.5)
