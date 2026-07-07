@@ -14994,58 +14994,6 @@
       "comment" : "Service Name for VLESS protocol gRPC transport",
       "shouldTranslate" : false
     },
-    "Set sail for the full experience" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "أبحر نحو التجربة الكاملة"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Set sail for the full experience"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Zarpa hacia la experiencia completa"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "به‌سوی تجربهٔ کامل بادبان برافرازید"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Отправляйтесь в путь к полным возможностям"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Eksiksiz deneyim için yelken açın"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Giương buồm đến trải nghiệm trọn vẹn"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "扬帆起航，解锁完整体验"
-          }
-        }
-      }
-    },
     "Settings" : {
       "localizations" : {
         "ar" : {
@@ -16211,58 +16159,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "测试延迟"
-          }
-        }
-      }
-    },
-    "Thanks for voyaging with us" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "شكرًا لإبحارك معنا"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Thanks for voyaging with us"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gracias por viajar con nosotros"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "سپاس که با ما سفر می‌کنید"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Спасибо, что путешествуете с нами"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bizimle yolculuk ettiğiniz için teşekkürler"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cảm ơn bạn đã đồng hành cùng chúng tôi"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "感谢与我们同行"
           }
         }
       }
