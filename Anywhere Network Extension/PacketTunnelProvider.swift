@@ -65,8 +65,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.statsRecorder.start {
                     return StatsRecorder.RawValues(
                         byteCounts: self.tunnelStack.byteCounts,
-                        tcpConnectionCount: self.tunnelStack.activeTCPConnections,
-                        udpConnectionCount: self.tunnelStack.activeUDPConnections,
+                        tcpConnectionCount: FlowGauge.liveTCP,
+                        udpConnectionCount: FlowGauge.liveUDP,
                         memoryBytes: Self.memoryFootprint()
                     )
                 }

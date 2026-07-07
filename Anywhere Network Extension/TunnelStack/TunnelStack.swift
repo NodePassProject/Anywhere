@@ -172,21 +172,6 @@ class TunnelStack {
     /// Snapshot of all per-target counters, read once per stats poll.
     var byteCounts: TrafficByteCounts { _byteCounts.withLock { $0 } }
 
-    // MARK: - Live Connection Counts
-    //
-    // Each snapshot hops onto the owning queue; callers run on neither, so
-    // `.sync` can't deadlock.
-
-    /// Active TCP connections per lwIP's `tcp_active_pcbs` (LISTEN and
-    /// TIME_WAIT excluded).
-    var activeTCPConnections: Int {
-        lwipQueue.sync { Int(lwip_bridge_active_tcp_count()) }
-    }
-
-    var activeUDPConnections: Int {
-        udpQueue.sync { udpFlows.count }
-    }
-
     // MARK: - Log Buffer
     //
     // Recent logs for the main app's viewer. Locked because appends come from

@@ -38,17 +38,6 @@ extension NWError {
         }
     }
 
-    /// Whether this error signals local resource exhaustion (memory, buffers,
-    /// or file descriptors).
-    nonisolated var isResourceExhaustion: Bool {
-        guard case .posix(let code) = self else { return false }
-        switch code {
-        case .ENOMEM, .ENOBUFS, .EMFILE, .ENFILE:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 // MARK: - NWEndpoint.Host

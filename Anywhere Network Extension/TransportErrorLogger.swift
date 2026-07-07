@@ -125,17 +125,12 @@ nonisolated enum TransportErrorLogger {
 /// Kernel-flow-ledger snapshots appended to TCP connect-failure logs.
 nonisolated enum DialDiagnostics {
 
-    /// E.g. `flows=312/384 pending=6 udp=96 lwip=205 brake=12s`. Must run on
+    /// E.g. `flows=312/384 pending=6 udp=96 lwip=205`. Must run on
     /// lwipQueue (the PCB count is lwipQueue-confined).
     static func snapshot() -> String {
-        var parts = "flows=\(FlowGauge.live)/\(TunnelLimits.flowBudget) "
+        "flows=\(FlowGauge.live)/\(TunnelLimits.flowBudget) "
             + "pending=\(FlowGauge.pendingTCP) udp=\(FlowGauge.liveUDP) "
             + "lwip=\(Int(lwip_bridge_active_tcp_count()))"
-        let braked = FlowExhaustionBrake.shared.remainingSeconds
-        if braked > 0 {
-            parts += " brake=\(Int(braked.rounded(.up)))s"
-        }
-        return parts
     }
 }
 

@@ -358,7 +358,6 @@
 				Networking/Routing/FlatLabelTrie.swift,
 				Networking/Routing/TieredRouteMatcher.swift,
 				Networking/RuleResolver.swift,
-				Networking/Transport/FlowExhaustionBrake.swift,
 				Networking/Transport/FlowGauge.swift,
 				Networking/Transport/NWTCPTransport.swift,
 				Networking/Transport/NWTransportHelpers.swift,

@@ -265,12 +265,10 @@ extension TunnelStack {
             return
         }
 
-        // Shed new non-DNS flows while braking or above the UDP watermark.
-        // Silent drop: the app's own timeout is the backoff, where an ICMP
-        // reply would invite an instant retry. DNS is exempt so resolution
-        // survives pressure.
-        let sheddingNewFlows = FlowExhaustionBrake.shared.isBraking
-            || FlowGauge.admissionLoad >= TunnelLimits.udpFlowAdmissionWatermark
+        // Shed new non-DNS flows above the UDP watermark. Silent drop: the
+        // app's own timeout is the backoff, where an ICMP reply would invite
+        // an instant retry. DNS is exempt so resolution survives pressure.
+        let sheddingNewFlows = FlowGauge.admissionLoad >= TunnelLimits.udpFlowAdmissionWatermark
         if sheddingNewFlows {
             if datagram.dstPort != 53 {
                 if !udpShedWarned {

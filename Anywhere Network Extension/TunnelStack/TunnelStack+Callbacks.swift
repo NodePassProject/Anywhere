@@ -250,17 +250,16 @@ extension TunnelStack {
 
     // MARK: - Flow Admission
 
-    /// Admits a TCP SYN against the kernel flow budget and the exhaustion
-    /// brake. Over budget the SYN is dropped, not RST — the client backs off
-    /// on kernel SYN retransmission, where an RST invites an instant retry.
+    /// Admits a TCP SYN against the kernel flow budget. Over budget the SYN
+    /// is dropped, not RST — the client backs off on kernel SYN
+    /// retransmission, where an RST invites an instant retry.
     /// Raw-IP destinations are swarm-shaped (P2P/PCDN peers) and yield at the
     /// lower pressure watermark so they can't starve domain-routed traffic.
     /// Runs on ``lwipQueue``.
     func admitSYN(rawIP: Bool) -> Int32 {
-        let braking = FlowExhaustionBrake.shared.isBraking
         let load = FlowGauge.admissionLoad
         let watermark = rawIP ? TunnelLimits.flowPressureWatermark : TunnelLimits.flowBudget
-        if !braking && load < watermark {
+        if load < watermark {
             // Clear the shed latch only once even raw-IP SYNs are admitted
             // again, so alternating domain/raw-IP SYNs can't flap it.
             if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
@@ -271,8 +270,7 @@ extension TunnelStack {
         }
         if !flowShedWarned {
             flowShedWarned = true
-            let reason = braking ? "exhaustion brake engaged" : "flow budget exhausted"
-            logger.warning("[TCP] dropping new SYNs: \(reason) [\(DialDiagnostics.snapshot())]")
+            logger.warning("[TCP] dropping new SYNs: flow budget exhausted [\(DialDiagnostics.snapshot())]")
         }
         return Int32(LWIP_BRIDGE_SYN_DROP)
     }

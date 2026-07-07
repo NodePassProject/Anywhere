@@ -326,14 +326,8 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
             handleConnectReady()
         case .failed(let error):
             logger.debug("[TCP] connect \(endpointDescription) failed: \(error)")
-            if error.isResourceExhaustion {
-                FlowExhaustionBrake.shared.recordExhaustion()
-            }
             finishConnectFailure(error.transportError(op: .connect))
         case .waiting(let error):
-            if error.isResourceExhaustion {
-                FlowExhaustionBrake.shared.recordExhaustion()
-            }
             logger.debug("[TCP] connect \(endpointDescription) \(error.connectWaitingDescription); failing fast")
             finishConnectFailure(error.transportError(op: .connect))
         case .preparing:
@@ -349,7 +343,6 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
         // A racing .cancelled wins; teardown fires the completion.
         guard transitionFromSetup(to: .ready) else { return }
         cancelDialDeadline()
-        FlowExhaustionBrake.shared.recordRecovery()
 
         dialTimer.stop()
 

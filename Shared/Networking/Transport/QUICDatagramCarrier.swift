@@ -106,7 +106,6 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         switch state {
         case .ready:
             ready = true
-            FlowExhaustionBrake.shared.recordRecovery()
             if packetHandler != nil, !receiving {
                 receiving = true
                 armReceiving(connection)
@@ -116,14 +115,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 onReady()
             }
         case .failed(let error):
-            if error.isResourceExhaustion {
-                FlowExhaustionBrake.shared.recordExhaustion()
-            }
             deliverError(error)
         case .waiting(let error):
-            if error.isResourceExhaustion {
-                FlowExhaustionBrake.shared.recordExhaustion()
-            }
             if ready, let onPathDown {
                 onPathDown()
             } else {

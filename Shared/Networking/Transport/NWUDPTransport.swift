@@ -192,18 +192,12 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
             handleConnectReady(connection)
         case .failed(let error):
             logger.debug("[UDP] connection \(endpointDescription) failed: \(error)")
-            if error.isResourceExhaustion {
-                FlowExhaustionBrake.shared.recordExhaustion()
-            }
             // Pre-ready, the dial is what failed: resolve the pending connect
             // with the connect-flavored error before `fail` reports the
             // receive-flavored one. No-op once connect has resolved.
             fireConnectCompletion(error.transportError(op: .connect))
             fail(with: error.transportError(op: .receive), connection: connection)
         case .waiting(let error):
-            if error.isResourceExhaustion {
-                FlowExhaustionBrake.shared.recordExhaustion()
-            }
             logger.debug("[UDP] connection \(endpointDescription) \(error.connectWaitingDescription); failing fast")
             fireConnectCompletion(error.transportError(op: .connect))
             fail(with: error.transportError(op: .receive), connection: connection)
@@ -224,7 +218,6 @@ nonisolated final class NWUDPTransport: @unchecked Sendable {
         }
         guard didBecomeReady else { return }
         cancelDialDeadline()
-        FlowExhaustionBrake.shared.recordRecovery()
         armReceiveLoop(connection)
         fireConnectCompletion(nil)
     }
