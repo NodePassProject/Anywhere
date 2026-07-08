@@ -261,30 +261,47 @@ enum X509Builder {
 
     /// RFC 5280 §4.1.2.5: UTCTime for years 1950–2049, GeneralizedTime otherwise.
     private static func encodeTime(_ date: Date) -> Data {
-        let calendar = Calendar(identifier: .gregorian)
-        var calCopy = calendar
-        calCopy.timeZone = TimeZone(identifier: "UTC")!
-        let components = calCopy.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second],
-            from: date
-        )
-        let year = components.year ?? 0
-        let month = components.month ?? 0
-        let day = components.day ?? 0
-        let hour = components.hour ?? 0
-        let minute = components.minute ?? 0
-        let second = components.second ?? 0
-
-        if year >= 1950 && year <= 2049 {
-            let yy = year % 100
+        let c = utcComponents(date)
+        if c.year >= 1950 && c.year <= 2049 {
+            let yy = c.year % 100
             let utc = String(format: "%02d%02d%02d%02d%02d%02dZ",
-                             yy, month, day, hour, minute, second)
+                             yy, c.month, c.day, c.hour, c.minute, c.second)
             return ASN1.utcTime(utc)
         } else {
             let gen = String(format: "%04d%02d%02d%02d%02d%02dZ",
-                             year, month, day, hour, minute, second)
+                             c.year, c.month, c.day, c.hour, c.minute, c.second)
             return ASN1.generalizedTime(gen)
         }
+    }
+
+    /// Splits `date` into its UTC calendar fields without constructing a `Calendar`.
+    private static func utcComponents(
+        _ date: Date
+    ) -> (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) {
+        let secondsPerDay = 86_400
+        let total = Int(date.timeIntervalSince1970.rounded(.down))
+        // Floor-divide so instants before 1970 still map to the correct civil day.
+        var days = total / secondsPerDay
+        var secondOfDay = total % secondsPerDay
+        if secondOfDay < 0 {
+            secondOfDay += secondsPerDay
+            days -= 1
+        }
+        let hour = secondOfDay / 3600
+        let minute = (secondOfDay % 3600) / 60
+        let second = secondOfDay % 60
+
+        // civil_from_days: `days` counts from 1970-01-01 (day 0).
+        let z = days + 719_468                                             // shift epoch to 0000-03-01
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let doe = z - era * 146_097                                        // day of era   [0, 146096]
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365  // year of era  [0, 399]
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)                  // day of year  [0, 365]
+        let mp = (5 * doy + 2) / 153                                       // month, Mar = 0 … Feb = 11
+        let day = doy - (153 * mp + 2) / 5 + 1                             // [1, 31]
+        let month = mp < 10 ? mp + 3 : mp - 9                              // [1, 12]
+        let year = yoe + era * 400 + (month <= 2 ? 1 : 0)
+        return (year, month, day, hour, minute, second)
     }
 
     // MARK: - SubjectPublicKeyInfo

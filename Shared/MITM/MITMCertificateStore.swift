@@ -36,6 +36,8 @@ final class MITMCertificateStore {
     private static let caOrganization = "Anywhere"
     
     private let lock = NSLock()
+    
+    private var cachedCA: (privateKey: SecKey, certificateDER: Data)?
 
     // MARK: - Init
 
@@ -49,7 +51,7 @@ final class MITMCertificateStore {
         lock.lock()
         defer { lock.unlock() }
 
-        if let existing = try? loadCAUnlocked() {
+        if let existing = try? loadCACachedUnlocked() {
             return existing
         }
         do {
@@ -58,7 +60,7 @@ final class MITMCertificateStore {
             // The App Group keychain is shared with the extension (NSLock is
             // intra-process): either the other process won the race (re-read), or
             // an orphaned key from a failed cert write hit errSecDuplicateItem (drop it).
-            if let existing = try? loadCAUnlocked() {
+            if let existing = try? loadCACachedUnlocked() {
                 return existing
             }
             // Non-duplicate failures leave no key, so surface the real error.
@@ -71,7 +73,7 @@ final class MITMCertificateStore {
     func loadCA() -> (privateKey: SecKey, certificateDER: Data)? {
         lock.lock()
         defer { lock.unlock() }
-        return try? loadCAUnlocked()
+        return try? loadCACachedUnlocked()
     }
 
     /// Wipes the persisted CA and generates a fresh one, invalidating any installed root profile.
@@ -223,6 +225,14 @@ final class MITMCertificateStore {
 
     // MARK: - Private — CA load / generate / delete
 
+    /// Returns the cached CA, populating it from the keychain on first use. Caller holds `lock`.
+    private func loadCACachedUnlocked() throws -> (privateKey: SecKey, certificateDER: Data) {
+        if let cachedCA { return cachedCA }
+        let loaded = try loadCAUnlocked()
+        cachedCA = loaded
+        return loaded
+    }
+
     private func loadCAUnlocked() throws -> (privateKey: SecKey, certificateDER: Data) {
         let cert = try readCertificateUnlocked()
         let key = try readPrivateKeyUnlocked()
@@ -245,7 +255,9 @@ final class MITMCertificateStore {
                 notAfter: notAfter
             )
             try writeCertificateUnlocked(certDER)
-            return (privateKey, certDER)
+            let ca = (privateKey: privateKey, certificateDER: certDER)
+            cachedCA = ca
+            return ca
         } catch {
             // The key was already persisted (kSecAttrIsPermanent); delete it or
             // the next call hits errSecDuplicateItem on the same tag.
@@ -255,6 +267,7 @@ final class MITMCertificateStore {
     }
 
     private func deleteUnlocked() {
+        cachedCA = nil
         deletePrivateKey()
         deleteCertificate()
         deleteSerial()
