@@ -1,0 +1,15 @@
+{
+  "originHash" : "12bf9c401f5be0aafc6e1cd6ff79bb3032868a97c5385591c8fd27b6ef35d49c",
+  "pins" : [
+    {
+      "identity" : "anywhererules",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/hiDandelion/AnywhereRules.git",
+      "state" : {
+        "revision" : "636bdcffcff77b4d41334e912c2dd9f20e3bcc62",
+        "version" : "1.0.0"
+      }
+    }
+  ],
+  "version" : 3
+}

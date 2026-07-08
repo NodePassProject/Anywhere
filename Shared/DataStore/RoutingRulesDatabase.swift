@@ -7,18 +7,19 @@
 
 import Foundation
 import SQLite3
+import AnywhereRules
 
 nonisolated private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
-/// Read-only SQLite over bundled `rules(source, type, value)` and `metadata(key, value)`; metadata values are JSON.
+/// Read-only SQLite over `rules(source, type, value)` and `metadata(key, value)` bundled by AnywhereRules; metadata values are JSON.
 final class RoutingRulesDatabase {
     static let shared = RoutingRulesDatabase()
 
     private var databaseHandle: OpaquePointer?
 
     private init() {
-        guard let url = Bundle.main.url(forResource: "Rules", withExtension: "db") else {
-            logger.error("[RoutingRulesDatabase] Rules.db not found in bundle")
+        guard let url = AnywhereRules.databaseURL else {
+            logger.error("[RoutingRulesDatabase] Rules.db not found in AnywhereRules bundle")
             return
         }
         if sqlite3_open_v2(url.path, &databaseHandle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
