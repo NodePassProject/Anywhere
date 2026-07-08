@@ -116,7 +116,6 @@ final class AppSettings {
     var proxyMode: ProxyMode {
         didSet {
             AWCore.setProxyMode(proxyMode)
-            ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }

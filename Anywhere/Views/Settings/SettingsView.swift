@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import WidgetKit
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
@@ -91,6 +92,9 @@ struct SettingsView: View {
         Section("Routing") {
             Toggle(isOn: $settings.isGlobalMode) {
                 SettingsItem.globalMode.label
+            }
+            .onChange(of: settings.isGlobalMode) {
+                ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
             }
             if !settings.isGlobalMode {
                 Toggle(isOn: $adBlockEnabled) {
