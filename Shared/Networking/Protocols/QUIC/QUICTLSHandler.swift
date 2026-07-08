@@ -192,6 +192,15 @@ nonisolated class QUICTLSHandler {
         return clientHello
     }
 
+    // MARK: - Failure Reporting
+    
+    private func fail(_ reason: String, error: Error? = nil) -> QUICTLSResult {
+        if handshakeError == nil {
+            handshakeError = error ?? TLSError.handshakeFailed(reason)
+        }
+        return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+    }
+
     // MARK: - Process Crypto Data
 
     /// Bytes that don't form a complete message remain buffered for the next call.
@@ -209,7 +218,7 @@ nonisolated class QUICTLSHandler {
             // Length field is uint24; this cap is not RFC-specified but guards against
             // huge allocations from erroneous lengths.
             guard msgLen <= 0xFFFF else {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail("handshake message too long (type \(msgType), \(msgLen) B, level \(level.rawValue))")
             }
             let totalLen = 4 + msgLen
 
@@ -263,30 +272,30 @@ nonisolated class QUICTLSHandler {
 
     private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
         guard body.count >= 35 else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("ServerHello truncated (\(body.count) B)")
         }
 
         // ServerHello rules: HRR forbidden; echoed empty legacy session ID;
         // legacy version TLS 1.2; compression zero; negotiated version TLS 1.3.
         let legacyVersion = (UInt16(body[0]) << 8) | UInt16(body[1])
         guard legacyVersion == 0x0303 else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail(String(format: "ServerHello legacy version 0x%04x (expected 0x0303)", legacyVersion))
         }
 
         let serverRandom = Data(body[2..<34])
         if serverRandom == TLSRandom.helloRetryRequest {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("server sent HelloRetryRequest (unsupported)", error: TLSError.helloRetryRequest)
         }
 
         var offset = 34
         let sessionIdLen = Int(body[offset])
         guard sessionIdLen == 0 else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("ServerHello echoed non-empty legacy session ID (\(sessionIdLen) B)")
         }
         offset += 1 + sessionIdLen
 
         guard offset + 2 <= body.count else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("ServerHello truncated at cipher suite")
         }
         cipherSuite = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
         offset += 2
@@ -297,16 +306,16 @@ nonisolated class QUICTLSHandler {
              TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256:
             break
         default:
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail(String(format: "server selected unsupported cipher suite 0x%04x", cipherSuite))
         }
 
         guard offset < body.count, body[offset] == 0 else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("ServerHello non-zero compression method")
         }
         offset += 1
 
         guard offset + 2 <= body.count else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("ServerHello truncated at extensions length")
         }
         let extLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
         offset += 2
@@ -323,12 +332,12 @@ nonisolated class QUICTLSHandler {
             offset += 4
 
             guard offset + extDataLen <= extEnd, offset + extDataLen <= body.count else {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail(String(format: "ServerHello extension 0x%04x overruns message", extType))
             }
 
             let (inserted, _) = observedExtensionTypes.insert(extType)
             if !inserted {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail(String(format: "duplicate ServerHello extension 0x%04x", extType))
             }
 
             if extType == TLSExtensionType.keyShare {
@@ -347,7 +356,7 @@ nonisolated class QUICTLSHandler {
             } else if extType == TLSExtensionType.preSharedKey {
                 guard activePSK != nil, extDataLen >= 2,
                       (UInt16(body[offset]) << 8) | UInt16(body[offset + 1]) == 0 else {
-                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                    return fail("invalid pre_shared_key extension in ServerHello")
                 }
                 pskAccepted = true
             }
@@ -355,17 +364,19 @@ nonisolated class QUICTLSHandler {
         }
 
         guard supportedVersionsSeen, negotiatedVersion == 0x0304 else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail(supportedVersionsSeen
+                ? String(format: "server negotiated 0x%04x, not TLS 1.3", negotiatedVersion)
+                : "ServerHello missing supported_versions extension")
         }
 
         if pskAccepted {
             guard cipherSuite == offeredPSKCipherSuite else {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail(String(format: "PSK accepted but cipher suite 0x%04x differs from ticket suite 0x%04x", cipherSuite, offeredPSKCipherSuite ?? 0))
             }
         }
 
         guard let serverPublicKey else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("ServerHello missing key_share extension")
         }
 
         do {
@@ -373,26 +384,25 @@ nonisolated class QUICTLSHandler {
             switch serverKeyShareGroup {
             case TLSNamedGroup.x25519:
                 guard let priv = privateKeyX25519 else {
-                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                    return fail("internal: X25519 private key unavailable")
                 }
                 let serverKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPublicKey)
                 let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
                 sharedSecretData = shared.withUnsafeBytes { Data($0) }
             case TLSNamedGroup.secp256:
                 guard let priv = privateKeyP256 else {
-                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                    return fail("internal: P-256 private key unavailable")
                 }
                 let serverKey = try P256.KeyAgreement.PublicKey(x963Representation: serverPublicKey)
                 let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
                 sharedSecretData = shared.withUnsafeBytes { Data($0) }
             default:
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail(String(format: "server chose unsupported key-share group 0x%04x", serverKeyShareGroup))
             }
 
             keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
 
-            ngtcp2_conn_set_tls_native_handle(conn,
-                UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
+            ngtcp2_conn_set_tls_native_handle(conn, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
 
             if !pskAccepted { activePSK = nil }
 
@@ -407,9 +417,8 @@ nonisolated class QUICTLSHandler {
             installHandshakeKeys(conn: conn, keys: hsKeys)
 
             state = .serverHelloReceived
-
         } catch {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail(String(format: "key agreement failed (group 0x%04x): %@", serverKeyShareGroup, String(describing: error)))
         }
 
         return .success
@@ -430,12 +439,12 @@ nonisolated class QUICTLSHandler {
             offset += 4
 
             guard offset + extDataLen <= extEnd, offset + extDataLen <= body.count else {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail(String(format: "EncryptedExtensions extension 0x%04x overruns message", extType))
             }
 
             let (inserted, _) = observedExtensionTypes.insert(extType)
             if !inserted {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail(String(format: "duplicate EncryptedExtensions extension 0x%04x", extType))
             }
 
             if extType == TLSExtensionType.quicTransportParameters {
@@ -468,7 +477,7 @@ nonisolated class QUICTLSHandler {
 
         if !alpn.isEmpty {
             guard let picked = negotiatedALPN, alpn.contains(picked) else {
-                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                return fail("ALPN mismatch: offered \(alpn), server selected \(negotiatedALPN ?? "nothing")")
             }
         }
 
@@ -479,7 +488,7 @@ nonisolated class QUICTLSHandler {
 
     private func processServerFinished(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
         guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("internal: handshake secrets unavailable at server Finished")
         }
 
         // A resumed handshake carries no Certificate/CertificateVerify; the server
@@ -509,14 +518,13 @@ nonisolated class QUICTLSHandler {
 
         guard let serverHTS = serverHandshakeTrafficSecret,
               let preFinishedTranscript = transcriptBeforeServerFinished else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("internal: transcript unavailable at server Finished")
         }
         let expectedServerFinished = keyDerivation.serverFinishedPayload(
             serverTrafficSecret: serverHTS, transcript: preFinishedTranscript
         )
         guard body == expectedServerFinished else {
-            logger.warning("[QUIC-TLS] Server Finished verification failed")
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("server Finished verification failed (transcript mismatch)")
         }
 
         let appKeys = keyDerivation.deriveApplicationKeys(
@@ -539,7 +547,7 @@ nonisolated class QUICTLSHandler {
         }
 
         if rv != 0 {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("submitting client Finished failed: \(rv) (\(String(cString: ngtcp2_strerror(rv))))")
         }
 
         ngtcp2_conn_tls_handshake_completed(conn)
@@ -848,18 +856,18 @@ nonisolated class QUICTLSHandler {
 
     private func processCertificateVerify(_ body: Data) -> QUICTLSResult {
         guard body.count >= 4 else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("CertificateVerify truncated (\(body.count) B)")
         }
         certificateVerifyAlgorithm = UInt16(body[0]) << 8 | UInt16(body[1])
 
         // Parse-time sanity check: must be an algorithm we offered.
         guard TLSClientHelloBuilder.quicSignatureAlgorithms.contains(certificateVerifyAlgorithm) else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail(String(format: "CertificateVerify uses signature algorithm 0x%04x", certificateVerifyAlgorithm))
         }
 
         let sigLen = Int(body[2]) << 8 | Int(body[3])
         guard body.count >= 4 + sigLen else {
-            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            return fail("CertificateVerify signature truncated (\(sigLen) B declared, \(body.count - 4) B present)")
         }
         certificateVerifySignature = Data(body[4..<(4 + sigLen)])
         return .success

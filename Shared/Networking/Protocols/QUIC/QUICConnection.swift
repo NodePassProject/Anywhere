@@ -1372,9 +1372,10 @@ nonisolated class QUICConnection {
             case NGTCP2_ERR_CLOSING:
                 error = QUICError.closed
             case NGTCP2_ERR_CALLBACK_FAILURE, NGTCP2_ERR_CRYPTO:
-                error = tlsHandler?.handshakeError ?? QUICError.handshakeFailed("ngtcp2 error: \(rv)")
+                error = tlsHandler?.handshakeError
+                    ?? QUICError.handshakeFailed("ngtcp2 error: \(rv) (\(String(cString: ngtcp2_strerror(rv))))")
             default:
-                error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv)")
+                error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv) (\(String(cString: ngtcp2_strerror(rv))))")
             }
             if let callback = connectCompletion {
                 connectCompletion = nil
@@ -1503,7 +1504,7 @@ nonisolated class QUICConnection {
                 let rv = ngtcp2_conn_handle_expiry(connectionOpaquePointer, ts)
                 self.ngtcp2Busy = prevBusy
                 if rv != 0 {
-                    let error = QUICError.connectionFailed("expiry error: \(rv)")
+                    let error = QUICError.connectionFailed("expiry error: \(rv) (\(String(cString: ngtcp2_strerror(rv))))")
                     if let callback = self.connectCompletion {
                         self.connectCompletion = nil
                         callback(error)

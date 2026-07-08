@@ -364,8 +364,65 @@ int ngtcp2_crypto_decrypt(uint8_t *dest, const ngtcp2_crypto_aead *aead,
                           (int)ctx->type);
 }
 
-/* --- Header Protection mask ---
-   AES-ECB is available in CommonCrypto's public API. */
+/* --- ChaCha20 block function (RFC 8439 §2.3) --- */
+
+#define CHACHA_ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+#define CHACHA_QR(a, b, c, d)                                                  \
+  do {                                                                         \
+    a += b; d ^= a; d = CHACHA_ROTL(d, 16);                                    \
+    c += d; b ^= c; b = CHACHA_ROTL(b, 12);                                    \
+    a += b; d ^= a; d = CHACHA_ROTL(d, 8);                                     \
+    c += d; b ^= c; b = CHACHA_ROTL(b, 7);                                     \
+  } while (0)
+
+static uint32_t chacha_load32_le(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+/* Writes the first |outlen| (<= 8) keystream bytes of the block selected by
+   |counter| and |nonce|. */
+static void chacha20_keystream(uint8_t *out, size_t outlen,
+                               const uint8_t key[32], uint32_t counter,
+                               const uint8_t nonce[12]) {
+  uint32_t s[16], x[16];
+  uint8_t block[8];
+  int i;
+
+  s[0] = 0x61707865;
+  s[1] = 0x3320646e;
+  s[2] = 0x79622d32;
+  s[3] = 0x6b206574;
+  for (i = 0; i < 8; i++) {
+    s[4 + i] = chacha_load32_le(key + 4 * i);
+  }
+  s[12] = counter;
+  s[13] = chacha_load32_le(nonce);
+  s[14] = chacha_load32_le(nonce + 4);
+  s[15] = chacha_load32_le(nonce + 8);
+
+  memcpy(x, s, sizeof(x));
+  for (i = 0; i < 10; i++) {
+    CHACHA_QR(x[0], x[4], x[8], x[12]);
+    CHACHA_QR(x[1], x[5], x[9], x[13]);
+    CHACHA_QR(x[2], x[6], x[10], x[14]);
+    CHACHA_QR(x[3], x[7], x[11], x[15]);
+    CHACHA_QR(x[0], x[5], x[10], x[15]);
+    CHACHA_QR(x[1], x[6], x[11], x[12]);
+    CHACHA_QR(x[2], x[7], x[8], x[13]);
+    CHACHA_QR(x[3], x[4], x[9], x[14]);
+  }
+  for (i = 0; i < 2; i++) {
+    uint32_t word = x[i] + s[i];
+    block[4 * i] = (uint8_t)word;
+    block[4 * i + 1] = (uint8_t)(word >> 8);
+    block[4 * i + 2] = (uint8_t)(word >> 16);
+    block[4 * i + 3] = (uint8_t)(word >> 24);
+  }
+  memcpy(out, block, outlen);
+}
+
+/* --- Header Protection mask --- */
 
 int ngtcp2_crypto_hp_mask(uint8_t *dest, const ngtcp2_crypto_cipher *hp,
                           const ngtcp2_crypto_cipher_ctx *hp_ctx,
@@ -385,9 +442,11 @@ int ngtcp2_crypto_hp_mask(uint8_t *dest, const ngtcp2_crypto_cipher *hp,
     return status == kCCSuccess ? 0 : -1;
   }
   case NGTCP2_APPLE_CIPHER_CHACHA20:
-    /* ChaCha20 HP: counter from sample[0..3], nonce from sample[4..15],
-       encrypt 5 zero bytes. Handled via Swift callback if needed. */
-    return -1;
+    /* RFC 9001 §5.4.4: counter = sample[0..3] (little endian), nonce =
+       sample[4..15]; the mask is ChaCha20 over 5 zero bytes, i.e. the first
+       NGTCP2_HP_MASKLEN keystream bytes. */
+    chacha20_keystream(dest, 5, ctx->key, chacha_load32_le(sample), sample + 4);
+    return 0;
   default:
     return -1;
   }
