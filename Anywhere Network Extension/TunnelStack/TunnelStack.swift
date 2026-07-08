@@ -104,32 +104,28 @@ class TunnelStack {
     var proxyMode: ProxyMode = .rule
     /// The user's configured mode, before the trusted-network policy is layered on.
     var baseProxyMode: ProxyMode = .rule
-    var trustedSSIDs: Set<String> = []
-    var alwaysTrustCellular: Bool = false
-    var alwaysUntrustCellular: Bool = false
-    /// Current egress identity, owned by ``lwipQueue``.
-    var currentNetworkIsWiFi: Bool = false
-    var currentNetworkIsCellular: Bool = false
-    var currentSSID: String?
-    var hideVPNIcon: Bool = false
     var blockUDP: Bool = false
     var quicPolicy: QUICPolicy = .blocked
     var blockWebRTC: Bool = true
     var preventDNSLeak: Bool = false
+    var hideVPNIcon: Bool = false
     var advertiseIPv6ToApps: Bool = false
 
-    // Reflection settings; owned by ``lwipQueue``, published as the
-    // ``reflector()`` snapshot, live-reloaded in place.
+    // MARK: Trusted Network
+    var alwaysTrustCellular: Bool = false
+    var alwaysUntrustCellular: Bool = false
+    var trustedSSIDs: Set<String> = []
+    var currentNetworkIsWiFi: Bool = false
+    var currentNetworkIsCellular: Bool = false
+    var currentSSID: String?
+    
+    // MARK: Reflection
     var reflectionEnabled: Bool = false
     var reflectionAddresses: [String] = []
 
     // MARK: MITM
-    //
-    // Routing selects the upstream proxy; MITM decides whether to intercept
-    // TLS in transit.
     var mitmEnabled: Bool = false
     let mitmPolicy = MITMRewritePolicy()
-    /// Lazily created to defer keychain access until a session needs a leaf cert.
     var mitmLeafCache: MITMLeafCertCache?
     let mitmCertificateStore = MITMCertificateStore()
 
@@ -232,8 +228,8 @@ class TunnelStack {
         let blockUDP: Bool
         let quicPolicy: QUICPolicy
         let blockWebRTC: Bool
-        let advertiseIPv6ToApps: Bool
         let mitmEnabled: Bool
+        let advertiseIPv6ToApps: Bool
     }
     private let _udpConfig = Mutex(UDPConfig(
         configuration: nil,
@@ -241,8 +237,8 @@ class TunnelStack {
         blockUDP: false,
         quicPolicy: .blocked,
         blockWebRTC: true,
-        advertiseIPv6ToApps: false,
-        mitmEnabled: false
+        mitmEnabled: false,
+        advertiseIPv6ToApps: false
     ))
 
     /// Current UDP config snapshot; callable from any queue.
@@ -261,8 +257,8 @@ class TunnelStack {
             blockUDP: blockUDP,
             quicPolicy: quicPolicy,
             blockWebRTC: blockWebRTC,
-            advertiseIPv6ToApps: advertiseIPv6ToApps,
-            mitmEnabled: mitmEnabled
+            mitmEnabled: mitmEnabled,
+            advertiseIPv6ToApps: advertiseIPv6ToApps
         )
         _udpConfig.withLock { $0 = snapshot }
     }
@@ -407,15 +403,15 @@ class TunnelStack {
                 ?? .proxy(configuration.id)
         }
 
-        loadIPv6Settings()
         loadBypassCountry()
-        loadHideVPNIconSetting()
         loadBlockUDPSetting()
         loadQUICPolicySetting()
         loadBlockWebRTCSetting()
         loadPreventDNSLeakSetting()
         loadReflectionSetting()
         loadMITMSetting()
+        loadHideVPNIconSetting()
+        loadIPv6Settings()
 
         publishUDPConfig()
         publishReflector()
@@ -472,10 +468,6 @@ class TunnelStack {
         }
         return base
     }
-
-    private func loadHideVPNIconSetting() {
-        hideVPNIcon = AWCore.getHideVPNIcon()
-    }
     
     private func loadBlockUDPSetting() {
         blockUDP = AWCore.getBlockUDP()
@@ -496,6 +488,10 @@ class TunnelStack {
     private func loadReflectionSetting() {
         reflectionEnabled = AWCore.getReflectionEnabled()
         reflectionAddresses = AWCore.getReflectionAddresses()
+    }
+    
+    private func loadHideVPNIconSetting() {
+        hideVPNIcon = AWCore.getHideVPNIcon()
     }
 
     func loadMITMSetting() {
