@@ -38,7 +38,7 @@ struct MITMSettingsView: View {
                     MITMCertificateView()
                 } label: {
                     HStack {
-                        TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
+                        TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                         Spacer()
                         Image(systemName: certificateStatusBadgeIcon)
                             .foregroundStyle(certificateStatusBadgeColor)

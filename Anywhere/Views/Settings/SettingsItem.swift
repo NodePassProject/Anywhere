@@ -101,8 +101,8 @@ enum SettingsItem: String {
             title: title,
             comment: nil,
             systemName: systemName,
-            foregroundColor: foregroundColor,
-            backgroundColor: backgroundColor
+            foregroundStyle: foregroundColor,
+            backgroundStyle: backgroundColor.gradient
         )
     }
 }

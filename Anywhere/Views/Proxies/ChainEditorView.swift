@@ -40,7 +40,7 @@ struct ChainEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Name", comment: nil, systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
+                        TextWithColorfulIcon(title: "Name", comment: nil, systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 }
 

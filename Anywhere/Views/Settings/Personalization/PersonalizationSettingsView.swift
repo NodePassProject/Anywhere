@@ -14,12 +14,12 @@ struct PersonalizationSettingsView: View {
                 NavigationLink {
                     CustomizeAppIconView()
                 } label: {
-                    TextWithColorfulIcon(title: "App Icon", comment: nil, systemName: "app.fill", foregroundColor: .white, backgroundColor: .blue)
+                    TextWithColorfulIcon(title: "App Icon", comment: nil, systemName: "app.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 NavigationLink {
                     CustomizeThemeView()
                 } label: {
-                    TextWithColorfulIcon(title: "Theme", comment: nil, systemName: "paintbrush.fill", foregroundColor: .white, backgroundColor: .pink)
+                    TextWithColorfulIcon(title: "Theme", comment: nil, systemName: "paintbrush.fill", foregroundStyle: .white, backgroundStyle: .pink.gradient)
                 }
             }
         }

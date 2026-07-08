@@ -192,7 +192,7 @@ struct SettingsView: View {
         Section {
             Link(destination: URL(string: "https://t.me/anywhere_official_group")!) {
                 HStack {
-                    TextWithColorfulIconAndCustomImage(title: "Join Telegram Group", comment: nil, imageName: "TelegramSymbol", foregroundColor: .white, backgroundColor: .blue)
+                    TextWithColorfulIconAndCustomImage(title: "Join Telegram Group", comment: nil, imageName: "TelegramSymbol", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     Spacer()
                     Image(systemName: "arrow.up.right")
                         .font(.footnote.bold())
@@ -202,7 +202,7 @@ struct SettingsView: View {
             NavigationLink {
                 AcknowledgementsView()
             } label: {
-                TextWithColorfulIcon(title: "Acknowledgements", comment: nil, systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .gray)
+                TextWithColorfulIcon(title: "Acknowledgements", comment: nil, systemName: "doc.text.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
             }
         } header: {
             Text("About")

@@ -7,12 +7,12 @@
 
 import SwiftUI
 
-struct TextWithColorfulIcon: View {
+struct TextWithColorfulIcon<F, B>: View where F : ShapeStyle, B : ShapeStyle {
     let title: String.LocalizationValue
     let comment: StaticString?
     let systemName: String
-    let foregroundColor: Color
-    let backgroundColor: Color
+    let foregroundStyle: F
+    let backgroundStyle: B
 
     var body: some View {
         HStack {
@@ -20,21 +20,21 @@ struct TextWithColorfulIcon: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 19, height: 19)
-                .foregroundStyle(foregroundColor)
+                .foregroundStyle(foregroundStyle)
                 .padding(5)
-                .background(backgroundColor.gradient)
+                .background(backgroundStyle)
                 .clipShape(.rect(cornerRadius: 7))
             Text(String(localized: title, comment: comment))
         }
     }
 }
 
-struct TextWithColorfulIconAndCustomImage: View {
+struct TextWithColorfulIconAndCustomImage<F, B>: View where F : ShapeStyle, B : ShapeStyle {
     let title: String.LocalizationValue
     let comment: StaticString?
     let imageName: String
-    let foregroundColor: Color
-    let backgroundColor: Color
+    let foregroundStyle: F
+    let backgroundStyle: B
 
     var body: some View {
         HStack {
@@ -44,9 +44,9 @@ struct TextWithColorfulIconAndCustomImage: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 19, height: 19)
-                .foregroundStyle(foregroundColor)
+                .foregroundStyle(foregroundStyle)
                 .padding(5)
-                .background(backgroundColor.gradient)
+                .background(backgroundStyle)
                 .clipShape(.rect(cornerRadius: 7))
             Text(String(localized: title, comment: comment))
         }
