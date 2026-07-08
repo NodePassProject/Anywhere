@@ -302,15 +302,13 @@ class TVProxyEditorViewController: UITableViewController {
                     label: String(localized: "Upload"),
                     value: nowhereUplink.rawValue.uppercased(),
                     options: [("TCP", "tcp"), ("UDP", "udp")],
-                    key: .nowhereUplink,
-                    systemImage: "arrow.up.circle.fill"
+                    key: .nowhereUplink
                 ),
                 .selection(
                     label: String(localized: "Download"),
                     value: nowhereDownlink.rawValue.uppercased(),
                     options: [("TCP", "tcp"), ("UDP", "udp")],
-                    key: .nowhereDownlink,
-                    systemImage: "arrow.down.circle.fill"
+                    key: .nowhereDownlink
                 ),
             ]
             if nowhereUplink == .tcp && nowhereDownlink == .tcp {
