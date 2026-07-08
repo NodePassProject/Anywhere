@@ -36,17 +36,13 @@ struct HomeView: View {
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
 
-    private var experimentalEnabled: Bool { settings.experimentalEnabled }
-
-    private var showsDetail: Bool { isConnected && experimentalEnabled }
-
     var body: some View {
         ZStack {
             BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
 
             Group {
-                if showsDetail && Self.allowsSideBySide(contentWidth: contentWidth) {
+                if isConnected && Self.allowsSideBySide(contentWidth: contentWidth) {
                     sideBySideLayout
                 } else {
                     stackedLayout
@@ -98,7 +94,7 @@ struct HomeView: View {
     }
 
     private var stackedLayout: some View {
-        DetailRevealScrollView(revealsDetail: showsDetail) {
+        DetailRevealScrollView(revealsDetail: isConnected) {
             connectionControls
                 .padding(.horizontal, Self.horizontalPadding)
         } detail: {
@@ -412,7 +408,6 @@ private struct ProminentCapsule<Content: View>: View {
 #if DEBUG
 #Preview("Connected") {
     let settings = AppSettings.shared
-    settings.experimentalEnabled = true
     
     let viewModel = VPNViewModel()
     viewModel.selectedConfiguration = ProxyConfiguration(
