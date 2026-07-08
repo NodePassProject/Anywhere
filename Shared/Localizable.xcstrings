@@ -1568,6 +1568,12 @@
             "value" : "أضف تكوينًا على iPhone الخاص بك."
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add a configuration on your iPhone."
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2873,58 +2879,6 @@
         }
       }
     },
-    "Appearance" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "المظهر"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Appearance"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aspecto"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ظاهر"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Оформление"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Görünüm"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Giao diện"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "外观"
-          }
-        }
-      }
-    },
     "ASCII" : {
       "shouldTranslate" : false
     },
@@ -4099,6 +4053,12 @@
             "value" : "التكوينات"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Configurations"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4248,6 +4208,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "جارٍ الاتصال"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting"
           }
         },
         "es" : {
@@ -5446,6 +5412,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "جارٍ قطع الاتصال"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disconnecting"
           }
         },
         "es" : {
@@ -7791,6 +7763,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "主页"
+          }
+        }
+      }
+    },
+    "Home Appearance" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مظهر الرئيسية"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Home Appearance"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aspecto de inicio"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ظاهر خانه"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Оформление главной страницы"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ana Sayfa Görünümü"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Giao diện Trang chủ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主页外观"
           }
         }
       }
@@ -10975,6 +10999,12 @@
             "value" : "افتح Anywhere على iPhone الخاص بك للمزامنة."
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Anywhere on your iPhone to sync."
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12553,6 +12583,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "جارٍ إعادة الاتصال"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reconnecting"
           }
         },
         "es" : {
@@ -15912,6 +15948,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "جارٍ المزامنة مع iPhone"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Syncing with iPhone"
           }
         },
         "es" : {
