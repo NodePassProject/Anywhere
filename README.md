@@ -49,7 +49,7 @@ If this README and the code disagree, the code is correct — and the README lik
 - **VLESS XHTTP over HTTP/1.1, HTTP/2 & HTTP/3** — full `stream-one` / `stream-up` / `packet-up` support across all three HTTP versions (HTTP/3 over QUIC), with **up/download detach**: the download (GET) leg can ride a *separate server* with its own TLS/Reality and transport, correlated to the upload (POST) leg by a shared session ID.
 - **Post-quantum VLESS encryption** — native `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT.
 - **XTLS-RPRX-Vision** flow control with adaptive padding, plus Mux + XUDP multiplexing.
-- **Native QUIC stack** — one ngtcp2-powered engine driving Hysteria2, Naive HTTP/3, and XHTTP-over-HTTP/3.
+- **Native QUIC stack** — one ngtcp2-powered engine driving Hysteria2, Nowhere QUIC/UDP, Naive HTTP/3, and XHTTP-over-HTTP/3.
 
 ### Protocols & Security
 
@@ -61,6 +61,7 @@ Every protocol, transport, and crypto layer below is implemented natively in Swi
 | --- | --- | --- |
 | **VLESS** | TCP · WebSocket · HTTP Upgrade · gRPC · XHTTP | XTLS-RPRX-Vision flow control with adaptive padding · post-quantum encryption · Mux + XUDP |
 | **Hysteria2** | QUIC | Brutal and BBR congestion control · Salamander/Gecko obfuscation |
+| **Nowhere** | TLS/TCP · QUIC/UDP | Variable frame layouts · split upload/download paths · pooled TCP relay · QUIC DATAGRAM · UDP-over-TCP|
 | **Trojan** | TLS / TCP | SHA-224 password auth · UDP-over-TCP relay |
 | **AnyTLS** | TLS / TCP | Stream multiplexing over pooled TLS sessions · server-driven padding · warm idle-session pool · UDP-over-TCP |
 | **Shadowsocks** | TCP | AEAD ciphers and Shadowsocks 2022 (BLAKE3) |
@@ -92,7 +93,7 @@ Selectable on VLESS; layered under TLS or Reality.
 
 - **Minimal dependencies** — Apple frameworks and vendored C libraries (lwIP, ngtcp2, BLAKE3, libyaml)
 - **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack
-- **Native QUIC stack** — ngtcp2-powered client used for Hysteria2, Naive HTTP/3, and XHTTP over HTTP/3
+- **Native QUIC stack** — ngtcp2-powered client used for Hysteria2, Nowhere QUIC/UDP, Naive HTTP/3, and XHTTP over HTTP/3
 - **Fake-IP DNS** — transparent domain-based routing for all apps
 
 ## Documentation
@@ -128,7 +129,7 @@ Import one or more routing (`.arrs`) and MITM (`.amrs`) rule sets from remote li
 
 Tapping any of the following links on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import:
 
-`vless://` · `hysteria2://` (`hy2://`) · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `sudoku://` · `https://` · `quic://`
+`vless://` · `hysteria2://` (`hy2://`) · `nowhere://` · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `sudoku://` · `https://` · `quic://`
 
 ### Integration Example
 
