@@ -148,6 +148,20 @@ final class AppSettings {
         }
     }
 
+    var tunnelExcludedRoutes: [String] {
+        didSet {
+            AWCore.setTunnelExcludedRoutes(tunnelExcludedRoutes)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var tunnelIncludedRoutes: [String] {
+        didSet {
+            AWCore.setTunnelIncludedRoutes(tunnelIncludedRoutes)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
     // MARK: - Persist + certificate policy
 
     var allowInsecure: Bool {
@@ -216,6 +230,8 @@ final class AppSettings {
         reflectionAddresses = AWCore.getReflectionAddresses()
         reflectionEnabled = AWCore.getReflectionEnabled()
         trustedSSIDs = AWCore.getTrustedSSIDs()
+        tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
+        tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
 
         allowInsecure = AWCore.getAllowInsecure()
 

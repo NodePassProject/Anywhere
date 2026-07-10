@@ -6607,6 +6607,9 @@
         }
       }
     },
+    "Excluded Routes" : {
+      "shouldTranslate" : false
+    },
     "Exit" : {
       "localizations" : {
         "ar" : {
@@ -8105,6 +8108,9 @@
       "shouldTranslate" : false
     },
     "Include Local Networks" : {
+      "shouldTranslate" : false
+    },
+    "Included Routes" : {
       "shouldTranslate" : false
     },
     "insecure" : {

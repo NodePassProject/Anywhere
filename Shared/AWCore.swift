@@ -104,9 +104,11 @@ nonisolated final class AWCore {
         static let selectedConfigurationId = "selectedConfigurationId"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
+        static let tunnelExcludedRoutes = "tunnelExcludedRoutes"
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
         static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
+        static let tunnelIncludedRoutes = "tunnelIncludedRoutes"
         static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
         static let voyagerMembership = "voyagerMembership"
     }
@@ -418,7 +420,23 @@ nonisolated final class AWCore {
     static func setTunnelIncludeCellularServices(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
     }
-    
+
+    static func getTunnelIncludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
+    }
+
+    static func setTunnelIncludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
+    }
+
+    static func getTunnelExcludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
+    }
+
+    static func setTunnelExcludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
+    }
+
     // MARK: - Routing Data
 
     private static let routingDataURL = FileManager.default

@@ -109,6 +109,8 @@ class TunnelStack {
     var blockWebRTC: Bool = true
     var preventDNSLeak: Bool = false
     var hideVPNIcon: Bool = false
+    var tunnelIncludedRoutes: [String] = []
+    var tunnelExcludedRoutes: [String] = []
     var advertiseIPv6ToApps: Bool = false
 
     // MARK: Trusted Network
@@ -410,7 +412,7 @@ class TunnelStack {
         loadPreventDNSLeakSetting()
         loadReflectionSetting()
         loadMITMSetting()
-        loadHideVPNIconSetting()
+        loadTunnelSetting()
         loadIPv6Settings()
 
         publishUDPConfig()
@@ -450,10 +452,12 @@ class TunnelStack {
     }
 
     func computeEffectiveProxyMode() -> ProxyMode {
-        computeEffectiveProxyMode(base: baseProxyMode,
-                                  trusted: trustedSSIDs,
-                                  trustCellular: alwaysTrustCellular,
-                                  untrustCellular: alwaysUntrustCellular)
+        computeEffectiveProxyMode(
+            base: baseProxyMode,
+            trusted: trustedSSIDs,
+            trustCellular: alwaysTrustCellular,
+            untrustCellular: alwaysUntrustCellular
+        )
     }
 
     func computeEffectiveProxyMode(base: ProxyMode, trusted: Set<String>, trustCellular: Bool, untrustCellular: Bool) -> ProxyMode {
@@ -489,9 +493,11 @@ class TunnelStack {
         reflectionEnabled = AWCore.getReflectionEnabled()
         reflectionAddresses = AWCore.getReflectionAddresses()
     }
-    
-    private func loadHideVPNIconSetting() {
+
+    private func loadTunnelSetting() {
         hideVPNIcon = AWCore.getHideVPNIcon()
+        tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
+        tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
     }
 
     func loadMITMSetting() {

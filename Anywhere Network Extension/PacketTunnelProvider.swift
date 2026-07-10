@@ -82,18 +82,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
 
         let hideVPNIcon = AWCore.getHideVPNIcon()
+        let includedRoutes = Self.parseRoutes(AWCore.getTunnelIncludedRoutes())
+        let excludedRoutes = Self.parseRoutes(AWCore.getTunnelExcludedRoutes())
+
         let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.1"], subnetMasks: ["255.255.255.0"])
-        ipv4Settings.includedRoutes = [NEIPv4Route.default()]
-        ipv4Settings.excludedRoutes = hideVPNIcon ? [NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254")] : []
+        ipv4Settings.includedRoutes = [NEIPv4Route.default()] + includedRoutes.ipv4
+        var excludedIPv4Routes = excludedRoutes.ipv4
+        if hideVPNIcon {
+            excludedIPv4Routes.append(NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254"))
+        }
+        ipv4Settings.excludedRoutes = excludedIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
         // Claiming IPv6 tunnel settings makes iOS show the VPN icon on cellular,
-        // so we drop IPv6 entirely when hideVPNIcon is enabled.
+        // so we drop IPv6 entirely (custom routes included) when hideVPNIcon is enabled.
         let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
         if advertiseIPv6ToApps {
             let ipv6Settings = NEIPv6Settings(addresses: ["fd00::1"], networkPrefixLengths: [64])
-            ipv6Settings.includedRoutes = [NEIPv6Route.default()]
-            ipv6Settings.excludedRoutes = []
+            ipv6Settings.includedRoutes = [NEIPv6Route.default()] + includedRoutes.ipv6
+            ipv6Settings.excludedRoutes = excludedRoutes.ipv6
             settings.ipv6Settings = ipv6Settings
         }
 
@@ -110,6 +117,75 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.mtu = 1500
 
         return settings
+    }
+
+    /// Parses user-configured route strings ("address" or "address/prefix").
+    private static func parseRoutes(_ strings: [String]) -> (ipv4: [NEIPv4Route], ipv6: [NEIPv6Route]) {
+        var ipv4Routes: [NEIPv4Route] = []
+        var ipv6Routes: [NEIPv6Route] = []
+
+        for string in strings {
+            if string.contains(":") {
+                if let route = parseIPv6Route(string) {
+                    ipv6Routes.append(route)
+                }
+            } else if let route = parseIPv4Route(string) {
+                ipv4Routes.append(route)
+            }
+        }
+
+        return (ipv4: ipv4Routes, ipv6: ipv6Routes)
+    }
+
+    /// Host bits beyond the prefix are zeroed.
+    private static func parseIPv4Route(_ string: String) -> NEIPv4Route? {
+        let parts = string.split(separator: "/", maxSplits: 1)
+        guard let addressPart = parts.first else { return nil }
+        var address = in_addr()
+        guard inet_pton(AF_INET, String(addressPart), &address) == 1 else { return nil }
+
+        var prefixLength = 32
+        if parts.count == 2 {
+            guard let parsed = Int(parts[1]), (0...32).contains(parsed) else { return nil }
+            prefixLength = parsed
+        }
+
+        let mask: UInt32 = prefixLength == 0 ? 0 : ~UInt32(0) << (32 - prefixLength)
+        let network = UInt32(bigEndian: address.s_addr) & mask
+        return NEIPv4Route(destinationAddress: dottedQuad(network), subnetMask: dottedQuad(mask))
+    }
+
+    /// Host bits beyond the prefix are zeroed.
+    private static func parseIPv6Route(_ string: String) -> NEIPv6Route? {
+        let parts = string.split(separator: "/", maxSplits: 1)
+        guard let addressPart = parts.first else { return nil }
+        var address = in6_addr()
+        guard inet_pton(AF_INET6, String(addressPart), &address) == 1 else { return nil }
+
+        var prefixLength = 128
+        if parts.count == 2 {
+            guard let parsed = Int(parts[1]), (0...128).contains(parsed) else { return nil }
+            prefixLength = parsed
+        }
+
+        withUnsafeMutableBytes(of: &address) { bytes in
+            for byteIndex in bytes.indices {
+                let bitPosition = byteIndex * 8
+                if bitPosition >= prefixLength {
+                    bytes[byteIndex] = 0
+                } else if bitPosition + 8 > prefixLength {
+                    bytes[byteIndex] &= ~UInt8(0) << (8 - (prefixLength - bitPosition))
+                }
+            }
+        }
+
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
+        return NEIPv6Route(destinationAddress: String(cString: buffer), networkPrefixLength: NSNumber(value: prefixLength))
+    }
+
+    private static func dottedQuad(_ value: UInt32) -> String {
+        "\((value >> 24) & 0xFF).\((value >> 16) & 0xFF).\((value >> 8) & 0xFF).\(value & 0xFF)"
     }
 
     /// Re-applies tunnel settings from current UserDefaults; resets the virtual

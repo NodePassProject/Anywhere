@@ -384,6 +384,17 @@ extension TunnelStack {
                 publishReflector()
             }
 
+            // Custom routes only change the tunnel network settings — reapply
+            // in place, before the change-detection guard below.
+            let tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
+            let tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
+            if tunnelIncludedRoutes != self.tunnelIncludedRoutes || tunnelExcludedRoutes != self.tunnelExcludedRoutes {
+                logger.info("[VPN] Custom routes changed: included=\(tunnelIncludedRoutes), excluded=\(tunnelExcludedRoutes)")
+                self.tunnelIncludedRoutes = tunnelIncludedRoutes
+                self.tunnelExcludedRoutes = tunnelExcludedRoutes
+                onTunnelSettingsNeedReapply?()
+            }
+
             let proxyModeChanged = effectiveProxyMode != self.proxyMode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
             let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
