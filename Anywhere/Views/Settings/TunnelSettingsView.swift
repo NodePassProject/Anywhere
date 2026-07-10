@@ -58,13 +58,29 @@ struct TunnelSettingsView: View {
         .onAppear { loadInitial() }
         .onChange(of: isEditing) { _, newValue in
             if newValue {
-                includedRouteDrafts.append(RouteDraft(value: ""))
-                excludedRouteDrafts.append(RouteDraft(value: ""))
+                ensureTrailingBlankDraft(&includedRouteDrafts)
+                ensureTrailingBlankDraft(&excludedRouteDrafts)
             } else {
                 save()
             }
         }
+        .onChange(of: includedRouteDrafts) {
+            if isEditing {
+                ensureTrailingBlankDraft(&includedRouteDrafts)
+            }
+        }
+        .onChange(of: excludedRouteDrafts) {
+            if isEditing {
+                ensureTrailingBlankDraft(&excludedRouteDrafts)
+            }
+        }
         .disabled(viewModel.pendingReconnect)
+    }
+    
+    private func ensureTrailingBlankDraft(_ drafts: inout [RouteDraft]) {
+        if drafts.last?.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true {
+            drafts.append(RouteDraft(value: ""))
+        }
     }
 
     @ViewBuilder

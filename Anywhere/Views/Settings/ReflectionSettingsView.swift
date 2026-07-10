@@ -75,15 +75,26 @@ struct ReflectionSettingsView: View {
         .onAppear { loadInitial() }
         .onChange(of: isEditing) { _, newValue in
             if newValue {
-                addressDrafts.append(ReflectionAddressDraft(value: ""))
+                ensureTrailingBlankDraft()
             } else {
                 save()
+            }
+        }
+        .onChange(of: addressDrafts) {
+            if isEditing {
+                ensureTrailingBlankDraft()
             }
         }
     }
 
     private func loadInitial() {
         addressDrafts = AppSettings.shared.reflectionAddresses.map { ReflectionAddressDraft(value: $0) }
+    }
+    
+    private func ensureTrailingBlankDraft() {
+        if addressDrafts.last?.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true {
+            addressDrafts.append(ReflectionAddressDraft(value: ""))
+        }
     }
     
     private func save() {

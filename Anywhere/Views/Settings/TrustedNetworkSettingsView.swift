@@ -66,16 +66,6 @@ struct TrustedNetworkSettingsView: View {
                     }
                 }
                 
-                if isEditing {
-                    Button {
-                        withAnimation {
-                            ssidDrafts.append(TrustedSSIDDraft(value: ""))
-                        }
-                    } label: {
-                        Label("Add", systemImage: "plus")
-                    }
-                }
-                
                 if !isEditing, let currentSSID, !trimmedSSIDs.contains(currentSSID) {
                     Button {
                         withAnimation {
@@ -103,14 +93,28 @@ struct TrustedNetworkSettingsView: View {
             refreshCurrentSSID()
         }
         .onChange(of: isEditing) { _, newValue in
-            if newValue == false {
+            if newValue {
+                ensureTrailingBlankDraft()
+            } else {
                 save()
             }
         }
+        .onChange(of: ssidDrafts) {
+            if isEditing {
+                ensureTrailingBlankDraft()
+            }
+        }
     }
-    
+
     private func loadInitial() {
         ssidDrafts = AppSettings.shared.trustedSSIDs.map { TrustedSSIDDraft(value: $0) }
+    }
+
+    // While editing, keep a blank row at the end so a new entry can always be typed.
+    private func ensureTrailingBlankDraft() {
+        if ssidDrafts.last?.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true {
+            ssidDrafts.append(TrustedSSIDDraft(value: ""))
+        }
     }
     
     private func save() {

@@ -110,9 +110,22 @@ struct MITMRuleSetDetailView: View {
         }
         .onAppear { loadInitial() }
         .onChange(of: isEditing) { _, newValue in
-            if newValue == false {
+            if newValue == true {
+                ensureTrailingBlankDraft()
+            } else if newValue == false {
                 save()
             }
+        }
+        .onChange(of: suffixDrafts) {
+            if isEditing == true {
+                ensureTrailingBlankDraft()
+            }
+        }
+    }
+    
+    private func ensureTrailingBlankDraft() {
+        if suffixDrafts.last?.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != true {
+            suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
         }
     }
 
@@ -235,15 +248,6 @@ struct MITMRuleSetDetailView: View {
                 suffixDrafts.move(fromOffsets: source, toOffset: destination)
                 if isEditing != true {
                     save()
-                }
-            }
-            if isEditing == true {
-                Button {
-                    withAnimation {
-                        suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
-                    }
-                } label: {
-                    Label("Add", systemImage: "plus")
                 }
             }
         }
