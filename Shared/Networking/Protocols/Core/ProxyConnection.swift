@@ -20,6 +20,12 @@ protocol ProxyConnectionProtocol: AnyObject {
     func cancel()
 }
 
+/// Optional directional close used by transports that can finish the uplink
+/// while keeping the downlink readable.
+protocol ProxyConnectionWriteClosable: AnyObject {
+    func closeWrite(completion: @escaping (Error?) -> Void)
+}
+
 // MARK: - ProxyConnection
 
 nonisolated class ProxyConnection: ProxyConnectionProtocol {
