@@ -114,7 +114,7 @@ struct ProxyEditorView: View {
     @State private var sudokuHTTPMaskTLS = false
     @State private var sudokuHTTPMaskHost = ""
     @State private var sudokuHTTPMaskPathRoot = ""
-    @State private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
+    @State private var sudokuMultiplex: SudokuMultiplex = .off
     
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
@@ -974,6 +974,15 @@ struct ProxyEditorView: View {
         }
         
         if isSudoku {
+            Section(String(localized: "Multiplex", comment: "Multiplex for Sudoku protocol")) {
+                Picker(selection: $sudokuMultiplex) {
+                    ForEach(SudokuMultiplex.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                } label: {
+                    TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "rectangle.split.3x1.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
+                }
+            }
             Section(String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol")) {
                 Toggle(isOn: $sudokuHTTPMaskDisable) {
                     TextWithColorfulIcon(title: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol", systemName: "xmark.circle.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
@@ -1004,13 +1013,6 @@ struct ProxyEditorView: View {
                             .multilineTextAlignment(.trailing)
                     } label: {
                         TextWithColorfulIcon(title: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                    }
-                    Picker(selection: $sudokuHTTPMaskMultiplex) {
-                        ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    } label: {
-                        TextWithColorfulIcon(title: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature", systemName: "rectangle.split.3x1.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                     }
                 }
             }
@@ -1157,7 +1159,7 @@ struct ProxyEditorView: View {
             sudokuHTTPMaskTLS = sudoku.httpMask.tls
             sudokuHTTPMaskHost = sudoku.httpMask.host
             sudokuHTTPMaskPathRoot = sudoku.httpMask.pathRoot
-            sudokuHTTPMaskMultiplex = sudoku.httpMask.multiplex
+            sudokuMultiplex = sudoku.multiplex
         case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
             naiveUsername = user
             naivePassword = pass
@@ -1400,13 +1402,13 @@ struct ProxyEditorView: View {
                     .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty },
                 enablePureDownlink: sudokuEnablePureDownlink,
+                multiplex: sudokuMultiplex,
                 httpMask: SudokuHTTPMaskConfiguration(
                     disable: sudokuHTTPMaskDisable,
                     mode: sudokuHTTPMaskMode,
                     tls: sudokuHTTPMaskTLS,
                     host: sudokuHTTPMaskHost,
-                    pathRoot: sudokuHTTPMaskPathRoot,
-                    multiplex: sudokuHTTPMaskMultiplex
+                    pathRoot: sudokuHTTPMaskPathRoot
                 )
             ))
         case .http11:
