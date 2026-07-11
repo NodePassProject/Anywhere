@@ -15,6 +15,30 @@ protocol TransportPool: AnyObject {
     func reclaim()
 }
 
+// MARK: - TransportPrewarm
+
+/// Prepares process-wide state for the default outbound before app traffic arrives.
+/// The exhaustive switch keeps protocol-specific lifecycle hooks out of TunnelStack.
+enum TransportPrewarm {
+    static func warm(
+        configuration: ProxyConfiguration,
+        directDialHost: String,
+        timeout: TimeInterval = 2
+    ) {
+        switch configuration.outboundProtocol {
+        case .sudoku:
+            SudokuTransportPool.warm(
+                configuration: configuration,
+                directDialHost: directDialHost,
+                timeout: timeout
+            )
+        case .vless, .hysteria, .nowhere, .anytls, .http2, .http3,
+             .trojan, .shadowsocks, .socks5, .http11:
+            break
+        }
+    }
+}
+
 // MARK: - TransportReclaim
 
 /// Switch is exhaustive with no `default` so a new protocol cannot be silently omitted.

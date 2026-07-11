@@ -420,6 +420,13 @@ class TunnelStack {
 
         publishUDPConfig()
         publishReflector()
+
+        if proxyMode != .direct {
+            TransportPrewarm.warm(
+                configuration: configuration,
+                directDialHost: configuration.serverAddress
+            )
+        }
         
         udpQueue.async { [self] in
             if configuration.outboundProtocol == .vless {

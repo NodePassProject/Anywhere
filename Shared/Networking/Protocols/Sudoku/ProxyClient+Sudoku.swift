@@ -7,6 +7,13 @@
 
 import Foundation
 
+private let sudokuMuxPoolLogger = AnywhereLogger(category: "SudokuMuxPool")
+
+private enum SudokuConnectCommand {
+    case tcp
+    case udp
+}
+
 extension ProxyClient {
     func connectWithSudoku(
         command: ProxyCommand,
@@ -15,28 +22,38 @@ extension ProxyClient {
         initialData: Data? = nil,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard command != .mux else {
+        let sudokuCommand: SudokuConnectCommand
+        switch command {
+        case .tcp:
+            sudokuCommand = .tcp
+        case .udp:
+            sudokuCommand = .udp
+        case .mux:
             completion(.failure(ProxyError.protocolError("Sudoku does not use the host mux manager")))
             return
         }
 
+        let configuration = configuration
+        let directDialHost = directDialHost
+        let initialTunnel = tunnel
+        let usesInitialTunnel = initialTunnel != nil
         let factory = SudokuConnectionFactory(
             configuration: configuration,
-            initialTunnel: tunnel,
+            initialTunnel: initialTunnel,
             directDialHost: directDialHost
         )
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let client = try SudokuNativeClient(configuration: self.configuration, factory: factory)
+                let client = try SudokuNativeClient(configuration: configuration, factory: factory)
                 let connection: ProxyConnection
-                switch command {
+                switch sudokuCommand {
                 case .tcp:
                     if client.shouldUseNativeMux {
-                        if self.tunnel == nil {
+                        if !usesInitialTunnel {
                             let lease = try SudokuSharedMuxPool.dialTCP(
-                                configuration: self.configuration,
-                                directDialHost: self.directDialHost,
+                                configuration: configuration,
+                                directDialHost: directDialHost,
                                 host: destinationHost,
                                 port: destinationPort
                             )
@@ -71,8 +88,6 @@ extension ProxyClient {
                         destinationHost: destinationHost,
                         destinationPort: destinationPort
                     )
-                case .mux:
-                    throw ProxyError.protocolError("Sudoku does not use the host mux manager")
                 }
                 completion(.success(connection))
             } catch {
@@ -128,18 +143,9 @@ private enum SudokuSharedMuxPool {
         port: UInt16
     ) throws -> SudokuSharedMuxLease {
         let key = SudokuSharedMuxKey(configuration: configuration, directDialHost: directDialHost)
-        let (shared, evicted) = lock.withLock { () -> (SudokuSharedMuxClient, [SudokuSharedMuxClient]) in
-            let shared: SudokuSharedMuxClient
-            if let existing = clients[key] {
-                shared = existing
-            } else {
-                shared = SudokuSharedMuxClient(configuration: configuration, directDialHost: directDialHost)
-                clients[key] = shared
-            }
-            touchLocked(key)
-            return (shared, trimIfNeededLocked())
-        }
+        let (shared, evicted) = sharedClient(for: key, configuration: configuration)
         for client in evicted { client.close() }
+        shared.startMaintaining()
         shared.retainStream()
         do {
             let (client, stream) = try shared.dialTCP(host: host, port: port)
@@ -150,10 +156,42 @@ private enum SudokuSharedMuxPool {
             }
         } catch {
             shared.releaseStream()
-            if shared.isClosed {
+            if shared.isStopped {
                 remove(key: key, closing: false)
             }
             throw error
+        }
+    }
+
+    static func warm(
+        configuration: ProxyConfiguration,
+        directDialHost: String,
+        timeout: TimeInterval
+    ) {
+        let key = SudokuSharedMuxKey(configuration: configuration, directDialHost: directDialHost)
+        let (shared, evicted) = sharedClient(for: key, configuration: configuration)
+        for client in evicted { client.close() }
+        shared.startMaintaining()
+        shared.waitUntilReady(timeout: timeout)
+    }
+
+    private static func sharedClient(
+        for key: SudokuSharedMuxKey,
+        configuration: ProxyConfiguration
+    ) -> (SudokuSharedMuxClient, [SudokuSharedMuxClient]) {
+        lock.withLock {
+            let shared: SudokuSharedMuxClient
+            if let existing = clients[key] {
+                shared = existing
+            } else {
+                shared = SudokuSharedMuxClient(
+                    configuration: configuration,
+                    directDialHost: key.directDialHost
+                )
+                clients[key] = shared
+            }
+            touchLocked(key)
+            return (shared, trimIfNeededLocked(protecting: key))
         }
     }
 
@@ -179,22 +217,19 @@ private enum SudokuSharedMuxPool {
         for client in evicted { client.close() }
     }
 
-    private static func trimIfNeededLocked() -> [SudokuSharedMuxClient] {
+    private static func trimIfNeededLocked(
+        protecting protectedKey: SudokuSharedMuxKey? = nil
+    ) -> [SudokuSharedMuxClient] {
         var evicted: [SudokuSharedMuxClient] = []
+        accessOrder.removeAll { clients[$0] == nil }
         while clients.count > maxEntries {
-            guard let victim = accessOrder.first else { break }
-            guard let client = clients[victim] else {
-                accessOrder.removeFirst()
-                continue
+            guard let victimIndex = accessOrder.firstIndex(where: { key in
+                key != protectedKey && clients[key]?.canEvict == true
+            }) else {
+                break
             }
-            if !client.canEvict {
-                accessOrder.removeFirst()
-                accessOrder.append(victim)
-                if !clients.values.contains(where: { $0.canEvict }) { break }
-                continue
-            }
-            accessOrder.removeFirst()
-            clients.removeValue(forKey: victim)
+            let victim = accessOrder.remove(at: victimIndex)
+            guard let client = clients.removeValue(forKey: victim) else { continue }
             evicted.append(client)
         }
         return evicted
@@ -213,17 +248,37 @@ private enum SudokuSharedMuxPool {
 
 enum SudokuTransportPool {
     static let pool: TransportPool = Reclaimer()
+
+    static func warm(
+        configuration: ProxyConfiguration,
+        directDialHost: String,
+        timeout: TimeInterval = 2
+    ) {
+        guard case .sudoku(let sudoku) = configuration.outbound,
+              sudoku.multiplex == .on else {
+            return
+        }
+        SudokuSharedMuxPool.warm(
+            configuration: configuration,
+            directDialHost: directDialHost,
+            timeout: timeout
+        )
+    }
+
     private final class Reclaimer: TransportPool {
         func reclaim() { SudokuSharedMuxPool.reclaim() }
     }
 }
 
-private final class SudokuSharedMuxClient {
+private final class SudokuSharedMuxClient: @unchecked Sendable {
     private let configuration: ProxyConfiguration
     private let directDialHost: String
     private let condition = NSCondition()
     private var client: SudokuMuxClient?
+    private var factory: SudokuConnectionFactory?
     private var creating = false
+    private var maintaining = false
+    private var stopped = false
     private var activeStreams = 0
 
     init(configuration: ProxyConfiguration, directDialHost: String) {
@@ -237,15 +292,17 @@ private final class SudokuSharedMuxClient {
         return activeStreams == 0
     }
 
-    var isClosed: Bool {
+    var isStopped: Bool {
         condition.lock()
         defer { condition.unlock() }
-        return client?.isClosed ?? true
+        return stopped
     }
 
     func retainStream() {
         condition.lock()
-        activeStreams += 1
+        if !stopped {
+            activeStreams += 1
+        }
         condition.unlock()
     }
 
@@ -267,27 +324,65 @@ private final class SudokuSharedMuxClient {
         }
     }
 
+    func startMaintaining() {
+        condition.lock()
+        guard !stopped, !maintaining else {
+            condition.unlock()
+            return
+        }
+        maintaining = true
+        condition.unlock()
+
+        DispatchQueue.global(qos: .utility).async {
+            self.maintainLoop()
+        }
+    }
+
+    func waitUntilReady(timeout: TimeInterval) {
+        guard timeout > 0 else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        condition.lock()
+        while client == nil && !stopped {
+            guard condition.wait(until: deadline) else { break }
+        }
+        condition.unlock()
+    }
+
     func close() {
         condition.lock()
+        if stopped {
+            condition.unlock()
+            return
+        }
+        stopped = true
         let old = client
+        let oldFactory = factory
         client = nil
-        creating = false
+        factory = nil
         condition.broadcast()
         condition.unlock()
         old?.close()
+        oldFactory?.closeAll()
     }
 
     private func getOrCreateMux() throws -> SudokuMuxClient {
         condition.lock()
         while true {
+            if stopped {
+                condition.unlock()
+                throw SudokuNativeError.closed
+            }
             if let existing = client, !existing.isClosed {
                 condition.unlock()
                 return existing
             }
             if let stale = client {
+                let staleFactory = factory
                 client = nil
+                factory = nil
                 condition.unlock()
                 stale.close()
+                staleFactory?.closeAll()
                 condition.lock()
                 continue
             }
@@ -305,10 +400,25 @@ private final class SudokuSharedMuxClient {
                 initialTunnel: nil,
                 directDialHost: directDialHost
             )
-            let native = try SudokuNativeClient(configuration: configuration, factory: factory)
-            let created = try native.openMux()
+            let created: SudokuMuxClient
+            do {
+                let native = try SudokuNativeClient(configuration: configuration, factory: factory)
+                created = try native.openMux()
+            } catch {
+                factory.closeAll()
+                throw error
+            }
             condition.lock()
+            if stopped {
+                creating = false
+                condition.broadcast()
+                condition.unlock()
+                created.close()
+                factory.closeAll()
+                throw SudokuNativeError.closed
+            }
             client = created
+            self.factory = factory
             creating = false
             condition.broadcast()
             condition.unlock()
@@ -323,11 +433,55 @@ private final class SudokuSharedMuxClient {
     }
 
     private func reset(_ mux: SudokuMuxClient) {
+        let oldFactory: SudokuConnectionFactory?
         condition.lock()
         if client === mux {
             client = nil
+            oldFactory = factory
+            factory = nil
+        } else {
+            oldFactory = nil
         }
+        condition.broadcast()
         condition.unlock()
         mux.close()
+        oldFactory?.closeAll()
+    }
+
+    private func maintainLoop() {
+        var retryDelay: TimeInterval = 0.25
+        var lastReportedError: String?
+        while true {
+            do {
+                let mux = try getOrCreateMux()
+                retryDelay = 0.25
+                lastReportedError = nil
+                mux.waitUntilClosed()
+                reset(mux)
+            } catch {
+                if isStopped { return }
+                let message = error.localizedDescription
+                if message != lastReportedError {
+                    sudokuMuxPoolLogger.warning("[Sudoku-Mux] warm session unavailable: \(message)")
+                    lastReportedError = message
+                }
+            }
+
+            guard waitForRetry(retryDelay) else { return }
+            retryDelay = min(retryDelay * 2, 5)
+        }
+    }
+
+    private func waitForRetry(_ delay: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(delay)
+        condition.lock()
+        while !stopped {
+            if !condition.wait(until: deadline) {
+                condition.unlock()
+                return true
+            }
+        }
+        condition.unlock()
+        return false
     }
 }
