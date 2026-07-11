@@ -70,11 +70,6 @@ struct SudokuXorshift64Star {
         return minThreshold + ((UInt64(nextUInt32()) * (maxThreshold - minThreshold)) >> 32)
     }
 
-    mutating func shouldPad(threshold: UInt64) -> Bool {
-        if threshold == 0 { return false }
-        if threshold >= sudokuProbabilityOne { return true }
-        return UInt64(nextUInt32()) < threshold
-    }
 }
 
 private let sudokuPermutations: [[Int]] = [
@@ -431,8 +426,16 @@ private func sudokuSHA256(_ string: String) -> [UInt8] { Array(SHA256.hash(data:
 private func sudokuSHA256(_ data: Data) -> [UInt8] { Array(SHA256.hash(data: data)) }
 
 private func sudokuPackHints(_ a: UInt8, _ b: UInt8, _ c: UInt8, _ d: UInt8) -> UInt32 {
-    let h = [a, b, c, d].sorted()
-    return (UInt32(h[0]) << 24) | (UInt32(h[1]) << 16) | (UInt32(h[2]) << 8) | UInt32(h[3])
+    var h0 = a
+    var h1 = b
+    var h2 = c
+    var h3 = d
+    if h0 > h1 { swap(&h0, &h1) }
+    if h2 > h3 { swap(&h2, &h3) }
+    if h0 > h2 { swap(&h0, &h2) }
+    if h1 > h3 { swap(&h1, &h3) }
+    if h1 > h2 { swap(&h1, &h2) }
+    return (UInt32(h0) << 24) | (UInt32(h1) << 16) | (UInt32(h2) << 8) | UInt32(h3)
 }
 
 private func sudokuHasUniqueMatch(grids: [[UInt8]], positions: [UInt8], values: [UInt8]) -> Bool {
@@ -489,18 +492,58 @@ nonisolated final class SudokuTable {
     }
 
     func encode(_ data: Data, rng: inout SudokuXorshift64Star, paddingThreshold: UInt64) -> Data {
+        if paddingThreshold == 0 {
+            return encodeWithoutPadding(data, rng: &rng)
+        }
+
         var out = Data(capacity: data.count * 6 + 8)
+        let paddingPool = layout.paddingPool
+        let paddingCount = paddingPool.count
+        if paddingThreshold >= sudokuProbabilityOne {
+            for byte in data {
+                out.append(paddingPool[rng.intn(paddingCount)])
+                let entries = encodeTable[Int(byte)]
+                let puzzle = entries[rng.intn(entries.count)]
+                let perm = sudokuPermutations[rng.intn(24)]
+                for index in perm {
+                    out.append(paddingPool[rng.intn(paddingCount)])
+                    out.append(puzzle[index])
+                }
+            }
+            out.append(paddingPool[rng.intn(paddingCount)])
+            return out
+        }
+
         for byte in data {
-            if rng.shouldPad(threshold: paddingThreshold) { out.append(layout.paddingPool[rng.intn(layout.paddingPool.count)]) }
+            if UInt64(rng.nextUInt32()) < paddingThreshold {
+                out.append(paddingPool[rng.intn(paddingCount)])
+            }
             let entries = encodeTable[Int(byte)]
             let puzzle = entries[rng.intn(entries.count)]
             let perm = sudokuPermutations[rng.intn(24)]
             for index in perm {
-                if rng.shouldPad(threshold: paddingThreshold) { out.append(layout.paddingPool[rng.intn(layout.paddingPool.count)]) }
+                if UInt64(rng.nextUInt32()) < paddingThreshold {
+                    out.append(paddingPool[rng.intn(paddingCount)])
+                }
                 out.append(puzzle[index])
             }
         }
-        if rng.shouldPad(threshold: paddingThreshold) { out.append(layout.paddingPool[rng.intn(layout.paddingPool.count)]) }
+        if UInt64(rng.nextUInt32()) < paddingThreshold {
+            out.append(paddingPool[rng.intn(paddingCount)])
+        }
+        return out
+    }
+
+    private func encodeWithoutPadding(_ data: Data, rng: inout SudokuXorshift64Star) -> Data {
+        var out = Data(capacity: data.count * 4)
+        for byte in data {
+            let entries = encodeTable[Int(byte)]
+            let puzzle = entries[rng.intn(entries.count)]
+            let perm = sudokuPermutations[rng.intn(24)]
+            for index in perm {
+                out.append(puzzle[index])
+            }
+        }
         return out
     }
 
@@ -620,7 +663,27 @@ struct SudokuPureDecoder {
             guard written < outputLimit else { return }
             try data.withUnsafeBytes { rawInput in
                 let input = rawInput.bindMemory(to: UInt8.self)
-                for b in input {
+                var index = 0
+                while index < input.count {
+                    if hintCount == 0, written < outputLimit, index + 3 < input.count {
+                        let b0 = input[index]
+                        let b1 = input[index + 1]
+                        let b2 = input[index + 2]
+                        let b3 = input[index + 3]
+                        if hintTable[Int(b0)], hintTable[Int(b1)], hintTable[Int(b2)], hintTable[Int(b3)] {
+                            let key = sudokuPackHints(b0, b1, b2, b3)
+                            guard let value = table.decodePackedKey(key) else {
+                                throw SudokuNativeError.protocolError("Sudoku decode failed")
+                            }
+                            outBytes[written] = value
+                            written += 1
+                            index += 4
+                            continue
+                        }
+                    }
+
+                    let b = input[index]
+                    index += 1
                     guard hintTable[Int(b)] else { continue }
                     hintBuffer[hintCount] = b
                     hintCount += 1
