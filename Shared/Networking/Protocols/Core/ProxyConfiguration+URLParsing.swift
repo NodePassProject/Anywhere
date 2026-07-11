@@ -400,8 +400,8 @@ extension ProxyConfiguration {
 
         let aead = SudokuAEADMethod(rawValue: (json["e"] as? String) ?? SudokuAEADMethod.none.rawValue) ?? .none
         let asciiMode = SudokuASCIIMode(normalized: (json["a"] as? String) ?? SudokuASCIIMode.preferEntropy.shortLinkToken) ?? .preferEntropy
-        let mixPortValue = json["m"] as? NSNumber
         let name = (json["n"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = name.flatMap { $0.isEmpty ? nil : $0 } ?? host
         let legacyCustomTable = (
             (json["t"] as? String)
                 ?? (json["table"] as? String)
@@ -420,8 +420,7 @@ extension ProxyConfiguration {
             mode: SudokuHTTPMaskMode(rawValue: (json["hm"] as? String) ?? SudokuHTTPMaskMode.legacy.rawValue) ?? .legacy,
             tls: (json["ht"] as? Bool) ?? false,
             host: (json["hh"] as? String) ?? "",
-            pathRoot: (json["hy"] as? String) ?? "",
-            multiplex: SudokuHTTPMaskMultiplex(rawValue: (json["hx"] as? String) ?? SudokuHTTPMaskMultiplex.off.rawValue) ?? .off
+            pathRoot: (json["hy"] as? String) ?? ""
         )
 
         let config = SudokuConfiguration(
@@ -432,12 +431,12 @@ extension ProxyConfiguration {
             asciiMode: asciiMode,
             customTables: customTables,
             enablePureDownlink: enablePureDownlink,
+            multiplex: SudokuMultiplex(normalized: (json["hx"] as? String) ?? ""),
             httpMask: httpMask
         )
 
-        let defaultName = mixPortValue == nil ? "Sudoku" : "Sudoku \(mixPortValue!.intValue)"
         return ProxyConfiguration(
-            name: (name?.isEmpty == false) ? name! : defaultName,
+            name: displayName,
             serverAddress: host,
             serverPort: port,
             outbound: .sudoku(config)

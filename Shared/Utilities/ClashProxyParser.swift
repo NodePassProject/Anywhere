@@ -433,6 +433,11 @@ struct ClashProxyParser {
 
         let httpMaskNode = node["httpmask"]
         let httpMask = parseSudokuHTTPMask(httpMaskNode)
+        let legacyMultiplex = getString(httpMaskNode, key: "multiplex")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let topLevelMultiplex = getString(node, key: "multiplex") ?? ""
+        let multiplexValue = legacyMultiplex.flatMap { $0.isEmpty ? nil : $0 } ?? topLevelMultiplex
+        let multiplex = SudokuMultiplex(normalized: multiplexValue)
 
         return ProxyConfiguration(
             name: basics.name,
@@ -446,6 +451,7 @@ struct ClashProxyParser {
                 asciiMode: asciiMode,
                 customTables: customTables,
                 enablePureDownlink: pureDownlink,
+                multiplex: multiplex,
                 httpMask: httpMask
             ))
         )
@@ -524,10 +530,7 @@ struct ClashProxyParser {
             mode: SudokuHTTPMaskMode(rawValue: getString(node, key: "mode") ?? SudokuHTTPMaskMode.legacy.rawValue) ?? .legacy,
             tls: getBool(node, key: "tls") ?? false,
             host: getString(node, key: "host") ?? "",
-            pathRoot: getString(node, key: "path-root") ?? getString(node, key: "path_root") ?? "",
-            multiplex: SudokuHTTPMaskMultiplex(
-                rawValue: getString(node, key: "multiplex") ?? SudokuHTTPMaskMultiplex.off.rawValue
-            ) ?? .off
+            pathRoot: getString(node, key: "path-root") ?? getString(node, key: "path_root") ?? ""
         )
     }
 

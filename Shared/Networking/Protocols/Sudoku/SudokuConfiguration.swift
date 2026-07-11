@@ -94,10 +94,21 @@ enum SudokuHTTPMaskMode: String, CaseIterable, Codable, Hashable {
     }
 }
 
-enum SudokuHTTPMaskMultiplex: String, CaseIterable, Codable, Hashable {
+enum SudokuMultiplex: String, CaseIterable, Codable, Hashable {
     case off
     case auto
     case on
+
+    init(normalized value: String) {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "auto":
+            self = .auto
+        case "on":
+            self = .on
+        default:
+            self = .off
+        }
+    }
 
     var displayName: String { rawValue.uppercased() }
 }
@@ -108,22 +119,19 @@ struct SudokuHTTPMaskConfiguration: Codable, Hashable {
     var tls: Bool
     var host: String
     var pathRoot: String
-    var multiplex: SudokuHTTPMaskMultiplex
 
     init(
         disable: Bool = false,
         mode: SudokuHTTPMaskMode = .legacy,
         tls: Bool = false,
         host: String = "",
-        pathRoot: String = "",
-        multiplex: SudokuHTTPMaskMultiplex = .off
+        pathRoot: String = ""
     ) {
         self.disable = disable
         self.mode = mode
         self.tls = tls
         self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
         self.pathRoot = SudokuHTTPMaskConfiguration.normalizePathRoot(pathRoot)
-        self.multiplex = disable ? .off : multiplex
     }
 
     static func normalizePathRoot(_ raw: String) -> String {
@@ -146,6 +154,7 @@ struct SudokuConfiguration: Codable, Hashable {
     var asciiMode: SudokuASCIIMode
     var customTables: [String]
     var enablePureDownlink: Bool
+    var multiplex: SudokuMultiplex
     var httpMask: SudokuHTTPMaskConfiguration
 
     init(
@@ -156,6 +165,7 @@ struct SudokuConfiguration: Codable, Hashable {
         asciiMode: SudokuASCIIMode = .preferEntropy,
         customTables: [String] = [],
         enablePureDownlink: Bool = true,
+        multiplex: SudokuMultiplex = .off,
         httpMask: SudokuHTTPMaskConfiguration = .init()
     ) {
         self.key = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -165,6 +175,7 @@ struct SudokuConfiguration: Codable, Hashable {
         self.asciiMode = asciiMode
         self.customTables = Self.normalizeCustomTables(customTables)
         self.enablePureDownlink = enablePureDownlink
+        self.multiplex = multiplex
         self.httpMask = httpMask
     }
 
@@ -178,7 +189,12 @@ struct SudokuConfiguration: Codable, Hashable {
         case customTable
         case customTables
         case enablePureDownlink
+        case multiplex
         case httpMask
+    }
+
+    private struct LegacyHTTPMaskConfiguration: Decodable {
+        let multiplex: String?
     }
 
     init(from decoder: Decoder) throws {
@@ -188,6 +204,12 @@ struct SudokuConfiguration: Codable, Hashable {
             ?? container.decodeIfPresent(String.self, forKey: .table)
             ?? ""
         let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables)
+        let legacyMultiplex = try container.decodeIfPresent(LegacyHTTPMaskConfiguration.self, forKey: .httpMask)?
+            .multiplex?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let topLevelMultiplex = try container.decodeIfPresent(String.self, forKey: .multiplex)
+        let multiplexValue = legacyMultiplex.flatMap { $0.isEmpty ? nil : $0 } ?? topLevelMultiplex ?? ""
+        let multiplex = SudokuMultiplex(normalized: multiplexValue)
 
         self.init(
             key: try container.decode(String.self, forKey: .key),
@@ -201,6 +223,7 @@ struct SudokuConfiguration: Codable, Hashable {
                 legacyFallback: true
             ),
             enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .enablePureDownlink) ?? true,
+            multiplex: multiplex,
             httpMask: try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .httpMask) ?? .init()
         )
     }
@@ -214,6 +237,7 @@ struct SudokuConfiguration: Codable, Hashable {
         try container.encode(asciiMode, forKey: .asciiMode)
         try container.encode(customTables, forKey: .customTables)
         try container.encode(enablePureDownlink, forKey: .enablePureDownlink)
+        try container.encode(multiplex, forKey: .multiplex)
         try container.encode(httpMask, forKey: .httpMask)
     }
 
