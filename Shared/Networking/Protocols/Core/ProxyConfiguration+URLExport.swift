@@ -225,12 +225,14 @@ extension ProxyConfiguration {
             "e": sudoku.aeadMethod.rawValue,
             "x": !sudoku.enablePureDownlink
         ]
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty { payload["n"] = trimmedName }
         if !sudoku.customTables.isEmpty { payload["ts"] = sudoku.customTables }
         if sudoku.httpMask.disable { payload["hd"] = true }
         if sudoku.httpMask.mode != .legacy { payload["hm"] = sudoku.httpMask.mode.rawValue }
         if sudoku.httpMask.tls { payload["ht"] = true }
         if !sudoku.httpMask.host.isEmpty { payload["hh"] = sudoku.httpMask.host }
-        if sudoku.httpMask.multiplex != .off { payload["hx"] = sudoku.httpMask.multiplex.rawValue }
+        if sudoku.multiplex != .off { payload["hx"] = sudoku.multiplex.rawValue }
         if !sudoku.httpMask.pathRoot.isEmpty { payload["hy"] = sudoku.httpMask.pathRoot }
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
