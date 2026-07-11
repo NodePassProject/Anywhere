@@ -23,6 +23,12 @@ private struct LWIPWriteFatalError: LocalizedError {
     }
 }
 
+private enum ProxyWriteCloseState: Equatable {
+    case idle
+    case closing
+    case finished
+}
+
 class TCPConnection {
     let pcb: UnsafeMutableRawPointer
     let dstPort: UInt16
@@ -109,6 +115,7 @@ class TCPConnection {
     private var sniffDeadline: DispatchWorkItem?
     private var uplinkDone = false
     private var downlinkDone = false
+    private var proxyWriteCloseState: ProxyWriteCloseState = .idle
 
     /// Logs this connection's terminal failure at most once.
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
@@ -302,7 +309,10 @@ class TCPConnection {
         }
 
         guard !closed, !uploadPipeline.sendInFlight, uploadBufferCount > 0,
-              let proxyConnection else { return }
+              let proxyConnection else {
+            finishConnectionIfReady()
+            return
+        }
 
         let take = min(uploadBufferCount, TunnelConstants.uploadChunkSize)
         let chunk = sliceUploadBuffer(take)
@@ -330,6 +340,40 @@ class TCPConnection {
         }
 
         proxyConnection.send(data: chunk, completion: completion)
+    }
+
+    private func closeProxyWriteIfReady() {
+        guard uplinkDone,
+              proxyWriteCloseState == .idle,
+              !uploadPipeline.sendInFlight,
+              uploadBufferCount == 0,
+              let connection = proxyConnection as? ProxyConnectionWriteClosable else {
+            return
+        }
+        proxyWriteCloseState = .closing
+        connection.closeWrite { [weak self] error in
+            guard let self else { return }
+            self.lwipQueue.async {
+                guard !self.closed else { return }
+                self.proxyWriteCloseState = .finished
+                if let error {
+                    self.reportFailure("Close write", error: error)
+                    self.abort()
+                } else {
+                    self.finishConnectionIfReady()
+                }
+            }
+        }
+    }
+
+    private func finishConnectionIfReady() {
+        guard !closed else { return }
+        closeProxyWriteIfReady()
+        guard uplinkDone, downlinkDone else { return }
+        if proxyConnection is ProxyConnectionWriteClosable {
+            guard proxyWriteCloseState == .finished else { return }
+        }
+        close()
     }
 
     /// Acks local-app bytes to lwIP once the proxy leg accepted them, then
@@ -400,9 +444,8 @@ class TCPConnection {
         mitmSession?.clientDidClose()
 
         uplinkDone = true
-        if downlinkDone {
-            close()
-        } else {
+        finishConnectionIfReady()
+        if !downlinkDone {
             activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
@@ -886,9 +929,8 @@ class TCPConnection {
 
                 guard let data, !data.isEmpty else {
                     self.downlinkDone = true
-                    if self.uplinkDone {
-                        self.close()
-                    } else {
+                    self.finishConnectionIfReady()
+                    if !self.uplinkDone {
                         self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
                     }
                     return
