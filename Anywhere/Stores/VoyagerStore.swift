@@ -105,7 +105,13 @@ final class VoyagerStore {
     
     func restore() async throws {
         try await AppStore.sync()
-        await refreshEntitlement()
+        guard let result = await Transaction.latest(for: Self.productID),
+              case .verified(let transaction) = result,
+              transaction.productID == Self.productID else {
+            setMember(false)
+            return
+        }
+        setMember(transaction.revocationDate == nil)
     }
 
     // MARK: - Transaction updates
