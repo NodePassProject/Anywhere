@@ -55,6 +55,7 @@ struct HomeView: View {
                 return .impact
             }
         }
+        .colorScheme(settings.homeColorScheme.colorSceme)
         .onGeometryChange(for: CGSize.self) { proxy in
             proxy.size
         } action: { size in

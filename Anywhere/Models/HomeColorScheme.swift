@@ -6,8 +6,16 @@
 //
 
 import Foundation
+import SwiftUI
 
 enum HomeColorScheme: String, CaseIterable {
     case dark
     case light
+    
+    var colorSceme: ColorScheme {
+        switch self {
+        case .dark: .dark
+        case .light: .light
+        }
+    }
 }

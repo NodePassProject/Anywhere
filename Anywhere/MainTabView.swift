@@ -82,8 +82,11 @@ struct MainTabView: View {
                 Tab(value: .home) {
                     NavigationStack {
                         HomeView()
+                            .toolbarColorScheme(
+                                settings.homeColorScheme.colorSceme,
+                                for: .tabBar
+                            )
                     }
-                    .colorScheme(settings.homeColorScheme == .light ? .light : .dark)
                 } label: {
                     Image("anywhere")
                 }
