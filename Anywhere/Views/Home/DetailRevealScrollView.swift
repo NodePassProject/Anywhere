@@ -43,6 +43,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                     .onGeometryChange(for: CGRect.self) { proxy in
                         proxy.frame(in: .scrollView)
                     } action: { frame in
+                        let previousHeight = metrics.foldHeight
                         metrics.foldHeight = frame.height
                         metrics.offset = -frame.minY
                         if frame.minY >= -DetailRevealSnapBehavior.boundaryTolerance {
@@ -51,6 +52,10 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                                 withAnimation { isSettledOnDetail = false }
                             }
                         }
+                        if previousHeight > 0,
+                           abs(frame.height - previousHeight) > DetailRevealSnapBehavior.boundaryTolerance {
+                            realignAfterResize()
+                        }
                     }
                     .id(DetailRevealPage.fold)
 
@@ -58,6 +63,16 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                     detail
                         .transition(.blurReplace)
                         .id(DetailRevealPage.detail)
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                let previousHeight = metrics.contentHeight
+                metrics.contentHeight = height
+                if previousHeight > 0,
+                   abs(height - previousHeight) > DetailRevealSnapBehavior.boundaryTolerance {
+                    realignAfterResize()
                 }
             }
         }
@@ -78,7 +93,12 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                 bottomInset: proxy.safeAreaInsets.bottom
             )
         } action: { newViewport in
+            let previousHeight = viewport.height
             viewport = newViewport
+            if previousHeight > 0,
+               abs(newViewport.height - previousHeight) > DetailRevealSnapBehavior.boundaryTolerance {
+                realignAfterResize()
+            }
         }
     }
 
@@ -111,6 +131,22 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
             }
         }
     }
+    
+    private func realignAfterResize() {
+        guard revealsDetail else { return }
+        Task { @MainActor in
+            let boundary = min(
+                metrics.foldHeight,
+                max(metrics.contentHeight - viewport.height, 0)
+            )
+            metrics.commitOffset = boundary
+            guard metrics.settledPage == .detail,
+                  abs(metrics.offset - boundary) > DetailRevealSnapBehavior.boundaryTolerance
+            else { return }
+            metrics.pendingSnap = nil
+            snap(to: .detail, playFeedback: false)
+        }
+    }
 }
 
 private nonisolated struct DetailRevealViewport: Equatable {
@@ -128,6 +164,8 @@ private nonisolated enum DetailRevealPage: Hashable {
 private final class DetailRevealMetrics {
     /// Height of the fold page — the offset at which detail is fully revealed.
     var foldHeight: CGFloat = 0
+    /// Total height of the scroll content, for capping the detail boundary.
+    var contentHeight: CGFloat = 0
     /// Current scroll offset (0 = fold page flush with the top).
     var offset: CGFloat = 0
     /// The page the scroll view last settled on.
