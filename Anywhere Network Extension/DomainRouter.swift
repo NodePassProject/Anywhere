@@ -16,9 +16,8 @@ class DomainRouter {
     //
     // Cross-source priority is tier query order (User > ADBlock > Built-in > Country
     // Bypass); within a tier, suffix beats keyword and deepest/longest match wins.
-    // The matching machinery lives in TieredRouteMatcher (Shared), instantiated
-    // here with bare `RouteTarget` payloads; the host app instantiates the same
-    // engine with rule-set-attributed payloads to replay these decisions.
+    // The matching machinery lives in TieredRouteMatcher (Shared). Payloads carry
+    // the action plus the payload's entry index.
 
     private enum Tier: Int, CaseIterable {
         case user = 0
@@ -27,11 +26,34 @@ class DomainRouter {
         case bypass = 3
     }
 
+    /// Matcher payload: POD so hot-path lookups stay ARC-free. `entryIndex`
+    /// resolves to a display name via `RoutingState.ruleSetNames`.
+    private struct RulePayload: Hashable, Sendable {
+        var action: RouteTarget
+        var entryIndex: UInt16
+    }
+
+    /// A routing decision plus the rule set behind it. `ruleSetName` is nil when
+    /// the loaded payload predates the names section.
+    struct Match: Sendable {
+        let action: RouteTarget
+        let ruleSetName: String?
+    }
+
     /// `matcher` + `configurationMap`, guarded as one unit (lookups run on both the lwIP and UDP
     /// queues); reloads hold the lock across the whole compile so a lookup never sees a half-built tier.
     private struct RoutingState {
-        var matcher = TieredRouteMatcher<RouteTarget>(tierCount: Tier.allCases.count)
+        var matcher = TieredRouteMatcher<RulePayload>(tierCount: Tier.allCases.count)
         var configurationMap: [UUID: ProxyConfiguration] = [:]
+        /// Rule-set display names by payload entry index; empty for older payloads.
+        var ruleSetNames: [String] = []
+
+        func match(resolving payload: RulePayload?) -> Match? {
+            guard let payload else { return nil }
+            let index = Int(payload.entryIndex)
+            let name = index < ruleSetNames.count ? ruleSetNames[index] : nil
+            return Match(action: payload.action, ruleSetName: (name?.isEmpty ?? true) ? nil : name)
+        }
 
         // MARK: Streaming ingestion
 
@@ -51,20 +73,20 @@ class DomainRouter {
             matcher.tiers[tierIndex].reserveIPv6(additionalPrefixes: additionalPrefixes)
         }
 
-        mutating func ingestRule(tierIndex: Int, action: RouteTarget, type: RoutingRuleType,
+        mutating func ingestRule(tierIndex: Int, payload: RulePayload, type: RoutingRuleType,
                                  valueStart: Int, length: Int, base: UnsafeBufferPointer<UInt8>) {
             switch type {
             case .domainSuffix:
-                matcher.tiers[tierIndex].collectSuffix(offset: valueStart, length: length, payload: action)
+                matcher.tiers[tierIndex].collectSuffix(offset: valueStart, length: length, payload: payload)
             case .domainKeyword:
-                matcher.tiers[tierIndex].insertKeyword(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self), payload: action)
+                matcher.tiers[tierIndex].insertKeyword(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self), payload: payload)
             case .ipCIDR:
                 if let parsed = RouteMatching.parseIPv4CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
-                    matcher.tiers[tierIndex].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, payload: action)
+                    matcher.tiers[tierIndex].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, payload: payload)
                 }
             case .ipCIDR6:
                 if let parsed = RouteMatching.parseIPv6CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
-                    matcher.tiers[tierIndex].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, payload: action)
+                    matcher.tiers[tierIndex].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, payload: payload)
                 }
             }
         }
@@ -137,16 +159,33 @@ class DomainRouter {
                 state.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
             }
 
-            var remainingEntries = try u32()
-            while remainingEntries > 0 {
-                try readEntry(state: &state)
-                remainingEntries -= 1
+            let entryCount = try u32()
+            for entryIndex in 0..<entryCount {
+                try readEntry(state: &state, entryIndex: UInt16(clamping: entryIndex))
             }
+
+            // Trailing names section (newer payloads): u32 count == entry count,
+            // then a u16-length-prefixed UTF-8 name per entry, in entry order.
+            state.ruleSetNames = readNames(expectedCount: entryCount) ?? []
         }
 
-        private mutating func readEntry(state: inout RoutingState) throws {
+        private mutating func readNames(expectedCount: UInt32) -> [String]? {
+            guard cursor < count,
+                  let nameCount = try? u32(), nameCount == expectedCount else { return nil }
+            var names: [String] = []
+            names.reserveCapacity(Int(nameCount))
+            for _ in 0..<nameCount {
+                guard let length = try? u16(), cursor + Int(length) <= count else { return nil }
+                names.append(String(decoding: bytes[cursor..<cursor + Int(length)], as: UTF8.self))
+                cursor += Int(length)
+            }
+            return names
+        }
+
+        private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws {
             guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw ReadError.malformed }
             let action = try readAction()
+            let payload = RulePayload(action: action, entryIndex: entryIndex)
 
             var remainingRules = try u32()
             // Upper bound on this entry's CIDR rules; reserving on the first of each family lets a bulk load
@@ -168,7 +207,7 @@ class DomainRouter {
                         state.reserveCIDRv6(tierIndex: Int(tier.rawValue), additionalPrefixes: reserveHint)
                         reservedV6 = true
                     }
-                    state.ingestRule(tierIndex: Int(tier.rawValue), action: action, type: type,
+                    state.ingestRule(tierIndex: Int(tier.rawValue), payload: payload, type: type,
                                      valueStart: valueStart, length: length, base: bytes)
                 }
                 remainingRules -= 1
@@ -234,18 +273,22 @@ class DomainRouter {
     }
 
     /// Matches a domain by walking tiers in priority order. First hit wins.
-    func matchDomain(_ domain: String) -> RouteTarget? {
+    func matchDomain(_ domain: String) -> Match? {
         guard !domain.isEmpty else { return nil }
         // Lowercase once, outside the lock, and share the UTF-8 bytes across tiers.
         var lowered = RouteMatching.asciiLowercasedIfNeeded(domain)
         return routingState.withLock { state in
-            lowered.withUTF8 { state.matcher.matchDomain(bytes: $0) }
+            let payload = lowered.withUTF8 { state.matcher.matchDomain(bytes: $0) }
+            return state.match(resolving: payload)
         }
     }
 
     /// Matches an IP address against per-tier CIDR tries in priority order.
-    func matchIP(_ ip: String) -> RouteTarget? {
-        routingState.withLock { $0.matcher.matchIP(ip) }
+    func matchIP(_ ip: String) -> Match? {
+        routingState.withLock { state in
+            let payload = state.matcher.matchIP(ip)
+            return state.match(resolving: payload)
+        }
     }
 
     /// Returns nil for .direct/.reject or when the configuration UUID is unknown.

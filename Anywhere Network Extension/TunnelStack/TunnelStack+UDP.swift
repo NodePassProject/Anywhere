@@ -175,16 +175,19 @@ extension TunnelStack {
 
         // True until a routing rule matches — i.e. the default outbound is used.
         var viaDefault = true
+        // Rule set behind the committed route; nil while on the default.
+        var ruleSetName: String? = nil
 
         switch resolveFakeIP(dstIPString, dstPort: datagram.dstPort, proto: "UDP") {
         case .passthrough:
-            if let action = domainRouter.matchIP(dstIPString) {
+            if let match = domainRouter.matchIP(dstIPString) {
                 viaDefault = false
-                switch action {
+                ruleSetName = match.ruleSetName
+                switch match.action {
                 case .direct:
                     routeTarget = .direct
                 case .reject:
-                    requestLog.record(protocol: .udp, host: dstIPString, port: datagram.dstPort, routeTarget: .reject)
+                    requestLog.record(protocol: .udp, host: dstIPString, port: datagram.dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
                     logger.debug("[UDP] IP rejected by routing rule: \(dstIPString):\(datagram.dstPort)")
                     sendICMPPortUnreachable(
                         srcIP: srcIPData,
@@ -197,14 +200,14 @@ extension TunnelStack {
                     return
                 case .proxy(let id):
                     routeTarget = .proxy(id)
-                    if let configuration = domainRouter.resolveConfiguration(action: action) {
+                    if let configuration = domainRouter.resolveConfiguration(action: match.action) {
                         flowConfiguration = configuration
                     } else {
                         logger.warning("[UDP] Routing config not found for \(dstIPString)")
                     }
                 }
             }
-        case .resolved(let domain, let target, let configuration):
+        case .resolved(let domain, let target, let configuration, let matchedRuleSet):
             dstHost = domain
             dstIsDomain = true
             // `target == nil` → no domain rule matched; keep the default route.
@@ -212,17 +215,19 @@ extension TunnelStack {
             case .direct:
                 routeTarget = .direct
                 viaDefault = false
+                ruleSetName = matchedRuleSet
             case .proxy(let id):
                 routeTarget = .proxy(id)
                 viaDefault = false
+                ruleSetName = matchedRuleSet
                 if let configuration {
                     flowConfiguration = configuration
                 }
             case .reject, .none:
                 break
             }
-        case .drop(let domain):
-            requestLog.record(protocol: .udp, host: domain, port: datagram.dstPort, routeTarget: .reject)
+        case .drop(let domain, let matchedRuleSet):
+            requestLog.record(protocol: .udp, host: domain, port: datagram.dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
             sendICMPPortUnreachable(
                 srcIP: srcIPData,
                 srcPort: datagram.srcPort,
@@ -283,7 +288,7 @@ extension TunnelStack {
             logger.info("[UDP] flow pressure recovered; admitting new flows")
         }
 
-        requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: viaDefault)
+        requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: viaDefault, ruleSetName: ruleSetName)
 
         let flow = UDPFlow(
             flowKey: flowKey,

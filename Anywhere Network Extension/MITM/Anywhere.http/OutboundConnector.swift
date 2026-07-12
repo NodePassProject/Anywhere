@@ -29,17 +29,18 @@ enum OutboundConnector {
 
     // MARK: - Route resolution
 
-    /// Resolves the route and whether it came from the global default (vs. an explicit rule).
-    static func resolveRoute(host: String) -> (target: RouteTarget, viaDefault: Bool) {
-        guard let stack = TunnelStack.shared else { return (.direct, false) }
+    /// Resolves the route, whether it came from the global default (vs. an explicit
+    /// rule), and the rule set behind an explicit match.
+    static func resolveRoute(host: String) -> (target: RouteTarget, viaDefault: Bool, ruleSetName: String?) {
+        guard let stack = TunnelStack.shared else { return (.direct, false, nil) }
         let router = stack.domainRouter
 
-        let matched: RouteTarget? = isIPLiteral(host) ? router.matchIP(host) : router.matchDomain(host)
-        if let matched { return (matched, false) }
+        let matched = isIPLiteral(host) ? router.matchIP(host) : router.matchDomain(host)
+        if let matched { return (matched.action, false, matched.ruleSetName) }
 
         // No explicit rule: keep loopback / LAN destinations off any proxy.
-        if isLoopbackOrPrivate(host) { return (.direct, false) }
-        return (stack.defaultRouteTarget, true)
+        if isLoopbackOrPrivate(host) { return (.direct, false, nil) }
+        return (stack.defaultRouteTarget, true, nil)
     }
 
     // MARK: - Dial
@@ -51,11 +52,11 @@ enum OutboundConnector {
         queue: DispatchQueue,
         completion: @escaping (Result<Dialed, Error>) -> Void
     ) {
-        let (route, viaDefault) = resolveRoute(host: host)
+        let (route, viaDefault, ruleSetName) = resolveRoute(host: host)
         // The only place script `Anywhere.http` fetches reach the Requests log — they're the
         // extension's own outbound, not captured device traffic. A pooled HTTP/2 connection
         // logs once per dial, shared across its streams.
-        TunnelStack.shared?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault)
+        TunnelStack.shared?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
         switch route {
         case .reject:
             queue.async { completion(.failure(ConnectError.rejected(host))) }

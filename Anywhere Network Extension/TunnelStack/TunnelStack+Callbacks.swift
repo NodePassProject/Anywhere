@@ -82,8 +82,8 @@ extension TunnelStack {
             let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
 
             // DROP if the host is flooding, RESET otherwise.
-            func reject(host: String, reason: String) -> Int32 {
-                shared.requestLog.record(protocol: .tcp, host: host, port: dstPort, routeTarget: .reject)
+            func reject(host: String, reason: String, ruleSetName: String?) -> Int32 {
+                shared.requestLog.record(protocol: .tcp, host: host, port: dstPort, routeTarget: .reject, ruleSetName: ruleSetName)
                 if rejectFloodTracker.shouldDrop(host: host) {
                     logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
                     return Int32(LWIP_BRIDGE_SYN_DROP)
@@ -94,14 +94,14 @@ extension TunnelStack {
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
-                if case .reject = shared.domainRouter.matchIP(dstIPString) {
-                    return reject(host: dstIPString, reason: "IP rule")
+                if let match = shared.domainRouter.matchIP(dstIPString), case .reject = match.action {
+                    return reject(host: dstIPString, reason: "IP rule", ruleSetName: match.ruleSetName)
                 }
                 return shared.admitSYN(rawIP: true)
             case .resolved:
                 return shared.admitSYN(rawIP: false)
-            case .drop(let domain):
-                return reject(host: domain, reason: "fake-IP domain rule")
+            case .drop(let domain, let ruleSetName):
+                return reject(host: domain, reason: "fake-IP domain rule", ruleSetName: ruleSetName)
             case .unreachable:
                 // Stale fake-IP pool entry — drop silently rather than RST.
                 logger.debug("[TCP] SYN dropped (stale fake-IP): \(dstIPString):\(dstPort)")
@@ -145,12 +145,15 @@ extension TunnelStack {
 
             // True until a routing rule matches — i.e. the default outbound is used.
             var viaDefault = true
+            // Rule set behind the committed route; nil while on the default.
+            var ruleSetName: String? = nil
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
-                if let action = shared.domainRouter.matchIP(dstIPString) {
+                if let match = shared.domainRouter.matchIP(dstIPString) {
                     viaDefault = false
-                    switch action {
+                    ruleSetName = match.ruleSetName
+                    switch match.action {
                     case .direct:
                         routeTarget = .direct
                     case .reject:
@@ -158,7 +161,7 @@ extension TunnelStack {
                         return nil
                     case .proxy(let id):
                         routeTarget = .proxy(id)
-                        if let configuration = shared.domainRouter.resolveConfiguration(action: action) {
+                        if let configuration = shared.domainRouter.resolveConfiguration(action: match.action) {
                             connectionConfiguration = configuration
                         } else {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
@@ -166,7 +169,7 @@ extension TunnelStack {
                     }
                 }
                 sniffSNI = true
-            case .resolved(let domain, let target, let configuration):
+            case .resolved(let domain, let target, let configuration, let matchedRuleSet):
                 dstHost = domain
                 hostIsResolvedDomain = true
                 // `target == nil` → no domain rule matched; keep the default route.
@@ -174,9 +177,11 @@ extension TunnelStack {
                 case .direct:
                     routeTarget = .direct
                     viaDefault = false
+                    ruleSetName = matchedRuleSet
                 case .proxy(let id):
                     routeTarget = .proxy(id)
                     viaDefault = false
+                    ruleSetName = matchedRuleSet
                     if let configuration {
                         connectionConfiguration = configuration
                     }
@@ -196,7 +201,8 @@ extension TunnelStack {
                 host: dstHost,
                 port: dstPort,
                 routeTarget: routeTarget,
-                viaDefault: viaDefault
+                viaDefault: viaDefault,
+                ruleSetName: ruleSetName
             )
 
             // MITM needs the buffered ClientHello, so force sniffing even for a known fake-IP domain.
@@ -211,6 +217,7 @@ extension TunnelStack {
                 configuration: connectionConfiguration,
                 routeTarget: routeTarget,
                 viaDefault: viaDefault,
+                ruleSetName: ruleSetName,
                 sniffSNI: sniffSNI,
                 hostIsResolvedDomain: hostIsResolvedDomain,
                 lwipQueue: shared.lwipQueue
@@ -282,10 +289,11 @@ extension TunnelStack {
         case passthrough
         /// Resolved to a domain. `target` is the matched route, or `nil` when no
         /// domain rule matched (caller uses the default). `configuration` is the
-        /// dialing config for a `.proxy` target.
-        case resolved(domain: String, target: RouteTarget?, configuration: ProxyConfiguration?)
-        /// Rejected by rule; carries the resolved domain for the request log.
-        case drop(domain: String)
+        /// dialing config for a `.proxy` target; `ruleSetName` names the matched
+        /// rule's set for the request log.
+        case resolved(domain: String, target: RouteTarget?, configuration: ProxyConfiguration?, ruleSetName: String?)
+        /// Rejected by rule; carries the resolved domain and rule set for the request log.
+        case drop(domain: String, ruleSetName: String?)
         /// Fake IP not in pool (stale from previous session) — drop and signal unreachable.
         case unreachable
     }
@@ -299,19 +307,19 @@ extension TunnelStack {
             return .unreachable
         }
 
-        if let action = domainRouter.matchDomain(entry.domain) {
-            switch action {
+        if let match = domainRouter.matchDomain(entry.domain) {
+            switch match.action {
             case .direct:
-                return .resolved(domain: entry.domain, target: .direct, configuration: nil)
+                return .resolved(domain: entry.domain, target: .direct, configuration: nil, ruleSetName: match.ruleSetName)
             case .reject:
                 logger.debug("[\(proto)] Domain rejected by routing rule: \(entry.domain) (\(ip):\(dstPort))")
-                return .drop(domain: entry.domain)
+                return .drop(domain: entry.domain, ruleSetName: match.ruleSetName)
             case .proxy(let id):
-                let configuration = domainRouter.resolveConfiguration(action: action)
+                let configuration = domainRouter.resolveConfiguration(action: match.action)
                 if configuration == nil {
                     logger.warning("[\(proto)] Routing config not found for \(entry.domain)")
                 }
-                return .resolved(domain: entry.domain, target: .proxy(id), configuration: configuration)
+                return .resolved(domain: entry.domain, target: .proxy(id), configuration: configuration, ruleSetName: match.ruleSetName)
             }
         }
 
@@ -320,19 +328,19 @@ extension TunnelStack {
         // IP-CIDR rules. The resolved IP feeds matching only.
         if !preventDNSLeak {
             if let resolvedIP = RuleResolver.shared.cachedIPv4(for: entry.domain) {
-                if let action = domainRouter.matchIP(resolvedIP) {
-                    switch action {
+                if let match = domainRouter.matchIP(resolvedIP) {
+                    switch match.action {
                     case .direct:
-                        return .resolved(domain: entry.domain, target: .direct, configuration: nil)
+                        return .resolved(domain: entry.domain, target: .direct, configuration: nil, ruleSetName: match.ruleSetName)
                     case .reject:
                         logger.debug("[\(proto)] Domain \(entry.domain) → \(resolvedIP) rejected by IP rule (\(ip):\(dstPort))")
-                        return .drop(domain: entry.domain)
+                        return .drop(domain: entry.domain, ruleSetName: match.ruleSetName)
                     case .proxy(let id):
-                        let configuration = domainRouter.resolveConfiguration(action: action)
+                        let configuration = domainRouter.resolveConfiguration(action: match.action)
                         if configuration == nil {
                             logger.warning("[\(proto)] Routing config not found for \(entry.domain) → \(resolvedIP)")
                         }
-                        return .resolved(domain: entry.domain, target: .proxy(id), configuration: configuration)
+                        return .resolved(domain: entry.domain, target: .proxy(id), configuration: configuration, ruleSetName: match.ruleSetName)
                     }
                 }
             } else {
@@ -340,6 +348,6 @@ extension TunnelStack {
             }
         }
 
-        return .resolved(domain: entry.domain, target: nil, configuration: nil)
+        return .resolved(domain: entry.domain, target: nil, configuration: nil, ruleSetName: nil)
     }
 }

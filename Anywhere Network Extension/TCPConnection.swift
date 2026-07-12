@@ -51,6 +51,10 @@ class TCPConnection {
     /// Whether the accept-time route is the default outbound.
     private let acceptedViaDefault: Bool
 
+    /// Rule set behind the committed route, mirroring `routeTarget`'s mutations;
+    /// nil while the route is the default outbound.
+    private var ruleSetName: String?
+
     private var bypass: Bool {
         if case .direct = routeTarget { return true }
         return false
@@ -138,6 +142,7 @@ class TCPConnection {
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
          configuration: ProxyConfiguration, routeTarget: RouteTarget,
          viaDefault: Bool,
+         ruleSetName: String? = nil,
          sniffSNI: Bool = false,
          hostIsResolvedDomain: Bool = false,
          lwipQueue: DispatchQueue) {
@@ -149,6 +154,7 @@ class TCPConnection {
         self.lwipQueue = lwipQueue
         self.routeTarget = routeTarget
         self.acceptedViaDefault = viaDefault
+        self.ruleSetName = ruleSetName
         self.hostIsResolvedDomain = hostIsResolvedDomain
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
@@ -561,29 +567,30 @@ class TCPConnection {
         }
 
         let router = stack.domainRouter
-        guard let action = router.matchDomain(sni) else {
+        guard let match = router.matchDomain(sni) else {
             // No domain rule — keep the IP-derived route.
             return
         }
 
-        switch action {
+        ruleSetName = match.ruleSetName
+        switch match.action {
         case .direct:
             routeTarget = .direct
-            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .direct)
+            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .direct, ruleSetName: match.ruleSetName)
         case .reject:
             routeTarget = .reject
-            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject)
+            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectWithTLSAlert()
         case .proxy(let id):
             // The domain rule wins over any IP-CIDR route set at accept time.
             routeTarget = .proxy(id)
-            if let resolved = router.resolveConfiguration(action: action) {
+            if let resolved = router.resolveConfiguration(action: match.action) {
                 configuration = resolved
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")
             }
-            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .proxy(id))
+            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .proxy(id), ruleSetName: match.ruleSetName)
         }
     }
 
@@ -894,30 +901,31 @@ class TCPConnection {
             routeTarget = target
             self.configuration = configuration
         }
-        TunnelStack.shared?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: routeTarget, viaDefault: resolved.viaDefault)
+        ruleSetName = resolved.ruleSetName
+        TunnelStack.shared?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: routeTarget, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
         return resolved.route
     }
-    
-    private func resolveUpstreamRoute(forDialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool) {
+
+    private func resolveUpstreamRoute(forDialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?) {
         // A rule matching the real dial host is an explicit route, never the default.
-        if let router = TunnelStack.shared?.domainRouter, let action = router.matchDomain(host) {
-            switch action {
+        if let router = TunnelStack.shared?.domainRouter, let match = router.matchDomain(host) {
+            switch match.action {
             case .direct:
-                return (.direct, false)
+                return (.direct, false, match.ruleSetName)
             case .reject:
-                return (.reject, false)
+                return (.reject, false, match.ruleSetName)
             case .proxy:
-                if let configuration = router.resolveConfiguration(action: action) {
-                    return (.proxy(routeTarget: action, configuration: configuration), false)
+                if let configuration = router.resolveConfiguration(action: match.action) {
+                    return (.proxy(routeTarget: match.action, configuration: configuration), false, match.ruleSetName)
                 }
             }
         }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
             // Unchanged host keeps the accept-time route — and carries its default-ness.
             let route: UpstreamRoute = bypass ? .direct : .proxy(routeTarget: routeTarget, configuration: configuration)
-            return (route, acceptedViaDefault)
+            return (route, acceptedViaDefault, ruleSetName)
         }
-        return (defaultUpstreamRoute(), true)
+        return (defaultUpstreamRoute(), true, nil)
     }
     
     private func defaultUpstreamRoute() -> UpstreamRoute {

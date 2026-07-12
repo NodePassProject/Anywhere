@@ -446,14 +446,7 @@ nonisolated final class AWCore {
     static func getRoutingData() -> Data? {
         try? Data(contentsOf: routingDataURL, options: .mappedIfSafe)
     }
-    
-    static func getRoutingDataStamp() -> String? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: routingDataURL.path) else { return nil }
-        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
-        return "\(size)/\(modified)"
-    }
-    
+
     static func setRoutingData(_ data: Data) {
         do {
             try data.write(to: routingDataURL, options: [.atomic, .noFileProtection])

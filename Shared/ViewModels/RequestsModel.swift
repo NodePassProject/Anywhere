@@ -29,6 +29,7 @@ class RequestsModel {
         let port: UInt16
         let routeTarget: RouteTarget
         let viaDefault: Bool
+        let ruleSetName: String?
     }
 
     private(set) var requests: [Entry] = []
@@ -99,7 +100,8 @@ class RequestsModel {
                 host: entry.host,
                 port: entry.port,
                 routeTarget: entry.routeTarget,
-                viaDefault: entry.viaDefault
+                viaDefault: entry.viaDefault,
+                ruleSetName: entry.ruleSetName
             )
         }
     }

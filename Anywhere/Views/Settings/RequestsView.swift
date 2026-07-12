@@ -38,11 +38,9 @@ struct RequestsView: View {
             }
             .onAppear {
                 requestsModel.startPolling()
-                RouteAttributor.shared.startReplaying()
             }
             .onDisappear {
                 requestsModel.stopPolling()
-                RouteAttributor.shared.stopReplaying()
             }
     }
 
@@ -159,9 +157,8 @@ struct RequestsView: View {
     }
     
     private func detailLine(for entry: RequestsModel.Entry) -> String? {
-        let ruleSetName = RouteAttributor.shared.ruleSetName(
-            forHost: entry.host, target: entry.routeTarget, viaDefault: entry.viaDefault
-        )
+        // Default-routed entries carry no rule by definition.
+        let ruleSetName = entry.viaDefault ? nil : entry.ruleSetName
         let parts = [routeName(for: entry), ruleSetName].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

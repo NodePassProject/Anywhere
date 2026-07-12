@@ -9,12 +9,9 @@ import Foundation
 
 // MARK: - Tiered route matching core
 //
-// The matching engine behind routing decisions, shared between the Network
-// Extension's DomainRouter (hot path — lookups on the lwIP and UDP queues)
-// and the host app's RouteAttributor (which replays decisions to label them
-// with rule sets). One implementation, two payloads: the extension stores
-// bare `RouteTarget`s, the app attaches rule-set identity. Matchers intern
-// payloads to `Int16` IDs so nodes stay small either way.
+// The matching engine behind routing decisions, driving the Network
+// Extension's DomainRouter (hot path — lookups on the lwIP and UDP queues).
+// Payloads intern to `Int16` IDs.
 //
 // Semantics: within a tier, suffix beats keyword and the deepest suffix /
 // longest keyword wins, later insertion breaking ties; CIDR is longest-prefix
@@ -26,8 +23,8 @@ nonisolated enum MatcherID {
     static let none: Int16 = -1
 }
 
-/// Interning payloads (a ~32 B `RouteTarget`, or the app's larger attributed
-/// form) down to `Int16` IDs keeps matcher nodes small.
+/// Interning payloads (the router's action + rule-set index) down to `Int16`
+/// IDs keeps matcher nodes small.
 nonisolated struct PayloadTable<Payload: Hashable> {
     private var payloads: [Payload] = []
     private var ids: [Payload: Int16] = [:]

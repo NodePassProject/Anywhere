@@ -346,14 +346,15 @@ class RoutingRuleSetStore {
 
                 let tier: RoutingBinaryFormat.Tier = ruleSet.isCustom ? .user
                     : (ruleSet.name == "ADBlock" ? .adBlock : .builtIn)
-                entries.append(.init(tier: tier, action: action, configId: configId, rules: rules))
+                entries.append(.init(tier: tier, action: action, configId: configId, name: ruleSet.name, rules: rules))
             }
 
             let countryCode = AWCore.getBypassCountryCode()
             if !countryCode.isEmpty {
                 let bypass = await CountryBypassCatalog.shared.rules(for: countryCode)
                 if !bypass.isEmpty {
-                    entries.append(.init(tier: .bypass, action: .direct, configId: nil, rules: bypass))
+                    entries.append(.init(tier: .bypass, action: .direct, configId: nil,
+                                         name: String(localized: "Country Bypass"), rules: bypass))
                 }
             }
             
@@ -441,6 +442,7 @@ private struct RoutingBinaryWriter {
         let tier: RoutingBinaryFormat.Tier
         let action: RoutingBinaryFormat.Action
         let configId: UUID?
+        let name: String
         let rules: [RoutingRule]
     }
 
@@ -483,6 +485,15 @@ private struct RoutingBinaryWriter {
                 kept += 1
             }
             writer.patchU32(at: ruleCountOffset, kept)
+        }
+
+        // Trailing names section: u32 count (== entry count), then one
+        // u16-length-prefixed UTF-8 name per entry, in entry order.
+        writer.u32(UInt32(entries.count))
+        for entry in entries {
+            let utf8 = Array(entry.name.prefix(64).utf8)
+            writer.u16(UInt16(utf8.count))
+            writer.append(utf8)
         }
 
         return Data(writer.bytes)
