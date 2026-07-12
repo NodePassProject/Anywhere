@@ -18,6 +18,7 @@ struct HomeView: View {
     private static let horizontalPadding: CGFloat = 20
     private static let paneSpacing: CGFloat = 20
     private static let minControlPaneWidth: CGFloat = 320
+    private static let maxControlPaneWidth: CGFloat = 500
 
     @Namespace private var namespace
 
@@ -130,6 +131,8 @@ struct HomeView: View {
             .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             .transition(.move(edge: .trailing).combined(with: .opacity))
         }
+        .frame(maxWidth: Self.maxControlPaneWidth + Self.paneSpacing + detailWidth)
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, Self.horizontalPadding)
     }
 
@@ -169,7 +172,7 @@ struct HomeView: View {
 
     private var configurationCard: some View {
         ConfigurationCapsule(isConnected: isConnected, showingAddSheet: $showingAddSheet)
-            .frame(maxWidth: 500)
+            .frame(maxWidth: Self.maxControlPaneWidth)
     }
     
     private var statusLabel: some View {
