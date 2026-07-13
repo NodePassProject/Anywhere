@@ -220,14 +220,13 @@ nonisolated final class NowhereSession {
     }
 
     private func handleDatagram(_ data: Data) {
-        guard let message = NowhereProtocol.decodeUDPDatagram(data, protocolSpec: configuration.protocolSpec),
+        guard let message = NowhereProtocol.decodeUDPDatagram(data),
               let connection = udpSessions[message.flowID] else { return }
-        if message.type == NowhereProtocol.UDPType.openAck.rawValue {
+        if message.type == .openAck {
             connection.handleOpenAck()
-        } else if message.type == NowhereProtocol.UDPType.data.rawValue
-                    || message.type == NowhereProtocol.UDPType.response.rawValue {
-            connection.handleIncomingDatagram(message.payload)
-        } else if message.type == NowhereProtocol.UDPType.compactClose.rawValue {
+        } else if message.type == .data {
+            connection.handleIncomingDatagram(message)
+        } else if message.type == .close {
             connection.handleFlowClose()
         }
     }
@@ -321,6 +320,10 @@ nonisolated final class NowhereSession {
 
     func writeDatagram(_ datagram: Data, completion: @escaping (Error?) -> Void) {
         quic.writeDatagram(datagram, completion: completion)
+    }
+
+    func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
+        quic.writeDatagrams(datagrams, completion: completion)
     }
 
     var maxDatagramPayloadSize: Int {

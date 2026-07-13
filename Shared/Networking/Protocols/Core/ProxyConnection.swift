@@ -127,7 +127,7 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
                 return
             }
 
-            if let data, !data.isEmpty {
+            if let data, !data.isEmpty || self.deliversDatagrams {
                 // Start next receive before processing to enable pipelining
                 self.receiveLoop(handler: handler, errorHandler: errorHandler)
                 handler(data)

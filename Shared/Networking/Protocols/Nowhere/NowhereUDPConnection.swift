@@ -33,7 +33,19 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     private static let maxQueuedPackets = 1024
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var closureError: Error?
-    private var compactReady = false
+    private var openAcknowledged = false
+
+    private struct DefragSlot {
+        var fragments: [Data?]
+        var received: Int
+        let fragmentCount: Int
+        let totalLength: Int
+        let createdAt: DispatchTime
+    }
+    private var defragSlots: [UInt16: DefragSlot] = [:]
+    private static let maxDefragSlots = 64
+    private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
+    private var nextPacketID: UInt16 = 1
 
     init(
         session: NowhereSession,
@@ -74,19 +86,27 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         }
     }
 
-    func handleOpenAck() { compactReady = true }
+    func handleOpenAck() { openAcknowledged = true }
 
     func handleFlowClose() {
         guard state == .ready else { return }
         if reopensExpiredFlow {
-            compactReady = false
+            openAcknowledged = false
+            defragSlots.removeAll()
         } else {
             handleSessionClose()
         }
     }
 
-    func handleIncomingDatagram(_ payload: Data) {
-        guard state != .closed, !payload.isEmpty else { return }
+    func handleIncomingDatagram(_ message: NowhereProtocol.UDPMessage) {
+        guard state != .closed else { return }
+        let payload: Data?
+        if message.fragmentCount == 1 {
+            payload = message.payload
+        } else {
+            payload = assembleFragment(message)
+        }
+        guard let payload else { return }
         if let callback = pendingReceive {
             pendingReceive = nil
             callback(payload, nil)
@@ -99,17 +119,13 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        guard !data.isEmpty else {
-            completion(nil)
-            return
-        }
         session.queue.async { [weak self] in
             guard let self else { completion(NowhereError.streamClosed); return }
             guard self.state == .ready else {
                 completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
                 return
             }
-            self.sendDatagramPayload(data, completion: completion)
+            self.attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1, completion: completion)
         }
     }
 
@@ -117,39 +133,56 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         sendRaw(data: data) { _ in }
     }
 
-    private func sendDatagramPayload(_ payload: Data, completion: @escaping (Error?) -> Void) {
-        let maxSize = session.maxDatagramPayloadSize
-        let headerSize = compactReady ? 10 : 13 + destination.utf8.count
-        guard maxSize > headerSize else {
-            completion(NowhereError.destinationTooLargeForDatagram(maxFrame: maxSize, headerSize: headerSize))
-            return
-        }
-        guard payload.count <= maxSize - headerSize else {
-            completion(QUICConnection.QUICError.datagramTooLarge(maxBound: maxSize - headerSize))
-            return
-        }
-
-        let frame: Data
+    private func attemptSend(
+        data: Data,
+        maxSizeOverride: Int?,
+        retriesLeft: Int,
+        completion: @escaping (Error?) -> Void
+    ) {
+        let maxSize = maxSizeOverride ?? session.maxDatagramPayloadSize
+        let packetID = newPacketID()
+        let frames: [Data]
         do {
-            if compactReady {
-                frame = try NowhereProtocol.encodeUDPCompact(
-                    type: .data,
+            if openAcknowledged {
+                frames = try NowhereProtocol.encodeUDPDataFragments(
                     flowID: flowID,
-                    payload: payload
+                    packetID: packetID,
+                    payload: data,
+                    maxDatagramSize: maxSize
                 )
             } else {
-                frame = try NowhereProtocol.encodeUDPOpenData(
+                frames = try NowhereProtocol.encodeUDPOpenFragments(
                     flowID: flowID,
+                    packetID: packetID,
                     downlink: downlink,
                     target: destination,
-                    payload: payload
+                    payload: data,
+                    maxDatagramSize: maxSize
                 )
             }
         } catch {
             completion(error)
             return
         }
-        session.writeDatagram(frame, completion: completion)
+        session.writeDatagrams(frames) { [weak self] error in
+            if let quicError = error as? QUICConnection.QUICError,
+               case .datagramTooLarge(let maxBound) = quicError,
+               retriesLeft > 0,
+               let self {
+                guard self.state == .ready else {
+                    completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
+                    return
+                }
+                self.attemptSend(
+                    data: data,
+                    maxSizeOverride: maxBound,
+                    retriesLeft: retriesLeft - 1,
+                    completion: completion
+                )
+                return
+            }
+            completion(error)
+        }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -187,14 +220,15 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             let callback = self.pendingReceive
             self.pendingReceive = nil
             self.packetQueue.removeAll()
+            self.defragSlots.removeAll()
             callback?(nil, nil)
         }
     }
 
     private func sendCloseFrame() {
         guard flowID != 0 else { return }
-        let frame = try? NowhereProtocol.encodeUDPCompact(
-            type: .compactClose,
+        let frame = try? NowhereProtocol.encodeUDPControl(
+            type: .close,
             flowID: flowID
         )
         if let frame {
@@ -224,9 +258,72 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             guard let self, self.state != .closed else { return }
             self.state = .closed
             self.session.releaseUDPSession(self.flowID)
+            self.defragSlots.removeAll()
             let callback = self.pendingReceive
             self.pendingReceive = nil
             callback?(nil, nil)
         }
+    }
+
+    private func assembleFragment(_ message: NowhereProtocol.UDPMessage) -> Data? {
+        guard message.fragmentCount > 1,
+              message.fragmentID < message.fragmentCount else { return nil }
+        let now = DispatchTime.now()
+        let nowNanos = now.uptimeNanoseconds
+        let existing = defragSlots[message.packetID]
+        let expired = existing.map {
+            nowNanos &- $0.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+        } ?? false
+
+        var slot: DefragSlot
+        if let existing, !expired,
+           existing.fragmentCount == Int(message.fragmentCount),
+           existing.totalLength == Int(message.totalLength) {
+            slot = existing
+        } else {
+            if defragSlots.count >= Self.maxDefragSlots {
+                let victim = defragSlots.min { lhs, rhs in
+                    lhs.value.createdAt < rhs.value.createdAt
+                }?.key
+                if let victim { defragSlots.removeValue(forKey: victim) }
+            }
+            slot = DefragSlot(
+                fragments: Array(repeating: nil, count: Int(message.fragmentCount)),
+                received: 0,
+                fragmentCount: Int(message.fragmentCount),
+                totalLength: Int(message.totalLength),
+                createdAt: now
+            )
+        }
+
+        let index = Int(message.fragmentID)
+        if let existing = slot.fragments[index] {
+            if existing != message.payload {
+                defragSlots.removeValue(forKey: message.packetID)
+                return nil
+            }
+        } else {
+            slot.fragments[index] = message.payload
+            slot.received += 1
+        }
+        if slot.received < slot.fragmentCount {
+            defragSlots[message.packetID] = slot
+            return nil
+        }
+
+        defragSlots.removeValue(forKey: message.packetID)
+        var full = Data(capacity: slot.totalLength)
+        for fragment in slot.fragments {
+            guard let fragment else { return nil }
+            full.append(fragment)
+        }
+        return full.count == slot.totalLength ? full : nil
+    }
+
+    private func newPacketID() -> UInt16 {
+        dispatchPrecondition(condition: .onQueue(session.queue))
+        let packetID = nextPacketID
+        nextPacketID = nextPacketID == UInt16.max ? 1 : nextPacketID + 1
+        return packetID
     }
 }

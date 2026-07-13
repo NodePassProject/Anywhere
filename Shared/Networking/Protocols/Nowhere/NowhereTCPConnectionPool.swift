@@ -262,8 +262,7 @@ nonisolated private final class NowhereTCPConnectionPool {
             return connection
         case .udp:
             return NowhereTCPUDPConnection(
-                inner: connection,
-                expectsAck: flowHeader?.role == .attach
+                inner: connection
             )
         }
     }

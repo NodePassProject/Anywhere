@@ -257,17 +257,13 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 }
 
-nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapable {
+nonisolated final class NowhereTCPUDPConnection: ProxyConnection {
 
     private let inner: NowhereTCPConnection
-    /// Whether the first framed packet is an empty ACK to swallow; guarded by `udpState`.
-    private var expectsAck: Bool
+    private let udpState = Mutex(UDPFramingState())
 
-    let udpState = Mutex(UDPFramingState())
-
-    init(inner: NowhereTCPConnection, expectsAck: Bool = false) {
+    init(inner: NowhereTCPConnection) {
         self.inner = inner
-        self.expectsAck = expectsAck
         super.init()
     }
 
@@ -275,51 +271,70 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
     override var deliversDatagrams: Bool { true }
 
-    override func send(data: Data, completion: @escaping (Error?) -> Void) {
-        super.send(data: frameUDPPacket(data), completion: completion)
-    }
-
-    override func send(data: Data) {
-        super.send(data: frameUDPPacket(data))
-    }
-
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: data, completion: completion)
+        do {
+            let frame = try NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data)
+            inner.sendRaw(data: frame, completion: completion)
+        } catch {
+            completion(error)
+        }
     }
 
     override func sendRaw(data: Data) {
-        inner.sendRaw(data: data)
+        guard let frame = try? NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data) else { return }
+        inner.sendRaw(data: frame)
     }
 
     private enum PacketStep {
         case deliver(Data)
-        case retryAfterAck
+        case skipControl
+        case close
+        case fail(Error)
         case needMore
     }
 
-    /// Pops the next framed packet, swallowing the one-shot empty ACK; call inside `udpState.withLock`.
+    /// Pops the next typed UoT frame; call inside `udpState.withLock`.
     private func nextPacketStep(_ state: inout UDPFramingState) -> PacketStep {
-        guard let packet = extractUDPPacket(from: &state) else { return .needMore }
-        if packet.isEmpty && expectsAck {
-            expectsAck = false
-            return .retryAfterAck
+        let available = state.buffer.count - state.bufferOffset
+        guard available >= 3 else { return .needMore }
+        let typeByte = state.buffer[state.bufferOffset]
+        let length = Int(UInt16(state.buffer[state.bufferOffset + 1]) << 8
+            | UInt16(state.buffer[state.bufferOffset + 2]))
+        guard available >= 3 + length else { return .needMore }
+        guard let type = NowhereProtocol.UDPStreamType(rawValue: typeByte) else {
+            return .fail(NowhereError.connectionFailed("Invalid UoT frame type"))
         }
-        return .deliver(packet)
-    }
-
-    override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        switch udpState.withLock({ nextPacketStep(&$0) }) {
-        case .deliver(let packet):
-            completion(packet, nil)
-        case .retryAfterAck:
-            receive(completion: completion)
-        case .needMore:
-            receiveMore(completion: completion)
+        guard type == .data || length == 0 else {
+            return .fail(NowhereError.connectionFailed("UoT control frame has payload"))
+        }
+        let payloadStart = state.bufferOffset + 3
+        let payloadEnd = payloadStart + length
+        let payload = Data(state.buffer[payloadStart..<payloadEnd])
+        state.bufferOffset = payloadEnd
+        if state.bufferOffset > 8192 {
+            state.buffer.removeSubrange(0..<state.bufferOffset)
+            state.bufferOffset = 0
+        }
+        switch type {
+        case .data: return .deliver(payload)
+        case .openAck: return .skipControl
+        case .close: return .close
         }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw(completion: completion)
+        switch udpState.withLock({ nextPacketStep(&$0) }) {
+        case .deliver(let packet):
+            completion(packet, nil)
+        case .skipControl:
+            receiveRaw(completion: completion)
+        case .close:
+            completion(nil, nil)
+        case .fail(let error):
+            completion(nil, error)
+        case .needMore:
+            receiveMore(completion: completion)
+        }
     }
 
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
@@ -343,8 +358,12 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
             switch step {
             case .deliver(let packet):
                 completion(packet, nil)
-            case .retryAfterAck:
-                self.receive(completion: completion)
+            case .skipControl:
+                self.receiveRaw(completion: completion)
+            case .close:
+                completion(nil, nil)
+            case .fail(let error):
+                completion(nil, error)
             case .needMore:
                 self.receiveMore(completion: completion)
             }
@@ -352,8 +371,17 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, UDPFramingCapa
     }
 
     override func cancel() {
-        udpState.withLock { clearUDPBuffer(&$0) }
-        inner.cancel()
+        udpState.withLock {
+            $0.buffer = Data()
+            $0.bufferOffset = 0
+        }
+        guard let close = try? NowhereProtocol.encodeUDPStreamFrame(type: .close) else {
+            inner.cancel()
+            return
+        }
+        inner.sendRaw(data: close) { [inner] _ in
+            inner.cancel()
+        }
     }
 }
 

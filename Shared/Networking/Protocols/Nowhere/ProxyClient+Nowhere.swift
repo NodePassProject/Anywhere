@@ -247,8 +247,7 @@ extension ProxyClient {
                     completion(.success(connection))
                 case .udp:
                     completion(.success(NowhereTCPUDPConnection(
-                        inner: connection,
-                        expectsAck: header.role == .attach
+                        inner: connection
                     )))
                 }
             }

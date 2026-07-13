@@ -58,8 +58,6 @@ enum NowhereProtocol {
 
     enum FrameElement: UInt8, Hashable {
         case version
-        case type
-        case flowID
         case target
         case padding
     }
@@ -77,26 +75,37 @@ enum NowhereProtocol {
         let tcpPaddingLength: UInt8
         let tcpPaddingKey: Data
         let tcpFrameOrder: [FrameElement]
-        let udpFrameOrder: [FrameElement]
     }
 
-    enum UDPType: UInt8 {
-        case request = 1
-        case response = 2
-        case close = 3
-        case openData = 0x11
-        case openAck = 0x12
-        case data = 0x13
-        case compactClose = 0x14
+    enum UDPType: UInt8, Equatable {
+        case openData = 1
+        case openAck = 2
+        case data = 3
+        case close = 4
     }
 
     struct UDPMessage {
-        let type: UInt8
+        let type: UDPType
         let flowID: UInt64
         let target: String?
         let downlink: NowhereNetwork?
+        let packetID: UInt16
+        let fragmentID: UInt8
+        let fragmentCount: UInt8
+        let totalLength: UInt16
         let payload: Data
     }
+
+    enum UDPStreamType: UInt8, Equatable {
+        case data = 1
+        case openAck = 2
+        case close = 3
+    }
+
+    static let udpFrameMagic = Data("NOWU".utf8)
+    static let maxUDPPacketSize = Int(UInt16.max)
+    static let udpControlHeaderSize = 4 + 1 + 8
+    static let udpDataHeaderSize = udpControlHeaderSize + 2 + 1 + 1 + 2
 
     enum FlowRole: UInt8 { case open = 1, attach = 2 }
     enum FlowKind: UInt8 { case tcp = 1, udp = 2 }
@@ -152,8 +161,7 @@ enum NowhereProtocol {
             authPaddingKey: hkdfExpand(prk: specPRK, info: authPaddingKeyLabel, count: authPaddingKeyLength),
             tcpPaddingLength: UInt8(tcpPaddingLengthValue),
             tcpPaddingKey: hkdfExpand(prk: specPRK, info: tcpPaddingKeyLabel, count: tcpPaddingKeyLength),
-            tcpFrameOrder: frameOrder.tcp,
-            udpFrameOrder: frameOrder.udp
+            tcpFrameOrder: frameOrder
         )
     }
 
@@ -336,7 +344,7 @@ enum NowhereProtocol {
         return order
     }
 
-    private static func buildFrameOrder(seed: Data) -> (tcp: [FrameElement], udp: [FrameElement]) {
+    private static func buildFrameOrder(seed: Data) -> [FrameElement] {
         var tcp: [FrameElement] = [.version, .target, .padding]
         for i in stride(from: tcp.count - 1, through: 1, by: -1) {
             let seedIndex = tcp.count - 1 - i
@@ -344,14 +352,7 @@ enum NowhereProtocol {
             tcp.swapAt(i, Int(seedByte) % (i + 1))
         }
 
-        var udp: [FrameElement] = [.version, .type, .flowID, .target]
-        guard !seed.isEmpty else { return (tcp, udp) }
-        for i in stride(from: udp.count - 1, through: 1, by: -1) {
-            let seedIndex = udp.count - i
-            let seedByte = seedIndex < seed.count ? byte(seed, at: seedIndex) : 0
-            udp.swapAt(i, Int(seedByte) % (i + 1))
-        }
-        return (tcp, udp)
+        return tcp
     }
 
     static func encodeTCPRequest(address: String, protocolSpec: EffectiveSpec) throws -> Data {
@@ -367,49 +368,55 @@ enum NowhereProtocol {
             case .padding:
                 out.append(protocolSpec.tcpPaddingLength)
                 out.append(padding)
-            case .type, .flowID:
-                break
             }
         }
         return out
     }
 
-    static func encodeUDPDatagram(type: UDPType, flowID: UInt64, target: String, payload: Data, protocolSpec: EffectiveSpec) throws -> Data {
-        let header = try encodeUDPHeader(type: type, flowID: flowID, target: target, protocolSpec: protocolSpec)
-        var out = Data(capacity: header.count + payload.count)
-        out.append(header)
-        out.append(payload)
-        return out
-    }
-
-    static func encodeUDPOpenData(
+    static func encodeUDPOpenFragments(
         flowID: UInt64,
+        packetID: UInt16,
         downlink: NowhereNetwork,
         target: String,
-        payload: Data
-    ) throws -> Data {
-        guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
+        payload: Data,
+        maxDatagramSize: Int
+    ) throws -> [Data] {
         let targetBytes = try encodeTarget(target)
-        var out = Data(capacity: 10 + 1 + targetBytes.count + payload.count)
-        out.append(proxyFrameVersion)
-        out.append(UDPType.openData.rawValue)
-        out.append(uint64Bytes(flowID))
-        out.append(downlink == .tcp ? 1 : 2)
-        out.append(targetBytes)
-        out.append(payload)
-        return out
+        return try encodeUDPFragments(
+            type: .openData,
+            flowID: flowID,
+            packetID: packetID,
+            payload: payload,
+            maxDatagramSize: maxDatagramSize,
+            metadata: Data([downlink == .tcp ? 1 : 2]) + targetBytes
+        )
     }
 
-    static func encodeUDPCompact(type: UDPType, flowID: UInt64, payload: Data = Data()) throws -> Data {
+    static func encodeUDPDataFragments(
+        flowID: UInt64,
+        packetID: UInt16,
+        payload: Data,
+        maxDatagramSize: Int
+    ) throws -> [Data] {
+        try encodeUDPFragments(
+            type: .data,
+            flowID: flowID,
+            packetID: packetID,
+            payload: payload,
+            maxDatagramSize: maxDatagramSize,
+            metadata: Data()
+        )
+    }
+
+    static func encodeUDPControl(type: UDPType, flowID: UInt64) throws -> Data {
         guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
-        guard type == .openAck || type == .data || type == .compactClose else {
-            throw NowhereError.connectionFailed("Invalid compact UDP type")
+        guard type == .openAck || type == .close else {
+            throw NowhereError.connectionFailed("Invalid UDP control type")
         }
-        var out = Data(capacity: 10 + payload.count)
-        out.append(proxyFrameVersion)
+        var out = Data(capacity: udpControlHeaderSize)
+        out.append(udpFrameMagic)
         out.append(type.rawValue)
         out.append(uint64Bytes(flowID))
-        out.append(payload)
         return out
     }
 
@@ -417,72 +424,133 @@ enum NowhereProtocol {
         try encodeTarget(target)
     }
 
-    private static func encodeUDPHeader(type: UDPType, flowID: UInt64, target: String, protocolSpec: EffectiveSpec) throws -> Data {
-        let targetBytes = try encodeTarget(target)
-        var out = Data(capacity: udpHeaderSize(target: target, protocolSpec: protocolSpec))
-        for element in protocolSpec.udpFrameOrder {
-            switch element {
-            case .version:
-                out.append(proxyFrameVersion)
-            case .type:
-                out.append(type.rawValue)
-            case .flowID:
-                out.append(uint64Bytes(flowID))
-            case .target:
-                out.append(targetBytes)
-            case .padding:
-                break
-            }
+    static func encodeUDPStreamFrame(type: UDPStreamType, payload: Data = Data()) throws -> Data {
+        guard payload.count <= maxUDPPacketSize else {
+            throw NowhereError.connectionFailed("UDP payload exceeds 65535 bytes")
         }
+        guard type == .data || payload.isEmpty else {
+            throw NowhereError.connectionFailed("UDP control frame has payload")
+        }
+        var out = Data(capacity: 3 + payload.count)
+        out.append(type.rawValue)
+        out.append(UInt8((payload.count >> 8) & 0xFF))
+        out.append(UInt8(payload.count & 0xFF))
+        out.append(payload)
         return out
     }
 
-    static func decodeUDPDatagram(_ data: Data, protocolSpec: EffectiveSpec) -> UDPMessage? {
-        if data.count >= 10, byte(data, at: 0) == proxyFrameVersion,
-           let compactType = UDPType(rawValue: byte(data, at: 1)),
-           compactType == .openAck || compactType == .data || compactType == .compactClose {
-            let flowID = readUInt64(data, at: 2)
-            guard flowID != 0 else { return nil }
-            let payload = data.subdata(in: data.index(data.startIndex, offsetBy: 10)..<data.endIndex)
-            if compactType != .data, !payload.isEmpty { return nil }
-            return UDPMessage(type: compactType.rawValue, flowID: flowID, target: nil, downlink: nil, payload: payload)
+    private static func encodeUDPFragments(
+        type: UDPType,
+        flowID: UInt64,
+        packetID: UInt16,
+        payload: Data,
+        maxDatagramSize: Int,
+        metadata: Data
+    ) throws -> [Data] {
+        guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
+        guard type == .openData || type == .data else {
+            throw NowhereError.connectionFailed("Invalid UDP data type")
         }
-        guard data.count >= 12 else { return nil }
-        var offset = 0
-        var frameType: UInt8?
-        var flowID: UInt64?
-        var target: String?
-        for element in protocolSpec.udpFrameOrder {
-            switch element {
-            case .version:
-                guard offset < data.count, byte(data, at: offset) == proxyFrameVersion else { return nil }
-                offset += 1
-            case .type:
-                guard offset < data.count else { return nil }
-                frameType = byte(data, at: offset)
-                offset += 1
-            case .flowID:
-                guard offset + 8 <= data.count else { return nil }
-                flowID = readUInt64(data, at: offset)
-                offset += 8
-            case .target:
-                guard let parsed = decodeTarget(data, offset: offset) else { return nil }
-                target = parsed.target
-                offset = data.distance(from: data.startIndex, to: parsed.nextOffset)
-            case .padding:
-                break
+        guard payload.count <= maxUDPPacketSize else {
+            throw NowhereError.connectionFailed("UDP payload exceeds 65535 bytes")
+        }
+        let headerSize = udpDataHeaderSize + metadata.count
+        guard maxDatagramSize >= headerSize else {
+            throw NowhereError.destinationTooLargeForDatagram(
+                maxFrame: maxDatagramSize,
+                headerSize: headerSize
+            )
+        }
+        let maxPayload = maxDatagramSize - headerSize
+        guard payload.isEmpty || maxPayload > 0 else {
+            throw NowhereError.destinationTooLargeForDatagram(
+                maxFrame: maxDatagramSize,
+                headerSize: headerSize
+            )
+        }
+        let fragmentCount = payload.isEmpty ? 1 : (payload.count + maxPayload - 1) / maxPayload
+        guard fragmentCount <= Int(UInt8.max) else {
+            throw NowhereError.connectionFailed("UDP payload requires too many fragments")
+        }
+        var frames: [Data] = []
+        frames.reserveCapacity(fragmentCount)
+        for fragmentID in 0..<fragmentCount {
+            let start = fragmentID * maxPayload
+            let end = min(payload.count, start + maxPayload)
+            var out = Data(capacity: headerSize + end - start)
+            out.append(udpFrameMagic)
+            out.append(type.rawValue)
+            out.append(uint64Bytes(flowID))
+            out.append(metadata)
+            out.append(UInt8((Int(packetID) >> 8) & 0xFF))
+            out.append(UInt8(Int(packetID) & 0xFF))
+            out.append(UInt8(fragmentID))
+            out.append(UInt8(fragmentCount))
+            out.append(UInt8((payload.count >> 8) & 0xFF))
+            out.append(UInt8(payload.count & 0xFF))
+            if end > start {
+                let startIndex = payload.index(payload.startIndex, offsetBy: start)
+                let endIndex = payload.index(payload.startIndex, offsetBy: end)
+                out.append(payload[startIndex..<endIndex])
             }
+            frames.append(out)
         }
-        guard let type = frameType,
-              type == UDPType.response.rawValue || type == UDPType.close.rawValue,
-              let flowID,
-              let target else { return nil }
-        let payload = data.subdata(in: data.index(data.startIndex, offsetBy: offset)..<data.endIndex)
-        return UDPMessage(type: type, flowID: flowID, target: target, downlink: nil, payload: payload)
+        return frames
     }
 
-    static func udpHeaderSize(target: String, protocolSpec _: EffectiveSpec) -> Int {
-        1 + 1 + 8 + 2 + target.utf8.count
+    static func decodeUDPDatagram(_ data: Data) -> UDPMessage? {
+        guard data.count >= udpControlHeaderSize,
+              data.prefix(udpFrameMagic.count) == udpFrameMagic,
+              let type = UDPType(rawValue: byte(data, at: udpFrameMagic.count)) else { return nil }
+        let flowID = readUInt64(data, at: udpFrameMagic.count + 1)
+        guard flowID != 0 else { return nil }
+        if type == .openAck || type == .close {
+            guard data.count == udpControlHeaderSize else { return nil }
+            return UDPMessage(
+                type: type, flowID: flowID, target: nil, downlink: nil,
+                packetID: 0, fragmentID: 0, fragmentCount: 0, totalLength: 0,
+                payload: Data()
+            )
+        }
+
+        var offset = udpControlHeaderSize
+        var target: String?
+        var downlink: NowhereNetwork?
+        if type == .openData {
+            guard offset + 3 <= data.count else { return nil }
+            switch byte(data, at: offset) {
+            case 1: downlink = .tcp
+            case 2: downlink = .udp
+            default: return nil
+            }
+            offset += 1
+            guard let parsed = decodeTarget(data, offset: offset) else { return nil }
+            target = parsed.target
+            offset = data.distance(from: data.startIndex, to: parsed.nextOffset)
+        } else if type != .data {
+            return nil
+        }
+
+        guard offset + 6 <= data.count else { return nil }
+        let packetID = UInt16(readUInt16(data, at: offset))
+        let fragmentID = byte(data, at: offset + 2)
+        let fragmentCount = byte(data, at: offset + 3)
+        let totalLength = UInt16(readUInt16(data, at: offset + 4))
+        offset += 6
+        guard fragmentCount > 0, fragmentID < fragmentCount else { return nil }
+        let payload = data.subdata(in: data.index(data.startIndex, offsetBy: offset)..<data.endIndex)
+        guard payload.count <= Int(totalLength) else { return nil }
+        if totalLength == 0 {
+            guard fragmentCount == 1, fragmentID == 0, payload.isEmpty else { return nil }
+        } else {
+            guard !payload.isEmpty else { return nil }
+            if fragmentCount == 1, payload.count != Int(totalLength) { return nil }
+        }
+        return UDPMessage(
+            type: type, flowID: flowID, target: target, downlink: downlink,
+            packetID: packetID, fragmentID: fragmentID, fragmentCount: fragmentCount,
+            totalLength: totalLength, payload: payload
+        )
     }
 
     private static func encodeTarget(_ target: String) throws -> Data {
