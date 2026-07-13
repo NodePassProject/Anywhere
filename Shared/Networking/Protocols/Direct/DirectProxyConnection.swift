@@ -58,8 +58,4 @@ nonisolated class DirectProxyConnection: ProxyConnection {
     override func cancel() {
         connection.forceCancel()
     }
-
-    override func abort() {
-        connection.forceAbort()
-    }
 }

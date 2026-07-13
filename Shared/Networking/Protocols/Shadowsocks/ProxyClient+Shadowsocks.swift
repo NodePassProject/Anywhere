@@ -61,7 +61,7 @@ extension ProxyClient {
             self.tunnel = nil
             wrapAndComplete(tunnel)
         } else {
-            let transport = NWUDPTransport()
+            let transport = UDPTransport()
             self.own(transport)
             transport.connect(host: directDialHost,
                            port: configuration.serverPort,

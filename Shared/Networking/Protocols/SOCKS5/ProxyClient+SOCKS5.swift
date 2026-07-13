@@ -38,7 +38,7 @@ extension ProxyClient {
         if let tunnel = self.tunnel {
             onTransportReady(TunneledTransport(tunnel: tunnel))
         } else {
-            let transport = NWTCPTransport()
+            let transport = TCPTransport()
             self.own(transport)
             transport.connect(host: directDialHost, port: configuration.serverPort) { error in
                 if let error {
@@ -153,7 +153,7 @@ extension ProxyClient {
                 completion(.failure(error))
             }
         } else {
-            let transport = NWUDPTransport()
+            let transport = UDPTransport()
             self.own(transport)
             transport.connect(host: relayHost, port: relayPort,
                            completionQueue: .global()) { error in

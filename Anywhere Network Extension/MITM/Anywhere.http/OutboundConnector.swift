@@ -116,7 +116,7 @@ enum OutboundConnector {
         host: String, port: UInt16,
         queue: DispatchQueue, completion: @escaping (Result<Dialed, Error>) -> Void
     ) {
-        let transport = NWTCPTransport()
+        let transport = TCPTransport()
         // Direct dial — not a proxied connection, so keep it out of the Dial metric.
         transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)

@@ -44,7 +44,7 @@ class UDPFlow {
     }
 
     // Direct bypass path
-    private var directTransport: NWUDPTransport?
+    private var directTransport: UDPTransport?
 
     // Non-mux path
     private var proxyClient: ProxyClient?
@@ -466,7 +466,7 @@ class UDPFlow {
         proxyConnecting = true  // reuse the flag so datagrams buffer until the transport connects
 
         // One connection per peer 5-tuple.
-        let transport = NWUDPTransport()
+        let transport = UDPTransport()
         self.directTransport = transport
         transport.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
             guard let self else { return }

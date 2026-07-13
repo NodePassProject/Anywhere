@@ -8,10 +8,10 @@
 import Foundation
 import Synchronization
 
-/// Adapts a push-based `NWUDPTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
+/// Adapts a push-based `UDPTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
-    private let transport: NWUDPTransport
+    private let transport: UDPTransport
 
     private struct ReceiveState {
         var recvBuffer: [Data] = []
@@ -26,7 +26,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
     /// Bounds memory under a burst the consumer hasn't drained yet.
     private static let maxBufferedDatagrams = 1024
 
-    init(transport: NWUDPTransport) {
+    init(transport: UDPTransport) {
         self.transport = transport
         super.init()
     }

@@ -80,7 +80,7 @@ nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Mutable state (all on `delegateQueue`)
 
-    private let transport = NWUDPTransport()
+    private let transport = UDPTransport()
     private var state: State = .idle
 
     private var nextToken: Token = 0

@@ -12,24 +12,40 @@ import Dispatch
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
+/// Carries QUIC's UDP datagrams for ngtcp2, backed by iOS 26's `NetworkConnection`.
+///
+/// Stage 1 of the `NWConnection` → `NetworkConnection` migration: the public
+/// surface stays synchronous and runs on the owner-provided `queue`, while a
+/// driver `Task` owns the connection inside `withNetworkConnection`. The path
+/// callbacks (`onPathDown`/`onBetterPath`/`onReady`) map to
+/// `onViabilityUpdate`/`onBetterPathUpdate`/`onStateUpdate`; `currentInterfaceType`
+/// is cached from the path so it stays synchronously readable on `queue`.
 nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     private typealias QUICError = QUICConnection.QUICError
 
+    /// Owner-provided serial queue; every method and callback runs on it.
     private let queue: DispatchQueue
 
-    private var connection: NWConnection?
+    /// Owns the `NetworkConnection` for its whole lifetime; cancelling it tears
+    /// the connection down. `queue`-confined.
+    private var driverTask: Task<Void, Never>?
+    /// Datagrams are sent in order by the driver's send loop. `queue`-confined.
+    private var sendContinuation: AsyncStream<Data>.Continuation?
 
     private var packetHandler: ((Data) -> Void)?
     /// Fires once with the `errno` on terminal failure.
     private var recvErrorHandler: ((Int32) -> Void)?
     /// A failure seen before `startReceiving` armed the handler.
     private var pendingError: Int32?
+    /// Datagrams received before `startReceiving` armed the handler.
+    private var pendingPackets: [Data] = []
+    private var didWarnPendingOverflow = false
 
     /// When set, a viability drop calls this instead of surfacing a terminal error,
     /// letting the owner attempt QUIC migration first. Fires on `queue`.
     var onPathDown: (() -> Void)?
-    /// Fires (on `queue`) when NWConnection reports a better path — the cue for a
+    /// Fires (on `queue`) when a better path is reported — the cue for a
     /// proactive migration while still healthy.
     var onBetterPath: (() -> Void)?
     /// Fires once (on `queue`) when the connection first reaches `.ready`; lets a
@@ -37,32 +53,40 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     var onReady: (() -> Void)?
 
     private var ready = false
-    /// Guards against double-arming the receive loop.
-    private var receiving = false
+    /// Set once `close()` has run; guards the async callbacks against acting
+    /// after teardown.
+    private var closed = false
+    /// One kernel socket per carrier; balanced exactly once by `releaseFlowCount`.
+    private var flowCounted = false
 
-    /// Number of `receiveMessage` calls kept outstanding at once.
-    private static let receiveWindow = 16
+    /// Cached egress interface type, refreshed from the connection's path so it
+    /// stays synchronously readable. `queue`-confined.
+    private var cachedInterfaceType: NWInterface.InterfaceType?
+
+    /// Bounds the pre-handler datagram buffer.
+    private static let maxPendingPackets = 1024
 
     init(queue: DispatchQueue) {
         self.queue = queue
     }
-    
+
     deinit {
-        guard let connection else { return }
+        driverTask?.cancel()
+        guard flowCounted else { return }
+        flowCounted = false
         FlowGauge.decrementUDP()
-        connection.cancel()
-        logger.error("[QUIC] Datagram carrier deallocated without close() — recovered the FlowGauge count and socket in deinit; a close() path has regressed.")
+        logger.error("[QUIC] Datagram carrier deallocated without close() — recovered the FlowGauge count in deinit; a close() path has regressed.")
     }
 
     /// The egress interface type in use, or nil before `.ready`. Lets the owner
     /// confirm a migration target is a *different* interface. Read on `queue`.
     var currentInterfaceType: NWInterface.InterfaceType? {
-        connection?.currentPath?.availableInterfaces.first?.type
+        cachedInterfaceType
     }
 
     // MARK: - Connect
 
-    /// Creates a connected UDP `NWConnection` to `remoteAddr` and fills `localAddr`
+    /// Creates a connected UDP `NetworkConnection` to `remoteAddr` and fills `localAddr`
     /// with a family-matched placeholder. The connection becomes ready
     /// asynchronously; sends issued before then are buffered by the framework.
     /// Must run on `queue`.
@@ -72,58 +96,13 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         }
         Self.fillAnyLocalAddr(&localAddr, family: remoteAddr.ss_family)
 
-        let connection = NWConnection(to: endpoint, using: .udp)
-        self.connection = connection
-        // One kernel socket per carrier; `close()` balances the gauge.
         FlowGauge.incrementUDP()
-        connection.stateUpdateHandler = { [weak self] state in
-            self?.handleState(state, for: connection)
-        }
-        // Egress under a ready connection went away: hand off to `onPathDown` if set
-        // (the owner migrates), else deliver a network error so ngtcp2 tears down
-        // instead of waiting on its PTO/idle timers. Identity guards stale callbacks.
-        connection.viabilityUpdateHandler = { [weak self] viable in
-            guard let self, self.connection === connection, !viable, self.ready else { return }
-            if let onPathDown = self.onPathDown {
-                onPathDown()
-            } else {
-                self.deliverError(.posix(.ENETDOWN))
-            }
-        }
-        // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
-        // proactive migration before the current path degrades.
-        connection.betterPathUpdateHandler = { [weak self] better in
-            guard let self, self.connection === connection, better, self.ready else { return }
-            self.onBetterPath?()
-        }
-        connection.start(queue: queue)
-    }
+        flowCounted = true
 
-    /// Tracks readiness and arms the receive loop once ready. Stale callbacks from
-    /// a superseded connection are ignored. Must run on `queue`.
-    private func handleState(_ state: NWConnection.State, for connection: NWConnection) {
-        guard self.connection === connection else { return }
-        switch state {
-        case .ready:
-            ready = true
-            if packetHandler != nil, !receiving {
-                receiving = true
-                armReceiving(connection)
-            }
-            if let onReady {
-                self.onReady = nil
-                onReady()
-            }
-        case .failed(let error):
-            deliverError(error)
-        case .waiting(let error):
-            if ready, let onPathDown {
-                onPathDown()
-            } else {
-                deliverError(error)
-            }
-        default:
-            break
+        let (sendStream, sendCont) = AsyncStream.makeStream(of: Data.self)
+        sendContinuation = sendCont
+        driverTask = Task { [self] in
+            await self.runDriver(endpoint: endpoint, sendStream: sendStream)
         }
     }
 
@@ -140,45 +119,10 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
             onError(pendingError)
             return
         }
-        if ready, let connection, !receiving {
-            receiving = true
-            armReceiving(connection)
-        }
-    }
-
-    /// Issues `receiveWindow` concurrent receives. Must run on `queue`.
-    private func armReceiving(_ connection: NWConnection) {
-        for _ in 0..<Self.receiveWindow {
-            receiveOne(connection)
-        }
-    }
-
-    /// Receives one datagram and refills the window slot it occupied. Must run on `queue`.
-    private func receiveOne(_ connection: NWConnection) {
-        connection.receiveMessage { [weak self] data, _, _, error in
-            guard let self, self.connection === connection else { return }
-            if let data, !data.isEmpty {
-                self.packetHandler?(data)
-            }
-            if let error {
-                self.deliverError(error)
-                return
-            }
-            if self.connection === connection {
-                self.receiveOne(connection)
-            }
-        }
-    }
-
-    /// Maps an `NWError` to an `errno` and delivers it once, or latches it until
-    /// `startReceiving` arms the handler. Must run on `queue`.
-    private func deliverError(_ error: NWError) {
-        let code: Int32 = { if case .posix(let posix) = error { return posix.rawValue }; return -1 }()
-        if let handler = recvErrorHandler {
-            recvErrorHandler = nil
-            handler(code)
-        } else {
-            pendingError = code
+        let drained = pendingPackets
+        pendingPackets.removeAll()
+        for data in drained {
+            onPacket(data)
         }
     }
 
@@ -187,30 +131,200 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     /// Sends `length` bytes; errors drop the packet (ngtcp2's loss recovery
     /// retransmits). Copies out of ngtcp2's reused buffer. Must run on `queue`.
     func send(_ bytes: UnsafePointer<UInt8>, length: Int) {
-        guard let connection, length > 0 else { return }
+        guard length > 0, let sendContinuation else { return }
         let datagram = Data(bytes: bytes, count: length)
-        connection.send(content: datagram, completion: .idempotent)
+        sendContinuation.yield(datagram)
     }
 
     // MARK: - Close
 
     /// Cancels the connection. Idempotent; must run on `queue`.
     func close() {
-        if let connection {
-            self.connection = nil
-            FlowGauge.decrementUDP()
-            connection.stateUpdateHandler = nil
-            connection.viabilityUpdateHandler = nil
-            connection.betterPathUpdateHandler = nil
-            connection.cancel()
-        }
+        guard !closed else { return }
+        closed = true
+        releaseFlowCount()
+        sendContinuation?.finish()
+        sendContinuation = nil
+        driverTask?.cancel()
+        driverTask = nil
         packetHandler = nil
         recvErrorHandler = nil
+        pendingError = nil
+        pendingPackets.removeAll()
+        didWarnPendingOverflow = false
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
         ready = false
-        receiving = false
+    }
+
+    // MARK: - Driver
+
+    /// Owns the `NetworkConnection` for the whole session. `withNetworkConnection`
+    /// tears the connection down deterministically when this task is cancelled or
+    /// returns. Runs off `queue`; all state mutation hops back onto `queue`.
+    private func runDriver(endpoint: NWEndpoint, sendStream: AsyncStream<Data>) async {
+        do {
+            try await withNetworkConnection(to: endpoint, using: { UDP() }) { [self] conn in
+                conn.onStateUpdate { [weak self] connection, state in
+                    guard let self else { return }
+                    switch state {
+                    case .ready:
+                        // Capture the interface here so it's cached before `onReady`
+                        // fires (proactive migration reads it immediately).
+                        let interfaceType = connection.currentPath?.availableInterfaces.first?.type
+                        self.queue.async { self.handleReady(interfaceType: interfaceType) }
+                    case .failed(let error):
+                        let code = Self.errnoCode(from: error)
+                        self.queue.async { self.deliverError(code) }
+                    case .waiting(let error):
+                        let code = Self.errnoCode(from: error)
+                        self.queue.async { self.handleWaiting(code) }
+                    default:
+                        break  // .setup, .preparing, .cancelled
+                    }
+                }
+                // Egress under a ready connection went away: hand off to `onPathDown`
+                // if set (the owner migrates), else deliver a network error so ngtcp2
+                // tears down instead of waiting on its PTO/idle timers.
+                conn.onViabilityUpdate { [weak self] _, viable in
+                    guard let self, !viable else { return }
+                    self.queue.async { self.handleViabilityLost() }
+                }
+                // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
+                // proactive migration before the current path degrades.
+                conn.onBetterPathUpdate { [weak self] _, better in
+                    guard let self, better else { return }
+                    self.queue.async { self.handleBetterPath() }
+                }
+                conn.onPathUpdate { [weak self] _, path in
+                    guard let self else { return }
+                    let interfaceType = path.availableInterfaces.first?.type
+                    self.queue.async { self.cachedInterfaceType = interfaceType }
+                }
+
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { try await self.runSendLoop(conn, stream: sendStream) }
+                    group.addTask { try await self.runReceiveLoop(conn) }
+                    _ = try await group.next()
+                    group.cancelAll()
+                }
+            }
+        } catch {
+            // Connection ended (cancelled or failed).
+        }
+        queue.async { [self] in releaseFlowCount() }
+    }
+
+    /// Drains ordered datagram sends; errors drop the packet (ngtcp2 retransmits).
+    /// Runs off `queue`.
+    private func runSendLoop(_ conn: NetworkConnection<UDP>, stream: AsyncStream<Data>) async throws {
+        for await datagram in stream {
+            try? await conn.send(datagram)
+        }
+    }
+
+    /// Continuously receives datagrams, starting the connection on the first read.
+    /// A receive failure is terminal. Runs off `queue`.
+    private func runReceiveLoop(_ conn: NetworkConnection<UDP>) async throws {
+        do {
+            while true {
+                let message = try await conn.receive()
+                let data = message.content
+                if !data.isEmpty {
+                    self.queue.async { [self] in deliverPacket(data) }
+                }
+            }
+        } catch {
+            let code = Self.errnoCode(from: error)
+            queue.async { [self] in deliverError(code) }
+            throw error
+        }
+    }
+
+    // MARK: - State handling (on queue)
+
+    /// First `.ready`: caches the interface, then fires `onReady` once.
+    private func handleReady(interfaceType: NWInterface.InterfaceType?) {
+        guard !closed, !ready else { return }
+        ready = true
+        cachedInterfaceType = interfaceType
+        if let onReady {
+            self.onReady = nil
+            onReady()
+        }
+    }
+
+    /// A `.waiting` report: once ready, prefer migration; otherwise it's terminal.
+    private func handleWaiting(_ code: Int32) {
+        guard !closed else { return }
+        if ready, let onPathDown {
+            onPathDown()
+        } else {
+            deliverError(code)
+        }
+    }
+
+    /// Egress under a ready connection went away. Must run on `queue`.
+    private func handleViabilityLost() {
+        guard !closed, ready else { return }
+        if let onPathDown {
+            onPathDown()
+        } else {
+            deliverError(POSIXErrorCode.ENETDOWN.rawValue)
+        }
+    }
+
+    /// A better path appeared while the current one still works. Must run on `queue`.
+    private func handleBetterPath() {
+        guard !closed, ready else { return }
+        onBetterPath?()
+    }
+
+    // MARK: - Delivery (on queue)
+
+    /// Delivers a datagram, or buffers it if no handler is armed yet. Must run on
+    /// `queue`.
+    private func deliverPacket(_ data: Data) {
+        guard !closed else { return }
+        if let packetHandler {
+            packetHandler(data)
+        } else {
+            if pendingPackets.count >= Self.maxPendingPackets {
+                pendingPackets.removeFirst()
+                if !didWarnPendingOverflow {
+                    didWarnPendingOverflow = true
+                    logger.warning("[QUIC] Pre-handler buffer overflowed (cap \(Self.maxPendingPackets)); dropping oldest until startReceiving arms")
+                }
+            }
+            pendingPackets.append(data)
+        }
+    }
+
+    /// Delivers a terminal error code once, or latches it until `startReceiving`
+    /// arms the handler. Must run on `queue`.
+    private func deliverError(_ code: Int32) {
+        guard !closed else { return }
+        if let handler = recvErrorHandler {
+            recvErrorHandler = nil
+            handler(code)
+        } else {
+            pendingError = code
+        }
+    }
+
+    /// Balances `FlowGauge` exactly once per carrier. Must run on `queue`.
+    private func releaseFlowCount() {
+        guard flowCounted else { return }
+        flowCounted = false
+        FlowGauge.decrementUDP()
+    }
+
+    /// Maps a `NetworkConnection` throw / `NWError` to an `errno`.
+    private static func errnoCode(from error: Error) -> Int32 {
+        if error is CancellationError { return ECANCELED }
+        if let nwError = error as? NWError, case .posix(let posix) = nwError { return posix.rawValue }
+        return -1
     }
 
     // MARK: - Address conversion

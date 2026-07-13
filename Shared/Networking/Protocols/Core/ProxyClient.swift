@@ -596,7 +596,7 @@ nonisolated class ProxyClient {
                 supportsVision: transportSupportsVision, completion: completion
             )
         } else {
-            let transport = NWTCPTransport()
+            let transport = TCPTransport()
             self.own(transport)
 
             transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
@@ -752,7 +752,7 @@ nonisolated class ProxyClient {
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                let transport = NWTCPTransport()
+                let transport = TCPTransport()
                 self.own(transport)
 
                 transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
@@ -851,7 +851,7 @@ nonisolated class ProxyClient {
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                let transport = NWTCPTransport()
+                let transport = TCPTransport()
                 self.own(transport)
 
                 transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
@@ -1016,7 +1016,7 @@ nonisolated class ProxyClient {
                 destinationPort: destinationPort, initialData: initialData, completion: completion
             )
         } else {
-            let transport = NWTCPTransport()
+            let transport = TCPTransport()
             self.own(transport)
             transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                 if let error {
@@ -1529,7 +1529,7 @@ nonisolated class ProxyClient {
         }
         switch security {
         case .none:
-            let transport = NWTCPTransport()
+            let transport = TCPTransport()
             transport.connect(host: host, port: port) { error in
                 if let error { completion(.failure(error)); return }
                 bringUp(TransportClosures(tcp: transport), retaining: transport)
@@ -1609,7 +1609,7 @@ nonisolated class ProxyClient {
             if let tunnel = overTunnel {
                 completion(.success(.byteStream(TransportClosures(tunnel: tunnel))))
             } else {
-                let transport = NWTCPTransport()
+                let transport = TCPTransport()
                 own(transport)
                 transport.connect(host: host, port: port) { error in
                     if let error { completion(.failure(error)); return }
@@ -1756,7 +1756,7 @@ nonisolated class ProxyClient {
         }
         switch security {
         case .none:
-            let transport = NWTCPTransport()
+            let transport = TCPTransport()
             transport.connect(host: host, port: port) { error in
                 if error != nil { completion(nil); return }
                 wrap(TransportClosures(tcp: transport), retaining: transport)

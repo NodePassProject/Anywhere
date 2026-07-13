@@ -628,7 +628,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
         var initialTunnel: ProxyConnection?
         var retainedClients: [ProxyClient] = []
         var retainedTLSClients: [TLSClient] = []
-        var retainedTransports: [NWTCPTransport] = []
+        var retainedTransports: [TCPTransport] = []
         var connections: [ProxyConnection] = []
         var closed = false
     }
@@ -813,7 +813,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
         preparedCondition.unlock()
 
         typealias Drained = (toClose: [ProxyConnection], clients: [ProxyClient],
-                             tlsClients: [TLSClient], transports: [NWTCPTransport])
+                             tlsClients: [TLSClient], transports: [TCPTransport])
         let drained: Drained? = stateLock.withLock { (state: inout State) -> Drained? in
             if state.closed {
                 return nil
@@ -1045,7 +1045,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
             return
         }
 
-        let transport = NWTCPTransport()
+        let transport = TCPTransport()
         guard retainTransport(transport) else {
             completion(.failure(SudokuNativeError.closed))
             return
@@ -1118,7 +1118,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
         }
     }
 
-    private func retainTransport(_ transport: NWTCPTransport) -> Bool {
+    private func retainTransport(_ transport: TCPTransport) -> Bool {
         stateLock.withLock { state in
             guard !state.closed else { return false }
             state.retainedTransports.append(transport)
@@ -1126,7 +1126,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
         }
     }
 
-    private func releaseTransport(_ transport: NWTCPTransport) {
+    private func releaseTransport(_ transport: TCPTransport) {
         stateLock.withLock { state in
             state.retainedTransports.removeAll { $0 === transport }
         }

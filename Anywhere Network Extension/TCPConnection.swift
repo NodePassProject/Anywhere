@@ -650,7 +650,7 @@ class TCPConnection {
             pendingData.removeAll(keepingCapacity: true)
         }
 
-        let transport = NWTCPTransport()
+        let transport = TCPTransport()
         // Direct/bypass — not a proxied connection, so exclude it from the Dial stat.
         transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)
@@ -954,7 +954,7 @@ class TCPConnection {
     
     private func dialDirectUpstream(host: String, port: UInt16, dial: InFlightDial,
                                     completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
-        let transport = NWTCPTransport()
+        let transport = TCPTransport()
         // Direct/bypass — not a proxied connection, exclude from Dial.
         transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)

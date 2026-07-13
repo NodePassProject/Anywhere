@@ -19,12 +19,12 @@ protocol AwaitableProxyClientOwned: ProxyClientOwned {
 
 // MARK: - Transports
 
-extension NWTCPTransport: AwaitableProxyClientOwned {
+extension TCPTransport: AwaitableProxyClientOwned {
     func releaseOwned() { forceCancel() }
     func releaseOwned(completion: @escaping @Sendable () -> Void) { forceCancel(completion: completion) }
 }
 
-extension NWUDPTransport: ProxyClientOwned {
+extension UDPTransport: ProxyClientOwned {
     func releaseOwned() { cancel() }
 }
 
