@@ -128,7 +128,7 @@ class UDPFlow {
             switch quicError {
             case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
                 return true
-            case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
+            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamError, .timeout:
                 return false
             }
         }
@@ -142,9 +142,10 @@ class UDPFlow {
         }
         if let nowhereError = error as? NowhereError {
             switch nowhereError {
-            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed:
+            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed,
+                    .flowRejected, .flowOpenTimeout:
                 return true
-            case .notReady, .connectionFailed:
+            case .notReady, .connectionFailed, .udpPacketTooLarge:
                 return false
             }
         }

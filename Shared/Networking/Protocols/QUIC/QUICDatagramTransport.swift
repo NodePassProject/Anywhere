@@ -54,7 +54,7 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
             switch quicError {
             case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
                 return false
-            case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
+            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamError, .timeout:
                 return true
             }
         }
@@ -69,12 +69,12 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
             }
         }
         if let nowhereError = error as? NowhereError {
-            switch nowhereError {
-            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed:
-                return false
-            case .notReady, .connectionFailed:
-                return true
-            }
+            // Conservatively allowlist only errors that describe a transient
+            // per-datagram/session window. New protocol errors remain terminal
+            // without coupling this transport adapter to every Nowhere case.
+            if case .notReady = nowhereError { return true }
+            if case .connectionFailed = nowhereError { return true }
+            return false
         }
         return false
     }

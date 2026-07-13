@@ -90,7 +90,7 @@ nonisolated final class NowhereTransportIdentityRegistry {
 
     private let states = Mutex<[NowhereTransportIdentityKey: State]>([:])
 
-    private init() {}
+    init() {}
 
     func identity(for identityKey: NowhereTransportIdentityKey) throws -> Data {
         try states.withLock { states in
@@ -108,10 +108,18 @@ nonisolated final class NowhereTransportIdentityRegistry {
         }
     }
 
-    func nextFlowID(for identityKey: NowhereTransportIdentityKey) throws -> UInt64 {
-        _ = try identity(for: identityKey)
+    func nextFlowID(
+        for identityKey: NowhereTransportIdentityKey,
+        sessionID expectedSessionID: Data
+    ) throws -> UInt64 {
         return try states.withLock { states in
-            var state = states[identityKey]!
+            guard var state = states[identityKey],
+                  state.sessionID == expectedSessionID else {
+                // reset()/reclaim invalidated the identity used to construct
+                // this in-flight configuration. Never recreate it here: that
+                // would pair an old session ID with a new flow counter.
+                throw NowhereError.streamClosed
+            }
             let value = state.nextFlowID
             guard value != UInt64.max else {
                 throw NowhereError.connectionFailed("Nowhere flow ID space exhausted")

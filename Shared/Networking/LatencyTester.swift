@@ -120,6 +120,15 @@ nonisolated enum LatencyTester {
 
                 let elapsed = clock.now - start
 
+                // The final request promises no more application bytes. Finish the
+                // logical uplink before owner teardown so stream transports can send
+                // FIN (and TLS close_notify) instead of being cut off by cancel().
+                // Teardown errors do not invalidate an already measured response;
+                // cancellation still interrupts this await through `resumer`.
+                try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
+                    proxyConnection.closeWrite { _ in complete(.success(())) }
+                }
+
                 let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
                     .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
                 guard let statusLine, statusLine.contains("200") else {

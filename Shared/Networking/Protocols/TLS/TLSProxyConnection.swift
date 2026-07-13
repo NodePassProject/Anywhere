@@ -32,6 +32,10 @@ nonisolated class TLSProxyConnection: ProxyConnection {
         tlsConnection.receive(completion: completion)
     }
 
+    override func closeWrite(completion: @escaping (Error?) -> Void) {
+        tlsConnection.closeWrite(completion: completion)
+    }
+
     override func cancel() {
         tlsConnection.cancel()
     }

@@ -54,6 +54,7 @@ nonisolated class TLSRecordConnection {
     let seqLock = UnfairLock()
 
     let sendLock = UnfairLock()
+    private var sentCloseNotify = false
 
     private static let maxRecordPlaintext = 16384
 
@@ -256,26 +257,20 @@ nonisolated class TLSRecordConnection {
         connection.send(data: data)
     }
 
-    // MARK: - Cancel
-
-    func cancel() {
-        sendCloseNotify()
-
-        receiveLock.lock()
-        receiveBuffer.removeAll()
-        receiveLock.unlock()
-
-        connection?.forceCancel()
-        connection = nil
-    }
-
-    private func sendCloseNotify() {
+    /// Sends TLS close_notify, then half-closes the underlying byte stream while
+    /// leaving the receive direction available.
+    func closeWrite(completion: @escaping (Error?) -> Void) {
         sendLock.lock()
         guard let connection else {
             sendLock.unlock()
+            completion(TLSRecordError.connectionUnavailable)
             return
         }
-
+        if sentCloseNotify {
+            sendLock.unlock()
+            connection.closeWrite(completion: completion)
+            return
+        }
         do {
             let alertPayload = Data([TLSAlertLevel.warning, TLSAlertDescription.closeNotify])
             let record: Data
@@ -284,11 +279,32 @@ nonisolated class TLSRecordConnection {
             } else {
                 record = try encryptTLS12Record(plaintext: alertPayload, contentType: TLSContentType.alert)
             }
-            connection.send(data: record)
+            sentCloseNotify = true
+            connection.send(data: record) { error in
+                if let error { completion(error) }
+                else { connection.closeWrite(completion: completion) }
+            }
             sendLock.unlock()
         } catch {
             sendLock.unlock()
+            completion(error)
         }
+    }
+
+    // MARK: - Cancel
+
+    /// Abortive teardown. Graceful callers must await `closeWrite` first.
+    func cancel() {
+        sendLock.lock()
+        let transport = connection
+        connection = nil
+        sendLock.unlock()
+
+        receiveLock.lock()
+        receiveBuffer.removeAll()
+        receiveLock.unlock()
+
+        transport?.forceCancel()
     }
 
     // MARK: - Internal Buffer Processing
