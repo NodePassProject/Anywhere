@@ -8,15 +8,21 @@
 import Foundation
 import Synchronization
 
-nonisolated final class NowhereUDPConnection: ProxyConnection {
+nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminationObservable {
 
-    enum State { case idle, ready, closed }
+    enum State { case idle, openingControl, waitingResult, ready, closed }
+
+    enum ControlResultStep: Equatable {
+        case needMore
+        case ready
+        case reject(NowhereProtocol.FlowRejectCode)
+        case invalid
+    }
 
     private let session: NowhereSession
     private let destination: String
-    private let requestedFlowID: UInt64?
-    private let downlink: NowhereNetwork
-    private let reopensExpiredFlow: Bool
+    private let flowHeader: NowhereProtocol.FlowHeader
+    private let expectsResult: Bool
 
     private var _state: State = .idle
     private var state: State {
@@ -28,37 +34,45 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     }
     private let _isReady = Atomic<Bool>(false)
 
-    private var flowID: UInt64 = 0
+    private var controlStreamID: Int64 = -1
+    private var controlBuffer = Data()
+    private var controlReadClosed = false
+    private var openCompletion: ((Error?) -> Void)?
+
     private var packetQueue: [Data] = []
-    private static let maxQueuedPackets = 1024
+    static let maxQueuedPackets = 64
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var closureError: Error?
-    private var openAcknowledged = false
+
+    private struct TerminationState {
+        var handler: ((Error?) -> Void)?
+        var terminated = false
+        var error: Error?
+    }
+    private let termination = Mutex(TerminationState())
 
     private struct DefragSlot {
         var fragments: [Data?]
         var received: Int
+        var receivedBytes: Int
         let fragmentCount: Int
         let totalLength: Int
         let createdAt: DispatchTime
     }
-    private var defragSlots: [UInt16: DefragSlot] = [:]
-    private static let maxDefragSlots = 64
+    private var defragSlots: [UInt32: DefragSlot] = [:]
     private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    private var nextPacketID: UInt16 = 1
+    private var defragCleanup: DispatchWorkItem?
+    private var nextPacketID: UInt32 = 1
 
     init(
         session: NowhereSession,
         destination: String,
-        requestedFlowID: UInt64? = nil,
-        downlink: NowhereNetwork = .udp,
-        reopensExpiredFlow: Bool = true
+        flowHeader: NowhereProtocol.FlowHeader
     ) {
         self.session = session
         self.destination = destination
-        self.requestedFlowID = requestedFlowID
-        self.downlink = downlink
-        self.reopensExpiredFlow = reopensExpiredFlow
+        self.flowHeader = flowHeader
+        self.expectsResult = flowHeader.role != .open
         super.init()
     }
 
@@ -69,51 +83,204 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     override var outerTLSVersion: TLSVersion? { .tls13 }
     override var deliversDatagrams: Bool { true }
 
-    func open(completion: @escaping (Error?) -> Void) {
-        session.registerUDPSession(self, requestedFlowID: requestedFlowID) { [weak self] result in
-            guard let self else {
-                completion(NowhereError.streamClosed)
-                return
+    func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
+        let immediate: (((Error?) -> Void), Error?)? = termination.withLock { state in
+            if state.terminated {
+                guard let handler else { return nil }
+                return (handler, state.error)
             }
-            switch result {
-            case .failure(let error):
-                completion(error)
-            case .success(let flowID):
-                self.flowID = flowID
-                self.state = .ready
-                completion(nil)
+            state.handler = handler
+            return nil
+        }
+        immediate?.0(immediate?.1)
+    }
+
+    func open(completion: @escaping (Error?) -> Void) {
+        session.queue.async { [weak self] in
+            guard let self else { completion(NowhereError.streamClosed); return }
+            guard self.state == .idle else { completion(NowhereError.notReady); return }
+            self.openCompletion = completion
+            self.state = .openingControl
+            self.session.registerUDPSession(
+                self,
+                requestedFlowID: self.flowHeader.flowID
+            ) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .failure(let error):
+                    self.fail(error)
+                case .success:
+                    self.openControlStream()
+                }
             }
         }
     }
 
-    func handleOpenAck() { openAcknowledged = true }
+    private func openControlStream() {
+        session.openUDPControlStream(for: self) { [weak self] sid, error in
+            guard let self else { return }
+            if let error {
+                self.fail(error)
+                return
+            }
+            guard let sid else {
+                self.fail(NowhereError.connectionFailed("No UDP control stream"))
+                return
+            }
+            self.controlStreamID = sid
+
+            let request: Data
+            do {
+                request = try NowhereProtocol.encodeFlowRequest(
+                    header: self.flowHeader,
+                    target: self.destination,
+                    protocolSpec: self.session.protocolSpec
+                )
+            } catch {
+                self.fail(error)
+                return
+            }
+
+            self.session.writeStream(sid, data: request, fin: true) { [weak self] error in
+                guard let self else { return }
+                self.session.queue.async {
+                    // Peer data/FIN can beat this local write callback. A complete
+                    // buffered F2 is authoritative and must be consumed first.
+                    self.processControlResultIfAvailable()
+                    guard self.state == .openingControl else { return }
+                    if let error {
+                        self.fail(error)
+                        return
+                    }
+                    guard self.state == .openingControl else { return }
+                    if self.expectsResult {
+                        self.state = .waitingResult
+                        self.processControlResultIfAvailable()
+                    } else {
+                        self.releaseControlStream(reset: false)
+                        self.finishOpen()
+                    }
+                }
+            }
+        }
+    }
+
+    func handleControlStreamData(_ data: Data, fin: Bool) {
+        dispatchPrecondition(condition: .onQueue(session.queue))
+        guard state != .closed else { return }
+        if !data.isEmpty {
+            controlBuffer.append(data)
+            if controlStreamID >= 0 {
+                session.extendStreamOffset(controlStreamID, count: data.count)
+            }
+        }
+        if fin { controlReadClosed = true }
+
+        if state == .openingControl || state == .waitingResult {
+            processControlResultIfAvailable()
+            if Self.shouldFailControlEOF(
+                expectsResult: expectsResult,
+                state: state,
+                bufferedBytes: controlBuffer.count
+            ) {
+                fail(NowhereError.connectionFailed("UDP control stream closed before READY"))
+            }
+            return
+        }
+
+        if state == .ready, !controlBuffer.isEmpty {
+            fail(NowhereError.connectionFailed("Unexpected UDP control data"))
+        }
+    }
+
+    func handleControlStreamTermination(error: Error?) {
+        dispatchPrecondition(condition: .onQueue(session.queue))
+        controlStreamID = -1
+        // ngtcp2 may report data+FIN before the local write completion. Accept a
+        // complete READY/REJECT already buffered before interpreting termination.
+        processControlResultIfAvailable()
+        guard state != .ready, state != .closed else { return }
+        if let error {
+            fail(error)
+        } else if expectsResult, state != .ready && state != .closed {
+            fail(NowhereError.connectionFailed("UDP control stream closed before READY"))
+        }
+    }
+
+    private func processControlResultIfAvailable() {
+        switch Self.controlResultStep(state: state, buffer: controlBuffer) {
+        case .needMore:
+            return
+        case .invalid:
+            fail(NowhereError.connectionFailed("Invalid UDP flow result"))
+        case .ready:
+            controlBuffer.removeAll(keepingCapacity: false)
+            releaseControlStream(reset: false)
+            finishOpen()
+        case .reject(let code):
+            controlBuffer.removeAll(keepingCapacity: false)
+            releaseControlStream(reset: false)
+            fail(NowhereError.flowRejected(code))
+        }
+    }
+
+    static func controlResultStep(state: State, buffer: Data) -> ControlResultStep {
+        guard state == .openingControl || state == .waitingResult else { return .needMore }
+        guard buffer.count >= NowhereProtocol.flowResultSize else { return .needMore }
+        guard buffer.count == NowhereProtocol.flowResultSize,
+              let result = NowhereProtocol.decodeFlowResult(buffer) else { return .invalid }
+        switch result {
+        case .ready: return .ready
+        case .reject(let code): return .reject(code)
+        }
+    }
+
+    static func shouldFailControlEOF(
+        expectsResult: Bool,
+        state: State,
+        bufferedBytes: Int
+    ) -> Bool {
+        expectsResult && state != .ready
+            && bufferedBytes < NowhereProtocol.flowResultSize
+    }
+
+    private func finishOpen() {
+        guard state != .closed else { return }
+        state = .ready
+        let callback = openCompletion
+        openCompletion = nil
+        callback?(nil)
+    }
 
     func handleFlowClose() {
-        guard state == .ready else { return }
-        if reopensExpiredFlow {
-            openAcknowledged = false
-            defragSlots.removeAll()
-        } else {
-            handleSessionClose()
-        }
+        dispatchPrecondition(condition: .onQueue(session.queue))
+        closeNormally(sendAdvisory: false)
     }
 
     func handleIncomingDatagram(_ message: NowhereProtocol.UDPMessage) {
-        guard state != .closed else { return }
-        let payload: Data?
+        dispatchPrecondition(condition: .onQueue(session.queue))
+        guard state == .ready else { return }
         if message.fragmentCount == 1 {
-            payload = message.payload
-        } else {
-            payload = assembleFragment(message)
+            guard session.reserveUDPBuffer(bytes: message.payload.count, reassemblySlot: false) else {
+                return
+            }
+            deliverReservedPacket(message.payload, reservedBytes: message.payload.count)
+            return
         }
-        guard let payload else { return }
+        guard let payload = assembleFragment(message) else { return }
+        deliverReservedPacket(payload, reservedBytes: Int(message.totalLength))
+    }
+
+    private func deliverReservedPacket(_ payload: Data, reservedBytes: Int) {
         if let callback = pendingReceive {
             pendingReceive = nil
+            session.releaseUDPBuffer(bytes: reservedBytes, reassemblySlot: false)
             callback(payload, nil)
             return
         }
-        if packetQueue.count >= Self.maxQueuedPackets {
-            packetQueue.removeFirst()
+        guard packetQueue.count < Self.maxQueuedPackets else {
+            session.releaseUDPBuffer(bytes: reservedBytes, reassemblySlot: false)
+            return
         }
         packetQueue.append(payload)
     }
@@ -125,7 +292,13 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
                 return
             }
-            self.attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1, completion: completion)
+            self.attemptSend(
+                data: data,
+                packetID: self.newPacketID(),
+                maxSizeOverride: nil,
+                retriesLeft: 1,
+                completion: completion
+            )
         }
     }
 
@@ -135,31 +308,24 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     private func attemptSend(
         data: Data,
+        packetID: UInt32,
         maxSizeOverride: Int?,
         retriesLeft: Int,
         completion: @escaping (Error?) -> Void
     ) {
         let maxSize = maxSizeOverride ?? session.maxDatagramPayloadSize
-        let packetID = newPacketID()
         let frames: [Data]
         do {
-            if openAcknowledged {
-                frames = try NowhereProtocol.encodeUDPDataFragments(
-                    flowID: flowID,
-                    packetID: packetID,
-                    payload: data,
-                    maxDatagramSize: maxSize
-                )
-            } else {
-                frames = try NowhereProtocol.encodeUDPOpenFragments(
-                    flowID: flowID,
-                    packetID: packetID,
-                    downlink: downlink,
-                    target: destination,
-                    payload: data,
-                    maxDatagramSize: maxSize
-                )
-            }
+            frames = try NowhereProtocol.encodeUDPDataFragments(
+                flowID: flowHeader.flowID,
+                packetID: packetID,
+                payload: data,
+                maxDatagramSize: maxSize
+            )
+        } catch NowhereError.udpPacketTooLarge {
+            // UDP is lossy by contract. Drop only this packet; keep the flow alive.
+            completion(nil)
+            return
         } catch {
             completion(error)
             return
@@ -175,10 +341,26 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 }
                 self.attemptSend(
                     data: data,
+                    // The first batch may have been partially transmitted before
+                    // the path MTU changed. A new identity prevents the receiver
+                    // from mixing fragments encoded with different geometry.
+                    packetID: self.newPacketID(),
                     maxSizeOverride: maxBound,
                     retriesLeft: retriesLeft - 1,
                     completion: completion
                 )
+                return
+            }
+            if let quicError = error as? QUICConnection.QUICError,
+               case .datagramTooLarge = quicError {
+                // The path bound changed again. Drop this packet without closing the flow.
+                completion(nil)
+                return
+            }
+            if let quicError = error as? QUICConnection.QUICError,
+               case .datagramQueueFull = quicError {
+                // Reject newest packet atomically; preserve queued packets and the flow.
+                completion(nil)
                 return
             }
             completion(error)
@@ -193,6 +375,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             }
             if !self.packetQueue.isEmpty {
                 let packet = self.packetQueue.removeFirst()
+                self.session.releaseUDPBuffer(bytes: packet.count, reassemblySlot: false)
                 completion(packet, nil)
                 return
             }
@@ -213,27 +396,41 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
 
     override func cancel() {
         session.queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
-            self.state = .closed
-            self.sendCloseFrame()
-            self.session.releaseUDPSession(self.flowID)
-            let callback = self.pendingReceive
-            self.pendingReceive = nil
-            self.packetQueue.removeAll()
-            self.defragSlots.removeAll()
-            callback?(nil, nil)
+            self?.closeNormally(sendAdvisory: true)
         }
     }
 
+    private func closeNormally(sendAdvisory: Bool) {
+        guard state != .closed else { return }
+        let wasReady = state == .ready
+        state = .closed
+        if sendAdvisory { sendCloseFrame() }
+        releaseControlStream(reset: !wasReady)
+        session.releaseUDPSession(flowHeader.flowID)
+        releaseAllBufferedData()
+        let open = openCompletion
+        openCompletion = nil
+        let receive = pendingReceive
+        pendingReceive = nil
+        open?(NowhereError.streamClosed)
+        receive?(nil, nil)
+        notifyTermination(error: nil)
+    }
+
     private func sendCloseFrame() {
-        guard flowID != 0 else { return }
         let frame = try? NowhereProtocol.encodeUDPControl(
             type: .close,
-            flowID: flowID
+            flowID: flowHeader.flowID
         )
-        if let frame {
-            session.writeDatagram(frame) { _ in }
-        }
+        if let frame { session.writeDatagram(frame) { _ in } }
+    }
+
+    private func releaseControlStream(reset: Bool) {
+        guard controlStreamID >= 0 else { return }
+        let sid = controlStreamID
+        controlStreamID = -1
+        if reset { session.shutdownStream(sid) }
+        session.releaseUDPControlStream(sid)
     }
 
     func handleSessionError(_ error: Error) {
@@ -241,57 +438,70 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             handleSessionClose()
             return
         }
-        session.queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
-            self.state = .closed
-            let callback = self.pendingReceive
-            self.pendingReceive = nil
-            if callback == nil {
-                self.closureError = error
-            }
-            callback?(nil, error)
-        }
+        session.queue.async { [weak self] in self?.fail(error) }
     }
 
     func handleSessionClose() {
         session.queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
-            self.state = .closed
-            self.session.releaseUDPSession(self.flowID)
-            self.defragSlots.removeAll()
-            let callback = self.pendingReceive
-            self.pendingReceive = nil
-            callback?(nil, nil)
+            self?.closeNormally(sendAdvisory: false)
         }
     }
 
+    private func fail(_ error: Error) {
+        guard state != .closed else { return }
+        state = .closed
+        releaseControlStream(reset: true)
+        session.releaseUDPSession(flowHeader.flowID)
+        releaseAllBufferedData()
+        let open = openCompletion
+        openCompletion = nil
+        let receive = pendingReceive
+        pendingReceive = nil
+        if open == nil, receive == nil { closureError = error }
+        open?(error)
+        receive?(nil, error)
+        notifyTermination(error: error)
+    }
+
+    private func notifyTermination(error: Error?) {
+        let handler: ((Error?) -> Void)? = termination.withLock { state in
+            guard !state.terminated else { return nil }
+            state.terminated = true
+            state.error = error
+            let handler = state.handler
+            state.handler = nil
+            return handler
+        }
+        handler?(error)
+    }
+
+    /// Returns a complete packet while keeping its `totalLength` byte reservation;
+    /// the caller transfers that reservation to immediate delivery or the packet queue.
     private func assembleFragment(_ message: NowhereProtocol.UDPMessage) -> Data? {
         guard message.fragmentCount > 1,
               message.fragmentID < message.fragmentCount else { return nil }
+        cleanupExpiredDefragSlots()
         let now = DispatchTime.now()
-        let nowNanos = now.uptimeNanoseconds
-        let existing = defragSlots[message.packetID]
-        let expired = existing.map {
-            nowNanos &- $0.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
-        } ?? false
-
         var slot: DefragSlot
-        if let existing, !expired,
+
+        if let existing = defragSlots[message.packetID],
            existing.fragmentCount == Int(message.fragmentCount),
            existing.totalLength == Int(message.totalLength) {
             slot = existing
         } else {
-            if defragSlots.count >= Self.maxDefragSlots {
-                let victim = defragSlots.min { lhs, rhs in
-                    lhs.value.createdAt < rhs.value.createdAt
-                }?.key
-                if let victim { defragSlots.removeValue(forKey: victim) }
+            if let old = defragSlots.removeValue(forKey: message.packetID) {
+                session.releaseUDPBuffer(bytes: old.totalLength, reassemblySlot: true)
+            }
+            let totalLength = Int(message.totalLength)
+            guard session.reserveUDPBuffer(bytes: totalLength, reassemblySlot: true) else {
+                return nil
             }
             slot = DefragSlot(
                 fragments: Array(repeating: nil, count: Int(message.fragmentCount)),
                 received: 0,
+                receivedBytes: 0,
                 fragmentCount: Int(message.fragmentCount),
-                totalLength: Int(message.totalLength),
+                totalLength: totalLength,
                 createdAt: now
             )
         }
@@ -300,30 +510,96 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
         if let existing = slot.fragments[index] {
             if existing != message.payload {
                 defragSlots.removeValue(forKey: message.packetID)
-                return nil
+                session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: true)
+                scheduleDefragCleanup()
             }
-        } else {
-            slot.fragments[index] = message.payload
-            slot.received += 1
+            return nil
         }
+        guard slot.receivedBytes <= slot.totalLength - message.payload.count else {
+            defragSlots.removeValue(forKey: message.packetID)
+            session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: true)
+            scheduleDefragCleanup()
+            return nil
+        }
+        slot.fragments[index] = message.payload
+        slot.received += 1
+        slot.receivedBytes += message.payload.count
         if slot.received < slot.fragmentCount {
             defragSlots[message.packetID] = slot
+            scheduleDefragCleanup()
             return nil
         }
 
         defragSlots.removeValue(forKey: message.packetID)
+        session.releaseUDPBuffer(bytes: 0, reassemblySlot: true)
+        scheduleDefragCleanup()
         var full = Data(capacity: slot.totalLength)
         for fragment in slot.fragments {
-            guard let fragment else { return nil }
+            guard let fragment else {
+                session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: false)
+                return nil
+            }
             full.append(fragment)
         }
-        return full.count == slot.totalLength ? full : nil
+        guard full.count == slot.totalLength else {
+            session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: false)
+            return nil
+        }
+        return full
     }
 
-    private func newPacketID() -> UInt16 {
+    private func cleanupExpiredDefragSlots() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        var expired: [UInt32] = []
+        for (key, slot) in defragSlots {
+            let created = slot.createdAt.uptimeNanoseconds
+            if now >= created, now - created >= Self.defragSlotTTLNanos {
+                expired.append(key)
+            }
+        }
+        for key in expired {
+            if let slot = defragSlots.removeValue(forKey: key) {
+                session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: true)
+            }
+        }
+    }
+
+    private func scheduleDefragCleanup() {
+        defragCleanup?.cancel()
+        defragCleanup = nil
+        guard let earliest = defragSlots.values.map(\.createdAt.uptimeNanoseconds).min() else { return }
+        let deadline = DispatchTime(uptimeNanoseconds: earliest + Self.defragSlotTTLNanos)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.cleanupExpiredDefragSlots()
+            self.scheduleDefragCleanup()
+        }
+        defragCleanup = work
+        session.queue.asyncAfter(deadline: deadline, execute: work)
+    }
+
+    private func releaseAllBufferedData() {
+        defragCleanup?.cancel()
+        defragCleanup = nil
+        let queuedBytes = packetQueue.reduce(into: 0) { $0 += $1.count }
+        packetQueue.removeAll(keepingCapacity: false)
+        if queuedBytes > 0 {
+            session.releaseUDPBuffer(bytes: queuedBytes, reassemblySlot: false)
+        }
+        for slot in defragSlots.values {
+            session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: true)
+        }
+        defragSlots.removeAll(keepingCapacity: false)
+    }
+
+    private func newPacketID() -> UInt32 {
         dispatchPrecondition(condition: .onQueue(session.queue))
         let packetID = nextPacketID
-        nextPacketID = nextPacketID == UInt16.max ? 1 : nextPacketID + 1
+        nextPacketID = Self.advancedPacketID(after: packetID)
         return packetID
+    }
+
+    static func advancedPacketID(after packetID: UInt32) -> UInt32 {
+        packetID == UInt32.max ? 1 : packetID + 1
     }
 }

@@ -15,6 +15,9 @@ enum NowhereError: Error, LocalizedError {
     case streamClosed
     case invalidTargetLength(Int)
     case destinationTooLargeForDatagram(maxFrame: Int, headerSize: Int)
+    case udpPacketTooLarge
+    case flowRejected(NowhereProtocol.FlowRejectCode)
+    case flowOpenTimeout
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +28,9 @@ enum NowhereError: Error, LocalizedError {
         case .invalidTargetLength(let length): return "Nowhere target length is invalid (\(length))"
         case .destinationTooLargeForDatagram(let frame, let header):
             return "Nowhere destination too large for DATAGRAM (peer max \(frame) <= header \(header))"
+        case .udpPacketTooLarge: return "Nowhere UDP packet is too large"
+        case .flowRejected(let code): return "Nowhere flow rejected: \(code.description)"
+        case .flowOpenTimeout: return "Nowhere flow open timed out"
         }
     }
 }
@@ -50,7 +56,13 @@ nonisolated final class NowhereSession {
 
     private var tcpStreams: [Int64: NowhereConnection] = [:]
     private var udpSessions: [UInt64: NowhereUDPConnection] = [:]
-    private var nextUDPFlowID: UInt64 = 1
+    private var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
+
+    static let maxUDPFlows = 256
+    static let maxUDPReassemblySlots = 64
+    static let maxUDPBufferedBytes = 4 * 1024 * 1024
+    private var udpReassemblySlots = 0
+    private var udpBufferedBytes = 0
 
     private var idleCloseWorkItem: DispatchWorkItem?
     private static let idleCloseDelay: DispatchTimeInterval = .seconds(60)
@@ -198,6 +210,11 @@ nonisolated final class NowhereSession {
             return
         }
 
+        if let connection = udpControlStreams[sid] {
+            connection.handleControlStreamData(data, fin: fin)
+            return
+        }
+
         if (sid & 0x01) == 0x01, !data.isEmpty {
             quic.extendStreamOffset(sid, count: data.count)
             quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
@@ -213,18 +230,21 @@ nonisolated final class NowhereSession {
             }
             return
         }
-        guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
-        _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
-        updateIdleCloseTimer()
-        connection.handleStreamTermination(error: error)
+        if let connection = tcpStreams.removeValue(forKey: sid) {
+            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
+            updateIdleCloseTimer()
+            connection.handleStreamTermination(error: error)
+            return
+        }
+        if let connection = udpControlStreams.removeValue(forKey: sid) {
+            connection.handleControlStreamTermination(error: error)
+        }
     }
 
     private func handleDatagram(_ data: Data) {
         guard let message = NowhereProtocol.decodeUDPDatagram(data),
               let connection = udpSessions[message.flowID] else { return }
-        if message.type == .openAck {
-            connection.handleOpenAck()
-        } else if message.type == .data {
+        if message.type == .data {
             connection.handleIncomingDatagram(message)
         } else if message.type == .close {
             connection.handleFlowClose()
@@ -249,8 +269,13 @@ nonisolated final class NowhereSession {
         }
     }
 
-    func writeStream(_ sid: Int64, data: Data, completion: @escaping (Error?) -> Void) {
-        quic.writeStream(sid, data: data, completion: completion)
+    func writeStream(
+        _ sid: Int64,
+        data: Data,
+        fin: Bool = false,
+        completion: @escaping (Error?) -> Void
+    ) {
+        quic.writeStream(sid, data: data, fin: fin, completion: completion)
     }
 
     func extendStreamOffset(_ sid: Int64, count: Int) {
@@ -271,6 +296,35 @@ nonisolated final class NowhereSession {
         }
     }
 
+    func openUDPControlStream(
+        for connection: NowhereUDPConnection,
+        completion: @escaping (Int64?, Error?) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else { completion(nil, NowhereError.streamClosed); return }
+            guard self.state == .ready else {
+                completion(nil, NowhereError.notReady)
+                return
+            }
+            guard let sid = self.quic.openBidiStream() else {
+                completion(nil, NowhereError.connectionFailed("Failed to open UDP control stream"))
+                return
+            }
+            self.udpControlStreams[sid] = connection
+            completion(sid, nil)
+        }
+    }
+
+    func releaseUDPControlStream(_ sid: Int64) {
+        queue.async { [weak self] in
+            self?.udpControlStreams.removeValue(forKey: sid)
+        }
+    }
+
+    func finishStream(_ sid: Int64, completion: @escaping (Error?) -> Void) {
+        quic.writeStream(sid, data: Data(), fin: true, completion: completion)
+    }
+
     func registerUDPSession(
         _ connection: NowhereUDPConnection,
         requestedFlowID: UInt64? = nil,
@@ -285,20 +339,14 @@ nonisolated final class NowhereSession {
                 completion(.failure(NowhereError.notReady))
                 return
             }
-            guard self.udpSessions.count < Int.max else {
+            guard self.udpSessions.count < Self.maxUDPFlows else {
                 completion(.failure(NowhereError.connectionFailed("UDP flow pool exhausted")))
                 return
             }
-            var flowID = requestedFlowID ?? self.nextUDPFlowID
-            guard flowID != 0, self.udpSessions[flowID] == nil else {
+            guard let flowID = requestedFlowID,
+                  flowID != 0, self.udpSessions[flowID] == nil else {
                 completion(.failure(NowhereError.connectionFailed("UDP flow ID collision")))
                 return
-            }
-            while flowID == 0 || self.udpSessions[flowID] != nil {
-                flowID = flowID == UInt64.max ? 1 : flowID + 1
-            }
-            if requestedFlowID == nil {
-                self.nextUDPFlowID = flowID == UInt64.max ? 1 : flowID + 1
             }
             self.udpSessions[flowID] = connection
             self._poolState.withLock { $0.udpCount += 1 }
@@ -306,6 +354,24 @@ nonisolated final class NowhereSession {
             completion(.success(flowID))
         }
         if isOnQueue { body() } else { queue.async(execute: body) }
+    }
+
+    func reserveUDPBuffer(bytes: Int, reassemblySlot: Bool) -> Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard bytes >= 0, bytes <= Self.maxUDPBufferedBytes,
+              udpBufferedBytes <= Self.maxUDPBufferedBytes - bytes,
+              !reassemblySlot || udpReassemblySlots < Self.maxUDPReassemblySlots else {
+            return false
+        }
+        udpBufferedBytes += bytes
+        if reassemblySlot { udpReassemblySlots += 1 }
+        return true
+    }
+
+    func releaseUDPBuffer(bytes: Int, reassemblySlot: Bool) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        udpBufferedBytes = max(0, udpBufferedBytes - max(0, bytes))
+        if reassemblySlot { udpReassemblySlots = max(0, udpReassemblySlots - 1) }
     }
 
     func releaseUDPSession(_ flowID: UInt64) {
@@ -319,11 +385,11 @@ nonisolated final class NowhereSession {
     }
 
     func writeDatagram(_ datagram: Data, completion: @escaping (Error?) -> Void) {
-        quic.writeDatagram(datagram, completion: completion)
+        quic.writeDatagramsAtomically([datagram], completion: completion)
     }
 
     func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
-        quic.writeDatagrams(datagrams, completion: completion)
+        quic.writeDatagramsAtomically(datagrams, completion: completion)
     }
 
     var maxDatagramPayloadSize: Int {
@@ -363,12 +429,19 @@ nonisolated final class NowhereSession {
                 state.udpCount = 0
             }
 
+            let callbacks = self.readyCallbacks
+            self.readyCallbacks.removeAll()
+            for callback in callbacks { callback(NowhereError.streamClosed) }
+
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()
-            for c in tcp { c.handleSessionError(NowhereError.connectionFailed("Session closed")) }
+            for c in tcp { c.handleSessionClose() }
 
             let udp = Array(self.udpSessions.values)
             self.udpSessions.removeAll()
+            self.udpControlStreams.removeAll()
+            self.udpBufferedBytes = 0
+            self.udpReassemblySlots = 0
             for c in udp { c.handleSessionClose() }
 
             self.quic.close()
@@ -406,6 +479,9 @@ nonisolated final class NowhereSession {
 
             let udp = Array(self.udpSessions.values)
             self.udpSessions.removeAll()
+            self.udpControlStreams.removeAll()
+            self.udpBufferedBytes = 0
+            self.udpReassemblySlots = 0
             for c in udp { c.handleSessionError(error) }
 
             self.quic.close()

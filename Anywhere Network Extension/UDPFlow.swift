@@ -142,9 +142,10 @@ class UDPFlow {
         }
         if let nowhereError = error as? NowhereError {
             switch nowhereError {
-            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed:
+            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed,
+                    .flowRejected, .flowOpenTimeout:
                 return true
-            case .notReady, .connectionFailed:
+            case .notReady, .connectionFailed, .udpPacketTooLarge:
                 return false
             }
         }

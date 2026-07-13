@@ -14,7 +14,6 @@ enum NowhereProtocol {
     
     static let closeErrCodeOK: UInt64 = 0x100
     static let defaultSpec = "auto"
-    static let uotMagicTarget = "uot.nowhere.invalid:0"
 
     private static let proxyFrameVersion: UInt8 = 1
     private static let defaultALPN = "now/1"
@@ -78,18 +77,14 @@ enum NowhereProtocol {
     }
 
     enum UDPType: UInt8, Equatable {
-        case openData = 1
-        case openAck = 2
-        case data = 3
-        case close = 4
+        case data = 1
+        case close = 2
     }
 
     struct UDPMessage {
         let type: UDPType
         let flowID: UInt64
-        let target: String?
-        let downlink: NowhereNetwork?
-        let packetID: UInt16
+        let packetID: UInt32
         let fragmentID: UInt8
         let fragmentCount: UInt8
         let totalLength: UInt16
@@ -98,17 +93,59 @@ enum NowhereProtocol {
 
     enum UDPStreamType: UInt8, Equatable {
         case data = 1
-        case openAck = 2
+        case ready = 2
         case close = 3
+        case reject = 4
     }
 
     static let udpFrameMagic = Data("NOWU".utf8)
     static let maxUDPPacketSize = Int(UInt16.max)
     static let udpControlHeaderSize = 4 + 1 + 8
-    static let udpDataHeaderSize = udpControlHeaderSize + 2 + 1 + 1 + 2
+    static let udpDataHeaderSize = udpControlHeaderSize + 4 + 1 + 1 + 2
 
-    enum FlowRole: UInt8 { case open = 1, attach = 2 }
+    enum FlowRole: UInt8 { case open = 1, attach = 2, duplex = 3 }
     enum FlowKind: UInt8 { case tcp = 1, udp = 2 }
+
+    enum FlowResultStatus: UInt8, Equatable {
+        case ready = 1
+        case reject = 2
+    }
+
+    enum FlowRejectCode: UInt8, Equatable, CaseIterable {
+        case invalidRequest = 1
+        case metadataConflict = 2
+        case pairTimeout = 3
+        case flowLimit = 4
+        case dialFailed = 5
+        case sessionReplaced = 6
+        case internalError = 7
+
+        var description: String {
+            switch self {
+            case .invalidRequest: return "invalid request"
+            case .metadataConflict: return "metadata conflict"
+            case .pairTimeout: return "pair timeout"
+            case .flowLimit: return "flow limit"
+            case .dialFailed: return "dial failed"
+            case .sessionReplaced: return "session replaced"
+            case .internalError: return "internal error"
+            }
+        }
+    }
+
+    enum FlowResult: Equatable {
+        case ready
+        case reject(FlowRejectCode)
+    }
+
+    struct UDPStreamMessage: Equatable {
+        let type: UDPStreamType
+        let payload: Data
+    }
+
+    private static let flowResultMagic: UInt8 = 0xF2
+    private static let flowResultVersion: UInt8 = 1
+    static let flowResultSize = 4
 
     struct FlowHeader {
         let role: FlowRole
@@ -244,14 +281,54 @@ enum NowhereProtocol {
         return out
     }
 
+    static func isValidFlowHeader(_ header: FlowHeader) -> Bool {
+        guard header.flowID != 0 else { return false }
+        switch header.role {
+        case .duplex:
+            return header.uplink == header.downlink
+        case .open, .attach:
+            return header.uplink != header.downlink
+        }
+    }
+
     static func encodeFlowRequest(
         header: FlowHeader,
         target: String,
         protocolSpec: EffectiveSpec
     ) throws -> Data {
+        guard isValidFlowHeader(header) else {
+            throw NowhereError.connectionFailed("Invalid Nowhere flow metadata")
+        }
         var out = encodeFlowHeader(header)
-        out.append(try encodeTCPRequest(address: target, protocolSpec: protocolSpec))
+        if header.role != .attach {
+            out.append(try encodeTCPRequest(address: target, protocolSpec: protocolSpec))
+        }
         return out
+    }
+
+    static func encodeFlowResult(_ result: FlowResult) -> Data {
+        switch result {
+        case .ready:
+            return Data([flowResultMagic, flowResultVersion, FlowResultStatus.ready.rawValue, 0])
+        case .reject(let code):
+            return Data([flowResultMagic, flowResultVersion, FlowResultStatus.reject.rawValue, code.rawValue])
+        }
+    }
+
+    static func decodeFlowResult(_ data: Data) -> FlowResult? {
+        guard data.count == flowResultSize,
+              byte(data, at: 0) == flowResultMagic,
+              byte(data, at: 1) == flowResultVersion,
+              let status = FlowResultStatus(rawValue: byte(data, at: 2)) else { return nil }
+        let code = byte(data, at: 3)
+        switch status {
+        case .ready:
+            guard code == 0 else { return nil }
+            return .ready
+        case .reject:
+            guard let rejectCode = FlowRejectCode(rawValue: code) else { return nil }
+            return .reject(rejectCode)
+        }
     }
 
     private static func validateRequired(_ value: Data, name: String) throws {
@@ -373,44 +450,23 @@ enum NowhereProtocol {
         return out
     }
 
-    static func encodeUDPOpenFragments(
-        flowID: UInt64,
-        packetID: UInt16,
-        downlink: NowhereNetwork,
-        target: String,
-        payload: Data,
-        maxDatagramSize: Int
-    ) throws -> [Data] {
-        let targetBytes = try encodeTarget(target)
-        return try encodeUDPFragments(
-            type: .openData,
-            flowID: flowID,
-            packetID: packetID,
-            payload: payload,
-            maxDatagramSize: maxDatagramSize,
-            metadata: Data([downlink == .tcp ? 1 : 2]) + targetBytes
-        )
-    }
-
     static func encodeUDPDataFragments(
         flowID: UInt64,
-        packetID: UInt16,
+        packetID: UInt32,
         payload: Data,
         maxDatagramSize: Int
     ) throws -> [Data] {
         try encodeUDPFragments(
-            type: .data,
             flowID: flowID,
             packetID: packetID,
             payload: payload,
-            maxDatagramSize: maxDatagramSize,
-            metadata: Data()
+            maxDatagramSize: maxDatagramSize
         )
     }
 
     static func encodeUDPControl(type: UDPType, flowID: UInt64) throws -> Data {
         guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
-        guard type == .openAck || type == .close else {
+        guard type == .close else {
             throw NowhereError.connectionFailed("Invalid UDP control type")
         }
         var out = Data(capacity: udpControlHeaderSize)
@@ -420,16 +476,23 @@ enum NowhereProtocol {
         return out
     }
 
-    static func encodeUOTSetupTarget(_ target: String) throws -> Data {
-        try encodeTarget(target)
-    }
-
     static func encodeUDPStreamFrame(type: UDPStreamType, payload: Data = Data()) throws -> Data {
         guard payload.count <= maxUDPPacketSize else {
-            throw NowhereError.connectionFailed("UDP payload exceeds 65535 bytes")
+            if type == .data { throw NowhereError.udpPacketTooLarge }
+            throw NowhereError.connectionFailed("UoT control payload exceeds 65535 bytes")
         }
-        guard type == .data || payload.isEmpty else {
-            throw NowhereError.connectionFailed("UDP control frame has payload")
+        switch type {
+        case .data:
+            break
+        case .ready, .close:
+            guard payload.isEmpty else {
+                throw NowhereError.connectionFailed("UDP control frame has payload")
+            }
+        case .reject:
+            guard payload.count == 1,
+                  FlowRejectCode(rawValue: byte(payload, at: 0)) != nil else {
+                throw NowhereError.connectionFailed("Invalid UoT reject frame")
+            }
         }
         var out = Data(capacity: 3 + payload.count)
         out.append(type.rawValue)
@@ -439,22 +502,38 @@ enum NowhereProtocol {
         return out
     }
 
+    static func decodeUDPStreamFrame(_ data: Data, offset: Int = 0) -> (UDPStreamMessage, Int)? {
+        guard offset >= 0, offset + 3 <= data.count,
+              let type = UDPStreamType(rawValue: byte(data, at: offset)) else { return nil }
+        let length = Int(readUInt16(data, at: offset + 1))
+        guard offset + 3 + length <= data.count else { return nil }
+        let start = data.index(data.startIndex, offsetBy: offset + 3)
+        let end = data.index(start, offsetBy: length)
+        let payload = Data(data[start..<end])
+        switch type {
+        case .data:
+            break
+        case .ready, .close:
+            guard payload.isEmpty else { return nil }
+        case .reject:
+            guard payload.count == 1,
+                  FlowRejectCode(rawValue: byte(payload, at: 0)) != nil else { return nil }
+        }
+        return (UDPStreamMessage(type: type, payload: payload), 3 + length)
+    }
+
     private static func encodeUDPFragments(
-        type: UDPType,
         flowID: UInt64,
-        packetID: UInt16,
+        packetID: UInt32,
         payload: Data,
-        maxDatagramSize: Int,
-        metadata: Data
+        maxDatagramSize: Int
     ) throws -> [Data] {
         guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
-        guard type == .openData || type == .data else {
-            throw NowhereError.connectionFailed("Invalid UDP data type")
-        }
+        guard packetID != 0 else { throw NowhereError.connectionFailed("Invalid UDP packet ID") }
         guard payload.count <= maxUDPPacketSize else {
-            throw NowhereError.connectionFailed("UDP payload exceeds 65535 bytes")
+            throw NowhereError.udpPacketTooLarge
         }
-        let headerSize = udpDataHeaderSize + metadata.count
+        let headerSize = udpDataHeaderSize
         guard maxDatagramSize >= headerSize else {
             throw NowhereError.destinationTooLargeForDatagram(
                 maxFrame: maxDatagramSize,
@@ -470,7 +549,7 @@ enum NowhereProtocol {
         }
         let fragmentCount = payload.isEmpty ? 1 : (payload.count + maxPayload - 1) / maxPayload
         guard fragmentCount <= Int(UInt8.max) else {
-            throw NowhereError.connectionFailed("UDP payload requires too many fragments")
+            throw NowhereError.udpPacketTooLarge
         }
         var frames: [Data] = []
         frames.reserveCapacity(fragmentCount)
@@ -479,11 +558,12 @@ enum NowhereProtocol {
             let end = min(payload.count, start + maxPayload)
             var out = Data(capacity: headerSize + end - start)
             out.append(udpFrameMagic)
-            out.append(type.rawValue)
+            out.append(UDPType.data.rawValue)
             out.append(uint64Bytes(flowID))
-            out.append(metadata)
-            out.append(UInt8((Int(packetID) >> 8) & 0xFF))
-            out.append(UInt8(Int(packetID) & 0xFF))
+            out.append(UInt8((packetID >> 24) & 0xFF))
+            out.append(UInt8((packetID >> 16) & 0xFF))
+            out.append(UInt8((packetID >> 8) & 0xFF))
+            out.append(UInt8(packetID & 0xFF))
             out.append(UInt8(fragmentID))
             out.append(UInt8(fragmentCount))
             out.append(UInt8((payload.count >> 8) & 0xFF))
@@ -504,40 +584,23 @@ enum NowhereProtocol {
               let type = UDPType(rawValue: byte(data, at: udpFrameMagic.count)) else { return nil }
         let flowID = readUInt64(data, at: udpFrameMagic.count + 1)
         guard flowID != 0 else { return nil }
-        if type == .openAck || type == .close {
+        if type == .close {
             guard data.count == udpControlHeaderSize else { return nil }
             return UDPMessage(
-                type: type, flowID: flowID, target: nil, downlink: nil,
+                type: type, flowID: flowID,
                 packetID: 0, fragmentID: 0, fragmentCount: 0, totalLength: 0,
                 payload: Data()
             )
         }
 
         var offset = udpControlHeaderSize
-        var target: String?
-        var downlink: NowhereNetwork?
-        if type == .openData {
-            guard offset + 3 <= data.count else { return nil }
-            switch byte(data, at: offset) {
-            case 1: downlink = .tcp
-            case 2: downlink = .udp
-            default: return nil
-            }
-            offset += 1
-            guard let parsed = decodeTarget(data, offset: offset) else { return nil }
-            target = parsed.target
-            offset = data.distance(from: data.startIndex, to: parsed.nextOffset)
-        } else if type != .data {
-            return nil
-        }
-
-        guard offset + 6 <= data.count else { return nil }
-        let packetID = UInt16(readUInt16(data, at: offset))
-        let fragmentID = byte(data, at: offset + 2)
-        let fragmentCount = byte(data, at: offset + 3)
-        let totalLength = UInt16(readUInt16(data, at: offset + 4))
-        offset += 6
-        guard fragmentCount > 0, fragmentID < fragmentCount else { return nil }
+        guard type == .data, offset + 8 <= data.count else { return nil }
+        let packetID = readUInt32(data, at: offset)
+        let fragmentID = byte(data, at: offset + 4)
+        let fragmentCount = byte(data, at: offset + 5)
+        let totalLength = UInt16(readUInt16(data, at: offset + 6))
+        offset += 8
+        guard packetID != 0, fragmentCount > 0, fragmentID < fragmentCount else { return nil }
         let payload = data.subdata(in: data.index(data.startIndex, offsetBy: offset)..<data.endIndex)
         guard payload.count <= Int(totalLength) else { return nil }
         if totalLength == 0 {
@@ -547,7 +610,7 @@ enum NowhereProtocol {
             if fragmentCount == 1, payload.count != Int(totalLength) { return nil }
         }
         return UDPMessage(
-            type: type, flowID: flowID, target: target, downlink: downlink,
+            type: type, flowID: flowID,
             packetID: packetID, fragmentID: fragmentID, fragmentCount: fragmentCount,
             totalLength: totalLength, payload: payload
         )
@@ -586,6 +649,14 @@ enum NowhereProtocol {
             memcpy(&value, raw.baseAddress!.advanced(by: offset), 8)
             return UInt64(bigEndian: value)
         }
+    }
+
+    private static func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
+        guard offset + 4 <= data.count else { return 0 }
+        return (UInt32(byte(data, at: offset)) << 24)
+            | (UInt32(byte(data, at: offset + 1)) << 16)
+            | (UInt32(byte(data, at: offset + 2)) << 8)
+            | UInt32(byte(data, at: offset + 3))
     }
 
     private static func readUInt16(_ data: Data, at offset: Int) -> Int {
