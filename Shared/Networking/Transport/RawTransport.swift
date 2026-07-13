@@ -17,6 +17,11 @@ protocol RawTransport: AnyObject {
 
     func send(data: Data)
 
+    /// Finishes the send direction (TCP FIN / protocol end-of-stream), ordered
+    /// after every send already issued; the receive side stays open. Called at
+    /// most once, and no sends may be issued after it.
+    nonisolated func closeWrite(completion: @escaping (Error?) -> Void)
+
     func receive(completion: @escaping (Data?, Bool, Error?) -> Void)
 
     func forceCancel()
@@ -30,6 +35,10 @@ extension RawTransport {
     /// Layered transports fall back to their ordinary teardown; only the
     /// socket-owning base transport distinguishes abortive close.
     func forceAbort() { forceCancel() }
+
+    /// Transports with no way to express end-of-stream short of a full close
+    /// complete immediately; the peer simply never sees the half-close.
+    nonisolated func closeWrite(completion: @escaping (Error?) -> Void) { completion(nil) }
 }
 
 // MARK: - TransportError

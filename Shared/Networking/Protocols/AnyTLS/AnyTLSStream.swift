@@ -46,7 +46,7 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
 
     override var outerTLSVersion: TLSVersion? { cachedTLSVersion }
 
-    // MARK: Send
+    // MARK: - Send
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         guard let multiplexer else {
@@ -60,7 +60,7 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         multiplexer?.writeData(sid: sid, data: data, completion: { _ in })
     }
 
-    // MARK: Receive
+    // MARK: - Receive
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         enum Action {
@@ -95,7 +95,7 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         }
     }
 
-    // MARK: Cancel
+    // MARK: - Cancel
 
     override func cancel() {
         let already = receiveState.withLock { state -> Bool in

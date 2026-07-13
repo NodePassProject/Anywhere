@@ -54,7 +54,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         recvState.withLock { $0.inCTR = ctr }
     }
 
-    // MARK: Send
+    // MARK: - Send
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         if data.isEmpty { completion(nil); return }
@@ -101,7 +101,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         }
     }
 
-    // MARK: Receive
+    // MARK: - Receive
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         // Drain stashed bytes first to preserve record-framing order.
@@ -174,7 +174,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         data = Data(bytes)
     }
 
-    // MARK: Cancel
+    // MARK: - Cancel
 
     override func cancel() {
         inner.cancel()

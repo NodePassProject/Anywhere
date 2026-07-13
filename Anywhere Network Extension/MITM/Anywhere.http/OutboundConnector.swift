@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "OutboundConnector")
 
@@ -15,6 +16,36 @@ enum OutboundConnector {
         let connection: ProxyConnection
         /// Retained for the connection's lifetime so the proxy transport stays alive; nil for direct dials.
         let proxyClient: ProxyClient?
+    }
+
+    // MARK: - Ambient Routing Context
+    //
+    // Script `Anywhere.http` fetches are detached, process-lifetime outbound —
+    // not tied to any accepted connection — so they resolve their route against
+    // a context the tunnel publishes at start and clears at stop. A narrow,
+    // read-only snapshot behind a Mutex; the extension runs one tunnel at a time.
+
+    /// The routing inputs a detached dial needs.
+    struct RoutingContext {
+        let domainRouter: DomainRouter
+        let requestLog: RequestLog
+        let defaultRouteTarget: RouteTarget
+        let defaultConfiguration: ProxyConfiguration?
+
+        func isDefaultConfiguration(_ id: UUID) -> Bool {
+            defaultConfiguration?.id == id
+        }
+    }
+
+    private static let context = Mutex<RoutingContext?>(nil)
+
+    /// Publishes the active routing context. Called by the tunnel on start/restart.
+    static func setRoutingContext(_ context: RoutingContext?) {
+        Self.context.withLock { $0 = context }
+    }
+
+    private static func routingContext() -> RoutingContext? {
+        context.withLock { $0 }
     }
 
     enum ConnectError: Error, LocalizedError {
@@ -32,15 +63,15 @@ enum OutboundConnector {
     /// Resolves the route, whether it came from the global default (vs. an explicit
     /// rule), and the rule set behind an explicit match.
     static func resolveRoute(host: String) -> (target: RouteTarget, viaDefault: Bool, ruleSetName: String?) {
-        guard let stack = TunnelStack.shared else { return (.direct, false, nil) }
-        let router = stack.domainRouter
+        guard let context = routingContext() else { return (.direct, false, nil) }
+        let router = context.domainRouter
 
         let matched = isIPLiteral(host) ? router.matchIP(host) : router.matchDomain(host)
         if let matched { return (matched.action, false, matched.ruleSetName) }
 
         // No explicit rule: keep loopback / LAN destinations off any proxy.
         if isLoopbackOrPrivate(host) { return (.direct, false, nil) }
-        return (stack.defaultRouteTarget, true, nil)
+        return (context.defaultRouteTarget, true, nil)
     }
 
     // MARK: - Dial
@@ -56,15 +87,15 @@ enum OutboundConnector {
         // The only place script `Anywhere.http` fetches reach the Requests log — they're the
         // extension's own outbound, not captured device traffic. A pooled HTTP/2 connection
         // logs once per dial, shared across its streams.
-        TunnelStack.shared?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
+        routingContext()?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
         switch route {
         case .reject:
             queue.async { completion(.failure(ConnectError.rejected(host))) }
         case .direct:
             dialDirect(host: host, port: port, queue: queue, completion: completion)
         case .proxy:
-            guard let stack = TunnelStack.shared,
-                  let configuration = resolveConfiguration(for: route, stack: stack) else {
+            guard let context = routingContext(),
+                  let configuration = resolveConfiguration(for: route, context: context) else {
                 // An unresolvable proxy configuration dials direct rather than failing outright.
                 logger.warning("[OutboundConnector] No configuration resolved for \(host); dialing direct")
                 dialDirect(host: host, port: port, queue: queue, completion: completion)
@@ -74,10 +105,10 @@ enum OutboundConnector {
         }
     }
 
-    /// The global default route's configuration lives on the stack, not in the router's map.
-    private static func resolveConfiguration(for route: RouteTarget, stack: TunnelStack) -> ProxyConfiguration? {
-        if let resolved = stack.domainRouter.resolveConfiguration(action: route) { return resolved }
-        if route == stack.defaultRouteTarget { return stack.configuration }
+    /// The global default route's configuration is carried by the context, not the router's map.
+    private static func resolveConfiguration(for route: RouteTarget, context: RoutingContext) -> ProxyConfiguration? {
+        if let resolved = context.domainRouter.resolveConfiguration(action: route) { return resolved }
+        if route == context.defaultRouteTarget { return context.defaultConfiguration }
         return nil
     }
 
@@ -107,7 +138,7 @@ enum OutboundConnector {
     ) {
         let client = ProxyClient(
             configuration: configuration,
-            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+            isDefaultProxy: routingContext()?.isDefaultConfiguration(configuration.id) ?? false
         )
         client.connect(to: host, port: port, initialData: nil) { result in
             queue.async {

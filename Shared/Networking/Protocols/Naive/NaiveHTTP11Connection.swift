@@ -14,7 +14,7 @@ nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP11Connection
 /// Parses only the status line, so `responseHeaders` is always empty.
 nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
-    // MARK: Properties
+    // MARK: - Properties
 
     private let transport: TLSStreamTransport
     /// Extra CONNECT headers; names are emitted verbatim so the caller controls wire casing.
@@ -29,7 +29,7 @@ nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
     var isConnected: Bool { connected }
 
-    // MARK: Initialization
+    // MARK: - Initialization
 
     init(transport: TLSStreamTransport, extraHeaders: [(name: String, value: String)],
          destination: String) {

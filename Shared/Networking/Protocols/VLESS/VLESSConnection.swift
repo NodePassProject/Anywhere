@@ -17,7 +17,6 @@ nonisolated final class VLESSConnection: ProxyConnection {
         var pendingResponseBuffer = Data()
     }
 
-    /// Response-header parsing state.
     private let headerState = Mutex(HeaderState())
 
     init(inner: ProxyConnection) {

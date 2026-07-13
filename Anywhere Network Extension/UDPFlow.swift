@@ -10,6 +10,11 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "UDPFlow")
 
 class UDPFlow {
+    /// The owning stack, for the flow registry, traffic accounting, shared
+    /// sessions, and the TUN write-back. Weak: the stack can stop while late
+    /// transport completions are still in flight.
+    private weak var stack: TunnelStack?
+
     let flowKey: TunnelStack.UDPFlowKey
     let srcHost: String
     let srcPort: UInt16
@@ -70,7 +75,8 @@ class UDPFlow {
     private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
 
 
-    init(flowKey: TunnelStack.UDPFlowKey,
+    init(stack: TunnelStack,
+         flowKey: TunnelStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
          dstHost: String, dstPort: UInt16,
          srcIPData: Data, dstIPData: Data,
@@ -78,6 +84,7 @@ class UDPFlow {
          configuration: ProxyConfiguration,
          routeTarget: RouteTarget,
          flowQueue: DispatchQueue) {
+        self.stack = stack
         self.flowKey = flowKey
         self.srcHost = srcHost
         self.srcPort = srcPort
@@ -109,7 +116,7 @@ class UDPFlow {
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
             close()
-            TunnelStack.shared?.removeUDPFlow(self)
+            self.stack?.removeUDPFlow(self)
         } else {
             logTransientSendFailure(error)
         }
@@ -151,7 +158,7 @@ class UDPFlow {
         guard !closed else { return }
         lastActivity = MonotonicClock.now
         
-        TunnelStack.shared?.addBytesOut(Int64(payloadLength), target: routeTarget)
+        stack?.addBytesOut(Int64(payloadLength), target: routeTarget)
 
         // Buffer while connecting: sends on an unconnected UDP transport are silently dropped.
         if proxyConnecting {
@@ -231,8 +238,8 @@ class UDPFlow {
 
         // Fast paths bypass ProxyClient, so they must only run when no chain is configured.
         if !hasChain {
-            let isDefaultConfiguration = TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
-            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let udpMultiplexerPool = TunnelStack.shared?.udpMultiplexerPool {
+            let isDefaultConfiguration = stack?.isDefaultConfiguration(configuration.id) ?? false
+            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let udpMultiplexerPool = stack?.udpMultiplexerPool {
                 proxyConnecting = true
                 connectViaMultiplexer(udpMultiplexerPool: udpMultiplexerPool)
                 return
@@ -280,14 +287,14 @@ class UDPFlow {
                                 self.reportFailure("Mux", error: error)
                             }
                             self.close()
-                            TunnelStack.shared?.removeUDPFlow(self)
+                            self.stack?.removeUDPFlow(self)
                         }
                     }
 
                     // closeAll() may have already closed the session before this ran.
                     guard !session.closed else {
                         self.close()
-                        TunnelStack.shared?.removeUDPFlow(self)
+                        self.stack?.removeUDPFlow(self)
                         return
                     }
 
@@ -309,7 +316,7 @@ class UDPFlow {
                         self.reportFailure("Connect", error: error)
                     }
                     self.close()
-                    TunnelStack.shared?.removeUDPFlow(self)
+                    self.stack?.removeUDPFlow(self)
                 }
             }
         }
@@ -318,7 +325,7 @@ class UDPFlow {
     private func connectViaProxyClient() {
         let client = ProxyClient(
             configuration: configuration,
-            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+            isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         self.proxyClient = client
 
@@ -359,7 +366,7 @@ class UDPFlow {
                         self.reportFailure("Connect", error: error)
                     }
                     self.close()
-                    TunnelStack.shared?.removeUDPFlow(self)
+                    self.stack?.removeUDPFlow(self)
                 }
             }
         }
@@ -368,7 +375,7 @@ class UDPFlow {
     private func connectShadowsocksUDP() {
         guard ssUDPSession == nil && !closed else { return }
 
-        guard let stack = TunnelStack.shared else {
+        guard let stack else {
             close()
             return
         }
@@ -402,7 +409,7 @@ class UDPFlow {
                 self.flowQueue.async {
                     self.reportFailure("Receive", error: error)
                     self.close()
-                    TunnelStack.shared?.removeUDPFlow(self)
+                    self.stack?.removeUDPFlow(self)
                 }
             }
         )
@@ -471,7 +478,7 @@ class UDPFlow {
                 if let error {
                     self.reportFailure("Connect", error: error)
                     self.close()
-                    TunnelStack.shared?.removeUDPFlow(self)
+                    self.stack?.removeUDPFlow(self)
                     return
                 }
 
@@ -493,7 +500,7 @@ class UDPFlow {
                     self.flowQueue.async {
                         self.reportFailure("Receive", error: error)
                         self.close()
-                        TunnelStack.shared?.removeUDPFlow(self)
+                        self.stack?.removeUDPFlow(self)
                     }
                 })
             }
@@ -511,7 +518,7 @@ class UDPFlow {
                     self.reportFailure("Receive", error: error)
                 }
                 self.close()
-                TunnelStack.shared?.removeUDPFlow(self)
+                self.stack?.removeUDPFlow(self)
             }
         }
     }
@@ -522,10 +529,10 @@ class UDPFlow {
             self.lastActivity = MonotonicClock.now
             self.replyCount += 1
             
-            TunnelStack.shared?.addBytesIn(Int64(data.count), target: self.routeTarget)
+            self.stack?.addBytesIn(Int64(data.count), target: self.routeTarget)
 
             // Swap the 5-tuple: response source = original destination, and vice versa.
-            TunnelStack.shared?.writeOutboundUDP(
+            self.stack?.writeOutboundUDP(
                 srcIP: self.dstIPBytes, srcPort: self.dstPort,
                 dstIP: self.srcIPBytes, dstPort: self.srcPort,
                 isIPv6: self.isIPv6, payload: data

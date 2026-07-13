@@ -82,7 +82,7 @@ enum NaiveHTTP2Framer {
     static let headerSize = HTTP2FrameWire.headerSize
     static let maxDataPayload = 16_384  // HTTP/2 default SETTINGS_MAX_FRAME_SIZE
 
-    // MARK: Deserialize
+    // MARK: - Deserialize
 
     /// Deserializes one complete frame from `buffer`, removing the consumed bytes; `nil` if incomplete.
     static func deserialize(from buffer: inout Data) -> NaiveHTTP2Frame? {

@@ -79,13 +79,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Tunnel Settings
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
+        let tunnelAddressIPv4 = TunnelConstants.tunnelAddressIPv4
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: tunnelAddressIPv4)
 
         let hideVPNIcon = AWCore.getHideVPNIcon()
         let includedRoutes = Self.parseRoutes(AWCore.getTunnelIncludedRoutes())
         let excludedRoutes = Self.parseRoutes(AWCore.getTunnelExcludedRoutes())
 
-        let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.1"], subnetMasks: ["255.255.255.0"])
+        let ipv4Settings = NEIPv4Settings(addresses: [tunnelAddressIPv4], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()] + includedRoutes.ipv4
         var excludedIPv4Routes = excludedRoutes.ipv4
         if hideVPNIcon {
@@ -98,7 +99,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // so we drop IPv6 entirely (custom routes included) when hideVPNIcon is enabled.
         let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
         if advertiseIPv6ToApps {
-            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::1"], networkPrefixLengths: [64])
+            let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelAddressIPv6], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()] + includedRoutes.ipv6
             ipv6Settings.excludedRoutes = excludedRoutes.ipv6
             settings.ipv6Settings = ipv6Settings
@@ -108,9 +109,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // keeps queries reachable only through utun, so they cannot leak.
         let plainDNSServers: [String]
         if advertiseIPv6ToApps {
-            plainDNSServers = ["10.8.0.1", "fd00::1"]
+            plainDNSServers = [tunnelAddressIPv4, TunnelConstants.tunnelAddressIPv6]
         } else {
-            plainDNSServers = ["10.8.0.1"]
+            plainDNSServers = [tunnelAddressIPv4]
         }
 
         settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
@@ -358,7 +359,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func logTunnelStop(reason: NEProviderStopReason) {
         let message: String
-        let level: TunnelStack.LogLevel
+        let level: TunnelLogLevel
 
         switch reason {
         case .userInitiated:

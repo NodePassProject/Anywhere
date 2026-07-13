@@ -25,16 +25,16 @@ static lwip_tcp_recv_fn   s_tcp_recv_fn   = NULL;
 static lwip_tcp_sent_fn   s_tcp_sent_fn   = NULL;
 static lwip_tcp_err_fn    s_tcp_err_fn    = NULL;
 
-/* Storage for the SYN filter pointer declared in `lwip/priv/tcp_priv.h`.
- * The vendored `tcp_listen_input` patch calls this directly — keeping it
- * a function pointer (instead of going through a setter that copies to a
- * bridge-local) lets the patch live entirely inside lwIP's translation
- * unit without an extra accessor call per SYN. */
-int (*lwip_anywhere_tcp_syn_filter)(const void *src_ip, u16_t src_port,
-                                     const void *dst_ip, u16_t dst_port,
-                                     int is_ipv6) = NULL;
+static void *s_host_ctx = NULL;
 
-void lwip_bridge_set_output_fn(lwip_output_fn fn)     { s_output_fn = fn; }
+void  lwip_bridge_set_host_ctx(void *ctx) { s_host_ctx = ctx; }
+void *lwip_bridge_host_ctx(void)          { return s_host_ctx; }
+
+int (*lwip_anywhere_tcp_syn_filter)(const void *src_ip, u16_t src_port,
+                                    const void *dst_ip, u16_t dst_port,
+                                    int is_ipv6) = NULL;
+
+void lwip_bridge_set_output_fn(lwip_output_fn fn)         { s_output_fn = fn; }
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn) { s_tcp_accept_fn = fn; }
 void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn) {
     lwip_anywhere_tcp_syn_filter = fn;
@@ -440,6 +440,16 @@ void lwip_bridge_tcp_output(void *pcb) {
 
 void lwip_bridge_tcp_recved(void *pcb, uint16_t len) {
     tcp_recved((struct tcp_pcb *)pcb, len);
+}
+
+void lwip_bridge_tcp_shutdown_tx(void *pcb) {
+    struct tcp_pcb *tpcb = (struct tcp_pcb *)pcb;
+    err_t err = tcp_shutdown(tpcb, 0, 1);
+    if (err != ERR_OK) {
+        /* Non-fatal — typically ERR_CONN (send side already shut, or never
+         * established); the connection still ends through the normal close path. */
+        os_log_error(s_log, "[Bridge] tcp_shutdown(tx) err=%d state=%d", (int)err, (int)tpcb->state);
+    }
 }
 
 void lwip_bridge_tcp_close(void *pcb) {

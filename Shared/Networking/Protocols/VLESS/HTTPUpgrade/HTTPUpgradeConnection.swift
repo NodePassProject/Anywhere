@@ -71,7 +71,6 @@ nonisolated class HTTPUpgradeConnection {
             request += "\(key): \(value)\r\n"
         }
 
-        // Fall back to Chrome UA if not set.
         if !configuration.headers.keys.contains(where: { $0.lowercased() == "user-agent" }) {
             request += "User-Agent: \(Self.chromeUserAgent)\r\n"
         }

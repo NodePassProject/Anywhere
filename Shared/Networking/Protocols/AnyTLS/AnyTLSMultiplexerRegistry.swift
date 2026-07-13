@@ -21,25 +21,25 @@ nonisolated final class AnyTLSMultiplexerRegistry {
         let password: String
     }
 
-    private let clients = Mutex<[Key: AnyTLSMultiplexerPool]>([:])
+    private let pools = Mutex<[Key: AnyTLSMultiplexerPool]>([:])
 
     private init() {}
 
     /// Creates the pool on first use; on reuse the passed `dialOut` is dropped.
-    func client(
+    func pool(
         for configuration: ProxyConfiguration,
         dialOut: @escaping AnyTLSMultiplexerPool.DialOut
     ) -> AnyTLSMultiplexerPool? {
         guard
             case .anytls(let password, let idleSessionCheckInterval, let idleSessionTimeout, let minIdleSession, _) = configuration.outbound
         else {
-            logger.debug("[AnyTLSMultiplexerRegistry] outbound is not .anytls — refusing to create client")
+            logger.debug("[AnyTLSMultiplexerRegistry] outbound is not .anytls — refusing to create pool")
             return nil
         }
         let key = Key(host: configuration.serverAddress, port: configuration.serverPort, password: password)
         var reused = true
-        let client = clients.withLock { clients -> AnyTLSMultiplexerPool in
-            if let existing = clients[key] {
+        let pool = pools.withLock { pools -> AnyTLSMultiplexerPool in
+            if let existing = pools[key] {
                 return existing
             }
             reused = false
@@ -50,29 +50,29 @@ nonisolated final class AnyTLSMultiplexerRegistry {
                 minIdleSession:           minIdleSession,
                 dialOut: dialOut
             )
-            clients[key] = created
+            pools[key] = created
             return created
         }
         if reused {
-            logger.debug("[AnyTLSMultiplexerRegistry] reuse client \(configuration.serverAddress):\(configuration.serverPort)")
+            logger.debug("[AnyTLSMultiplexerRegistry] reuse pool \(configuration.serverAddress):\(configuration.serverPort)")
         } else {
-            logger.debug("[AnyTLSMultiplexerRegistry] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(idleSessionCheckInterval)s it=\(idleSessionTimeout)s mis=\(minIdleSession)")
+            logger.debug("[AnyTLSMultiplexerRegistry] created pool \(configuration.serverAddress):\(configuration.serverPort) ici=\(idleSessionCheckInterval)s it=\(idleSessionTimeout)s mis=\(minIdleSession)")
         }
-        return client
+        return pool
     }
 
     /// Called on wake/path change/stop because the kernel may have torn down the sockets.
     func closeAll() {
-        let snapshot = clients.withLock { clients -> [AnyTLSMultiplexerPool] in
-            let values = Array(clients.values)
-            clients.removeAll(keepingCapacity: false)
+        let snapshot = pools.withLock { pools -> [AnyTLSMultiplexerPool] in
+            let values = Array(pools.values)
+            pools.removeAll(keepingCapacity: false)
             return values
         }
         if !snapshot.isEmpty {
-            logger.debug("[AnyTLSMultiplexerRegistry] closeAll(\(snapshot.count) clients)")
+            logger.debug("[AnyTLSMultiplexerRegistry] closeAll(\(snapshot.count) pools)")
         }
-        for client in snapshot {
-            client.closeAll()
+        for pool in snapshot {
+            pool.closeAll()
         }
     }
 }

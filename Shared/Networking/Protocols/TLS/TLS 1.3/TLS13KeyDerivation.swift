@@ -128,7 +128,7 @@ struct TLS13KeyDerivation {
         return (hsPRK, keys)
     }
 
-    /// Derive application keys from the full transcript (including server Finished)
+    /// Derive application keys from the full transcript (including server Finished).
     func deriveApplicationKeys(handshakeSecret: Data, fullTranscript: Data) -> TLS13ApplicationKeys {
         let hsKey = SymmetricKey(data: handshakeSecret)
         let derivedHS = deriveSecret(secret: hsKey, label: "derived", messages: Data())

@@ -31,8 +31,8 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     // MARK: - Receive buffering
 
-    // Each element carries its QUIC byte count so the flow-control window is
-    // extended as chunks are consumed, not up-front.
+    /// Each element carries its QUIC byte count so the flow-control window is
+    /// extended as chunks are consumed, not up-front.
     private var receiveQueue: [(chunk: Data, quicBytes: Int)] = []
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var endStreamReceived = false

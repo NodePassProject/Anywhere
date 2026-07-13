@@ -292,7 +292,7 @@ private enum VLESSNfsPublicKey {
     }
 }
 
-// MARK: - VLESSEncryptionClient (matches Go's ClientInstance)
+// MARK: - VLESSEncryptionClient
 
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 nonisolated final class VLESSEncryptionClient {
@@ -731,12 +731,12 @@ nonisolated final class VLESSEncryptionClient {
                                 throw VLESSEncryptionError.framingError("server sealed length frame too short: \(lenBytes.count) bytes")
                             }
                             let sealedPaddingBodySize = VLESSLength.decode(lenBytes)
-                            // Over-read bytes are padding tail, always unmasked (written
-                            // before the server wrapped with XorConn); carry them over.
+                            // Over-read bytes are padding tail, always unmasked (sent
+                            // before the server enables XOR masking); carry them over.
                             let leftover = reader.drain()
 
                             // inSkip covers padding tail still on the wire; leftover bytes
-                            // bypass XorConn via carryOverBytes, so don't skip them again.
+                            // bypass the XOR wrapper via carryOverBytes, so don't skip them again.
                             let xorConnection: VLESSXORConnection?
                             let transport: ProxyConnection
                             if self.xorMode == .random {
@@ -822,7 +822,7 @@ private final class VLESSEncryptionByteReader {
     }
 }
 
-// MARK: - VLESSEncryptedConnection (matches Go's CommonConn)
+// MARK: - VLESSEncryptedConnection
 
 /// AEAD-framed wrapper: application bytes travel as TLS-1.3-style records
 /// (5-byte header + sealed payload), with a BLAKE3 rekey when the nonce wraps.
@@ -891,7 +891,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
-    // MARK: Send
+    // MARK: - Send
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         if data.isEmpty { completion(nil); return }
@@ -939,7 +939,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         }
     }
 
-    // MARK: Receive
+    // MARK: - Receive
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         // 0-RTT: readAEAD is unknown until the server random arrives.
@@ -1105,7 +1105,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         }
     }
 
-    // MARK: Vision direct-copy (bypass AEAD)
+    // MARK: - Vision direct-copy (bypass AEAD)
 
     // Vision direct copy peels only our AEAD layer (unwrapping to the raw conn);
     // delegating to `inner` keeps random-mode XOR masking and outer TLS intact.

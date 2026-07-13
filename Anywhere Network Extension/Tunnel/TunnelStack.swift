@@ -62,7 +62,8 @@ class TunnelStack {
 
     /// Identity of the default outbound, derived from the app's persisted
     /// selection so a chain resolves to its stable chain id, not the
-    /// composite's throwaway id. Recomputed on every start/switch.
+    /// composite's throwaway id. Recomputed on every start/switch. Owned by
+    /// ``lwipQueue``; udpQueue readers use ``UDPConfig/defaultRouteTarget``.
     var defaultRouteTarget: RouteTarget = .direct
 
     static let ipv4Proto = NSNumber(value: AF_INET)
@@ -97,33 +98,18 @@ class TunnelStack {
     /// ``OutputBufferState/releases`` stays index-aligned with ``OutputBufferState/packets``.
     static let noopRelease = PendingRelease(ctx: nil, fn: { _ in })
 
-    // Settings read from App Group UserDefaults at start/restart and
-    // live-reloaded via Darwin notification.
-    /// Effective mode applied by the data plane; equals ``baseProxyMode`` unless
-    /// the trusted-network policy overrides it for the current egress.
-    var proxyMode: ProxyMode = .rule
-    /// The user's configured mode, before the trusted-network policy is layered on.
-    var baseProxyMode: ProxyMode = .rule
-    var blockUDP: Bool = false
-    var quicPolicy: QUICPolicy = .blocked
-    var blockWebRTC: Bool = true
-    var preventDNSLeak: Bool = false
-    var hideVPNIcon: Bool = false
-    var tunnelIncludedRoutes: [String] = []
-    var tunnelExcludedRoutes: [String] = []
-    var advertiseIPv6ToApps: Bool = false
+    /// Settings snapshot read from App Group UserDefaults at start/restart
+    /// and live-reloaded via Darwin notification. Owned by ``lwipQueue``;
+    /// the UDP path reads the flags it needs via ``UDPConfig``.
+    var settings = TunnelSettings()
 
-    // MARK: Trusted Network
-    var alwaysTrustCellular: Bool = false
-    var alwaysUntrustCellular: Bool = false
-    var trustedSSIDs: Set<String> = []
-    var currentNetworkIsWiFi: Bool = false
-    var currentNetworkIsCellular: Bool = false
-    var currentSSID: String?
-    
-    // MARK: Reflection
-    var reflectionEnabled: Bool = false
-    var reflectionAddresses: [String] = []
+    /// Effective mode applied by the data plane; equals
+    /// ``TunnelSettings/baseProxyMode`` unless the trusted-network policy
+    /// overrides it for the current egress. Owned by ``lwipQueue``.
+    var proxyMode: ProxyMode = .rule
+
+    /// Egress identity feeding the trusted-network policy. Owned by ``lwipQueue``.
+    var networkContext = NetworkContext()
 
     // MARK: MITM
     var mitmEnabled: Bool = false
@@ -154,9 +140,6 @@ class TunnelStack {
     /// `DispatchSource` traps.
     var lwipTickSuspended = false
 
-    /// Active bypass country code (empty = disabled).
-    var bypassCountryCode: String = ""
-
     /// Per-target traffic counters. Payload bytes, not wire bytes (headers,
     /// ACKs, retransmits excluded). Written from ``lwipQueue``/``udpQueue``,
     /// read from the NE message handler — every access goes through the Mutex.
@@ -175,26 +158,17 @@ class TunnelStack {
     // Recent logs for the main app's viewer. Locked because appends come from
     // I/O completion handlers, fetches from IPC.
 
-    typealias LogLevel = TunnelLogLevel
-    typealias LogEntry = TunnelLogEntry
+    private let logEntries = Mutex<[TunnelLogEntry]>([])
 
-    struct RecentTunnelInterruption {
-        let timestamp: CFAbsoluteTime
-        let level: LogLevel
-        let summary: String
-    }
-
-    private let logEntries = Mutex<[LogEntry]>([])
-
-    func appendLog(_ message: String, level: LogLevel) {
+    func appendLog(_ message: String, level: TunnelLogLevel) {
         let now = CFAbsoluteTimeGetCurrent()
         logEntries.withLock { entries in
-            entries.append(LogEntry(timestamp: now, level: level, message: message))
+            entries.append(TunnelLogEntry(timestamp: now, level: level, message: message))
             Self.compactLogs(&entries, now: now)
         }
     }
 
-    func fetchLogs() -> [LogEntry] {
+    func fetchLogs() -> [TunnelLogEntry] {
         let now = CFAbsoluteTimeGetCurrent()
         return logEntries.withLock { entries in
             Self.compactLogs(&entries, now: now)
@@ -203,7 +177,7 @@ class TunnelStack {
     }
 
     /// Prunes by age, then by count.
-    private static func compactLogs(_ entries: inout [LogEntry], now: CFAbsoluteTime) {
+    private static func compactLogs(_ entries: inout [TunnelLogEntry], now: CFAbsoluteTime) {
         let cutoff = now - TunnelConstants.logRetentionInterval
         entries.removeAll { $0.timestamp < cutoff }
         if entries.count > TunnelConstants.logMaxEntries {
@@ -227,6 +201,8 @@ class TunnelStack {
         let configuration: ProxyConfiguration?
         /// `configuration?.id`, precomputed to avoid a cross-queue read.
         let configurationID: UUID?
+        /// Mirror of ``TunnelStack/defaultRouteTarget`` for udpQueue readers.
+        let defaultRouteTarget: RouteTarget
         let blockUDP: Bool
         let quicPolicy: QUICPolicy
         let blockWebRTC: Bool
@@ -236,6 +212,7 @@ class TunnelStack {
     private let _udpConfig = Mutex(UDPConfig(
         configuration: nil,
         configurationID: nil,
+        defaultRouteTarget: .direct,
         blockUDP: false,
         quicPolicy: .blocked,
         blockWebRTC: true,
@@ -256,25 +233,39 @@ class TunnelStack {
         let snapshot = UDPConfig(
             configuration: configuration,
             configurationID: configuration?.id,
-            blockUDP: blockUDP,
-            quicPolicy: quicPolicy,
-            blockWebRTC: blockWebRTC,
+            defaultRouteTarget: defaultRouteTarget,
+            blockUDP: settings.blockUDP,
+            quicPolicy: settings.quicPolicy,
+            blockWebRTC: settings.blockWebRTC,
             mitmEnabled: mitmEnabled,
-            advertiseIPv6ToApps: advertiseIPv6ToApps
+            advertiseIPv6ToApps: settings.advertiseIPv6ToApps
         )
         _udpConfig.withLock { $0 = snapshot }
     }
 
-    // Reflector snapshot: the read-callback thread reads it while ``lwipQueue``
-    // reloads it; an immutable value behind a Mutex, read once per inbound batch.
+    /// Reflector snapshot: the read-callback thread reads it while ``lwipQueue``
+    /// reloads it; an immutable value behind a Mutex, read once per inbound batch.
     private let _reflector = Mutex(Reflector.inactive)
 
     /// Current reflector snapshot; callable from any queue.
     func reflector() -> Reflector { _reflector.withLock { $0 } }
 
+    /// Publishes the routing context that detached script `Anywhere.http`
+    /// fetches dial against. Must be called on ``lwipQueue``.
+    func publishOutboundRoutingContext(configuration: ProxyConfiguration?) {
+        OutboundConnector.setRoutingContext(OutboundConnector.RoutingContext(
+            domainRouter: domainRouter,
+            requestLog: requestLog,
+            defaultRouteTarget: defaultRouteTarget,
+            defaultConfiguration: configuration
+        ))
+    }
+
     /// Rebuilds and publishes the reflector. Must be called on ``lwipQueue``.
     func publishReflector() {
-        let snapshot = reflectionEnabled ? Reflector(addresses: reflectionAddresses) : .inactive
+        let snapshot = settings.reflectionEnabled
+            ? Reflector(addresses: settings.reflectionAddresses)
+            : .inactive
         _reflector.withLock { $0 = snapshot }
     }
 
@@ -323,20 +314,29 @@ class TunnelStack {
     var ssUDPSessions: [UUID: ShadowsocksUDPSession] = [:]
 
     /// Domain-based DNS routing (loaded from App Group routing.json).
-    let domainRouter = DomainRouter()
+    let domainRouter: DomainRouter
 
     /// Recent per-connection routing decisions, shown in the app's Requests view.
     let requestLog = RequestLog()
 
     /// Fake-IP pool for mapping domains to synthetic IPs.
-    let fakeIPPool = FakeIPPool()
+    let fakeIPPool: FakeIPPool
+
+    /// Connection-time routing decisions (fake-IP pool + domain + IP rules),
+    /// shared by the TCP SYN filter, TCP accept, and UDP paths.
+    let connectionRouter: ConnectionRouter
+
+    init() {
+        let fakeIPPool = FakeIPPool()
+        let domainRouter = DomainRouter()
+        self.fakeIPPool = fakeIPPool
+        self.domainRouter = domainRouter
+        self.connectionRouter = ConnectionRouter(fakeIPPool: fakeIPPool, domainRouter: domainRouter)
+    }
 
     /// Re-applies tunnel network settings via `setTunnelNetworkSettings`,
     /// resetting the virtual interface and flushing the OS DNS cache.
     var onTunnelSettingsNeedReapply: (() -> Void)?
-
-    /// Singleton for C callback access (one NE process = one stack).
-    static var shared: TunnelStack?
 
     // MARK: - Shadowsocks UDP Sessions
 
@@ -392,7 +392,9 @@ class TunnelStack {
     // MARK: - Runtime Configuration
 
     func configureRuntime(for configuration: ProxyConfiguration) {
-        reloadProxyModeSettings()
+        settings = TunnelSettings.load()
+        connectionRouter.setPreventDNSLeak(settings.preventDNSLeak)
+        proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
 
         if proxyMode == .direct {
             // Router is reset below, so every connection falls through to this
@@ -405,26 +407,12 @@ class TunnelStack {
                 ?? .proxy(configuration.id)
         }
 
-        loadBypassCountry()
-        loadBlockUDPSetting()
-        loadQUICPolicySetting()
-        loadBlockWebRTCSetting()
-        loadPreventDNSLeakSetting()
-        loadReflectionSetting()
         loadMITMSetting()
-        loadTunnelSetting()
-        loadIPv6Settings()
 
         publishUDPConfig()
         publishReflector()
+        publishOutboundRoutingContext(configuration: configuration)
 
-        if proxyMode != .direct {
-            TransportPrewarm.warm(
-                configuration: configuration,
-                directDialHost: configuration.serverAddress
-            )
-        }
-        
         udpQueue.async { [self] in
             if configuration.outboundProtocol == .vless {
                 udpMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
@@ -442,69 +430,25 @@ class TunnelStack {
         }
     }
 
-    private func loadIPv6Settings() {
-        advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
-    }
-
-    private func loadBypassCountry() {
-        bypassCountryCode = AWCore.getBypassCountryCode()
-    }
-
-    private func reloadProxyModeSettings() {
-        baseProxyMode = AWCore.getProxyMode()
-        trustedSSIDs = Set(AWCore.getTrustedSSIDs())
-        alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
-        alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
-        proxyMode = computeEffectiveProxyMode()
-    }
-
-    func computeEffectiveProxyMode() -> ProxyMode {
-        computeEffectiveProxyMode(
-            base: baseProxyMode,
-            trusted: trustedSSIDs,
-            trustCellular: alwaysTrustCellular,
-            untrustCellular: alwaysUntrustCellular
-        )
-    }
-
-    func computeEffectiveProxyMode(base: ProxyMode, trusted: Set<String>, trustCellular: Bool, untrustCellular: Bool) -> ProxyMode {
-        if currentNetworkIsWiFi, let ssid = currentSSID, trusted.contains(ssid) {
+    /// Effective mode under the trusted-network policy. Pure so the policy is
+    /// unit-testable.
+    static func effectiveProxyMode(settings: TunnelSettings, network: NetworkContext) -> ProxyMode {
+        if network.isWiFi, let ssid = network.ssid, settings.trustedSSIDs.contains(ssid) {
             return .direct
         }
-        if currentNetworkIsCellular, trustCellular {
+        if network.isCellular, settings.alwaysTrustCellular {
             return .direct
         }
-        if currentNetworkIsCellular, untrustCellular {
+        if network.isCellular, settings.alwaysUntrustCellular {
             return .global
         }
-        return base
-    }
-    
-    private func loadBlockUDPSetting() {
-        blockUDP = AWCore.getBlockUDP()
+        return settings.baseProxyMode
     }
 
-    private func loadQUICPolicySetting() {
-        quicPolicy = AWCore.getQUICPolicy()
-    }
-
-    private func loadBlockWebRTCSetting() {
-        blockWebRTC = AWCore.getBlockWebRTC()
-    }
-
-    private func loadPreventDNSLeakSetting() {
-        preventDNSLeak = AWCore.getPreventDNSLeak()
-    }
-
-    private func loadReflectionSetting() {
-        reflectionEnabled = AWCore.getReflectionEnabled()
-        reflectionAddresses = AWCore.getReflectionAddresses()
-    }
-
-    private func loadTunnelSetting() {
-        hideVPNIcon = AWCore.getHideVPNIcon()
-        tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
-        tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
+    /// ``effectiveProxyMode(settings:network:)`` for the current state.
+    /// Must be called on ``lwipQueue``.
+    func computeEffectiveProxyMode() -> ProxyMode {
+        Self.effectiveProxyMode(settings: settings, network: networkContext)
     }
 
     func loadMITMSetting() {

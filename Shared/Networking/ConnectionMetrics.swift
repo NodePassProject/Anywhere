@@ -70,7 +70,8 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
                 state.handshakeTotalMs += remainder
                 state.handshakeSampleCount += 1
             case .handshakeNoDial:
-                // QUIC: clear the dial gauge so a stale pending dial is never paired.
+                // QUIC: clear the dial gauge so the snapshot doesn't pair a stale dial
+                // with this handshake.
                 state.dialMs = nil
                 state.handshakeMs = ms
                 state.handshakeTotalMs += ms

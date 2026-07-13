@@ -26,6 +26,10 @@ nonisolated class DirectProxyConnection: ProxyConnection {
         connection.send(data: data)
     }
 
+    override func closeWrite(completion: @escaping (Error?) -> Void) {
+        connection.closeWrite(completion: completion)
+    }
+
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         connection.receive() { [weak self] data, isComplete, error in
             guard let self else {

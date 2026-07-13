@@ -96,12 +96,12 @@ nonisolated class QUICTLSHandler {
     private var privateKeyX25519: Curve25519.KeyAgreement.PrivateKey?
     private var clientRandom = Data(count: 32)
 
-    // Concatenation of all handshake messages.
+    /// Concatenation of all handshake messages.
     private var transcript = Data()
 
     private(set) var cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256
 
-    // Accumulates partial TLS messages across CRYPTO frames.
+    /// Accumulates partial TLS messages across CRYPTO frames.
     private var cryptoBuffer = Data()
 
     private var serverCertificates: [SecCertificate] = []

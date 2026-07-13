@@ -56,6 +56,10 @@ typedef void (*lwip_tcp_sent_fn)(void *conn, uint16_t len);
 typedef void (*lwip_tcp_err_fn)(void *conn, int err);
 
 /* --- Callback registration --- */
+
+void  lwip_bridge_set_host_ctx(void *ctx);
+void *lwip_bridge_host_ctx(void);
+
 void lwip_bridge_set_output_fn(lwip_output_fn fn);
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn);
 void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn);
@@ -103,6 +107,9 @@ void lwip_bridge_input(const void *data, int len);
 int  lwip_bridge_tcp_write(void *pcb, const void *data, uint16_t len);
 void lwip_bridge_tcp_output(void *pcb);
 void lwip_bridge_tcp_recved(void *pcb, uint16_t len);
+
+void lwip_bridge_tcp_shutdown_tx(void *pcb);
+
 void lwip_bridge_tcp_close(void *pcb);
 void lwip_bridge_tcp_abort(void *pcb);
 int  lwip_bridge_tcp_sndbuf(void *pcb);

@@ -27,10 +27,10 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
     private var connected = false
     private(set) var closed = false
 
-    // Pending connect completions (queued while connecting)
+    /// Pending connect completions (queued while connecting).
     private var connectCompletions: [(Error?) -> Void] = []
 
-    // Write serialization (frames must not interleave)
+    /// Write serialization (frames must not interleave).
     private var writeQueue: [(Data, (Error?) -> Void)] = []
     private var isWriting = false
 
@@ -40,6 +40,10 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
     private static let idleTimeout: TimeInterval = 16
 
     private var isXUDP = false
+
+    /// Called once when the mux becomes permanently unusable (idle timeout, transport failure,
+    /// or explicit close) so the pool can evict it. Fired on `flowQueue`.
+    var onClose: (() -> Void)?
 
     // MARK: - Init
 
@@ -313,6 +317,11 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
         guard !closed else { return }
         closed = true
 
+        // Captured before teardown; fired last so the pool evicts exactly once (the
+        // `closed` guard above makes close() idempotent).
+        let notifyClose = onClose
+        onClose = nil
+
         idleTimer?.cancel()
         idleTimer = nil
 
@@ -337,5 +346,7 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
         for callback in pendingCompletions {
             callback(ProxyError.connectionFailed("Mux client closed"))
         }
+
+        notifyClose?()
     }
 }

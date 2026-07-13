@@ -14,7 +14,7 @@ struct UDPFramingState {
     var bufferOffset = 0
 }
 
-/// UDP packets are length-prefixed with 2 bytes (big-endian)
+/// UDP packets are length-prefixed with 2 bytes (big-endian).
 protocol UDPFramingCapable: AnyObject {
     var udpState: Mutex<UDPFramingState> { get }
 }

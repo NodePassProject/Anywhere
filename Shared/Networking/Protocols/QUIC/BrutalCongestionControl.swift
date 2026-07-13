@@ -124,7 +124,7 @@ nonisolated final class BrutalCongestionControl {
             cwnd = max(Self.initialCwndBytes, minCwnd)
         } else {
             // bps * RTT * 2 / ackRate, raw RTT with no floor (a 50 ms clamp
-            // inflated cwnd 5-50× on low-RTT links).
+            // would inflate cwnd 5-50× on low-RTT links).
             let cwndBytes = pacingBps * Self.congestionWindowMultiplier * Double(smoothedRtt) / 1_000_000_000.0
             cwnd = max(UInt64(cwndBytes), minCwnd)
         }
@@ -152,7 +152,7 @@ nonisolated final class BrutalCongestionControl {
     }
 }
 
-// MARK: - Registry keyed by the `ngtcp2_cc *` the trampolines receive.
+// MARK: - Registry keyed by the `ngtcp2_cc *` the trampolines receive
 
 private let brutalRegistry = Mutex<[OpaquePointer: BrutalCongestionControl]>([:])
 

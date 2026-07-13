@@ -67,7 +67,9 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     var isAlive: Bool { lock.withLock { !$0.closed } }
     var isClosed: Bool { lock.withLock { $0.closed } }
-    var activeStreamCount: Int { lock.withLock { $0.streams.count } }
+    /// Counts an active reservation as a live stream so the pool's idle sweep never treats a
+    /// mux that's reserved-for-reuse (but between reserve and its first `openStream`) as idle.
+    var activeStreamCount: Int { lock.withLock { $0.streams.count + ($0.reserved ? 1 : 0) } }
 
     /// Atomically claims a live, unreserved, stream-free multiplexer for serial reuse;
     /// returns false otherwise. Released via ``releaseReservation()`` when the stream ends.

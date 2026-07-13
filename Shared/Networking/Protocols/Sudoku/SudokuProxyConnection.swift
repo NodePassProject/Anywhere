@@ -414,7 +414,6 @@ private enum SudokuTableCache {
 }
 
 nonisolated final class SudokuTables {
-    /// The mutex serializes uplink/downlink table access, exactly as the old lock did.
     private let pair: Mutex<SudokuTablePair>
     let sendsTableHint: Bool
 
@@ -617,8 +616,8 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
     }
 
     private static let preparedConnectionTTL: TimeInterval = 4
-    // A pending preconnection is only a latency optimization. Do not let a
-    // stalled handshake hold an HTTPMask request behind the full dial timeout.
+    /// A pending preconnection is only a latency optimization. Do not let a
+    /// stalled handshake hold an HTTPMask request behind the full dial timeout.
     private static let preparedConnectionWaitTimeout: TimeInterval = 0.25
     private static let preparationRetryInterval: TimeInterval = 0.5
     private let configuration: ProxyConfiguration
@@ -832,7 +831,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
             return (toClose, clients, tlsClients, transports)
         }
         guard let drained else { return }
-        // Cancels run outside the lock, as before.
+        // Cancels run outside the lock.
         for connection in drained.toClose { connection.cancel() }
         for client in drained.clients { client.cancel() }
         for client in drained.tlsClients { client.cancel() }
@@ -2208,12 +2207,14 @@ nonisolated final class SudokuNativeClient {
         return record
     }
 
-    func openMux() throws -> SudokuMuxClient {
+    /// `ownsFactory` hands the client's factory to the mux session so pooled sessions tear
+    /// down their own transport; leave it false when the caller owns the factory.
+    func openMux(ownsFactory: Bool = false) throws -> SudokuMuxClient {
         let record = try connectBase()
         do {
             try writeKIP(record: record, type: 0x11, payload: Data())
             try record.waitHTTPMaskReady(timeout: 30)
-            return SudokuMuxClient(record: record)
+            return SudokuMuxClient(record: record, factory: ownsFactory ? factory : nil)
         } catch {
             record.close()
             throw error
@@ -2475,9 +2476,11 @@ private enum SudokuAddress {
     }
 }
 
-nonisolated final class SudokuMuxClient: @unchecked Sendable {
+nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
     private static let keepaliveInterval: TimeInterval = 15
     private let record: SudokuRecordStream
+    /// Non-nil when the session owns its transport (pooled sessions); torn down on close.
+    private let factory: SudokuConnectionFactory?
     private let condition = NSCondition()
     private let keepaliveTimer: DispatchSourceTimer
     private var streams: [UInt32: SudokuMuxStream] = [:]
@@ -2485,14 +2488,25 @@ nonisolated final class SudokuMuxClient: @unchecked Sendable {
     private var lastWrite = DispatchTime.now().uptimeNanoseconds
     private var closed = false
 
+    /// Called once when the session becomes permanently unusable so the pool can evict it.
+    var onClose: (() -> Void)?
+
     var isClosed: Bool {
         condition.lock()
         defer { condition.unlock() }
         return closed
     }
 
-    init(record: SudokuRecordStream) {
+    /// Thread-safe count read off-queue by the pool's idle sweep.
+    var activeStreamCount: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return streams.count
+    }
+
+    init(record: SudokuRecordStream, factory: SudokuConnectionFactory? = nil) {
         self.record = record
+        self.factory = factory
         keepaliveTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         keepaliveTimer.schedule(
             deadline: .now() + Self.keepaliveInterval,
@@ -2544,7 +2558,7 @@ nonisolated final class SudokuMuxClient: @unchecked Sendable {
             lastWrite = DispatchTime.now().uptimeNanoseconds
             condition.unlock()
         } catch {
-            close()
+            close(error: error)
             throw error
         }
     }
@@ -2555,7 +2569,8 @@ nonisolated final class SudokuMuxClient: @unchecked Sendable {
         condition.unlock()
     }
 
-    func close() {
+    /// `error` non-nil for transport failure, nil for clean close.
+    func close(error: Error? = nil) {
         condition.lock()
         if closed {
             condition.unlock()
@@ -2564,6 +2579,8 @@ nonisolated final class SudokuMuxClient: @unchecked Sendable {
         closed = true
         let streamsToClose = Array(streams.values)
         streams.removeAll()
+        let closeCallback = onClose
+        onClose = nil
         condition.broadcast()
         condition.unlock()
         keepaliveTimer.cancel()
@@ -2571,14 +2588,8 @@ nonisolated final class SudokuMuxClient: @unchecked Sendable {
             stream.markClosed(discardQueuedData: true)
         }
         record.close()
-    }
-
-    func waitUntilClosed() {
-        condition.lock()
-        while !closed {
-            condition.wait()
-        }
-        condition.unlock()
+        factory?.closeAll()
+        closeCallback?()
     }
 
     private func allocateStreamID() -> UInt32 {
@@ -2648,7 +2659,7 @@ nonisolated final class SudokuMuxClient: @unchecked Sendable {
                 if !wasClosed {
                     sudokuLogger.error("[Sudoku-Mux] reader failed: \(error.localizedDescription)")
                 }
-                close()
+                close(error: error)
                 return
             }
         }
@@ -2860,7 +2871,6 @@ nonisolated final class SudokuMuxStream {
 
 nonisolated final class SudokuTCPProxyConnection:
     ProxyConnection,
-    ProxyConnectionWriteClosable,
     @unchecked Sendable
 {
     private let stream: SudokuRecordStream
@@ -2904,7 +2914,7 @@ nonisolated final class SudokuTCPProxyConnection:
         }
     }
 
-    func closeWrite(completion: @escaping (Error?) -> Void) {
+    override func closeWrite(completion: @escaping (Error?) -> Void) {
         writeQueue.async {
             do {
                 if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
@@ -2921,7 +2931,6 @@ nonisolated final class SudokuTCPProxyConnection:
 
 nonisolated final class SudokuMuxTCPProxyConnection:
     ProxyConnection,
-    ProxyConnectionWriteClosable,
     @unchecked Sendable
 {
     private let client: SudokuMuxClient
@@ -2987,7 +2996,7 @@ nonisolated final class SudokuMuxTCPProxyConnection:
         }
     }
 
-    func closeWrite(completion: @escaping (Error?) -> Void) {
+    override func closeWrite(completion: @escaping (Error?) -> Void) {
         writeQueue.async {
             do {
                 if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }

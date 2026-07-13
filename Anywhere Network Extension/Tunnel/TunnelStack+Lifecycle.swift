@@ -16,9 +16,8 @@ extension TunnelStack {
     // MARK: - Lifecycle
 
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
-        TunnelStack.shared = self
         AnywhereLogger.logSink = { [weak self] message, level in
-            let logLevel: TunnelStack.LogLevel
+            let logLevel: TunnelLogLevel
             switch level {
             // `debug` never reaches the sink; mapped defensively.
             case .debug, .info: logLevel = .info
@@ -53,13 +52,19 @@ extension TunnelStack {
             deferredRestart?.cancel()
             deferredRestart = nil
             shutdownInternal()
+            // After shutdown so the teardown's own callbacks (RSTs, errors)
+            // still reach the stack.
+            lwip_bridge_set_host_ctx(nil)
+            OutboundConnector.setRoutingContext(nil)
             fakeIPPool.reset()
+            configuration = nil
         }
 
         AnywhereLogger.logSink = nil
-        packetFlow = nil
-        configuration = nil
-        TunnelStack.shared = nil
+        // `packetFlow` is deliberately kept: outputQueue's drain loop and the
+        // packet-read callback read it unsynchronized, so dropping it here
+        // would race a late transport completion. The reference dies with the
+        // provider, which owns both objects.
     }
 
     /// Restarts the stack on the existing packet flow under the new configuration.
@@ -112,13 +117,9 @@ extension TunnelStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
 
-            let unchanged = isWiFi == currentNetworkIsWiFi
-                && isCellular == currentNetworkIsCellular
-                && ssid == currentSSID
-            currentNetworkIsWiFi = isWiFi
-            currentNetworkIsCellular = isCellular
-            currentSSID = ssid
-            guard !unchanged else { return }
+            let context = NetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: ssid)
+            guard context != networkContext else { return }
+            networkContext = context
 
             let newEffective = computeEffectiveProxyMode()
             guard newEffective != proxyMode else { return }
@@ -311,98 +312,57 @@ extension TunnelStack {
         )
     }
 
-    /// Restarts the stack when a restart-requiring toggle changed; QUIC, Block
-    /// WebRTC, and Reflection changes instead reload in place.
+    /// Reloads the settings snapshot and applies the diff. Flags consumed
+    /// per-datagram or at connection time reload in place; route changes
+    /// reapply the tunnel network settings; an effective-mode, VPN-icon, or
+    /// IPv6 change restarts the stack.
     private func handleSettingsChanged() {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
-            
-            let baseProxyMode = AWCore.getProxyMode()
-            let trustedSSIDs = Set(AWCore.getTrustedSSIDs())
-            let alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
-            let alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
-            // Keep the inputs current even when the effective mode is unchanged, so a
+
+            let old = settings
+            let new = TunnelSettings.load()
+            guard new != old else { return }
+            // Committed even when only trusted-network inputs changed, so a
             // later network transition derives the mode from fresh settings.
-            self.baseProxyMode = baseProxyMode
-            self.trustedSSIDs = trustedSSIDs
-            self.alwaysTrustCellular = alwaysTrustCellular
-            self.alwaysUntrustCellular = alwaysUntrustCellular
-            let effectiveProxyMode = computeEffectiveProxyMode(
-                base: baseProxyMode,
-                trusted: trustedSSIDs,
-                trustCellular: alwaysTrustCellular,
-                untrustCellular: alwaysUntrustCellular
-            )
-            let hideVPNIcon = AWCore.getHideVPNIcon()
-            let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
+            settings = new
 
-            // QUIC policy only drives the per-datagram UDP/443 decision —
-            // reload in place rather than dropping every connection.
-            let quicPolicy = AWCore.getQUICPolicy()
-            if quicPolicy != self.quicPolicy {
-                logger.info("[VPN] QUIC policy changed: \(self.quicPolicy.rawValue) -> \(quicPolicy.rawValue)")
-                self.quicPolicy = quicPolicy
-                // May be the only change (the guard below returns without a
-                // restart), so republish the UDP snapshot here.
-                publishUDPConfig()
+            if new.quicPolicy != old.quicPolicy {
+                logger.info("[VPN] QUIC policy changed: \(old.quicPolicy.rawValue) -> \(new.quicPolicy.rawValue)")
             }
-
-            // Block UDP only drives the per-datagram UDP reject; reload in
-            // place, before the change-detection guard below.
-            let blockUDP = AWCore.getBlockUDP()
-            if blockUDP != self.blockUDP {
-                logger.info("[VPN] Block UDP changed: \(self.blockUDP) -> \(blockUDP)")
-                self.blockUDP = blockUDP
-                publishUDPConfig()
+            if new.blockUDP != old.blockUDP {
+                logger.info("[VPN] Block UDP changed: \(old.blockUDP) -> \(new.blockUDP)")
             }
-
-            // Block WebRTC only drives the per-datagram STUN check; reload in
-            // place, before the change-detection guard below.
-            let blockWebRTC = AWCore.getBlockWebRTC()
-            if blockWebRTC != self.blockWebRTC {
-                logger.info("[VPN] Block WebRTC changed: \(self.blockWebRTC) -> \(blockWebRTC)")
-                self.blockWebRTC = blockWebRTC
-                publishUDPConfig()
+            if new.blockWebRTC != old.blockWebRTC {
+                logger.info("[VPN] Block WebRTC changed: \(old.blockWebRTC) -> \(new.blockWebRTC)")
             }
-
-            // Prevent DNS Leak only affects the connection-time routing decision;
-            // the flag is self-synchronized, so update it in place.
-            let preventDNSLeak = AWCore.getPreventDNSLeak()
-            if preventDNSLeak != self.preventDNSLeak {
-                logger.info("[VPN] Prevent DNS Leak changed: \(self.preventDNSLeak) -> \(preventDNSLeak)")
-                self.preventDNSLeak = preventDNSLeak
+            if new.preventDNSLeak != old.preventDNSLeak {
+                logger.info("[VPN] Prevent DNS Leak changed: \(old.preventDNSLeak) -> \(new.preventDNSLeak)")
+                connectionRouter.setPreventDNSLeak(new.preventDNSLeak)
             }
-
-            // Reflection is a pure read-path setting; reload in place, before
-            // the change-detection guard below.
-            let reflectionEnabled = AWCore.getReflectionEnabled()
-            let reflectionAddresses = AWCore.getReflectionAddresses()
-            if reflectionEnabled != self.reflectionEnabled || reflectionAddresses != self.reflectionAddresses {
-                logger.info("[VPN] Reflection changed: enabled=\(reflectionEnabled), addresses=\(reflectionAddresses)")
-                self.reflectionEnabled = reflectionEnabled
-                self.reflectionAddresses = reflectionAddresses
+            if new.reflectionEnabled != old.reflectionEnabled || new.reflectionAddresses != old.reflectionAddresses {
+                logger.info("[VPN] Reflection changed: enabled=\(new.reflectionEnabled), addresses=\(new.reflectionAddresses)")
                 publishReflector()
             }
+            // Several live flags ride the UDP snapshot; republish once for
+            // whichever changed.
+            publishUDPConfig()
 
             // Custom routes only change the tunnel network settings — reapply
-            // in place, before the change-detection guard below.
-            let tunnelIncludedRoutes = AWCore.getTunnelIncludedRoutes()
-            let tunnelExcludedRoutes = AWCore.getTunnelExcludedRoutes()
-            if tunnelIncludedRoutes != self.tunnelIncludedRoutes || tunnelExcludedRoutes != self.tunnelExcludedRoutes {
-                logger.info("[VPN] Custom routes changed: included=\(tunnelIncludedRoutes), excluded=\(tunnelExcludedRoutes)")
-                self.tunnelIncludedRoutes = tunnelIncludedRoutes
-                self.tunnelExcludedRoutes = tunnelExcludedRoutes
+            // in place, before the restart guard below.
+            if new.tunnelIncludedRoutes != old.tunnelIncludedRoutes || new.tunnelExcludedRoutes != old.tunnelExcludedRoutes {
+                logger.info("[VPN] Custom routes changed: included=\(new.tunnelIncludedRoutes), excluded=\(new.tunnelExcludedRoutes)")
                 onTunnelSettingsNeedReapply?()
             }
 
-            let proxyModeChanged = effectiveProxyMode != self.proxyMode
-            let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
-            let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
+            let proxyModeChanged = computeEffectiveProxyMode() != proxyMode
+            let hideVPNIconChanged = new.hideVPNIcon != old.hideVPNIcon
+            let advertiseIPv6ToAppsChanged = new.advertiseIPv6ToApps != old.advertiseIPv6ToApps
 
             guard proxyModeChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged else {
                 return
             }
-            
+
             logger.info("[VPN] Settings changed")
 
             // These toggles change tunnel network settings (routes/DNS);

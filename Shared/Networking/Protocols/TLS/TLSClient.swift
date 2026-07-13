@@ -53,7 +53,7 @@ nonisolated class TLSClient {
     var useExtendedMasterSecret = false
     var ecdhP256PrivateKey: P256.KeyAgreement.PrivateKey?
     var ecdhP384PrivateKey: P384.KeyAgreement.PrivateKey?
-    /// Handshake transcript for TLS 1.2 Finished computation
+    /// Handshake transcript for TLS 1.2 Finished computation.
     var tls12Transcript: Data?
 
     var serverCertificates: [SecCertificate] = []

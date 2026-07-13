@@ -79,7 +79,7 @@ nonisolated class ProxyClient {
             return true
         }
         if !accepted {
-            // Outside the lock, as before: the release may do arbitrary work.
+            // Outside the lock: the release may do arbitrary work.
             resource.releaseOwned()
         }
         return accepted

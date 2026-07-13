@@ -28,14 +28,14 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
     private var state: StreamState = .idle
     private var headersReceived = false
 
-    // Each queued chunk carries its QUIC byte count (frame header + payload) so
-    // flow control is extended as chunks drain, preserving backpressure.
+    /// Each queued chunk carries its QUIC byte count (frame header + payload) so
+    /// flow control is extended as chunks drain, preserving backpressure.
     private var receiveQueue: [(chunk: Data, quicBytes: Int)] = []
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var endStreamReceived = false
     private var streamError: Error?
 
-    // Partial HTTP/3 frame buffer; frames may span QUIC deliveries.
+    /// Partial HTTP/3 frame buffer; frames may span QUIC deliveries.
     private var frameBuffer = Data()
     private var frameBufferOffset = 0
 

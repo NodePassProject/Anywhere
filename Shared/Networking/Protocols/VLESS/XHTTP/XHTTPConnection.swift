@@ -714,6 +714,9 @@ nonisolated final class XHTTPXMUXMultiplexerClient {
     }
 }
 
+/// Intentionally not a ``MultiplexerPool`` subclass: XMUX reuse follows Xray's per-connection
+/// retirement policy (`cMaxReuseTimes` / `hMaxRequestTimes` / `hMaxReusableSecs`, see
+/// ``XHTTPXMUXMultiplexerClient/isRetired(now:)``) rather than the base's idle-age sweep.
 /// All state is guarded by the `clients` mutex.
 nonisolated final class XHTTPXMUXMultiplexerManager {
     private let config: XHTTPXMUXMultiplexerConfiguration
@@ -922,7 +925,7 @@ extension HTTP3Multiplexer: XHTTPXMUXMultiplexerPoolable {
 // MARK: - Shared Multiplexing HTTP/2 Connection (xmux)
 //
 // Carries many XHTTP sessions as independent H2 streams over one socket. Gated behind
-// xmux config; the default 1:1 H2 path (XHTTPConnection+H2*.swift) is unchanged.
+// xmux config; without xmux, sessions use the 1:1 H2 path (XHTTPConnection+H2*.swift).
 
 /// All mutable state is guarded by the owning connection's lock.
 nonisolated final class XHTTPH2Stream {

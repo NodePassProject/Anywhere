@@ -15,15 +15,10 @@ protocol ProxyConnectionProtocol: AnyObject {
 
     func send(data: Data, completion: @escaping (Error?) -> Void)
     func send(data: Data)
+    nonisolated func closeWrite(completion: @escaping (Error?) -> Void)
     func receive(completion: @escaping (Data?, Error?) -> Void)
     func startReceiving(handler: @escaping (Data) -> Void, errorHandler: @escaping (Error?) -> Void)
     func cancel()
-}
-
-/// Optional directional close used by transports that can finish the uplink
-/// while keeping the downlink readable.
-protocol ProxyConnectionWriteClosable: AnyObject {
-    func closeWrite(completion: @escaping (Error?) -> Void)
 }
 
 // MARK: - ProxyConnection
@@ -99,6 +94,17 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
 
     func sendDirectRaw(data: Data) {
         sendRaw(data: data)
+    }
+
+    // MARK: Half-Close
+
+    /// Finishes the send direction — the streaming analogue of `shutdown(SHUT_WR)`:
+    /// signals end-of-stream to the remote while receive stays open. Ordered after
+    /// every issued send; called at most once, with no sends afterwards; `completion`
+    /// fires exactly once, on an arbitrary queue. The default completes immediately
+    /// for protocols that can't express end-of-stream short of a full close.
+    func closeWrite(completion: @escaping (Error?) -> Void) {
+        completion(nil)
     }
 
     // MARK: Receive Loop

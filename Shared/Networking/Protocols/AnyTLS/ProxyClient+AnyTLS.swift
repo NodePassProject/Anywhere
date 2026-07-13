@@ -64,13 +64,13 @@ extension ProxyClient {
             }
         }
 
-        guard let client = AnyTLSMultiplexerRegistry.shared.client(for: configuration, dialOut: dialOut) else {
-            logger.debug("[AnyTLS] AnyTLSMultiplexerRegistry returned nil client (outbound type mismatch?)")
-            completion(.failure(ProxyError.connectionFailed("Failed to acquire AnyTLS client")))
+        guard let pool = AnyTLSMultiplexerRegistry.shared.pool(for: configuration, dialOut: dialOut) else {
+            logger.debug("[AnyTLS] AnyTLSMultiplexerRegistry returned nil pool (outbound type mismatch?)")
+            completion(.failure(ProxyError.connectionFailed("Failed to acquire AnyTLS pool")))
             return
         }
 
-        client.acquireStream { [weak self] result in
+        pool.acquireStream { [weak self] result in
             switch result {
             case .failure(let error):
                 logger.debug("[AnyTLS] acquireStream failed: \(error.localizedDescription)")

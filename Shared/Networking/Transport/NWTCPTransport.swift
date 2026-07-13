@@ -187,6 +187,30 @@ nonisolated final class NWTCPTransport: RawTransport, @unchecked Sendable {
         }
     }
 
+    /// Half-closes the send direction: `.finalMessage` emits a FIN ordered after
+    /// every issued send; receive stays open. `completion` fires on `queue`.
+    func closeWrite(completion: @escaping (Error?) -> Void) {
+        queue.async { [self] in
+            switch state {
+            case .ready:
+                guard let connection else {
+                    completion(TransportError.notConnected)
+                    return
+                }
+                connection.send(content: nil,
+                                contentContext: .finalMessage,
+                                isComplete: true,
+                                completion: .contentProcessed { error in
+                    completion(error.map { $0.transportError(op: .send) })
+                })
+            case .failed(let error):
+                completion(error)
+            default:
+                completion(TransportError.notConnected)
+            }
+        }
+    }
+
     /// Receives once. Completion: `(data, false, nil)` on data,
     /// `(nil, true, nil)` on EOF, `(nil, true, error)` on failure; fires on `queue`.
     func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {

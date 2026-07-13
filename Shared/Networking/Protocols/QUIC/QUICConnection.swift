@@ -203,8 +203,8 @@ nonisolated class QUICConnection {
     static let maxUDPPayload = 1452
 
     /// UDP payload ceiling when riding a `QUICDatagramTransport`: the RFC 9000 §14 floor (1200 B)
-    /// always fits the inner transport — larger sizes forced inner fragmentation and, with PMTUD
-    /// disabled for chained transports, wedged loss recovery at a too-large size forever.
+    /// always fits the inner transport — larger sizes force inner fragmentation and, with PMTUD
+    /// disabled for chained transports, wedge loss recovery at a too-large size forever.
     static let chainedMaxUDPPayload = 1200
 
     /// Reusable tx buffer; one slot suffices because ngtcp2 is single-threaded on `queue`.
@@ -819,7 +819,7 @@ nonisolated class QUICConnection {
         }
     }
 
-    // MARK: - Path-aware carrier I/O
+    // MARK: Path-aware carrier I/O
 
     /// Builds an `ngtcp2_path` over pinned copies of `local`/`remote` and runs `body`
     /// with it. ngtcp2 copies the addrs internally, so the copies need only outlive the call.
@@ -890,7 +890,7 @@ nonisolated class QUICConnection {
         carrier.onBetterPath = { [weak self] in self?.attemptProactiveMigration() }
     }
 
-    // MARK: - Migration
+    // MARK: Migration
 
     /// Migration applies only to the direct carrier, and only if we advertised support.
     private var migrationEnabled: Bool {

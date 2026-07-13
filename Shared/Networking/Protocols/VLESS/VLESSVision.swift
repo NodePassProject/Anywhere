@@ -23,7 +23,7 @@ private let tls13SupportedVersions: [UInt8] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x0
 private let tlsHandshakeTypeClientHello: UInt8 = 0x01
 private let tlsHandshakeTypeServerHello: UInt8 = 0x02
 
-/// TLS 1.3 cipher suites that support XTLS direct copy
+/// TLS 1.3 cipher suites that support XTLS direct copy.
 private let tls13CipherSuites: Set<UInt16> = [
     0x1301,  // TLS_AES_128_GCM_SHA256
     0x1302,  // TLS_AES_256_GCM_SHA384

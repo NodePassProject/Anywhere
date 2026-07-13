@@ -9797,7 +9797,7 @@
       "shouldTranslate" : false
     },
     "Multiplex" : {
-      "comment" : "Multiplex for Sudoku protocol HTTP Mask feature",
+      "comment" : "Multiplex for Sudoku protocol",
       "shouldTranslate" : false
     },
     "Muted" : {

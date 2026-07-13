@@ -93,15 +93,7 @@ extension TunnelStack {
         if datagram.dstPort == 53 {
             let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
             if let destination = TunnelStack.dnsDestination(for: dstIPString) {
-                if handleDNSQuery(
-                    payload: payload,
-                    srcIP: datagram.srcIPData,
-                    srcPort: datagram.srcPort,
-                    dstIP: datagram.dstIPData,
-                    dstPort: datagram.dstPort,
-                    isIPv6: isIPv6,
-                    destination: destination
-                ) {
+                if handleDNSQuery(datagram, destination: destination) {
                     return  // Fake response sent, no flow needed
                 }
                 // `.publicResolver` non-A/AAAA — fall through, proxy MX/SRV/TXT to real server
@@ -111,14 +103,7 @@ extension TunnelStack {
 
         // Block UDP: reject every datagram except DNS (port 53).
         if udpConfig.blockUDP && datagram.dstPort != 53 {
-            sendICMPPortUnreachable(
-                srcIP: datagram.srcIPData,
-                srcPort: datagram.srcPort,
-                dstIP: datagram.dstIPData,
-                dstPort: datagram.dstPort,
-                isIPv6: isIPv6,
-                udpPayloadLength: payload.count
-            )
+            sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
@@ -126,14 +111,7 @@ extension TunnelStack {
         // HTTP/3 clients fail fast and fall back to HTTP/2. Automatic mode is
         // decided post-resolution below (needs the routing result).
         if datagram.dstPort == 443 && udpConfig.quicPolicy.blocksAllQUIC {
-            sendICMPPortUnreachable(
-                srcIP: datagram.srcIPData,
-                srcPort: datagram.srcPort,
-                dstIP: datagram.dstIPData,
-                dstPort: datagram.dstPort,
-                isIPv6: isIPv6,
-                udpPayloadLength: payload.count
-            )
+            sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
@@ -141,14 +119,7 @@ extension TunnelStack {
         // negotiated ports, so classify by payload; runs before the flow lookup
         // so a candidate never opens a flow.
         if udpConfig.blockWebRTC && TunnelStack.isSTUNMessage(payload) {
-            sendICMPPortUnreachable(
-                srcIP: datagram.srcIPData,
-                srcPort: datagram.srcPort,
-                dstIP: datagram.dstIPData,
-                dstPort: datagram.dstPort,
-                isIPv6: isIPv6,
-                udpPayloadLength: payload.count
-            )
+            sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
@@ -167,85 +138,32 @@ extension TunnelStack {
         let srcIPData = datagram.srcIPData
         let dstIPData = datagram.dstIPData
 
-        var dstHost = dstIPString
-        var flowConfiguration = defaultConfiguration
-        // Committed routing identity; drives the dial path and the QUIC automatic check.
-        var routeTarget = defaultRouteTarget
-        var dstIsDomain = false
+        let decision = connectionRouter.decision(forIP: dstIPString, port: datagram.dstPort, proto: "UDP")
+        let dstHost = decision.host
+        let dstIsDomain = decision.hostIsResolvedDomain
 
-        // True until a routing rule matches — i.e. the default outbound is used.
-        var viaDefault = true
+        var flowConfiguration = defaultConfiguration
+        // Committed routing identity; drives the dial path and the QUIC automatic
+        // check. Read from the snapshot — the stored property is lwipQueue-owned.
+        var routeTarget = udpConfig.defaultRouteTarget
         // Rule set behind the committed route; nil while on the default.
         var ruleSetName: String? = nil
 
-        switch resolveFakeIP(dstIPString, dstPort: datagram.dstPort, proto: "UDP") {
-        case .passthrough:
-            if let match = domainRouter.matchIP(dstIPString) {
-                viaDefault = false
-                ruleSetName = match.ruleSetName
-                switch match.action {
-                case .direct:
-                    routeTarget = .direct
-                case .reject:
-                    requestLog.record(protocol: .udp, host: dstIPString, port: datagram.dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
-                    logger.debug("[UDP] IP rejected by routing rule: \(dstIPString):\(datagram.dstPort)")
-                    sendICMPPortUnreachable(
-                        srcIP: srcIPData,
-                        srcPort: datagram.srcPort,
-                        dstIP: dstIPData,
-                        dstPort: datagram.dstPort,
-                        isIPv6: isIPv6,
-                        udpPayloadLength: payload.count
-                    )
-                    return
-                case .proxy(let id):
-                    routeTarget = .proxy(id)
-                    if let configuration = domainRouter.resolveConfiguration(action: match.action) {
-                        flowConfiguration = configuration
-                    } else {
-                        logger.warning("[UDP] Routing config not found for \(dstIPString)")
-                    }
-                }
+        switch decision.action {
+        case .route(let target, let configuration, let matchedRuleSet):
+            routeTarget = target
+            ruleSetName = matchedRuleSet
+            if let configuration {
+                flowConfiguration = configuration
             }
-        case .resolved(let domain, let target, let configuration, let matchedRuleSet):
-            dstHost = domain
-            dstIsDomain = true
-            // `target == nil` → no domain rule matched; keep the default route.
-            switch target {
-            case .direct:
-                routeTarget = .direct
-                viaDefault = false
-                ruleSetName = matchedRuleSet
-            case .proxy(let id):
-                routeTarget = .proxy(id)
-                viaDefault = false
-                ruleSetName = matchedRuleSet
-                if let configuration {
-                    flowConfiguration = configuration
-                }
-            case .reject, .none:
-                break
-            }
-        case .drop(let domain, let matchedRuleSet):
-            requestLog.record(protocol: .udp, host: domain, port: datagram.dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
-            sendICMPPortUnreachable(
-                srcIP: srcIPData,
-                srcPort: datagram.srcPort,
-                dstIP: dstIPData,
-                dstPort: datagram.dstPort,
-                isIPv6: isIPv6,
-                udpPayloadLength: payload.count
-            )
+        case .routeViaDefault:
+            break
+        case .reject(let matchedRuleSet):
+            requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
+            sendICMPPortUnreachable(rejecting: datagram)
             return
         case .unreachable:
-            sendICMPPortUnreachable(
-                srcIP: srcIPData,
-                srcPort: datagram.srcPort,
-                dstIP: dstIPData,
-                dstPort: datagram.dstPort,
-                isIPv6: isIPv6,
-                udpPayloadLength: payload.count
-            )
+            sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
@@ -259,14 +177,7 @@ extension TunnelStack {
                mitmListed: dstIsDomain && udpConfig.mitmEnabled && mitmPolicy.matches(dstHost)
            ) {
             logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(isProxied ? "proxied" : "mitm")")
-            sendICMPPortUnreachable(
-                srcIP: srcIPData,
-                srcPort: datagram.srcPort,
-                dstIP: dstIPData,
-                dstPort: datagram.dstPort,
-                isIPv6: isIPv6,
-                udpPayloadLength: payload.count
-            )
+            sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
@@ -288,9 +199,10 @@ extension TunnelStack {
             logger.info("[UDP] flow pressure recovered; admitting new flows")
         }
 
-        requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: viaDefault, ruleSetName: ruleSetName)
+        requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: decision.viaDefault, ruleSetName: ruleSetName)
 
         let flow = UDPFlow(
+            stack: self,
             flowKey: flowKey,
             srcHost: srcHost,
             srcPort: datagram.srcPort,
@@ -326,6 +238,21 @@ extension TunnelStack {
     }
 
     // MARK: - Outbound UDP
+
+    /// Answers `datagram` with ICMP port-unreachable — sourced from the
+    /// original destination — so the sender abandons the destination fast
+    /// (QUIC fallback, stale fake IPs, blocked UDP). Callable from any queue.
+    func sendICMPPortUnreachable(rejecting datagram: UDPPacket.Inbound) {
+        guard let packet = ICMPPacket.portUnreachable(
+            srcIP: datagram.srcIPData,
+            srcPort: datagram.srcPort,
+            dstIP: datagram.dstIPData,
+            dstPort: datagram.dstPort,
+            isIPv6: datagram.isIPv6,
+            udpPayloadLength: datagram.payload.count
+        ) else { return }
+        enqueueOutbound(packet, isIPv6: datagram.isIPv6)
+    }
 
     /// Builds a UDP packet and queues it to the TUN output; callers pass the
     /// original 5-tuple swapped. Callable from any queue.

@@ -1,54 +1,52 @@
 //
-//  TunnelStack+ICMP.swift
+//  ICMPPacket.swift
 //  Anywhere
 //
-//  Created by NodePassProject on 3/30/26.
+//  Created by NodePassProject on 7/12/26.
 //
 
 import Foundation
 
-extension TunnelStack {
+/// Builders for synthesized ICMP control messages, mirroring ``UDPPacket``
+/// and ``DNSPacket``. Pure byte construction — no I/O.
+enum ICMPPacket {
 
-    // MARK: - ICMP Port Unreachable
-    //
-    // Sent for UDP to a stale fake IP (e.g. from a previous VPN session) so
-    // QUIC/UDP clients abandon it and re-resolve DNS instead of retrying forever.
-
-    /// `srcIP`/`dstIP` are the original datagram's raw source/destination bytes;
-    /// the builders swap them so the response appears to come from `dstIP`.
-    func sendICMPPortUnreachable(
+    /// Builds a port-unreachable reply for a UDP datagram. `srcIP`/`dstIP`
+    /// are the original datagram's raw source/destination bytes (4 for IPv4,
+    /// 16 for IPv6); the reply swaps them so it appears to come from `dstIP`.
+    /// Returns nil when the address bytes are unavailable.
+    static func portUnreachable(
         srcIP: Data,
         srcPort: UInt16,
         dstIP: Data,
         dstPort: UInt16,
         isIPv6: Bool,
         udpPayloadLength: Int
-    ) {
+    ) -> Data? {
         let packet: Data = srcIP.withUnsafeBytes { srcRaw in
             dstIP.withUnsafeBytes { dstRaw in
                 guard let source = srcRaw.baseAddress, let destination = dstRaw.baseAddress else {
                     return Data()
                 }
                 if isIPv6 {
-                    return buildICMPv6PortUnreachable(
+                    return ipv6PortUnreachable(
                         srcIP: source, srcPort: srcPort, dstIP: destination, dstPort: dstPort,
                         udpPayloadLength: udpPayloadLength
                     )
                 } else {
-                    return buildICMPv4PortUnreachable(
+                    return ipv4PortUnreachable(
                         srcIP: source, srcPort: srcPort, dstIP: destination, dstPort: dstPort,
                         udpPayloadLength: udpPayloadLength
                     )
                 }
             }
         }
-        guard !packet.isEmpty else { return }
-        enqueueOutbound(packet, isIPv6: isIPv6)
+        return packet.isEmpty ? nil : packet
     }
 
     /// Builds an IPv4 ICMP Destination Unreachable (Type 3, Code 3) packet.
     /// Contains a reconstructed original IPv4+UDP header per RFC 792.
-    private func buildICMPv4PortUnreachable(
+    private static func ipv4PortUnreachable(
         srcIP: UnsafeRawPointer,
         srcPort: UInt16,
         dstIP: UnsafeRawPointer,
@@ -137,7 +135,7 @@ extension TunnelStack {
 
     /// Builds an IPv6 ICMPv6 Destination Unreachable (Type 1, Code 4) packet.
     /// Contains a reconstructed original IPv6+UDP header per RFC 4443.
-    private func buildICMPv6PortUnreachable(
+    private static func ipv6PortUnreachable(
         srcIP: UnsafeRawPointer,
         srcPort: UInt16,
         dstIP: UnsafeRawPointer,

@@ -38,6 +38,10 @@ nonisolated class TunneledTransport: RawTransport {
         }
     }
 
+    func closeWrite(completion: @escaping (Error?) -> Void) {
+        tunnel.closeWrite(completion: completion)
+    }
+
     func forceCancel() {
         tunnel.cancel()
     }

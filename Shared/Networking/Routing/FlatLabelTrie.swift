@@ -93,11 +93,10 @@ nonisolated fileprivate struct LOUDSBitVector {
 //   • `labelBytes`/`labelOff` — each node's incoming edge label.
 //   • `payloadTable` — payloads for terminal nodes only, in terminal-rank order.
 //
-// Versus the previous CSR encoding this drops the per-node `edgeRangeStart` and
-// per-edge `edgeTarget` `Int32` arrays (child links are implicit in `louds`) and
-// the mostly-nil `[Payload?]` array (payloads are kept only at terminals),
-// roughly halving the footprint for large suffix sets while making lookups
-// faster than the old linear edge scan at high fan-out (e.g. many `*.com` rules).
+// Child links are implicit in `louds` — no per-node or per-edge pointer arrays —
+// and payloads are stored only at terminals, keeping the footprint small for
+// large suffix sets; the binary search over label-sorted children keeps lookup
+// fast at high fan-out (e.g. many `*.com` rules).
 nonisolated struct FlatLabelTrie<Payload> {
 
     // MARK: - Build state (dropped on freeze)
@@ -257,11 +256,11 @@ nonisolated struct FlatLabelTrie<Payload> {
 //
 // `buildBulk` avoids the `insert`/`freeze` `BuildNode` scratch tree, whose
 // `[String: BuildNode]` dictionaries run to tens of MB for hundreds of thousands
-// of sibling suffixes — transient scaffolding that overflowed the Network
+// of sibling suffixes — transient scaffolding that would overflow the Network
 // Extension memory limit. It sorts entries into reversed-label order, builds a
 // compact parallel-array node arena (labels referenced by offset, not copied),
 // then BFS-flattens that arena into the LOUDS arrays. Peak memory tracks output,
-// not input. A given trie uses one path or the other; `insert`/`freeze` stay for MITM.
+// not input. A given trie uses one build path or the other; MITM uses `insert`/`freeze`.
 
 nonisolated extension FlatLabelTrie {
     /// `offset`/`length` delimit the suffix's lowercased UTF-8 bytes in the

@@ -9,34 +9,47 @@ import Foundation
 
 enum TunnelConstants {
 
+    // MARK: - Tunnel Addresses
+
+    /// The tunnel's IPv4 interface/peer address; also the in-tunnel DNS
+    /// resolver apps are told to use. Shared by the provider's network
+    /// settings and the UDP/53 interception table.
+    static let tunnelAddressIPv4 = "10.8.0.1"
+    /// The tunnel's IPv6 interface address and in-tunnel DNS resolver,
+    /// advertised only when IPv6 is enabled.
+    static let tunnelAddressIPv6 = "fd00::1"
+
     // MARK: - Connection Timeouts
 
     /// Inactivity timeout for TCP connections.
     static let connectionIdleTimeout: TimeInterval = 300
-    /// Timeout after uplink (local → remote) finishes.
-    static let downlinkOnlyTimeout: TimeInterval = 1
-    /// Timeout after downlink (remote → local) finishes.
-    static let uplinkOnlyTimeout: TimeInterval = 1
+    /// Idle timeout once the app has FIN'd but the remote may still respond;
+    /// each downlink chunk refreshes it. Doubles as the stall bound for
+    /// TCPConnection's drain-before-close flush.
+    static let downlinkOnlyTimeout: TimeInterval = 5
+    /// Idle timeout once the remote EOF'd (forwarded to the app as a FIN) while
+    /// the app is still uploading; bounds apps that hold the socket open.
+    static let uplinkOnlyTimeout: TimeInterval = 5
     /// Timeout for the entire connection setup phase.
-    static let handshakeTimeout: TimeInterval = 60
+    static let handshakeTimeout: TimeInterval = 10
     /// Max wait for a TLS ClientHello before falling back to IP-based routing,
     /// so server-speaks-first protocols (SSH, SMTP, FTP) don't stall.
     static let sniffDeadline: TimeInterval = 0.5
 
     // MARK: - TCP Buffer Sizes
 
-    /// Max bytes per tcp_write call (16 KB ≈ 12 segments at TCP_MSS=1360); must stay in sync with lwipopts.h.
+    /// Max bytes per tcp_write call (16 KB ≈ 11 segments at TCP_MSS=1460); must stay in sync with lwipopts.h.
     static let tcpMaxWriteSize = 16 * 1024
     /// Max bytes per upload send; UInt16.max stays safe for protocols with 2-byte length framing (e.g. Vision padding).
     static let uploadChunkSize = Int(UInt16.max)
     /// Safety cap on per-connection pendingData; 2 × TCP_WND so it only fires on runaway bookkeeping drift.
-    static let tcpMaxPendingDataSize = 2 * 1024 * 1360
+    static let tcpMaxPendingDataSize = 2 * 1024 * 1460
     /// Max packets per writePackets call; 128 is the empirical utun ceiling (256 trips ENOSPC).
     static let tunnelMaxPacketsPerWrite = 128
 
     /// Downlink backlog low-water mark below which the next proxy receive is prefetched
     /// (otherwise downlink degrades to stop-and-wait); half TCP_SND_BUF (lwipopts.h).
-    static let drainLowWaterMark = 512 * 1360
+    static let drainLowWaterMark = 512 * 1460
 
     // MARK: - UDP Settings
 

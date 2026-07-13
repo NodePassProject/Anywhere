@@ -2,10 +2,7 @@
 //  TLSClientHelloSniffer.swift
 //  Anywhere
 //
-//  Incremental, bounds-checked parser that extracts the SNI hostname from an
-//  inbound TLS ClientHello, enabling domain-based routing for traffic that
-//  reaches the tunnel by real IP. Strictly passive; buffers at most
-//  tlsSnifferBufferLimit bytes.
+//  Created by NodePassProject on 7/13/26.
 //
 
 import Foundation

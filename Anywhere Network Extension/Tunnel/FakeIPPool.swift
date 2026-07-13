@@ -18,7 +18,7 @@ class FakeIPPool {
 
     // IPv4: 198.18.0.0/15, offsets 1...fakeIPPoolSize (LRU-capped).
     // IPv6: 2001:db8::/96 (RFC 3849), offset in low 32 bits. Prefix must stay inside
-    // the tunnel's routes (not bypassIPv6Routes) or fakes black-hole; rules out ULA.
+    // the tunnel's routes or fakes black-hole; rules out ULA.
 
     private class LRUNode {
         let offset: Int

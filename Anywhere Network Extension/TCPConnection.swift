@@ -23,13 +23,12 @@ private struct LWIPWriteFatalError: LocalizedError {
     }
 }
 
-private enum ProxyWriteCloseState: Equatable {
-    case idle
-    case closing
-    case finished
-}
-
 class TCPConnection {
+    /// The owning stack, for traffic accounting, MITM state, and teardown
+    /// coordination. Weak: the stack can stop while late completions on this
+    /// connection are still in flight.
+    private weak var stack: TunnelStack?
+
     let pcb: UnsafeMutableRawPointer
     let dstPort: UInt16
     let lwipQueue: DispatchQueue
@@ -128,7 +127,11 @@ class TCPConnection {
     private var sniffDeadline: DispatchWorkItem?
     private var uplinkDone = false
     private var downlinkDone = false
-    private var proxyWriteCloseState: ProxyWriteCloseState = .idle
+    private var closePending = false
+
+    private enum UplinkCloseState { case open, closing, closed }
+    private var uplinkCloseState: UplinkCloseState = .open
+    private var downlinkShutdownSent = false
 
     /// Logs this connection's terminal failure at most once.
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
@@ -139,7 +142,8 @@ class TCPConnection {
 
     // MARK: Lifecycle
 
-    init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
+    init(stack: TunnelStack,
+         pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
          configuration: ProxyConfiguration, routeTarget: RouteTarget,
          viaDefault: Bool,
          ruleSetName: String? = nil,
@@ -147,6 +151,7 @@ class TCPConnection {
          hostIsResolvedDomain: Bool = false,
          lwipQueue: DispatchQueue) {
         FlowGauge.incrementPendingTCP()
+        self.stack = stack
         self.pcb = pcb
         self.dstHost = dstHost
         self.dstPort = dstPort
@@ -227,8 +232,13 @@ class TCPConnection {
         sniffer != nil || httpSniffer != nil
     }
 
+    /// Starts on the tighter response-wait timeout when the app FIN'd during setup.
+    private var initialIdleTimeout: TimeInterval {
+        uplinkDone ? TunnelConstants.downlinkOnlyTimeout : TunnelConstants.connectionIdleTimeout
+    }
+
     private var mitmCanInterceptPlaintext: Bool {
-        TunnelStack.shared?.mitmEnabled == true
+        stack?.mitmEnabled == true
     }
 
     // MARK: - lwIP Callbacks (called on lwipQueue)
@@ -333,9 +343,9 @@ class TCPConnection {
             uploadPipeline.isPumpScheduled = false
         }
 
-        guard !closed, !uploadPipeline.sendInFlight, uploadBufferCount > 0,
-              let proxyConnection else {
-            finishConnectionIfReady()
+        guard !closed, !uploadPipeline.sendInFlight, uploadBufferCount > 0, let proxyConnection else {
+            propagateUplinkCloseIfReady()
+            attemptDeferredClose()
             return
         }
 
@@ -367,38 +377,41 @@ class TCPConnection {
         proxyConnection.send(data: chunk, completion: completion)
     }
 
-    private func closeProxyWriteIfReady() {
+    /// Forwards the app's FIN to the outbound leg once every buffered upload
+    /// byte has been accepted, so the remote sees data-then-EOS in order.
+    private func propagateUplinkCloseIfReady() {
         guard uplinkDone,
-              proxyWriteCloseState == .idle,
+              uplinkCloseState == .open,
               !uploadPipeline.sendInFlight,
               uploadBufferCount == 0,
-              let connection = proxyConnection as? ProxyConnectionWriteClosable else {
-            return
-        }
-        proxyWriteCloseState = .closing
+              let connection = proxyConnection else { return }
+        uplinkCloseState = .closing
         connection.closeWrite { [weak self] error in
             guard let self else { return }
             self.lwipQueue.async {
                 guard !self.closed else { return }
-                self.proxyWriteCloseState = .finished
+                self.uplinkCloseState = .closed
                 if let error {
                     self.reportFailure("Close write", error: error)
                     self.abort()
                 } else {
-                    self.finishConnectionIfReady()
+                    self.attemptDeferredClose()
                 }
             }
         }
     }
 
-    private func finishConnectionIfReady() {
-        guard !closed else { return }
-        closeProxyWriteIfReady()
-        guard uplinkDone, downlinkDone else { return }
-        if proxyConnection is ProxyConnectionWriteClosable {
-            guard proxyWriteCloseState == .finished else { return }
-        }
-        close()
+    /// Forwards the remote's EOF to the app as a FIN once the downlink backlog
+    /// has drained, leaving the app's uplink open (half-close) so read-until-close
+    /// protocols finish promptly; the full-close path supersedes this.
+    private func propagateDownlinkCloseIfReady() {
+        guard downlinkDone,
+              !downlinkShutdownSent,
+              !closed,
+              !closePending,
+              pendingWriteCount == 0 else { return }
+        downlinkShutdownSent = true
+        lwip_bridge_tcp_shutdown_tx(pcb)
     }
 
     /// Acks local-app bytes to lwIP once the proxy leg accepted them, then
@@ -406,7 +419,7 @@ class TCPConnection {
     private func acknowledgeReceivedBytes(_ byteCount: Int) {
         guard byteCount > 0 else { return }
         // Single uplink tally point; rejects call tcp_recved directly, uncounted.
-        TunnelStack.shared?.addBytesOut(Int64(byteCount), target: routeTarget)
+        stack?.addBytesOut(Int64(byteCount), target: routeTarget)
         var remaining = byteCount
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
@@ -467,10 +480,12 @@ class TCPConnection {
 
         // Propagate the orderly close through the inner TLS leg.
         mitmSession?.clientDidClose()
-
+        
         uplinkDone = true
-        finishConnectionIfReady()
-        if !downlinkDone {
+        propagateUplinkCloseIfReady()
+        if downlinkDone {
+            closeWhenDrained()
+        } else {
             activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
@@ -483,7 +498,7 @@ class TCPConnection {
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
-        } else if err == -13, TunnelStack.shared?.isTearingDown == true {
+        } else if err == -13, stack?.isTearingDown == true {
             // ERR_ABRT during deliberate teardown; otherwise it's an lwIP pressure abort and warns below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
         } else {
@@ -556,7 +571,7 @@ class TCPConnection {
 
     /// Evaluates routing from the sniffed SNI; call only after the sniffer is cleared.
     private func applySNI(_ sni: String) {
-        guard let stack = TunnelStack.shared else { return }
+        guard let stack else { return }
 
         // MITM (intercept TLS?) is decided independently of routing (which leg).
         if stack.mitmEnabled, stack.mitmPolicy.matches(sni) {
@@ -615,7 +630,7 @@ class TCPConnection {
 
     /// Enables plaintext MITM when a rewrite rule matches the request's authority.
     private func applyHTTPMITM(authority: String?) {
-        guard let stack = TunnelStack.shared, stack.mitmEnabled else { return }
+        guard let stack, stack.mitmEnabled else { return }
         let matchHost = hostIsResolvedDomain ? dstHost : authority
         guard let matchHost, stack.mitmPolicy.matches(matchHost) else { return }
         mitmEnabled = true
@@ -655,7 +670,7 @@ class TCPConnection {
                 self.handshakeTimer = nil
                 self.activityTimer = ActivityTimer(
                     queue: self.lwipQueue,
-                    timeout: TunnelConstants.connectionIdleTimeout
+                    timeout: self.initialIdleTimeout
                 ) { [weak self] in
                     guard let self, !self.closed else { return }
                     self.close()
@@ -695,7 +710,7 @@ class TCPConnection {
         
         let client = ProxyClient(
             configuration: configuration,
-            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+            isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         self.proxyClient = client
 
@@ -719,7 +734,7 @@ class TCPConnection {
                     self.handshakeTimer = nil
                     self.activityTimer = ActivityTimer(
                         queue: self.lwipQueue,
-                        timeout: TunnelConstants.connectionIdleTimeout
+                        timeout: self.initialIdleTimeout
                     ) { [weak self] in
                         guard let self, !self.closed else { return }
                         self.close()
@@ -746,7 +761,7 @@ class TCPConnection {
     // MARK: - MITM Session
 
     private func startMITMSession() {
-        guard let stack = TunnelStack.shared else { abort(); return }
+        guard let stack else { abort(); return }
         settlePendingAdmission()
         let sni = mitmSNI ?? dstHost
         
@@ -771,7 +786,7 @@ class TCPConnection {
         handshakeTimer = nil
         activityTimer = ActivityTimer(
             queue: lwipQueue,
-            timeout: TunnelConstants.connectionIdleTimeout
+            timeout: initialIdleTimeout
         ) { [weak self] in
             guard let self, !self.closed else { return }
             self.close()
@@ -812,7 +827,7 @@ class TCPConnection {
                     self.reportFailure("MITM", error: error)
                     self.abort()
                 } else {
-                    self.close()
+                    self.closeWhenDrained()
                 }
             }
         }
@@ -902,13 +917,13 @@ class TCPConnection {
             self.configuration = configuration
         }
         ruleSetName = resolved.ruleSetName
-        TunnelStack.shared?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: routeTarget, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
+        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: routeTarget, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
         return resolved.route
     }
 
     private func resolveUpstreamRoute(forDialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?) {
         // A rule matching the real dial host is an explicit route, never the default.
-        if let router = TunnelStack.shared?.domainRouter, let match = router.matchDomain(host) {
+        if let router = stack?.domainRouter, let match = router.matchDomain(host) {
             switch match.action {
             case .direct:
                 return (.direct, false, match.ruleSetName)
@@ -929,7 +944,7 @@ class TCPConnection {
     }
     
     private func defaultUpstreamRoute() -> UpstreamRoute {
-        guard let stack = TunnelStack.shared,
+        guard let stack,
               case .proxy = stack.defaultRouteTarget,
               let configuration = stack.configuration else {
             return .direct
@@ -966,7 +981,7 @@ class TCPConnection {
                                    completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
         let client = ProxyClient(
             configuration: configuration,
-            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+            isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         dial.cancel = { [weak client] in client?.cancel() }
         client.connect(to: host, port: port, initialData: nil) { [weak self] result in
@@ -992,9 +1007,11 @@ class TCPConnection {
 
     /// Issues the next proxy receive when the backlog is below `drainLowWaterMark`
     /// and none is in flight; overlapping receive with drain avoids stop-and-wait.
+    /// Stops for good once the downlink EOF'd — reading past EOF errors on some transports.
     private func tryArmReceive() {
         guard !closed,
               !receiveInFlight,
+              !downlinkDone,
               pendingWriteCount < TunnelConstants.drainLowWaterMark,
               let connection = proxyConnection else { return }
 
@@ -1011,16 +1028,19 @@ class TCPConnection {
                     self.abort()
                     return
                 }
-
+                
+                // nil and empty both mean EOF; transports never deliver zero-byte data.
                 guard let data, !data.isEmpty else {
                     self.downlinkDone = true
-                    self.finishConnectionIfReady()
-                    if !self.uplinkDone {
+                    if self.uplinkDone {
+                        self.closeWhenDrained()
+                    } else {
                         self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
+                        self.propagateDownlinkCloseIfReady()
                     }
                     return
                 }
-
+                
                 self.activityTimer?.update()
                 self.writeToLWIP(data)
             }
@@ -1057,7 +1077,7 @@ class TCPConnection {
     /// ordering lives in `pendingWrite`, so a prefetched receive can't race the drain.
     private func writeToLWIP(_ data: Data) {
         guard !closed, !data.isEmpty else { return }
-        TunnelStack.shared?.addBytesIn(Int64(data.count), target: routeTarget)
+        stack?.addBytesIn(Int64(data.count), target: routeTarget)
         pendingWrite.append(data)
         drainPendingWrite()
     }
@@ -1089,6 +1109,8 @@ class TCPConnection {
             guard !closed else { return }
 
             if written > 0 {
+                // Drain progress is activity; the tightened post-FIN timeout must not fire mid-backlog.
+                activityTimer?.update()
                 pendingWriteOffset += written
                 if pendingWriteOffset >= pendingWrite.count {
                     pendingWrite.removeAll(keepingCapacity: true)
@@ -1110,6 +1132,10 @@ class TCPConnection {
             }
         }
 
+        attemptDeferredClose()
+        guard !closed else { return }
+        propagateDownlinkCloseIfReady()
+
         // Prefetch the next chunk now that the backlog shrank.
         tryArmReceive()
     }
@@ -1130,6 +1156,32 @@ class TCPConnection {
         if written > 0 {
             lwip_bridge_tcp_output(pcb)
         }
+    }
+
+    /// Defers `close()` until both relay buffers drain — the downlink backlog owed
+    /// to lwIP and upload bytes the proxy leg hasn't accepted — since an immediate
+    /// close truncates both. Drain/pump tails finish via `attemptDeferredClose()`;
+    /// the activity timer bounds a stalled peer.
+    private func closeWhenDrained() {
+        guard !closed else { return }
+        closePending = true
+        activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeout)
+        attemptDeferredClose()
+    }
+
+    /// Gates the deferred close so `releaseProxy`'s cancel can't race the
+    /// forwarded FIN off the wire.
+    private var uplinkCloseSettled: Bool {
+        proxyConnection == nil || !uplinkDone || uplinkCloseState == .closed
+    }
+
+    private func attemptDeferredClose() {
+        guard closePending, !closed,
+              pendingWriteCount == 0,
+              uploadBufferCount == 0,
+              !uploadPipeline.sendInFlight,
+              uplinkCloseSettled else { return }
+        close()
     }
 
     func close() {
