@@ -128,7 +128,7 @@ class UDPFlow {
             switch quicError {
             case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
                 return true
-            case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
+            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamError, .timeout:
                 return false
             }
         }

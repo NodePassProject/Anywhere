@@ -44,6 +44,9 @@ nonisolated class QUICConnection {
         case streamClosedWithError(appErrorCode: UInt64)
         /// Queued DATAGRAM exceeded the path's max frame size and was dropped; re-fragment to `maxBound` for a retry.
         case datagramTooLarge(maxBound: Int)
+        /// An atomic DATAGRAM batch did not fit the bounded send queue. Nothing
+        /// from that batch was enqueued and the existing queue was unchanged.
+        case datagramQueueFull
         case timeout
         case closed
         /// Peer closed the whole connection with a benign code (transport NO_ERROR, or
@@ -58,6 +61,7 @@ nonisolated class QUICConnection {
             case .streamReset(let c): return "QUIC stream reset (app code \(c))"
             case .streamClosedWithError(let c): return "QUIC stream closed (app code \(c))"
             case .datagramTooLarge(let b): return "QUIC datagram exceeds path MTU (max \(b) B)"
+            case .datagramQueueFull: return "QUIC datagram send queue is full"
             case .timeout: return "QUIC timeout"
             case .closed: return "QUIC closed"
             case .closedOK: return "QUIC closed (OK)"
@@ -81,7 +85,9 @@ nonisolated class QUICConnection {
 
     fileprivate var state: State = .idle
     let queue: DispatchQueue
-    private static let queueKey = DispatchSpecificKey<Bool>()
+    /// Per-connection identity. A static Boolean key makes every QUIC queue look
+    /// like this instance's queue and can run ngtcp2 work on the wrong queue.
+    private let queueKey = DispatchSpecificKey<UInt8>()
 
     fileprivate var connectionOpaquePointer: OpaquePointer?
     private var connRefStorage = ngtcp2_crypto_conn_ref()
@@ -216,7 +222,7 @@ nonisolated class QUICConnection {
 
     // MARK: Init
 
-    var isOnQueue: Bool { DispatchQueue.getSpecific(key: Self.queueKey) == true }
+    var isOnQueue: Bool { DispatchQueue.getSpecific(key: queueKey) == 1 }
 
     init(host: String, port: UInt16, serverName: String? = nil, alpn: [String],
          datagramsEnabled: Bool = false, tuning: QUICTuning,
@@ -231,7 +237,7 @@ nonisolated class QUICConnection {
         self.obfuscator = obfuscator
         self.transport = transport
         self.queue = DispatchQueue(label: AWCore.Identifier.quicQueue, qos: .userInitiated)
-        queue.setSpecific(key: Self.queueKey, value: true)
+        queue.setSpecific(key: queueKey, value: 1)
     }
 
     // MARK: Connect
@@ -382,6 +388,50 @@ nonisolated class QUICConnection {
             self.enqueueDatagrams(pending)
             self.writeToUDP()
         }
+    }
+
+    /// Queues one logical packet's DATAGRAM fragments as an indivisible batch.
+    /// Capacity pressure rejects the new batch and never evicts existing frames.
+    func writeDatagramsAtomically(
+        _ datagrams: [Data],
+        completion: @escaping (Error?) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else { completion(QUICError.closed); return }
+            guard self.connectionOpaquePointer != nil, self.state == .connected else {
+                completion(QUICError.closed)
+                return
+            }
+            if datagrams.isEmpty {
+                completion(nil)
+                return
+            }
+            guard Self.canEnqueueDatagramBatch(
+                pendingCount: self.pendingDatagrams.count,
+                batchCount: datagrams.count
+            ) else {
+                completion(QUICError.datagramQueueFull)
+                return
+            }
+
+            var remaining = datagrams.count
+            var firstError: Error?
+            let onEach: ((Error?) -> Void) = { error in
+                if let error, firstError == nil { firstError = error }
+                remaining -= 1
+                if remaining == 0 { completion(firstError) }
+            }
+            self.pendingDatagrams.append(contentsOf: datagrams.map {
+                PendingDatagram(data: $0, completion: onEach)
+            })
+            self.writeToUDP()
+        }
+    }
+
+    static func canEnqueueDatagramBatch(pendingCount: Int, batchCount: Int) -> Bool {
+        guard pendingCount >= 0, batchCount >= 0,
+              pendingCount <= maxPendingDatagrams else { return false }
+        return batchCount <= maxPendingDatagrams - pendingCount
     }
 
     /// Appends with drop-oldest at `maxPendingDatagrams`; dropped completions fire so callers observe the overflow.
