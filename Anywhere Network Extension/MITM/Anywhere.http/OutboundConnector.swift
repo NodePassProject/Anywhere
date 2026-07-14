@@ -119,7 +119,7 @@ enum OutboundConnector {
         // Direct dial — not a proxied connection. TCPTransport has no dial timer,
         // so it stays out of the Dial metric automatically.
         let transport = TCPTransport(host: host, port: port)
-        let connection = DirectProxyConnection(connection: CallbackByteTransport(transport))
+        let connection = DirectProxyConnection(transport: transport)
         Task {
             do {
                 try await transport.connect()

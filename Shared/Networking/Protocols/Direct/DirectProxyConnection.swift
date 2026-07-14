@@ -2,60 +2,70 @@
 //  DirectProxyConnection.swift
 //  Anywhere
 //
-//  Created by NodePassProject on 1/26/26.
+//  Created by NodePassProject on 7/15/26.
 //
 
 import Foundation
 
-nonisolated class DirectProxyConnection: ProxyConnection {
-    let connection: any RawTransport
+nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Sendable {
 
-    init(connection: any RawTransport) {
-        self.connection = connection
+    private let transport: any AsyncByteTransport
+    
+    private struct SendJob: @unchecked Sendable {
+        let data: Data
+        let endOfStream: Bool
+        let completion: ((Error?) -> Void)?
     }
 
-    override var isConnected: Bool {
-        connection.isTransportReady
-    }
+    private let jobsContinuation: AsyncStream<SendJob>.Continuation
+    private let pump: Task<Void, Never>
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        connection.send(data: data, completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        connection.send(data: data)
-    }
-
-    override func closeWrite(completion: @escaping (Error?) -> Void) {
-        connection.closeWrite(completion: completion)
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        connection.receive() { [weak self] data, isComplete, error in
-            guard let self else {
-                completion(nil, nil)
-                return
-            }
-
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                if isComplete {
-                    completion(nil, nil)
-                } else {
-                    self.receive(completion: completion)
+    init(transport: any AsyncByteTransport) {
+        self.transport = transport
+        let (stream, continuation) = AsyncStream.makeStream(of: SendJob.self)
+        self.jobsContinuation = continuation
+        pump = Task {
+            for await job in stream {
+                do {
+                    if job.endOfStream {
+                        try await transport.finishSend()
+                    } else {
+                        try await transport.send(job.data)
+                    }
+                    job.completion?(nil)
+                } catch {
+                    job.completion?(error)
                 }
-                return
             }
+        }
+        super.init()
+    }
 
-            completion(data, nil)
+    deinit {
+        jobsContinuation.finish()
+        pump.cancel()
+    }
+
+    override var isConnected: Bool { transport.isReady }
+
+    override func sendRaw(_ data: Data) async throws {
+        try await transport.send(data)
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        switch try await transport.receive() {
+        case .bytes(let data): return data
+        case .end: return nil
         }
     }
 
+    override func closeWrite() async throws {
+        try await transport.finishSend()
+    }
+
     override func cancel() {
-        connection.forceCancel()
+        jobsContinuation.finish()
+        pump.cancel()
+        transport.cancel()
     }
 }

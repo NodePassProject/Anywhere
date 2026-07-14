@@ -750,7 +750,7 @@ class TCPConnection {
         // Direct/bypass — not a proxied connection. TCPTransport has no dial
         // timer, so it stays out of the Dial stat automatically.
         let transport = TCPTransport(host: dstHost, port: dstPort)
-        let connection = DirectProxyConnection(connection: CallbackByteTransport(transport))
+        let connection = DirectProxyConnection(transport: transport)
         self.proxyConnection = connection
         Task { [weak self] in
             let error: Error?
@@ -1059,7 +1059,7 @@ class TCPConnection {
         // Direct/bypass — not a proxied connection. TCPTransport has no dial
         // timer, so it stays out of the Dial stat automatically.
         let transport = TCPTransport(host: host, port: port)
-        let connection = DirectProxyConnection(connection: CallbackByteTransport(transport))
+        let connection = DirectProxyConnection(transport: transport)
         dial.cancel = { [weak connection] in connection?.cancel() }
         Task { [weak self] in
             let error: Error?

@@ -1059,7 +1059,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
                 return
             }
             self.releaseTransport(transport)
-            completion(.success(DirectProxyConnection(connection: CallbackByteTransport(transport))))
+            completion(.success(DirectProxyConnection(transport: transport)))
         }
     }
 

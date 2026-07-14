@@ -589,7 +589,7 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         if let tunnel = self.tunnel {
-            let directProxyConnection = DirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
+            let directProxyConnection = LegacyDirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
             sendProtocolHandshake(
                 over: directProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
@@ -611,7 +611,7 @@ nonisolated class ProxyClient {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
-                let directProxyConnection = DirectProxyConnection(connection: CallbackByteTransport(transport))
+                let directProxyConnection = DirectProxyConnection(transport: transport)
                 self.sendProtocolHandshake(
                     over: directProxyConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData,

@@ -122,7 +122,7 @@ extension ProxyClient {
                 } else {
                     wrappedTransport = transport
                 }
-                let proxyConnection = DirectProxyConnection(connection: wrappedTransport)
+                let proxyConnection = LegacyDirectProxyConnection(connection: wrappedTransport)
                 completion(.success(proxyConnection))
             }
         }
