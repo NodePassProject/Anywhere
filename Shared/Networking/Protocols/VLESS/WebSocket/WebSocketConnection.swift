@@ -51,7 +51,7 @@ nonisolated class WebSocketConnection {
         self.state = Mutex(ConnectionState(isConnected: true))
     }
 
-    convenience init(transport: TCPTransport, configuration: WebSocketConfiguration) {
+    convenience init(transport: any RawTransport, configuration: WebSocketConfiguration) {
         self.init(transport: TransportClosures(tcp: transport), configuration: configuration)
     }
 

@@ -33,6 +33,24 @@ extension RawTransport {
     nonisolated func closeWrite(completion: @escaping (Error?) -> Void) { completion(nil) }
 }
 
+// MARK: - RawDatagramTransport
+
+/// A connected datagram transport with a push receive surface — the datagram
+/// analogue of ``RawTransport``. Consumers depend on this protocol rather than a
+/// concrete transport.
+protocol RawDatagramTransport: AnyObject {
+    var isTransportReady: Bool { get }
+
+    func send(data: Data, completion: @escaping (Error?) -> Void)
+
+    func send(data: Data)
+
+    /// Arms the datagram handler; `errorHandler` fires once on terminal failure.
+    func startReceiving(queue: DispatchQueue?, handler: @escaping (Data) -> Void, errorHandler: ((Error) -> Void)?)
+
+    func cancel()
+}
+
 // MARK: - TransportError
 
 enum TransportError: Error, LocalizedError {

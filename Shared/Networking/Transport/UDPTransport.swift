@@ -15,8 +15,7 @@ nonisolated private let logger = AnywhereLogger(category: "UDPTransport")
 
 /// A connected-UDP transport backed by iOS 26's `NetworkConnection`.
 ///
-/// Stage 1 of the `NWConnection` → `NetworkConnection` migration: the public
-/// surface stays completion-handler / push based, while the underlying
+/// The public surface is completion-handler / push based, while the underlying
 /// connection uses `NetworkConnection`'s structured-concurrency API. A single
 /// driver `Task` owns the connection inside `withNetworkConnection`; a serial
 /// state queue bridges the callbacks. The connection is started by the driver's
@@ -297,7 +296,7 @@ nonisolated final class UDPTransport: @unchecked Sendable {
                 try await conn.send(data)
                 queue.async { [self] in completeSend(nil) }
             } catch {
-                let mapped = Self.mapError(error, op: .send)
+                let mapped = TransportError.from(error, op: .send)
                 queue.async { [self] in completeSend(mapped) }
             }
         }
@@ -316,7 +315,7 @@ nonisolated final class UDPTransport: @unchecked Sendable {
                 }
             }
         } catch {
-            let mapped = Self.mapError(error, op: .receive)
+            let mapped = TransportError.from(error, op: .receive)
             queue.async { [self] in fail(with: mapped) }
             throw error
         }
@@ -456,8 +455,8 @@ nonisolated final class UDPTransport: @unchecked Sendable {
     /// A driver exit outside the cancel path: resolve the connect and fail the
     /// transport. No-ops once those have already fired.
     private func handleDriverError(_ error: Error) {
-        fireConnectCompletion(Self.mapError(error, op: .connect))
-        fail(with: Self.mapError(error, op: .receive))
+        fireConnectCompletion(TransportError.from(error, op: .connect))
+        fail(with: TransportError.from(error, op: .receive))
     }
 
     /// Fires every buffered send completion with `error`, in order.
@@ -516,10 +515,7 @@ nonisolated final class UDPTransport: @unchecked Sendable {
         }
     }
 
-    /// Maps a `NetworkConnection` throw to a `TransportError` for operation `op`.
-    private static func mapError(_ error: Error, op: TransportError.Operation) -> Error {
-        if error is CancellationError { return TransportError.connectionFailed("Cancelled") }
-        if let nwError = error as? NWError { return nwError.transportError(op: op) }
-        return TransportError.connectionFailed(error.localizedDescription)
-    }
 }
+
+// `UDPTransport` already provides the full `RawDatagramTransport` surface.
+extension UDPTransport: RawDatagramTransport {}

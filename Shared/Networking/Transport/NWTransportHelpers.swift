@@ -40,6 +40,28 @@ extension NWError {
 
 }
 
+// MARK: - TransportError mapping
+
+extension TransportError {
+
+    /// Maps an arbitrary throw from a `NetworkConnection` connect/send/receive to
+    /// a `TransportError` for operation `op`. Shared by the byte-stream and
+    /// datagram transports.
+    nonisolated static func from(_ error: Error, op: Operation) -> TransportError {
+        if error is CancellationError { return .connectionFailed("Cancelled") }
+        if let nwError = error as? NWError { return nwError.transportError(op: op) }
+        return .connectionFailed(error.localizedDescription)
+    }
+
+    /// The raw `errno` for such a throw; the QUIC datagram carrier feeds a code to
+    /// ngtcp2 rather than a `TransportError`.
+    nonisolated static func errnoCode(from error: Error) -> Int32 {
+        if error is CancellationError { return ECANCELED }
+        if let nwError = error as? NWError, case .posix(let posix) = nwError { return posix.rawValue }
+        return -1
+    }
+}
+
 // MARK: - NWEndpoint.Host
 
 extension NWEndpoint.Host {

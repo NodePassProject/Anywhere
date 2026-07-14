@@ -14,9 +14,8 @@ nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
 /// Carries QUIC's UDP datagrams for ngtcp2, backed by iOS 26's `NetworkConnection`.
 ///
-/// Stage 1 of the `NWConnection` → `NetworkConnection` migration: the public
-/// surface stays synchronous and runs on the owner-provided `queue`, while a
-/// driver `Task` owns the connection inside `withNetworkConnection`. The path
+/// The public surface is synchronous and runs on the owner-provided `queue`, while
+/// a driver `Task` owns the connection inside `withNetworkConnection`. The path
 /// callbacks (`onPathDown`/`onBetterPath`/`onReady`) map to
 /// `onViabilityUpdate`/`onBetterPathUpdate`/`onStateUpdate`; `currentInterfaceType`
 /// is cached from the path so it stays synchronously readable on `queue`.
@@ -175,10 +174,10 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                         let interfaceType = connection.currentPath?.availableInterfaces.first?.type
                         self.queue.async { self.handleReady(interfaceType: interfaceType) }
                     case .failed(let error):
-                        let code = Self.errnoCode(from: error)
+                        let code = TransportError.errnoCode(from: error)
                         self.queue.async { self.deliverError(code) }
                     case .waiting(let error):
-                        let code = Self.errnoCode(from: error)
+                        let code = TransportError.errnoCode(from: error)
                         self.queue.async { self.handleWaiting(code) }
                     default:
                         break  // .setup, .preparing, .cancelled
@@ -236,7 +235,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 }
             }
         } catch {
-            let code = Self.errnoCode(from: error)
+            let code = TransportError.errnoCode(from: error)
             queue.async { [self] in deliverError(code) }
             throw error
         }
@@ -318,13 +317,6 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         guard flowCounted else { return }
         flowCounted = false
         FlowGauge.decrementUDP()
-    }
-
-    /// Maps a `NetworkConnection` throw / `NWError` to an `errno`.
-    private static func errnoCode(from error: Error) -> Int32 {
-        if error is CancellationError { return ECANCELED }
-        if let nwError = error as? NWError, case .posix(let posix) = nwError { return posix.rawValue }
-        return -1
     }
 
     // MARK: - Address conversion

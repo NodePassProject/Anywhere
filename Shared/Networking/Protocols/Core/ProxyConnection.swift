@@ -96,6 +96,56 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
         sendRaw(data: data)
     }
 
+    // MARK: Async Surface
+
+    // An async-native surface over the same primitives. The defaults bridge to the
+    // callback methods, so every decorator gains a working async surface for free; a
+    // decorator can override the async raw methods to run natively over an async
+    // transport, deleting a bridge hop. Task cancellation surfaces as the underlying
+    // callback firing with an error (transports complete pending work on cancel).
+
+    /// Sends `data`, tracking traffic stats. Async analogue of `send(data:completion:)`.
+    func send(_ data: Data) async throws {
+        _bytesSent.wrappingAdd(Int64(data.count), ordering: .relaxed)
+        try await sendRaw(data)
+    }
+
+    /// Receives once; `nil` signals EOF. Async analogue of `receive(completion:)`.
+    func receive() async throws -> Data? {
+        let data = try await receiveRaw()
+        if let data, !data.isEmpty {
+            _bytesReceived.wrappingAdd(Int64(data.count), ordering: .relaxed)
+        }
+        return data
+    }
+
+    /// Async raw send. Defaults to bridging `sendRaw(data:completion:)`.
+    func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    /// Async raw receive; `nil` (or empty) == EOF. Defaults to bridging `receiveRaw(completion:)`.
+    func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    /// Async half-close. Defaults to bridging `closeWrite(completion:)`.
+    func closeWrite() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            closeWrite { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
     // MARK: Half-Close
 
     /// Finishes the send direction — the streaming analogue of `shutdown(SHUT_WR)`:

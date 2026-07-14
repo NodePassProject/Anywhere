@@ -47,7 +47,7 @@ nonisolated class HTTPUpgradeConnection {
         self.state = Mutex(ConnectionState(isConnected: true))
     }
 
-    convenience init(transport: TCPTransport, configuration: HTTPUpgradeConfiguration) {
+    convenience init(transport: any RawTransport, configuration: HTTPUpgradeConfiguration) {
         self.init(transport: TransportClosures(tcp: transport), configuration: configuration)
     }
 

@@ -61,16 +61,16 @@ extension ProxyClient {
             self.tunnel = nil
             wrapAndComplete(tunnel)
         } else {
-            let transport = UDPTransport()
+            let transport = AsyncUDPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
-            transport.connect(host: directDialHost,
-                           port: configuration.serverPort,
-                           completionQueue: .global()) { error in
-                if let error {
+            Task {
+                do {
+                    try await transport.connect()
+                } catch {
                     completion(.failure(error))
                     return
                 }
-                wrapAndComplete(DirectUDPProxyConnection(transport: transport))
+                wrapAndComplete(DirectUDPProxyConnection(transport: CallbackDatagramTransport(transport)))
             }
         }
     }

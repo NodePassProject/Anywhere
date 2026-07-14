@@ -15,9 +15,8 @@ nonisolated private let logger = AnywhereLogger(category: "TCPTransport")
 
 /// A TCP byte-stream transport backed by iOS 26's `NetworkConnection`.
 ///
-/// Stage 1 of the `NWConnection` → `NetworkConnection` migration: the public
-/// surface stays completion-handler based, while the underlying connection uses
-/// `NetworkConnection`'s structured-concurrency API. A single driver `Task` owns
+/// The public surface is completion-handler based, while the underlying connection
+/// uses `NetworkConnection`'s structured-concurrency API. A single driver `Task` owns
 /// the connection inside `withNetworkConnection`; the completion-handler API is
 /// bridged to it through a serial state queue and two async pipelines (ordered
 /// sends, one-at-a-time receives). Cancellation is task cancellation.
@@ -363,11 +362,11 @@ nonisolated final class TCPTransport: RawTransport, @unchecked Sendable {
                 }
             } catch {
                 if job.isEstablish {
-                    let mapped = Self.mapError(error, op: .connect)
+                    let mapped = TransportError.from(error, op: .connect)
                     queue.async { [self] in finishConnectFailure(mapped) }
                     throw error  // dial failed: tear the connection down
                 }
-                let mapped = Self.mapError(error, op: .send)
+                let mapped = TransportError.from(error, op: .send)
                 queue.async { [self] in completeSend(mapped) }
             }
         }
@@ -385,7 +384,7 @@ nonisolated final class TCPTransport: RawTransport, @unchecked Sendable {
             } catch {
                 // Fail the leg atomically: transition to `.failed` and notify the
                 // in-flight receive in one hop, then tear the connection down.
-                let mapped = Self.mapError(error, op: .receive)
+                let mapped = TransportError.from(error, op: .receive)
                 queue.async { [self] in failActive(with: mapped) }
                 throw error
             }
@@ -529,9 +528,9 @@ nonisolated final class TCPTransport: RawTransport, @unchecked Sendable {
     /// fail the active leg. No-ops once the relevant completion has already fired.
     private func handleDriverError(_ error: Error) {
         if connectCompletion != nil {
-            finishConnectFailure(Self.mapError(error, op: .connect))
+            finishConnectFailure(TransportError.from(error, op: .connect))
         } else {
-            failActive(with: Self.mapError(error, op: .receive))
+            failActive(with: TransportError.from(error, op: .receive))
         }
     }
 
@@ -602,10 +601,4 @@ nonisolated final class TCPTransport: RawTransport, @unchecked Sendable {
             .connectionTimeout(UInt32(Self.connectTimeout))
     }
 
-    /// Maps a `NetworkConnection` throw to a `TransportError` for operation `op`.
-    private static func mapError(_ error: Error, op: TransportError.Operation) -> Error {
-        if error is CancellationError { return TransportError.connectionFailed("Cancelled") }
-        if let nwError = error as? NWError { return nwError.transportError(op: op) }
-        return TransportError.connectionFailed(error.localizedDescription)
-    }
 }

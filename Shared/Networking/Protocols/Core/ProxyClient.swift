@@ -596,11 +596,14 @@ nonisolated class ProxyClient {
                 supportsVision: transportSupportsVision, completion: completion
             )
         } else {
-            let transport = TCPTransport()
+            let supportsVision = transportSupportsVision
+            let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
 
-            transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
-                if let error {
+            Task { [weak self] in
+                do {
+                    try await transport.connect()
+                } catch {
                     completion(.failure(error))
                     return
                 }
@@ -608,11 +611,11 @@ nonisolated class ProxyClient {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
-                let directProxyConnection = DirectProxyConnection(connection: transport)
+                let directProxyConnection = DirectProxyConnection(connection: CallbackByteTransport(transport))
                 self.sendProtocolHandshake(
                     over: directProxyConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData,
-                    supportsVision: transportSupportsVision, completion: completion
+                    supportsVision: supportsVision, completion: completion
                 )
             }
         }
@@ -752,11 +755,13 @@ nonisolated class ProxyClient {
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                let transport = TCPTransport()
+                let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
                 self.own(transport)
 
-                transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
-                    if let error {
+                Task { [weak self] in
+                    do {
+                        try await transport.connect()
+                    } catch {
                         completion(.failure(error))
                         return
                     }
@@ -764,7 +769,7 @@ nonisolated class ProxyClient {
                         completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                         return
                     }
-                    let wsConnection = WebSocketConnection(transport: transport, configuration: wsConfig)
+                    let wsConnection = WebSocketConnection(transport: CallbackByteTransport(transport), configuration: wsConfig)
                     self.performWebSocketUpgrade(
                         wsConnection: wsConnection, command: command, destinationHost: destinationHost,
                         destinationPort: destinationPort, initialData: initialData, completion: completion
@@ -851,11 +856,13 @@ nonisolated class ProxyClient {
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                let transport = TCPTransport()
+                let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
                 self.own(transport)
 
-                transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
-                    if let error {
+                Task { [weak self] in
+                    do {
+                        try await transport.connect()
+                    } catch {
                         completion(.failure(error))
                         return
                     }
@@ -863,7 +870,7 @@ nonisolated class ProxyClient {
                         completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                         return
                     }
-                    let huConnection = HTTPUpgradeConnection(transport: transport, configuration: huConfig)
+                    let huConnection = HTTPUpgradeConnection(transport: CallbackByteTransport(transport), configuration: huConfig)
                     self.performHTTPUpgrade(
                         huConnection: huConnection, command: command, destinationHost: destinationHost,
                         destinationPort: destinationPort, initialData: initialData, completion: completion
@@ -1016,10 +1023,12 @@ nonisolated class ProxyClient {
                 destinationPort: destinationPort, initialData: initialData, completion: completion
             )
         } else {
-            let transport = TCPTransport()
+            let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
-            transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
-                if let error {
+            Task { [weak self] in
+                do {
+                    try await transport.connect()
+                } catch {
                     completion(.failure(error))
                     return
                 }
@@ -1027,7 +1036,7 @@ nonisolated class ProxyClient {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
-                let grpcConnection = GRPCConnection(transport: transport, configuration: grpcConfig, authority: authority)
+                let grpcConnection = GRPCConnection(transport: CallbackByteTransport(transport), configuration: grpcConfig, authority: authority)
                 self.performGRPCSetup(
                     grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData, completion: completion

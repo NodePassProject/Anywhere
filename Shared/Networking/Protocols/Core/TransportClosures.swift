@@ -18,7 +18,7 @@ struct TransportClosures {
 // MARK: - Transport adapters
 
 extension TransportClosures {
-    init(tcp transport: TCPTransport) {
+    init(tcp transport: any RawTransport) {
         self.init(
             send: { data, completion in
                 transport.send(data: data, completion: completion)

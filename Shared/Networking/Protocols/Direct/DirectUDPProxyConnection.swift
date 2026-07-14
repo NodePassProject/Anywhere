@@ -11,7 +11,7 @@ import Synchronization
 /// Adapts a push-based `UDPTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
-    private let transport: UDPTransport
+    private let transport: any RawDatagramTransport
 
     private struct ReceiveState {
         var recvBuffer: [Data] = []
@@ -26,7 +26,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
     /// Bounds memory under a burst the consumer hasn't drained yet.
     private static let maxBufferedDatagrams = 1024
 
-    init(transport: UDPTransport) {
+    init(transport: any RawDatagramTransport) {
         self.transport = transport
         super.init()
     }
@@ -76,7 +76,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
         }
 
         if shouldStartReceiving {
-            transport.startReceiving(handler: { [weak self] data in
+            transport.startReceiving(queue: nil, handler: { [weak self] data in
                 self?.deliverIncoming(data)
             }, errorHandler: { [weak self] error in
                 self?.deliverError(error)

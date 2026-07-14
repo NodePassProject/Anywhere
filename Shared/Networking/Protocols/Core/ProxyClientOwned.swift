@@ -24,7 +24,15 @@ extension TCPTransport: AwaitableProxyClientOwned {
     func releaseOwned(completion: @escaping @Sendable () -> Void) { forceCancel(completion: completion) }
 }
 
+extension AsyncTCPTransport: ProxyClientOwned {
+    func releaseOwned() { cancel() }
+}
+
 extension UDPTransport: ProxyClientOwned {
+    func releaseOwned() { cancel() }
+}
+
+extension AsyncUDPTransport: ProxyClientOwned {
     func releaseOwned() { cancel() }
 }
 
