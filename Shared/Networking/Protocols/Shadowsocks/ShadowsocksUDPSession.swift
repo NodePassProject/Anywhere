@@ -80,7 +80,10 @@ nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Mutable state (all on `delegateQueue`)
 
-    private let transport = UDPTransport()
+    /// The async-native datagram transport; `connect()` is awaited in `beginConnect`.
+    private let asyncTransport: UDPTransport
+    /// Callback-surface adapter over `asyncTransport` for this session's push-based send/receive.
+    private let transport: any RawDatagramTransport
     private var state: State = .idle
 
     private var nextToken: Token = 0
@@ -120,6 +123,10 @@ nonisolated final class ShadowsocksUDPSession {
         self.serverHost = serverHost
         self.serverPort = serverPort
         self.delegateQueue = delegateQueue
+
+        let asyncTransport = UDPTransport(host: serverHost, port: serverPort)
+        self.asyncTransport = asyncTransport
+        self.transport = CallbackDatagramTransport(asyncTransport)
 
         switch mode {
         case .ss2022AES(let cipher, let pskList):
@@ -262,34 +269,52 @@ nonisolated final class ShadowsocksUDPSession {
 
     private func beginConnect() {
         state = .connecting
-        transport.connect(host: serverHost, port: serverPort, completionQueue: delegateQueue) { [weak self] error in
+        let asyncTransport = self.asyncTransport
+        Task { [weak self] in
+            let connectResult: Result<Void, Error>
+            do {
+                try await asyncTransport.connect()
+                connectResult = .success(())
+            } catch {
+                connectResult = .failure(error)
+            }
             guard let self else { return }
-            if case .cancelled = self.state { return }
-
-            if let error {
-                self.state = .failed(error)
-                self.transport.cancel()
-                self.notifyAllFlows(error: error)
-                self.pendingSends.removeAll()
-                return
+            // Resume on delegateQueue so state mutations and callbacks stay serialized there.
+            self.delegateQueue.async { [weak self] in
+                guard let self else { return }
+                self.finishConnect(connectResult)
             }
+        }
+    }
 
-            self.state = .ready
+    /// Completes the dial on `delegateQueue`: arms the receive loop and drains buffered sends,
+    /// or fails the session.
+    private func finishConnect(_ result: Result<Void, Error>) {
+        if case .cancelled = state { return }
 
-            // Receive on delegateQueue so handlers run on the same queue as state mutations.
-            self.transport.startReceiving(queue: self.delegateQueue, handler: { [weak self] data in
-                self?.handleReceivedDatagram(data)
-            }, errorHandler: { [weak self] error in
-                self?.handleTransportError(error)
-            })
+        if case .failure(let error) = result {
+            state = .failed(error)
+            transport.cancel()
+            notifyAllFlows(error: error)
+            pendingSends.removeAll()
+            return
+        }
 
-            // Drain anything queued while connecting, preserving order.
-            let flushes = self.pendingSends
-            self.pendingSends.removeAll()
-            for pendingSend in flushes {
-                self.sendNow(dstHost: pendingSend.dstHost, dstPort: pendingSend.dstPort,
-                             payload: pendingSend.payload, completion: pendingSend.completion)
-            }
+        state = .ready
+
+        // Receive on delegateQueue so handlers run on the same queue as state mutations.
+        transport.startReceiving(queue: delegateQueue, handler: { [weak self] data in
+            self?.handleReceivedDatagram(data)
+        }, errorHandler: { [weak self] error in
+            self?.handleTransportError(error)
+        })
+
+        // Drain anything queued while connecting, preserving order.
+        let flushes = pendingSends
+        pendingSends.removeAll()
+        for pendingSend in flushes {
+            sendNow(dstHost: pendingSend.dstHost, dstPort: pendingSend.dstPort,
+                    payload: pendingSend.payload, completion: pendingSend.completion)
         }
     }
 

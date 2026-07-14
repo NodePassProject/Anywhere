@@ -116,18 +116,22 @@ enum OutboundConnector {
         host: String, port: UInt16,
         queue: DispatchQueue, completion: @escaping (Result<Dialed, Error>) -> Void
     ) {
-        let transport = TCPTransport()
-        // Direct dial — not a proxied connection, so keep it out of the Dial metric.
-        transport.dialTimer.enabled = false
-        let connection = DirectProxyConnection(connection: transport)
-        transport.connect(host: host, port: port) { error in
-            queue.async {
-                if let error {
+        // Direct dial — not a proxied connection. TCPTransport has no dial timer,
+        // so it stays out of the Dial metric automatically.
+        let transport = TCPTransport(host: host, port: port)
+        let connection = DirectProxyConnection(connection: CallbackByteTransport(transport))
+        Task {
+            do {
+                try await transport.connect()
+            } catch {
+                queue.async {
                     connection.cancel()
                     completion(.failure(error))
-                } else {
-                    completion(.success(Dialed(connection: connection, proxyClient: nil)))
                 }
+                return
+            }
+            queue.async {
+                completion(.success(Dialed(connection: connection, proxyClient: nil)))
             }
         }
     }

@@ -1,5 +1,5 @@
 //
-//  AsyncTCPTransport.swift
+//  TCPTransport.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 7/14/26.
@@ -9,19 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-// MARK: - AsyncTCPTransport
-
-/// A TCP byte-stream transport with an async-native surface, backed by an iOS 26
-/// `NetworkConnection`.
-///
-/// A `OneToOneProtocol` connection has no manual `start()`/`cancel()`: its lifetime
-/// is the `withNetworkConnection` scope. A single lightweight driver task holds
-/// that scope open and publishes the connection; ``send(_:)``/``receive()`` then
-/// await the connection *directly* — the `await` is the ordering and backpressure,
-/// so there is no `AsyncStream` send feeder, pending-completion FIFO, or receive
-/// token stream. Teardown is ``cancel()`` (or a viability drop); state protection
-/// stays with a `Mutex`.
-nonisolated final class AsyncTCPTransport: AsyncByteTransport, @unchecked Sendable {
+nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
 
     // MARK: Constants
 
@@ -83,7 +71,7 @@ nonisolated final class AsyncTCPTransport: AsyncByteTransport, @unchecked Sendab
         }
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
-        let slot = FlowSlot(.tcp, context: "[AsyncTCP] \(endpointDescription)")
+        let slot = FlowSlot(.tcp, context: "[TCP] \(endpointDescription)")
 
         let started: Bool = state.withLock { state in
             guard !state.cancelled else { return false }

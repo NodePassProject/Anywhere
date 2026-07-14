@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-/// Adapts a push-based `UDPTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
+/// Adapts a push-based `RawDatagramTransport` to a pull-based `ProxyConnection`; the receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
     private let transport: any RawDatagramTransport

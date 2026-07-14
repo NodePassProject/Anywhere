@@ -835,7 +835,7 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
         for connection in drained.toClose { connection.cancel() }
         for client in drained.clients { client.cancel() }
         for client in drained.tlsClients { client.cancel() }
-        for transport in drained.transports { transport.forceCancel() }
+        for transport in drained.transports { transport.cancel() }
     }
 
     private func awaitConnection(
@@ -1045,15 +1045,21 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
             return
         }
 
-        let transport = TCPTransport()
+        let transport = TCPTransport(host: directDialHost, port: port)
         guard retainTransport(transport) else {
             completion(.failure(SudokuNativeError.closed))
             return
         }
-        transport.connect(host: directDialHost, port: port) { error in
+        Task {
+            do {
+                try await transport.connect()
+            } catch {
+                self.releaseTransport(transport)
+                completion(.failure(error))
+                return
+            }
             self.releaseTransport(transport)
-            if let error { completion(.failure(error)) }
-            else { completion(.success(DirectProxyConnection(connection: transport))) }
+            completion(.success(DirectProxyConnection(connection: CallbackByteTransport(transport))))
         }
     }
 

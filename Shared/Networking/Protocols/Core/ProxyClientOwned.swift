@@ -19,20 +19,11 @@ protocol AwaitableProxyClientOwned: ProxyClientOwned {
 
 // MARK: - Transports
 
-extension TCPTransport: AwaitableProxyClientOwned {
-    func releaseOwned() { forceCancel() }
-    func releaseOwned(completion: @escaping @Sendable () -> Void) { forceCancel(completion: completion) }
-}
-
-extension AsyncTCPTransport: ProxyClientOwned {
+extension TCPTransport: ProxyClientOwned {
     func releaseOwned() { cancel() }
 }
 
 extension UDPTransport: ProxyClientOwned {
-    func releaseOwned() { cancel() }
-}
-
-extension AsyncUDPTransport: ProxyClientOwned {
     func releaseOwned() { cancel() }
 }
 

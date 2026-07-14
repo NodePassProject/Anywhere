@@ -22,7 +22,7 @@ nonisolated final class FlowSlot: @unchecked Sendable {
     enum Kind { case tcp, udp }
 
     private let kind: Kind
-    /// Diagnostic context for the deinit-recovery log (e.g. "[AsyncTCP] host:port").
+    /// Diagnostic context for the deinit-recovery log (e.g. "[TCP] host:port").
     private let context: String
     private let released = Atomic<Bool>(false)
 

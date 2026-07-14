@@ -58,11 +58,13 @@ nonisolated class RealityClient {
         }
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = TCPTransport()
-        self.connection = transport
+        let transport = TCPTransport(host: host, port: port)
+        self.connection = CallbackByteTransport(transport)
 
-        transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
-            if let error {
+        Task { [weak self] in
+            do {
+                try await transport.connect(initialData: clientHello)
+            } catch {
                 completion(.failure(RealityError.connectionFailed(error.localizedDescription)))
                 return
             }

@@ -1,5 +1,5 @@
 //
-//  AsyncUDPTransport.swift
+//  UDPTransport.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 7/14/26.
@@ -9,18 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-// MARK: - AsyncUDPTransport
-
-/// A connected-UDP transport with an async-native surface, backed by an iOS 26
-/// `NetworkConnection`.
-///
-/// The datagram sibling of ``AsyncTCPTransport``: a lightweight driver task holds
-/// the `withNetworkConnection` scope open and publishes the connection, and
-/// ``send(_:)``/``receive()`` await it directly — one `send`/`receive` per
-/// datagram, boundaries preserved. Unlike TCP there is no handshake, so readiness
-/// is the connection reaching `.ready` (an establish send would put a spurious
-/// empty datagram on the wire). Teardown is ``cancel()`` or a viability drop.
-nonisolated final class AsyncUDPTransport: AsyncDatagramTransport, @unchecked Sendable {
+nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendable {
 
     // MARK: Constants
 
@@ -74,7 +63,7 @@ nonisolated final class AsyncUDPTransport: AsyncDatagramTransport, @unchecked Se
         }
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
-        let slot = FlowSlot(.udp, context: "[AsyncUDP] \(endpointDescription)")
+        let slot = FlowSlot(.udp, context: "[UDP] \(endpointDescription)")
 
         let started: Bool = state.withLock { state in
             guard !state.cancelled else { return false }

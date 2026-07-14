@@ -650,12 +650,19 @@ class TCPConnection {
             pendingData.removeAll(keepingCapacity: true)
         }
 
-        let transport = TCPTransport()
-        // Direct/bypass — not a proxied connection, so exclude it from the Dial stat.
-        transport.dialTimer.enabled = false
-        let connection = DirectProxyConnection(connection: transport)
+        // Direct/bypass — not a proxied connection. TCPTransport has no dial
+        // timer, so it stays out of the Dial stat automatically.
+        let transport = TCPTransport(host: dstHost, port: dstPort)
+        let connection = DirectProxyConnection(connection: CallbackByteTransport(transport))
         self.proxyConnection = connection
-        transport.connect(host: dstHost, port: dstPort) { [weak self] error in
+        Task { [weak self] in
+            let error: Error?
+            do {
+                try await transport.connect()
+                error = nil
+            } catch let dialError {
+                error = dialError
+            }
             guard let self else { return }
 
             self.lwipQueue.async { [self] in
@@ -954,12 +961,19 @@ class TCPConnection {
     
     private func dialDirectUpstream(host: String, port: UInt16, dial: InFlightDial,
                                     completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
-        let transport = TCPTransport()
-        // Direct/bypass — not a proxied connection, exclude from Dial.
-        transport.dialTimer.enabled = false
-        let connection = DirectProxyConnection(connection: transport)
+        // Direct/bypass — not a proxied connection. TCPTransport has no dial
+        // timer, so it stays out of the Dial stat automatically.
+        let transport = TCPTransport(host: host, port: port)
+        let connection = DirectProxyConnection(connection: CallbackByteTransport(transport))
         dial.cancel = { [weak connection] in connection?.cancel() }
-        transport.connect(host: host, port: port) { [weak self] error in
+        Task { [weak self] in
+            let error: Error?
+            do {
+                try await transport.connect()
+                error = nil
+            } catch let dialError {
+                error = dialError
+            }
             guard let self else {
                 connection.cancel()
                 completion(.failure(error ?? TransportError.notConnected))

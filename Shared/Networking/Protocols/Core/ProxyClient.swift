@@ -597,7 +597,7 @@ nonisolated class ProxyClient {
             )
         } else {
             let supportsVision = transportSupportsVision
-            let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
 
             Task { [weak self] in
@@ -755,7 +755,7 @@ nonisolated class ProxyClient {
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
+                let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
                 self.own(transport)
 
                 Task { [weak self] in
@@ -856,7 +856,7 @@ nonisolated class ProxyClient {
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
+                let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
                 self.own(transport)
 
                 Task { [weak self] in
@@ -1023,7 +1023,7 @@ nonisolated class ProxyClient {
                 destinationPort: destinationPort, initialData: initialData, completion: completion
             )
         } else {
-            let transport = AsyncTCPTransport(host: directDialHost, port: configuration.serverPort)
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
             Task { [weak self] in
                 do {
@@ -1538,10 +1538,16 @@ nonisolated class ProxyClient {
         }
         switch security {
         case .none:
-            let transport = TCPTransport()
-            transport.connect(host: host, port: port) { error in
-                if let error { completion(.failure(error)); return }
-                bringUp(TransportClosures(tcp: transport), retaining: transport)
+            let transport = TCPTransport(host: host, port: port)
+            Task {
+                do {
+                    try await transport.connect()
+                } catch {
+                    completion(.failure(error))
+                    return
+                }
+                let wrapped = CallbackByteTransport(transport)
+                bringUp(TransportClosures(tcp: wrapped), retaining: wrapped)
             }
         case .tls(let tlsConfig):
             // XHTTP rides h2; advertise it (fall back to http/1.1) regardless of the configured ALPN.
@@ -1618,11 +1624,16 @@ nonisolated class ProxyClient {
             if let tunnel = overTunnel {
                 completion(.success(.byteStream(TransportClosures(tunnel: tunnel))))
             } else {
-                let transport = TCPTransport()
+                let transport = TCPTransport(host: host, port: port)
                 own(transport)
-                transport.connect(host: host, port: port) { error in
-                    if let error { completion(.failure(error)); return }
-                    completion(.success(.byteStream(TransportClosures(tcp: transport))))
+                Task {
+                    do {
+                        try await transport.connect()
+                    } catch {
+                        completion(.failure(error))
+                        return
+                    }
+                    completion(.success(.byteStream(TransportClosures(tcp: CallbackByteTransport(transport)))))
                 }
             }
         case .tls(let tlsConfig):
@@ -1765,10 +1776,16 @@ nonisolated class ProxyClient {
         }
         switch security {
         case .none:
-            let transport = TCPTransport()
-            transport.connect(host: host, port: port) { error in
-                if error != nil { completion(nil); return }
-                wrap(TransportClosures(tcp: transport), retaining: transport)
+            let transport = TCPTransport(host: host, port: port)
+            Task {
+                do {
+                    try await transport.connect()
+                } catch {
+                    completion(nil)
+                    return
+                }
+                let wrapped = CallbackByteTransport(transport)
+                wrap(TransportClosures(tcp: wrapped), retaining: wrapped)
             }
         case .tls(let tlsConfig):
             let h1TLS = TLSConfiguration(

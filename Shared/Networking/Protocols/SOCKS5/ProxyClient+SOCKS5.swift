@@ -38,14 +38,16 @@ extension ProxyClient {
         if let tunnel = self.tunnel {
             onTransportReady(TunneledTransport(tunnel: tunnel))
         } else {
-            let transport = TCPTransport()
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
-            transport.connect(host: directDialHost, port: configuration.serverPort) { error in
-                if let error {
+            Task {
+                do {
+                    try await transport.connect()
+                } catch {
                     completion(.failure(error))
                     return
                 }
-                onTransportReady(transport)
+                onTransportReady(CallbackByteTransport(transport))
             }
         }
     }
@@ -153,15 +155,16 @@ extension ProxyClient {
                 completion(.failure(error))
             }
         } else {
-            let transport = UDPTransport()
+            let transport = UDPTransport(host: relayHost, port: relayPort)
             self.own(transport)
-            transport.connect(host: relayHost, port: relayPort,
-                           completionQueue: .global()) { error in
-                if let error {
+            Task {
+                do {
+                    try await transport.connect()
+                } catch {
                     completion(.failure(error))
                     return
                 }
-                completion(.success(DirectUDPProxyConnection(transport: transport)))
+                completion(.success(DirectUDPProxyConnection(transport: CallbackDatagramTransport(transport))))
             }
         }
     }

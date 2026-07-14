@@ -44,7 +44,7 @@ class UDPFlow {
     }
 
     // Direct bypass path
-    private var directTransport: UDPTransport?
+    private var directTransport: (any RawDatagramTransport)?
 
     // Non-mux path
     private var proxyClient: ProxyClient?
@@ -467,17 +467,25 @@ class UDPFlow {
         proxyConnecting = true  // reuse the flag so datagrams buffer until the transport connects
 
         // One connection per peer 5-tuple.
-        let transport = UDPTransport()
+        let asyncTransport = UDPTransport(host: dstHost, port: dstPort)
+        let transport = CallbackDatagramTransport(asyncTransport)
         self.directTransport = transport
-        transport.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
+        Task { [weak self] in
+            let connectError: Error?
+            do {
+                try await asyncTransport.connect()
+                connectError = nil
+            } catch {
+                connectError = error
+            }
             guard let self else { return }
 
             self.flowQueue.async { [self] in
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
-                if let error {
-                    self.reportFailure("Connect", error: error)
+                if let connectError {
+                    self.reportFailure("Connect", error: connectError)
                     self.close()
                     self.stack?.removeUDPFlow(self)
                     return
@@ -494,7 +502,7 @@ class UDPFlow {
                 self.pendingBufferSize = 0
 
                 // Non-EAGAIN recv errors close the flow so we don't sit on a dead transport.
-                transport.startReceiving(handler: { [weak self] data in
+                transport.startReceiving(queue: nil, handler: { [weak self] data in
                     self?.handleProxyData(data)
                 }, errorHandler: { [weak self] error in
                     guard let self else { return }
