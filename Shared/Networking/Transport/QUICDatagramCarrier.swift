@@ -164,8 +164,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     /// returns. Runs off `queue`; all state mutation hops back onto `queue`.
     private func runDriver(endpoint: NWEndpoint, sendStream: AsyncStream<Data>) async {
         do {
-            try await withNetworkConnection(to: endpoint, using: { UDP() }) { [self] conn in
-                conn.onStateUpdate { [weak self] connection, state in
+            try await withNetworkConnection(to: endpoint, using: { UDP() }) { [self] connection in
+                connection.onStateUpdate { [weak self] connection, state in
                     guard let self else { return }
                     switch state {
                     case .ready:
@@ -186,25 +186,25 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 // Egress under a ready connection went away: hand off to `onPathDown`
                 // if set (the owner migrates), else deliver a network error so ngtcp2
                 // tears down instead of waiting on its PTO/idle timers.
-                conn.onViabilityUpdate { [weak self] _, viable in
+                connection.onViabilityUpdate { [weak self] _, viable in
                     guard let self, !viable else { return }
                     self.queue.async { self.handleViabilityLost() }
                 }
                 // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
                 // proactive migration before the current path degrades.
-                conn.onBetterPathUpdate { [weak self] _, better in
+                connection.onBetterPathUpdate { [weak self] _, better in
                     guard let self, better else { return }
                     self.queue.async { self.handleBetterPath() }
                 }
-                conn.onPathUpdate { [weak self] _, path in
+                connection.onPathUpdate { [weak self] _, path in
                     guard let self else { return }
                     let interfaceType = path.availableInterfaces.first?.type
                     self.queue.async { self.cachedInterfaceType = interfaceType }
                 }
 
                 try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await self.runSendLoop(conn, stream: sendStream) }
-                    group.addTask { try await self.runReceiveLoop(conn) }
+                    group.addTask { try await self.runSendLoop(connection, stream: sendStream) }
+                    group.addTask { try await self.runReceiveLoop(connection) }
                     _ = try await group.next()
                     group.cancelAll()
                 }
@@ -217,18 +217,18 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     /// Drains ordered datagram sends; errors drop the packet (ngtcp2 retransmits).
     /// Runs off `queue`.
-    private func runSendLoop(_ conn: NetworkConnection<UDP>, stream: AsyncStream<Data>) async throws {
+    private func runSendLoop(_ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>) async throws {
         for await datagram in stream {
-            try? await conn.send(datagram)
+            try? await connection.send(datagram)
         }
     }
 
     /// Continuously receives datagrams, starting the connection on the first read.
     /// A receive failure is terminal. Runs off `queue`.
-    private func runReceiveLoop(_ conn: NetworkConnection<UDP>) async throws {
+    private func runReceiveLoop(_ connection: NetworkConnection<UDP>) async throws {
         do {
             while true {
-                let message = try await conn.receive()
+                let message = try await connection.receive()
                 let data = message.content
                 if !data.isEmpty {
                     self.queue.async { [self] in deliverPacket(data) }

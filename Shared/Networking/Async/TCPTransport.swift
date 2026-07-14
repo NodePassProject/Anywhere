@@ -94,35 +94,45 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
     }
 
     /// Owns the connection scope for the whole session. Publishes the connection,
-    /// resolves the dial via an establish send, then parks on `teardownPromise`
-    /// until cancel / viability loss / a fatal I/O error unwinds it.
+    /// resolves the dial, then parks on `teardownPromise` until cancel / viability loss /
+    /// a fatal I/O error unwinds it.
     private func runDriver(endpoint: NWEndpoint, initialData: Data?, slot: FlowSlot) async {
+        let hasInitialData = initialData?.isEmpty == false
         do {
-            try await withNetworkConnection(to: endpoint, using: { Self.makeProtocolStack() }) { [self] conn in
+            try await withNetworkConnection(to: endpoint, using: { Self.makeProtocolStack() }) { [self] connection in
                 let live = state.withLock { state -> Bool in
                     guard !state.cancelled else { return false }
-                    state.connection = conn
+                    state.connection = connection
                     return true
                 }
                 guard live else { throw CancellationError() }
 
-                // TCP can't migrate a 4-tuple: a viability drop means the leg is dead.
-                conn.onViabilityUpdate { [self] _, viable in
+                connection.onStateUpdate { [self] _, update in
+                    switch update {
+                    case .ready:
+                        state.withLock { $0.ready = true }
+                    case .failed(let error), .waiting(let error):
+                        connectPromise.resolve(.failure(error.transportError(op: .connect)))
+                        teardownPromise.resolve(.success(()))
+                    default:
+                        break  // .setup, .preparing, .cancelled
+                    }
+                }
+                .onViabilityUpdate { [self] _, viable in
                     if !viable { teardownPromise.resolve(.success(())) }
                 }
 
-                do {
-                    try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in
-                        teardownPromise.resolve(.success(()))
-                    }) {
-                        // The establish send returns once the connection is ready
-                        // and the initial data is flushed — an authoritative
-                        // readiness signal.
-                        try await conn.send(initialData ?? Data(), endOfStream: false)
+                if let initialData, hasInitialData {
+                    do {
+                        try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in
+                            teardownPromise.resolve(.success(()))
+                        }) {
+                            try await connection.send(initialData, endOfStream: false)
+                        }
+                    } catch {
+                        connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
+                        throw error  // exit scope → tear the connection down
                     }
-                } catch {
-                    connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
-                    throw error  // exit scope → tear the connection down
                 }
 
                 state.withLock { $0.ready = true }

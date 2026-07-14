@@ -93,18 +93,33 @@ class TCPConnection {
         pendingWrite.count - pendingWriteOffset
     }
 
-    /// At most one outstanding proxy receive; the transports require serial receives.
-    private var receiveInFlight = false
-
-    // MARK: Upload Pipeline
+    // MARK: Relay Drivers
     //
-    // Single-flight is mandatory: transports can split a logical send and resume it later,
-    // so two in-flight chunks would interleave; deferred tcp_recved makes TCP_WND the cap.
+    // The upload and download copy loops run as two long-lived `Task`s over the proxy
+    // connection's async surface: `await send` / `await receive` are the ordering and the
+    // single-flight, so there is no manual pump, pending-completion FIFO, or in-flight
+    // bookkeeping. lwipQueue-confined state is reached through `onLwip` hops; two
+    // `AsyncStream` wakeups nudge each driver when upload work appears (new bytes / the
+    // app's FIN) or download capacity opens (backlog drained below the low-water mark).
+    private var uploadDriver: Task<Void, Never>?
+    private var downloadDriver: Task<Void, Never>?
+    private let uploadWake: AsyncStream<Void>
+    private let uploadWakeContinuation: AsyncStream<Void>.Continuation
+    private let downloadWake: AsyncStream<Void>
+    private let downloadWakeContinuation: AsyncStream<Void>.Continuation
+
+    /// True only while the upload driver is awaiting a `send`; gates the graceful deferred
+    /// close so it can't truncate an in-flight chunk. lwipQueue-confined.
+    private var uploadSending = false
+
+    // MARK: Upload Buffer
+    //
+    // Coalesces a synchronous burst of lwIP callbacks so the driver ships one large send;
+    // `tcp_recved` stays deferred until the proxy accepts a chunk, so TCP_WND caps how far
+    // ahead the buffer can run.
     private struct UploadPipeline {
         var buffer = Data()
         var bufferOffset = 0
-        var sendInFlight = false
-        var isPumpScheduled = false
     }
     private var uploadPipeline = UploadPipeline()
 
@@ -161,6 +176,14 @@ class TCPConnection {
         self.acceptedViaDefault = viaDefault
         self.ruleSetName = ruleSetName
         self.hostIsResolvedDomain = hostIsResolvedDomain
+
+        let (uploadStream, uploadContinuation) = AsyncStream<Void>.makeStream()
+        self.uploadWake = uploadStream
+        self.uploadWakeContinuation = uploadContinuation
+        let (downloadStream, downloadContinuation) = AsyncStream<Void>.makeStream()
+        self.downloadWake = downloadStream
+        self.downloadWakeContinuation = downloadContinuation
+
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
@@ -322,81 +345,154 @@ class TCPConnection {
         }
 
         uploadPipeline.buffer.append(bytePtr, count: count)
-        schedulePumpIfNeeded()
+        uploadWakeContinuation.yield(())
     }
 
-    /// The async hop coalesces a synchronous burst of lwIP callbacks into one large
-    /// send; while a send is in flight, the completion's tail call ships what accumulated.
-    private func schedulePumpIfNeeded() {
-        guard !uploadPipeline.isPumpScheduled,
-              !uploadPipeline.sendInFlight,
-              uploadBufferCount > 0 else { return }
-        uploadPipeline.isPumpScheduled = true
-        lwipQueue.async { [weak self] in
-            self?.pumpUploadSends(fromSchedule: true)
+    // MARK: - Relay Drivers
+
+    /// Hops onto `lwipQueue` to touch lwIP-confined state from an async driver, returning its result.
+    private func onLwip<T>(_ body: @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            lwipQueue.async { continuation.resume(returning: body()) }
         }
     }
 
-    /// Issues one `proxyConnection.send` with the head slice of the pipeline buffer; strict single-flight.
-    private func pumpUploadSends(fromSchedule: Bool = false) {
-        if fromSchedule {
-            uploadPipeline.isPumpScheduled = false
-        }
+    /// Starts the upload/download copy loops once the proxy leg is up. Called on `lwipQueue`.
+    private func startRelayDrivers(_ connection: ProxyConnection) {
+        uploadDriver = Task { [weak self] in await self?.runUploadDriver(connection) }
+        downloadDriver = Task { [weak self] in await self?.runDownloadDriver(connection) }
+        // Flush anything buffered during the handshake (and honor an app FIN that already landed).
+        uploadWakeContinuation.yield(())
+    }
 
-        guard !closed, !uploadPipeline.sendInFlight, uploadBufferCount > 0, let proxyConnection else {
-            propagateUplinkCloseIfReady()
-            attemptDeferredClose()
-            return
-        }
+    private enum UploadStep {
+        case send(Data)
+        case finish
+        case idle
+        case stop
+    }
 
-        let take = min(uploadBufferCount, TunnelConstants.uploadChunkSize)
-        let chunk = sliceUploadBuffer(take)
-
-        uploadPipeline.sendInFlight = true
-        let chunkSize = take
-
-        let completion: (Error?) -> Void = { [weak self] error in
-            guard let self else { return }
-            self.lwipQueue.async {
-                self.uploadPipeline.sendInFlight = false
-                guard !self.closed else { return }
-                if let error {
-                    self.reportFailure("Send", error: error)
-                    self.abort()
-                    return
+    /// Uplink copy loop: drains the coalescing buffer to the proxy leg one `await send` at
+    /// a time (natural single-flight), then forwards the app's FIN as an ordered half-close.
+    /// `tcp_recved` is deferred to each send's completion, so the app is throttled to TCP_WND.
+    private func runUploadDriver(_ connection: ProxyConnection) async {
+        for await _ in uploadWake {
+            drain: while true {
+                let step = await onLwip { () -> UploadStep in
+                    if self.closed { return .stop }
+                    if self.uploadBufferCount > 0 {
+                        let take = min(self.uploadBufferCount, TunnelConstants.uploadChunkSize)
+                        self.uploadSending = true
+                        return .send(self.sliceUploadBuffer(take))
+                    }
+                    // Buffer drained: forward the app's FIN as an ordered half-close.
+                    if self.uplinkDone, self.uplinkCloseState == .open {
+                        self.uplinkCloseState = .closing
+                        return .finish
+                    }
+                    return .idle
                 }
-                // Count proxy-side accepts as uplink activity; a long upload that
-                // backpressures the app would otherwise look idle and close mid-stream.
-                self.activityTimer?.update()
-                self.acknowledgeReceivedBytes(chunkSize)
-                // Drain synchronously so bytes accumulated in-flight ship without another hop.
-                self.pumpUploadSends()
+                switch step {
+                case .stop:
+                    return
+                case .idle:
+                    break drain  // park until the next wakeup
+                case .send(let chunk):
+                    do {
+                        try await connection.send(chunk)
+                    } catch {
+                        await onLwip {
+                            self.uploadSending = false
+                            guard !self.closed else { return }
+                            self.reportFailure("Send", error: error)
+                            self.abort()
+                        }
+                        return
+                    }
+                    await onLwip {
+                        self.uploadSending = false
+                        guard !self.closed else { return }
+                        // Count proxy-side accepts as uplink activity; a long backpressured
+                        // upload would otherwise look idle and close mid-stream.
+                        self.activityTimer?.update()
+                        self.acknowledgeReceivedBytes(chunk.count)
+                        self.attemptDeferredClose()
+                    }
+                case .finish:
+                    do {
+                        try await connection.closeWrite()
+                    } catch {
+                        await onLwip {
+                            guard !self.closed else { return }
+                            self.uplinkCloseState = .closed
+                            self.reportFailure("Close write", error: error)
+                            self.abort()
+                        }
+                        return
+                    }
+                    await onLwip {
+                        guard !self.closed else { return }
+                        self.uplinkCloseState = .closed
+                        self.attemptDeferredClose()
+                    }
+                }
             }
         }
-
-        proxyConnection.send(data: chunk, completion: completion)
     }
 
-    /// Forwards the app's FIN to the outbound leg once every buffered upload
-    /// byte has been accepted, so the remote sees data-then-EOS in order.
-    private func propagateUplinkCloseIfReady() {
-        guard uplinkDone,
-              uplinkCloseState == .open,
-              !uploadPipeline.sendInFlight,
-              uploadBufferCount == 0,
-              let connection = proxyConnection else { return }
-        uplinkCloseState = .closing
-        connection.closeWrite { [weak self] error in
-            guard let self else { return }
-            self.lwipQueue.async {
-                guard !self.closed else { return }
-                self.uplinkCloseState = .closed
-                if let error {
-                    self.reportFailure("Close write", error: error)
-                    self.abort()
-                } else {
-                    self.attemptDeferredClose()
+    private enum DownloadStep {
+        case receive
+        case waitDrain
+        case stop
+    }
+
+    /// Downlink copy loop: pulls from the proxy leg and hands each chunk to lwIP,
+    /// prefetching only while the downlink backlog is below the low-water mark so the peer
+    /// is throttled to what the app drains. Stops for good once the downlink EOF'd.
+    private func runDownloadDriver(_ connection: ProxyConnection) async {
+        var drainSignals = downloadWake.makeAsyncIterator()
+        while true {
+            let step = await onLwip { () -> DownloadStep in
+                if self.closed || self.downlinkDone { return .stop }
+                if self.pendingWriteCount >= TunnelConstants.drainLowWaterMark { return .waitDrain }
+                return .receive
+            }
+            switch step {
+            case .stop:
+                return
+            case .waitDrain:
+                // Suspend until a drain frees capacity (or teardown finishes the stream).
+                if await drainSignals.next() == nil { return }
+            case .receive:
+                let data: Data?
+                do {
+                    data = try await connection.receive()
+                } catch {
+                    await onLwip {
+                        guard !self.closed else { return }
+                        self.reportFailure("Receive", error: error)
+                        self.abort()
+                    }
+                    return
                 }
+                let stop = await onLwip { () -> Bool in
+                    guard !self.closed else { return true }
+                    // nil and empty both mean EOF; transports never deliver zero-byte data.
+                    guard let data, !data.isEmpty else {
+                        self.downlinkDone = true
+                        if self.uplinkDone {
+                            self.closeWhenDrained()
+                        } else {
+                            self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
+                            self.propagateDownlinkCloseIfReady()
+                        }
+                        return true
+                    }
+                    self.activityTimer?.update()
+                    self.writeToLWIP(data)
+                    return false
+                }
+                if stop { return }
             }
         }
     }
@@ -482,7 +578,8 @@ class TCPConnection {
         mitmSession?.clientDidClose()
         
         uplinkDone = true
-        propagateUplinkCloseIfReady()
+        // Wake the upload driver so it drains the buffer, then forwards the FIN.
+        uploadWakeContinuation.yield(())
         if downlinkDone {
             closeWhenDrained()
         } else {
@@ -690,8 +787,7 @@ class TCPConnection {
                     self.uploadPipeline.buffer.append(self.pendingData)
                     self.pendingData.removeAll(keepingCapacity: true)
                 }
-                self.pumpUploadSends()
-                self.tryArmReceive()
+                self.startRelayDrivers(connection)
             }
         }
     }
@@ -755,8 +851,7 @@ class TCPConnection {
                         self.uploadPipeline.buffer.append(self.pendingData)
                         self.pendingData.removeAll(keepingCapacity: true)
                     }
-                    self.pumpUploadSends()
-                    self.tryArmReceive()
+                    self.startRelayDrivers(proxyConnection)
 
                 case .failure(let error):
                     self.handleConnectFailure(error, bufferedClientData: initialData)
@@ -1017,50 +1112,6 @@ class TCPConnection {
         }
     }
 
-    // MARK: - Proxy Receive Loop
-
-    /// Issues the next proxy receive when the backlog is below `drainLowWaterMark`
-    /// and none is in flight; overlapping receive with drain avoids stop-and-wait.
-    /// Stops for good once the downlink EOF'd — reading past EOF errors on some transports.
-    private func tryArmReceive() {
-        guard !closed,
-              !receiveInFlight,
-              !downlinkDone,
-              pendingWriteCount < TunnelConstants.drainLowWaterMark,
-              let connection = proxyConnection else { return }
-
-        receiveInFlight = true
-        connection.receive { [weak self] data, error in
-            guard let self else { return }
-
-            self.lwipQueue.async {
-                self.receiveInFlight = false
-                guard !self.closed else { return }
-
-                if let error {
-                    self.reportFailure("Receive", error: error)
-                    self.abort()
-                    return
-                }
-                
-                // nil and empty both mean EOF; transports never deliver zero-byte data.
-                guard let data, !data.isEmpty else {
-                    self.downlinkDone = true
-                    if self.uplinkDone {
-                        self.closeWhenDrained()
-                    } else {
-                        self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
-                        self.propagateDownlinkCloseIfReady()
-                    }
-                    return
-                }
-                
-                self.activityTimer?.update()
-                self.writeToLWIP(data)
-            }
-        }
-    }
-
     // MARK: - lwIP Write Helper
 
     /// Writes as much as lwIP's send buffer accepts; returns bytes written, or -1 on a
@@ -1150,8 +1201,10 @@ class TCPConnection {
         guard !closed else { return }
         propagateDownlinkCloseIfReady()
 
-        // Prefetch the next chunk now that the backlog shrank.
-        tryArmReceive()
+        // Capacity opened up; let the download driver prefetch the next chunk.
+        if pendingWriteCount < TunnelConstants.drainLowWaterMark {
+            downloadWakeContinuation.yield(())
+        }
     }
 
     // MARK: - Close / Abort
@@ -1193,7 +1246,7 @@ class TCPConnection {
         guard closePending, !closed,
               pendingWriteCount == 0,
               uploadBufferCount == 0,
-              !uploadPipeline.sendInFlight,
+              !uploadSending,
               uplinkCloseSettled else { return }
         close()
     }
@@ -1270,6 +1323,15 @@ class TCPConnection {
         pendingWrite = Data()
         pendingWriteOffset = 0
         uploadPipeline = UploadPipeline()
+        // Stop the relay drivers: finishing the wakeup streams ends any parked `for await`,
+        // and cancelling unblocks a driver stuck in `onLwip` on the next hop; the connection
+        // cancel below unblocks one awaiting `send`/`receive`.
+        uploadWakeContinuation.finish()
+        downloadWakeContinuation.finish()
+        uploadDriver?.cancel()
+        uploadDriver = nil
+        downloadDriver?.cancel()
+        downloadDriver = nil
         mitmSession = nil
         session?.cancel(error: nil)
         if abortive {

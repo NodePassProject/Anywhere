@@ -11,7 +11,7 @@ import Synchronization
 // MARK: - Async-native transport surface
 
 // The async-native transport surface over iOS 26's `NetworkConnection`, which can
-// be stored and awaited directly — `await conn.send(_)` *is* ordering +
+// be stored and awaited directly — `await connection.send(_)` *is* ordering +
 // backpressure, `await conn.receive()` *is* the read — so there is no driver task,
 // `AsyncStream` send feeder, or hand-rolled state machine.
 
