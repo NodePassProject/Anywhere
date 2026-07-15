@@ -82,8 +82,8 @@ nonisolated final class ShadowsocksUDPSession {
 
     /// The async-native datagram transport; `connect()` is awaited in `beginConnect`.
     private let asyncTransport: UDPTransport
-    /// Callback-surface adapter over `asyncTransport` for this session's push-based send/receive.
-    private let transport: any RawDatagramTransport
+    /// Drives the datagram downlink; armed in `finishConnect`, cancelled on teardown.
+    private var receiveTask: Task<Void, Never>?
     private var state: State = .idle
 
     private var nextToken: Token = 0
@@ -126,7 +126,6 @@ nonisolated final class ShadowsocksUDPSession {
 
         let asyncTransport = UDPTransport(host: serverHost, port: serverPort)
         self.asyncTransport = asyncTransport
-        self.transport = CallbackDatagramTransport(asyncTransport)
 
         switch mode {
         case .ss2022AES(let cipher, let pskList):
@@ -257,7 +256,9 @@ nonisolated final class ShadowsocksUDPSession {
     func cancel() {
         if case .cancelled = state { return }
         state = .cancelled
-        transport.cancel()
+        receiveTask?.cancel()
+        receiveTask = nil
+        asyncTransport.cancel()
         notifyAllFlows(error: ProxyError.connectionFailed("Session cancelled"))
         registrations.removeAll()
         tokensByResponse.removeAll()
@@ -294,7 +295,7 @@ nonisolated final class ShadowsocksUDPSession {
 
         if case .failure(let error) = result {
             state = .failed(error)
-            transport.cancel()
+            asyncTransport.cancel()
             notifyAllFlows(error: error)
             pendingSends.removeAll()
             return
@@ -302,12 +303,7 @@ nonisolated final class ShadowsocksUDPSession {
 
         state = .ready
 
-        // Receive on delegateQueue so handlers run on the same queue as state mutations.
-        transport.startReceiving(queue: delegateQueue, handler: { [weak self] data in
-            self?.handleReceivedDatagram(data)
-        }, errorHandler: { [weak self] error in
-            self?.handleTransportError(error)
-        })
+        startReceiveLoop()
 
         // Drain anything queued while connecting, preserving order.
         let flushes = pendingSends
@@ -321,8 +317,28 @@ nonisolated final class ShadowsocksUDPSession {
     private func handleTransportError(_ error: Error) {
         if case .cancelled = state { return }
         state = .failed(error)
-        transport.cancel()
+        receiveTask?.cancel()
+        receiveTask = nil
+        asyncTransport.cancel()
         notifyAllFlows(error: error)
+    }
+
+    /// Drives the datagram downlink on `delegateQueue`, matching the state-mutation queue.
+    private func startReceiveLoop() {
+        let asyncTransport = self.asyncTransport
+        let queue = self.delegateQueue
+        receiveTask = Task { [weak self] in
+            do {
+                while true {
+                    let datagram = try await asyncTransport.receive()
+                    if Task.isCancelled { return }
+                    queue.async { self?.handleReceivedDatagram(datagram) }
+                }
+            } catch {
+                if Task.isCancelled { return }
+                queue.async { self?.handleTransportError(error) }
+            }
+        }
     }
 
     private func notifyAllFlows(error: Error) {
@@ -340,8 +356,15 @@ nonisolated final class ShadowsocksUDPSession {
             let encrypted = try encryptPacket(payload: payload,
                                               dstHost: dstHost,
                                               dstPort: dstPort)
-            transport.send(data: encrypted) { error in
-                completion?(error)
+            // UDP datagrams are independent, so each send is its own task (no ordering pump).
+            let asyncTransport = self.asyncTransport
+            Task {
+                do {
+                    try await asyncTransport.send(encrypted)
+                    completion?(nil)
+                } catch {
+                    completion?(error)
+                }
             }
         } catch {
             completion?(error)

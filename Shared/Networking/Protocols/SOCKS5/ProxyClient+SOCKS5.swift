@@ -159,12 +159,22 @@ extension ProxyClient {
             let chain = effectiveChain
             switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
             case .success(let hopCommands):
-                buildChainTunnel(
-                    chain: chain, index: 0, currentTunnel: nil,
-                    hopCommands: hopCommands,
-                    finalDestination: (relayHost, relayPort),
-                    completion: completion
-                )
+                Task { [weak self] in
+                    guard let self else {
+                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                        return
+                    }
+                    do {
+                        let tunnel = try await self.buildChainTunnel(
+                            chain: chain, index: 0, currentTunnel: nil,
+                            hopCommands: hopCommands,
+                            finalDestination: (relayHost, relayPort)
+                        )
+                        completion(.success(tunnel))
+                    } catch {
+                        completion(.failure(error))
+                    }
+                }
             case .failure(let error):
                 completion(.failure(error))
             }
@@ -178,7 +188,7 @@ extension ProxyClient {
                     completion(.failure(error))
                     return
                 }
-                completion(.success(DirectUDPProxyConnection(transport: CallbackDatagramTransport(transport))))
+                completion(.success(DirectUDPProxyConnection(transport: transport)))
             }
         }
     }

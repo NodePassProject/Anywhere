@@ -97,7 +97,7 @@ extension ProxyClient {
                     completion(.failure(error))
                     return
                 }
-                wrapAndComplete(DirectUDPProxyConnection(transport: CallbackDatagramTransport(transport)))
+                wrapAndComplete(DirectUDPProxyConnection(transport: transport))
             }
         }
     }

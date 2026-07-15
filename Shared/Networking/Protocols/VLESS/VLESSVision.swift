@@ -334,7 +334,7 @@ private func isCompleteTLSRecord(data: Data) -> Bool {
 
 // MARK: - Vision Connection Wrapper
 
-nonisolated class VLESSVisionConnection: ProxyConnection {
+nonisolated class VLESSVisionConnection: AsyncProxyConnection {
     private let innerConnection: ProxyConnection
     private let trafficState: VisionTrafficState
 
@@ -355,6 +355,32 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
     
     override var isConnected: Bool {
         return innerConnection.isConnected
+    }
+
+    // MARK: - Async Surface
+
+    // Bridges the callback Vision framing below for the flipped class; deleted with it
+    // later. `receive()` delegates to `receiveRaw()` to match the callback override
+    // (the inner connection already handled response-header/byte accounting).
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func receive() async throws -> Data? {
+        try await receiveRaw()
     }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
@@ -531,7 +557,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         return data
     }
 
-    override func cancel() {
+    override func performCancel() {
         innerConnection.cancel()
     }
 }

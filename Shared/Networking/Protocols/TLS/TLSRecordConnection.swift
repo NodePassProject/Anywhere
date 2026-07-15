@@ -291,6 +291,93 @@ nonisolated class TLSRecordConnection {
         }
     }
 
+    // MARK: - Async Surface
+
+    // Async-native counterparts of `send`/`receive`/`closeWrite`, over the transport's
+    // async surface. These are the primary path for async consumers (`TLSProxyConnection`);
+    // the callback methods above remain for the framing consumers (WebSocket/HTTPUpgrade/
+    // XHTTP/Reality/TLSServer) not yet migrated. Both share the synchronous record crypto
+    // and `processBuffer`; a given connection is driven by one consumer, so the two receive
+    // paths never touch `receiveBuffer` concurrently.
+
+    /// Encrypts `data` into TLS records and sends them, awaiting the write. Records are
+    /// built under `sendLock` (sequence-number ordering); the awaited write is serialized
+    /// by the caller (each `await` completes before the next), preserving on-wire order.
+    func send(_ data: Data) async throws {
+        sendLock.lock()
+        guard let connection else {
+            sendLock.unlock()
+            throw TLSRecordError.connectionUnavailable
+        }
+        let record: Data
+        do {
+            record = try buildTLSRecords(for: data)
+        } catch {
+            sendLock.unlock()
+            throw error
+        }
+        sendLock.unlock()
+        try await connection.send(record)
+    }
+
+    /// Receives and decrypts one chunk of application data; `nil` signals a clean close.
+    func receive() async throws -> Data? {
+        while true {
+            receiveLock.lock()
+            let processed = processBuffer()
+            let needsKeyUpdateResponse = keyUpdateResponsePending
+            keyUpdateResponsePending = false
+            receiveLock.unlock()
+
+            if needsKeyUpdateResponse {
+                sendKeyUpdateResponseAndRekeyEgress()
+            }
+
+            if let result = processed {
+                switch result {
+                case .data(let data):
+                    return data
+                case .error(let error):
+                    throw error
+                case .needMore:
+                    break            // fall through to read more bytes
+                case .skip:
+                    continue         // re-process without reading (non-app record consumed)
+                case .closed:
+                    return nil
+                }
+            }
+
+            guard let connection else {
+                throw TLSRecordError.connectionUnavailable
+            }
+            let (data, isComplete) = try await connection.receive()
+            if let data, !data.isEmpty {
+                receiveLock.lock()
+                receiveBuffer.append(data)
+                receiveLock.unlock()
+                continue             // re-process with the new bytes
+            }
+            if isComplete {
+                return nil
+            }
+            // Spurious empty read without EOF: read again.
+        }
+    }
+
+    /// Half-closes the underlying byte stream (transport FIN / end-of-stream), leaving the
+    /// receive direction open. The TLS close_notify alert is intentionally not sent — a
+    /// plain half-close is used for graceful shutdown.
+    func closeWrite() async throws {
+        sendLock.lock()
+        let connection = self.connection
+        sendLock.unlock()
+        guard let connection else {
+            throw TLSRecordError.connectionUnavailable
+        }
+        try await connection.closeWrite()
+    }
+
     // MARK: - Cancel
 
     /// Abortive teardown. Graceful callers must await `closeWrite` first.

@@ -83,7 +83,13 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
         let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
         self.proxyClient = client
 
-        client.connectMultiplexer { [weak self] (result: Result<ProxyConnection, Error>) in
+        Task { [weak self] in
+            let result: Result<ProxyConnection, Error>
+            do {
+                result = .success(try await client.connectMultiplexer())
+            } catch {
+                result = .failure(error)
+            }
             guard let self else { return }
 
             self.flowQueue.async { [weak self] in

@@ -24,7 +24,7 @@ protocol NaiveTunnel: AnyObject {
 // MARK: - NaiveProxyConnection
 
 /// Padding framing applies only to the first 8 reads/writes, and only when the server negotiates variant 1.
-nonisolated class NaiveProxyConnection: ProxyConnection {
+nonisolated class NaiveProxyConnection: AsyncProxyConnection {
     private let tunnel: NaiveTunnel
     private var paddingFramer = NaivePaddingFramer()
     private let paddingType: NaivePaddingNegotiator.PaddingType
@@ -37,6 +37,26 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
 
     override var isConnected: Bool { tunnel.isConnected }
     override var outerTLSVersion: TLSVersion? { .tls13 }
+
+    // MARK: - Async Surface
+
+    // Bridges the callback padding framing below for the flipped class; deleted with it later.
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
 
     // MARK: - Send
 
@@ -135,7 +155,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    override func performCancel() {
         tunnel.close()
     }
 

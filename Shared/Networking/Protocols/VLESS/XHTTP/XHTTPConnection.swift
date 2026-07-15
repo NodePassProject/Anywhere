@@ -467,6 +467,27 @@ nonisolated class XHTTPConnection {
         }
     }
 
+    // MARK: - Async Surface
+
+    // Async-native send/receive for the flipped `XHTTPProxyConnection`, bridging the
+    // callback framer above; deleted once the framing internals move to async.
+
+    func send(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            send(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    func receive() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receive { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
     // MARK: - Cancel
 
     func cancel() {

@@ -7,32 +7,27 @@
 
 import Foundation
 
-nonisolated class XHTTPProxyConnection: ProxyConnection {
+nonisolated class XHTTPProxyConnection: AsyncProxyConnection {
     private let xhttpConnection: XHTTPConnection
 
     init(xhttpConnection: XHTTPConnection) {
         self.xhttpConnection = xhttpConnection
+        super.init()
     }
 
     override var isConnected: Bool {
         xhttpConnection.isConnected
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        xhttpConnection.send(data: data, completion: completion)
+    override func sendRaw(_ data: Data) async throws {
+        try await xhttpConnection.send(data)
     }
 
-    override func sendRaw(data: Data) {
-        xhttpConnection.send(data: data)
+    override func receiveRaw() async throws -> Data? {
+        try await xhttpConnection.receive()
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        xhttpConnection.receive { data, error in
-            completion(data, error)
-        }
-    }
-
-    override func cancel() {
+    override func performCancel() {
         xhttpConnection.cancel()
     }
 }

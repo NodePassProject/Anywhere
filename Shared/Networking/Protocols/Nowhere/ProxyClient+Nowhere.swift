@@ -566,23 +566,23 @@ extension ProxyClient {
             chainSignature: chainSignature,
             builder: { builderCompletion in
                 let holders = Mutex<[ProxyClient]>([])
-                ProxyClient.buildDetachedChainTunnel(
-                    chain: chain,
-                    hopCommands: cascadeCommands,
-                    finalDestination: (nwServerAddress, nwServerPort),
-                    useResolvedAddressForDirectDial: useResolvedAddress,
-                    track: { client in
-                        holders.withLock { $0.append(client) }
-                    }
-                ) { result in
-                    switch result {
-                    case .success(let chainTunnel):
+                Task {
+                    do {
+                        let chainTunnel = try await ProxyClient.buildDetachedChainTunnel(
+                            chain: chain,
+                            hopCommands: cascadeCommands,
+                            finalDestination: (nwServerAddress, nwServerPort),
+                            useResolvedAddressForDirectDial: useResolvedAddress,
+                            track: { client in
+                                holders.withLock { $0.append(client) }
+                            }
+                        )
                         let snapshot = holders.withLock { $0 }
                         let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
                         builderCompletion(.success((transport, snapshot)))
-                    case .failure(let error):
+                    } catch {
                         let snapshot = holders.withLock { $0 }
-                        for c in snapshot { c.cancel() }
+                        for c in snapshot { await c.cancel() }
                         builderCompletion(.failure(error))
                     }
                 }

@@ -204,18 +204,30 @@ class UDPFlow {
 
         // Raw payload; each protocol's UDP connection applies its own per-packet wire framing.
         if let connection = proxyConnection {
-            connection.send(data: payload) { [weak self] error in
-                guard let self, let error else { return }
-                self.flowQueue.async {
-                    guard !self.closed else { return }
-                    self.handleProxySendError(error, connection: connection)
-                }
-            }
+            sendToProxyConnection(payload, connection: connection)
             return
         }
 
         bufferPayload(data: data, payloadLength: payloadLength)
         connectProxy()
+    }
+
+    /// Fire-and-forget async send to the proxy connection. Datagrams are independent, so
+    /// each send is its own task; the connection serializes its own framed writes, so
+    /// concurrent tasks can't interleave frames on a stream transport. A terminal send
+    /// error closes the flow; transient ones just log (UDP is lossy).
+    private func sendToProxyConnection(_ payload: Data, connection: ProxyConnection) {
+        Task { [weak self] in
+            do {
+                try await connection.send(payload)
+            } catch {
+                guard let self else { return }
+                self.flowQueue.async {
+                    guard !self.closed else { return }
+                    self.handleProxySendError(error, connection: connection)
+                }
+            }
+        }
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {
@@ -363,13 +375,7 @@ class UDPFlow {
 
                     // Drain buffered payloads; `send` preserves packet boundaries.
                     for payload in self.pendingData {
-                        proxyConnection.send(data: payload) { [weak self] error in
-                            guard let self, let error else { return }
-                            self.flowQueue.async {
-                                guard !self.closed else { return }
-                                self.handleProxySendError(error, connection: proxyConnection)
-                            }
-                        }
+                        self.sendToProxyConnection(payload, connection: proxyConnection)
                     }
                     self.pendingData.removeAll()
                     self.pendingBufferSize = 0

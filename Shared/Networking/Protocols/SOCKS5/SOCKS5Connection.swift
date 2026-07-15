@@ -432,7 +432,7 @@ nonisolated class TLSRecordTransport: RawTransport {
 
 /// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
 /// The TCP control connection is retained because closing it ends the UDP session.
-nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
+nonisolated class SOCKS5UDPProxyConnection: AsyncProxyConnection {
     private let tcpTransport: any RawTransport
     private let tlsClient: TLSClient?
     private let tlsConnection: TLSRecordConnection?
@@ -510,7 +510,25 @@ nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
         }
     }
 
-    override func cancel() {
+    // MARK: - Async Surface (bridges the callback relay I/O above; deleted with it later)
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func performCancel() {
         guard !cancelled else { return }
         cancelled = true
         relay.cancel()

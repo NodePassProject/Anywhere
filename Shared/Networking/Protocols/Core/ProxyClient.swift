@@ -1644,16 +1644,16 @@ nonisolated class ProxyClient {
         case .buildChain(let chain):
             // XHTTP requires a TCP stream end-to-end.
             let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
-            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { [weak self] result in
+            Task { [weak self] in
                 guard let self else {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
-                switch result {
-                case .success(let tunnel):
+                do {
+                    let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
                     self.dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
                                              httpVersion: httpVersion, overTunnel: tunnel, completion: completion)
-                case .failure(let error):
+                } catch {
                     completion(.failure(error))
                 }
             }
@@ -1734,11 +1734,15 @@ nonisolated class ProxyClient {
                 completion(.failure(error))
                 return
             }
-            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { result in
-                switch result {
-                case .success(let tunnel):
+            Task { [weak self] in
+                guard let self else {
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                    return
+                }
+                do {
+                    let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
                     completion(.success(makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))))
-                case .failure(let error):
+                } catch {
                     completion(.failure(error))
                 }
             }

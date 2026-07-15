@@ -17,7 +17,7 @@ protocol NowhereTerminationObservable: AnyObject {
     func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
 }
 
-nonisolated final class NowhereConnection: ProxyConnection {
+nonisolated final class NowhereConnection: AsyncProxyConnection {
 
     enum State { case idle, openingStream, handshaking, waitingResult, ready, closed }
     enum BufferedFlowResultStep: Equatable {
@@ -365,7 +365,33 @@ nonisolated final class NowhereConnection: ProxyConnection {
         }
     }
 
-    override func cancel() {
+    // MARK: - Async Surface (bridges the callback stream I/O above; deleted with it later)
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func closeWrite() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            closeWrite { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func performCancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
@@ -385,7 +411,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 }
 
-nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTerminationObservable {
+nonisolated final class NowhereTCPUDPConnection: AsyncProxyConnection, NowhereTerminationObservable {
 
     private let inner: NowhereTCPConnection
     private let udpState = Mutex(UDPFramingState())
@@ -554,7 +580,25 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         }
     }
 
-    override func cancel() {
+    // MARK: - Async Surface (bridges the callback datagram I/O above; deleted with it later)
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func performCancel() {
         let shouldStart = cancelState.withLock { state in
             guard !state.started else { return false }
             state.started = true
@@ -586,7 +630,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     }
 }
 
-nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
+nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTerminationObservable {
 
     private enum State { case idle, connecting, authenticating, prepared, requesting, waitingResult, ready, closed }
 
@@ -1316,7 +1360,33 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         }
     }
 
-    override func cancel() {
+    // MARK: - Async Surface (bridges the callback stream I/O above; deleted with it later)
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func closeWrite() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            closeWrite { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func performCancel() {
         let resources: (TLSClient?, TLSProxyConnection?, ((Error?) -> Void)?, ((Data?, Error?) -> Void)?, (() -> Void)?) = lock.withLock {
             guard state != .closed else { return (nil, nil, nil, nil, nil) }
             let wasPrepared = state == .prepared
@@ -1340,7 +1410,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
 }
 
 /// Presents one logical proxy flow while retaining independent carrier halves.
-nonisolated final class NowhereDirectionalConnection: ProxyConnection {
+nonisolated final class NowhereDirectionalConnection: AsyncProxyConnection {
     private let uplink: ProxyConnection
     private let downlink: ProxyConnection
     private let kind: NowhereProtocol.FlowKind
@@ -1423,7 +1493,49 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 
-    override func cancel() {
+    // MARK: - Async Surface (bridges the callback directional routing above; deleted with it later)
+
+    override func send(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            send(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receive() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receive { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    override func closeWrite() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            closeWrite { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func performCancel() {
         let shouldCancel = lifecycle.withLock { state in
             guard !state.terminated else { return false }
             state.terminated = true

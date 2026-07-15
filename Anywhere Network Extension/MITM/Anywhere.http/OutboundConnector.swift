@@ -144,12 +144,14 @@ enum OutboundConnector {
             configuration: configuration,
             isDefaultProxy: routingContext()?.isDefaultConfiguration(configuration.id) ?? false
         )
-        client.connect(to: host, port: port, initialData: nil) { result in
-            queue.async {
-                switch result {
-                case .success(let connection):
+        Task {
+            do {
+                let connection = try await client.connect(to: host, port: port, initialData: nil)
+                queue.async {
                     completion(.success(Dialed(connection: connection, proxyClient: client)))
-                case .failure(let error):
+                }
+            } catch {
+                queue.async {
                     client.cancel()
                     completion(.failure(error))
                 }

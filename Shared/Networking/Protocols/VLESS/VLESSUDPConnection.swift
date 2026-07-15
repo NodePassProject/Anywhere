@@ -8,97 +8,55 @@
 import Foundation
 import Synchronization
 
-nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
+nonisolated final class VLESSUDPConnection: AsyncProxyConnection, UDPFramingCapable {
 
     private let inner: ProxyConnection
 
     let udpState = Mutex(UDPFramingState())
 
+    /// Serializes framed datagram writes across the wire `await`. The datagram flow
+    /// submits sends fire-and-forget, so without this two datagrams could interleave
+    /// their length-prefixed frames on the stream transport and corrupt it. UDP
+    /// tolerates whole-datagram reordering; only intra-frame interleaving is fatal.
+    private let sendMutex = AsyncMutex()
+
     init(inner: ProxyConnection) {
         self.inner = inner
+        super.init()
     }
 
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
     override var deliversDatagrams: Bool { true }
 
-    // MARK: - Send: frame payload then hand off to the TCP-style inner.
+    // MARK: - Send: length-prefix each datagram, then hand off to the TCP-style inner.
 
-    override func send(data: Data, completion: @escaping (Error?) -> Void) {
-        super.send(data: frameUDPPacket(data), completion: completion)
-    }
-
-    override func send(data: Data) {
-        super.send(data: frameUDPPacket(data))
-    }
-
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: data, completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        inner.sendRaw(data: data)
+    override func sendRaw(_ data: Data) async throws {
+        try await sendMutex.withLock {
+            try await inner.sendRaw(frameUDPPacket(data))
+        }
     }
 
     // MARK: - Receive: pull one framed packet at a time.
 
-    override func receive(completion: @escaping (Data?, Error?) -> Void) {
+    override func receiveRaw() async throws -> Data? {
         if let packet = udpState.withLock({ extractUDPPacket(from: &$0) }) {
-            completion(packet, nil)
-            return
+            return packet
         }
-        receiveMore(completion: completion)
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw(completion: completion)
-    }
-
-    private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-            if let error {
-                completion(nil, error)
-                return
-            }
-            guard let data else {
-                completion(nil, nil)
-                return
-            }
-
-            let packet = self.udpState.withLock { state -> Data? in
+        while true {
+            guard let data = try await inner.receiveRaw() else { return nil }
+            let packet = udpState.withLock { state -> Data? in
                 state.buffer.append(data)
-                return self.extractUDPPacket(from: &state)
+                return extractUDPPacket(from: &state)
             }
-            if let packet {
-                completion(packet, nil)
-            } else {
-                self.receiveMore(completion: completion)
-            }
+            if let packet { return packet }
         }
     }
 
     // MARK: - Cancel
 
-    override func cancel() {
+    override func performCancel() {
         udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
-    }
-
-    // MARK: - Direct (Vision bypass) passthroughs
-
-    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveDirectRaw(completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendDirectRaw(data: data, completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data) {
-        inner.sendDirectRaw(data: data)
     }
 }

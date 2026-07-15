@@ -19,21 +19,6 @@ extension ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithSudoku(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
-        }
-    }
-
-    func connectWithSudoku(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data? = nil,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
         let sudokuCommand: SudokuConnectCommand
         switch command {
         case .tcp:
@@ -41,23 +26,19 @@ extension ProxyClient {
         case .udp:
             sudokuCommand = .udp
         case .mux:
-            completion(.failure(ProxyError.protocolError("Sudoku does not use the host mux manager")))
-            return
+            throw ProxyError.protocolError("Sudoku does not use the host mux manager")
         }
 
         guard case .sudoku(let sudoku) = configuration.outbound else {
-            completion(.failure(ProxyError.protocolError("missing Sudoku protocol settings")))
-            return
+            throw ProxyError.protocolError("missing Sudoku protocol settings")
         }
-        
+
         if case .tcp = sudokuCommand, sudoku.multiplex == .on, tunnel == nil {
-            connectWithPooledSudokuMux(
+            return try await connectWithPooledSudokuMux(
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
-                initialData: initialData,
-                completion: completion
+                initialData: initialData
             )
-            return
         }
 
         let configuration = configuration
@@ -68,33 +49,31 @@ extension ProxyClient {
         )
         own(factory)
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let client = try SudokuNativeClient(configuration: configuration, factory: factory)
-                let connection: ProxyConnection
-                switch sudokuCommand {
-                case .tcp where client.shouldUseNativeMux:
-                    let multiplexer = try client.openMux()
-                    let stream = try multiplexer.dialTCP(host: destinationHost, port: destinationPort)
-                    try ProxyClient.sendSudokuInitialData(initialData, to: stream)
-                    connection = SudokuMuxTCPProxyConnection(client: multiplexer, stream: stream)
-                case .tcp:
-                    let stream = try client.openTCP(host: destinationHost, port: destinationPort)
-                    try stream.sendInitialDataIfNeeded(initialData)
-                    connection = SudokuTCPProxyConnection(stream: stream)
-                case .udp:
-                    let stream = try client.openUoT()
-                    connection = SudokuUDPProxyConnection(
-                        stream: stream,
-                        destinationHost: destinationHost,
-                        destinationPort: destinationPort
-                    )
-                }
-                completion(.success(connection))
-            } catch {
-                factory.closeAll()
-                completion(.failure(error))
+        do {
+            let client = try SudokuNativeClient(configuration: configuration, factory: factory)
+            let connection: ProxyConnection
+            switch sudokuCommand {
+            case .tcp where client.shouldUseNativeMux:
+                let multiplexer = try await client.openMux()
+                let stream = try await multiplexer.dialTCP(host: destinationHost, port: destinationPort)
+                try await ProxyClient.sendSudokuInitialData(initialData, to: stream)
+                connection = SudokuMuxTCPProxyConnection(client: multiplexer, stream: stream)
+            case .tcp:
+                let stream = try await client.openTCP(host: destinationHost, port: destinationPort)
+                try await stream.sendInitialDataIfNeeded(initialData)
+                connection = SudokuTCPProxyConnection(stream: stream)
+            case .udp:
+                let stream = try await client.openUoT()
+                connection = SudokuUDPProxyConnection(
+                    stream: stream,
+                    destinationHost: destinationHost,
+                    destinationPort: destinationPort
+                )
             }
+            return connection
+        } catch {
+            factory.closeAll()
+            throw error
         }
     }
 
@@ -103,48 +82,39 @@ extension ProxyClient {
     private func connectWithPooledSudokuMux(
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
         guard let pool = SudokuMultiplexerRegistry.shared.pool(
             for: configuration,
             directDialHost: directDialHost
         ) else {
-            completion(.failure(ProxyError.connectionFailed("Failed to acquire Sudoku mux pool")))
-            return
+            throw ProxyError.connectionFailed("Failed to acquire Sudoku mux pool")
         }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let (multiplexer, stream) = try pool.dialTCP(host: destinationHost, port: destinationPort)
-                do {
-                    try ProxyClient.sendSudokuInitialData(initialData, to: stream)
-                } catch {
-                    stream.close()
-                    throw error
-                }
-                let connection = SudokuMuxTCPProxyConnection(
-                    client: multiplexer,
-                    stream: stream,
-                    closesClientOnClose: false,
-                    onClose: { pool.noteStreamEnded(multiplexer) }
-                )
-                completion(.success(connection))
-            } catch {
-                completion(.failure(error))
-            }
+        let (multiplexer, stream) = try await pool.dialTCP(host: destinationHost, port: destinationPort)
+        do {
+            try await ProxyClient.sendSudokuInitialData(initialData, to: stream)
+        } catch {
+            stream.close()
+            throw error
         }
+        return SudokuMuxTCPProxyConnection(
+            client: multiplexer,
+            stream: stream,
+            closesClientOnClose: false,
+            onClose: { pool.noteStreamEnded(multiplexer) }
+        )
     }
 
-    private static func sendSudokuInitialData(_ data: Data?, to stream: SudokuMuxStream) throws {
+    private static func sendSudokuInitialData(_ data: Data?, to stream: SudokuMuxStream) async throws {
         guard let data, !data.isEmpty else { return }
-        try stream.send(data)
+        try await stream.send(data)
     }
 }
 
 private extension SudokuRecordStream {
-    func sendInitialDataIfNeeded(_ data: Data?) throws {
+    func sendInitialDataIfNeeded(_ data: Data?) async throws {
         guard let data, !data.isEmpty else { return }
-        try send(data)
+        try await send(data)
     }
 }

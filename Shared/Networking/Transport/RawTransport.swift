@@ -33,22 +33,41 @@ extension RawTransport {
     nonisolated func closeWrite(completion: @escaping (Error?) -> Void) { completion(nil) }
 }
 
-// MARK: - RawDatagramTransport
+// MARK: - RawTransport async surface
 
-/// A connected datagram transport with a push receive surface — the datagram
-/// analogue of ``RawTransport``. Consumers depend on this protocol rather than a
-/// concrete transport.
-protocol RawDatagramTransport: AnyObject {
-    var isTransportReady: Bool { get }
+// Async-native counterparts of the callback methods, for consumers migrating off
+// completion handlers (e.g. `TLSRecordConnection`). The defaults bridge to the callback
+// methods — so ordering (sends drained through a pump, single-flight receives) is
+// preserved by whatever concrete transport is underneath — and a transport can override
+// them to run natively over its own async surface, deleting a bridge hop.
+extension RawTransport {
+    /// Sends `data`, awaiting the write. Bridges the ordered `send(data:completion:)`.
+    func send(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            send(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
 
-    func send(data: Data, completion: @escaping (Error?) -> Void)
+    /// Receives once; `isComplete` marks EOF (a nil/empty `data` with `isComplete` is a clean close).
+    func receive() async throws -> (data: Data?, isComplete: Bool) {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(data: Data?, isComplete: Bool), Error>) in
+            receive { data, isComplete, error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume(returning: (data, isComplete)) }
+            }
+        }
+    }
 
-    func send(data: Data)
-
-    /// Arms the datagram handler; `errorHandler` fires once on terminal failure.
-    func startReceiving(queue: DispatchQueue?, handler: @escaping (Data) -> Void, errorHandler: ((Error) -> Void)?)
-
-    func cancel()
+    /// Half-closes the send direction. Bridges the ordered `closeWrite(completion:)`.
+    func closeWrite() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            closeWrite { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
 }
 
 // MARK: - TransportError

@@ -7,32 +7,27 @@
 
 import Foundation
 
-nonisolated class HTTPUpgradeProxyConnection: ProxyConnection {
+nonisolated class HTTPUpgradeProxyConnection: AsyncProxyConnection {
     private let huConnection: HTTPUpgradeConnection
 
     init(huConnection: HTTPUpgradeConnection) {
         self.huConnection = huConnection
+        super.init()
     }
 
     override var isConnected: Bool {
         huConnection.isConnected
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        huConnection.send(data: data, completion: completion)
+    override func sendRaw(_ data: Data) async throws {
+        try await huConnection.send(data)
     }
 
-    override func sendRaw(data: Data) {
-        huConnection.send(data: data)
+    override func receiveRaw() async throws -> Data? {
+        try await huConnection.receive()
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        huConnection.receive { data, error in
-            completion(data, error)
-        }
-    }
-
-    override func cancel() {
+    override func performCancel() {
         huConnection.cancel()
     }
 }

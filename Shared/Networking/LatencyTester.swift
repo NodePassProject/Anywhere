@@ -92,41 +92,28 @@ nonisolated enum LatencyTester {
         }
 
         let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
-        let resumer = PendingResumer()
 
         do {
             let ms = try await withTaskCancellationHandler {
-                let proxyConnection = try await Self.establishWarmedConnection(client: client, resumer: resumer)
+                let proxyConnection = try await Self.establishWarmedConnection(client: client)
 
                 // Phase 3 (untimed): send the request.
                 let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
-
-                try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
-                    proxyConnection.send(data: httpRequest) { error in
-                        if let error { complete(.failure(error)) } else { complete(.success(())) }
-                    }
-                }
+                try await proxyConnection.send(httpRequest)
 
                 // Phase 4 (timed): timer starts after the send completes.
                 let clock = ContinuousClock()
                 let start = clock.now
 
-                let responseData: Data? = try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Data?, Error>) -> Void) in
-                    proxyConnection.receive { data, error in
-                        if let error { complete(.failure(error)) } else { complete(.success(data)) }
-                    }
-                }
+                let responseData = try await proxyConnection.receive()
 
                 let elapsed = clock.now - start
 
                 // The final request promises no more application bytes. Finish the
                 // logical uplink before owner teardown so stream transports can send
                 // FIN (and TLS close_notify) instead of being cut off by cancel().
-                // Teardown errors do not invalidate an already measured response;
-                // cancellation still interrupts this await through `resumer`.
-                try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
-                    proxyConnection.closeWrite { _ in complete(.success(())) }
-                }
+                // Teardown errors do not invalidate an already measured response.
+                try? await proxyConnection.closeWrite()
 
                 let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
                     .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
@@ -136,46 +123,29 @@ nonisolated enum LatencyTester {
 
                 return Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
             } onCancel: {
-                // Unblock the awaiting callback. Do NOT call client.cancel()
-                // here — it races with awaitClientCancel.
-                resumer.cancel()
+                // Abortive teardown unblocks whichever async op is in flight. Safe against
+                // the graceful `await client.cancel()` below: teardown drains the owned
+                // resources atomically, so the loser sees an empty set and no-ops.
+                client.cancel()
             }
-            await awaitClientCancel(client)
+            await client.cancel()
             return ms
         } catch {
-            await awaitClientCancel(client)
+            await client.cancel()
             throw error
         }
     }
 
-    /// Waits until the underlying fd is fully closed before the next test runs.
-    private static func awaitClientCancel(_ client: ProxyClient) async {
-        await withCheckedContinuation { continuation in
-            client.cancel { continuation.resume() }
-        }
-    }
-
     /// Phases 1 + 2 (untimed): proxy handshake plus a warmup HEAD round-trip.
-    private static func establishWarmedConnection(client: ProxyClient, resumer: PendingResumer) async throws -> ProxyConnection {
+    private static func establishWarmedConnection(client: ProxyClient) async throws -> ProxyConnection {
         // Phase 1 (untimed): TCP/TLS/outbound handshake.
-        let proxyConnection: ProxyConnection = try await awaitCallback(resumer: resumer) { complete in
-            client.connect(to: Self.latencyHost, port: Self.latencyPort) { complete($0) }
-        }
+        let proxyConnection = try await client.connect(to: Self.latencyHost, port: Self.latencyPort)
 
         // Phase 2 (untimed): warmup request primes the proxy-to-target connection.
         let warmupRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
+        try await proxyConnection.send(warmupRequest)
 
-        try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
-            proxyConnection.send(data: warmupRequest) { error in
-                if let error { complete(.failure(error)) } else { complete(.success(())) }
-            }
-        }
-
-        let warmupData: Data? = try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Data?, Error>) -> Void) in
-            proxyConnection.receive { data, error in
-                if let error { complete(.failure(error)) } else { complete(.success(data)) }
-            }
-        }
+        let warmupData = try await proxyConnection.receive()
 
         let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
             .split(separator: "\r\n", maxSplits: 1).first.map(String.init)

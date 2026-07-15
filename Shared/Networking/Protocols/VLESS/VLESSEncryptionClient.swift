@@ -827,7 +827,7 @@ private final class VLESSEncryptionByteReader {
 /// AEAD-framed wrapper: application bytes travel as TLS-1.3-style records
 /// (5-byte header + sealed payload), with a BLAKE3 rekey when the nonce wraps.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-nonisolated final class VLESSEncryptedConnection: ProxyConnection {
+nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
     /// Snapshot of the cache entry behind a 0-RTT attempt, so first-record decode
     /// failure invalidates exactly that entry and not a newer ticket that raced in.
     struct ZeroRTTState {
@@ -886,10 +886,31 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             pendingServerPaddingLength: pendingServerPaddingLength
         ))
         self.zeroRTTState = zeroRTTState
+        super.init()
     }
 
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+
+    // MARK: - Async Surface
+
+    // Bridges the callback AEAD framing below for the flipped class; deleted with it later.
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
 
     // MARK: - Send
 
@@ -1133,7 +1154,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         inner.receiveRaw(completion: completion)
     }
 
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 }

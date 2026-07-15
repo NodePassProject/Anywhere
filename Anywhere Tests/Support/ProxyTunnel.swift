@@ -21,20 +21,12 @@ final class ProxyConnectionStream: ByteStream {
     init(_ connection: ProxyConnection) { self.connection = connection }
 
     func sendBytes(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await connection.send(data)
     }
 
     func receiveBytes() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            connection.receive { data, error in
-                if let error { continuation.resume(throwing: error); return }
-                continuation.resume(returning: (data?.isEmpty == false) ? data : nil)
-            }
-        }
+        let data = try await connection.receive()
+        return (data?.isEmpty == false) ? data : nil
     }
 
     func closeStream() { connection.cancel() }
@@ -77,11 +69,7 @@ final class ProxyTunnel {
     
     static func open(configuration: ProxyConfiguration, host: String, port: UInt16) async throws -> ProxyTunnel {
         let client = ProxyClient(configuration: configuration)
-        let connection: ProxyConnection = try await withCheckedThrowingContinuation { continuation in
-            client.connect(to: host, port: port) { result in
-                continuation.resume(with: result)
-            }
-        }
+        let connection = try await client.connect(to: host, port: port)
         return ProxyTunnel(client: client, connection: connection)
     }
 
@@ -90,11 +78,7 @@ final class ProxyTunnel {
     /// `ProxyConnectionDatagramTransport` to run QUIC over the relay.
     static func openUDP(configuration: ProxyConfiguration, host: String, port: UInt16) async throws -> ProxyTunnel {
         let client = ProxyClient(configuration: configuration)
-        let connection: ProxyConnection = try await withCheckedThrowingContinuation { continuation in
-            client.connectUDP(to: host, port: port) { result in
-                continuation.resume(with: result)
-            }
-        }
+        let connection = try await client.connectUDP(to: host, port: port)
         return ProxyTunnel(client: client, connection: connection)
     }
 
@@ -117,9 +101,7 @@ final class ProxyTunnel {
     }
     
     func close() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            client.cancel { continuation.resume() }
-        }
+        await client.cancel()
     }
 }
 

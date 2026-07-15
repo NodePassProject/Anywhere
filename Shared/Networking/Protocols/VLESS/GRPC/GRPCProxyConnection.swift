@@ -7,32 +7,27 @@
 
 import Foundation
 
-nonisolated class GRPCProxyConnection: ProxyConnection {
+nonisolated class GRPCProxyConnection: AsyncProxyConnection {
     private let grpcConnection: GRPCConnection
 
     init(grpcConnection: GRPCConnection) {
         self.grpcConnection = grpcConnection
+        super.init()
     }
 
     override var isConnected: Bool {
         grpcConnection.isConnected
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        grpcConnection.send(data: data, completion: completion)
+    override func sendRaw(_ data: Data) async throws {
+        try await grpcConnection.send(data)
     }
 
-    override func sendRaw(data: Data) {
-        grpcConnection.send(data: data)
+    override func receiveRaw() async throws -> Data? {
+        try await grpcConnection.receive()
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        grpcConnection.receive { data, error in
-            completion(data, error)
-        }
-    }
-
-    override func cancel() {
+    override func performCancel() {
         grpcConnection.cancel()
     }
 }

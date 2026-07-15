@@ -119,14 +119,14 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     /// Opens a stream on the pooled session, dialing one if needed. A dial failure on a
     /// reused session usually means the kernel killed the socket while it sat idle, so the
     /// dial is retried once on a fresh session.
-    func dialTCP(host: String, port: UInt16) throws -> (SudokuMuxClient, SudokuMuxStream) {
-        let multiplexer = try acquireMultiplexer()
+    func dialTCP(host: String, port: UInt16) async throws -> (SudokuMuxClient, SudokuMuxStream) {
+        let multiplexer = try await acquireMultiplexer()
         do {
-            return (multiplexer, try multiplexer.dialTCP(host: host, port: port))
+            return (multiplexer, try await multiplexer.dialTCP(host: host, port: port))
         } catch {
             multiplexer.close(error: error)
-            let retry = try acquireMultiplexer()
-            return (retry, try retry.dialTCP(host: host, port: port))
+            let retry = try await acquireMultiplexer()
+            return (retry, try await retry.dialTCP(host: host, port: port))
         }
     }
 
@@ -156,20 +156,24 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
 
     // MARK: - Private
 
-    private func acquireMultiplexer() throws -> SudokuMuxClient {
+    private func acquireMultiplexer() async throws -> SudokuMuxClient {
         while true {
             if let existing = try reusableMultiplexer() {
                 return existing
             }
-            dialCondition.lock()
-            if dialing {
-                // Another caller is handshaking; re-check the pool once it publishes.
-                dialCondition.wait()
-                dialCondition.unlock()
+            let claimedDial: Bool = {
+                dialCondition.lock()
+                defer { dialCondition.unlock() }
+                if dialing { return false }
+                dialing = true
+                return true
+            }()
+            if !claimedDial {
+                // Another caller is handshaking; poll (non-blocking) until it publishes a
+                // session or clears the dial slot, then re-check the pool.
+                try await Task.sleep(for: .milliseconds(10))
                 continue
             }
-            dialing = true
-            dialCondition.unlock()
 
             defer {
                 dialCondition.lock()
@@ -177,7 +181,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
                 dialCondition.broadcast()
                 dialCondition.unlock()
             }
-            return try dialMultiplexer()
+            return try await dialMultiplexer()
         }
     }
 
@@ -199,7 +203,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
 
     /// Dials a fresh session on its own factory; the session owns the factory and tears it
     /// down on close.
-    private func dialMultiplexer() throws -> SudokuMuxClient {
+    private func dialMultiplexer() async throws -> SudokuMuxClient {
         let factory = SudokuConnectionFactory(
             configuration: configuration,
             initialTunnel: nil,
@@ -208,7 +212,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
         let multiplexer: SudokuMuxClient
         do {
             let client = try SudokuNativeClient(configuration: configuration, factory: factory)
-            multiplexer = try client.openMux(ownsFactory: true)
+            multiplexer = try await client.openMux(ownsFactory: true)
         } catch {
             factory.closeAll()
             throw error

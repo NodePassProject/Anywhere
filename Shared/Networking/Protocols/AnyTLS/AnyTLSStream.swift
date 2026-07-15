@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSStream")
 
-nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
+nonisolated final class AnyTLSStream: AsyncProxyConnection, MultiplexerStreamSink {
 
     let sid: UInt32
     private weak var multiplexer: AnyTLSMultiplexer?
@@ -38,6 +38,7 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         self.sid = sid
         self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
+        super.init()
     }
 
     override var isConnected: Bool {
@@ -45,6 +46,26 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
     }
 
     override var outerTLSVersion: TLSVersion? { cachedTLSVersion }
+
+    // MARK: - Async Surface
+
+    // Bridges the callback multiplexer sink below for the flipped class; deleted with it later.
+
+    override func sendRaw(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRaw(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveRaw { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
 
     // MARK: - Send
 
@@ -97,7 +118,7 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    override func performCancel() {
         let already = receiveState.withLock { state -> Bool in
             let already = state.locallyCancelled
             state.locallyCancelled = true
