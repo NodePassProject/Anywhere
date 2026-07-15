@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection
 // MARK: - ShadowsocksConnection
 
 /// Address header is prepended to the first send, encrypted as part of the AEAD stream.
-nonisolated class ShadowsocksConnection: ProxyConnection {
+nonisolated class ShadowsocksConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private let writer: ShadowsocksAEADWriter
     private let reader: ShadowsocksAEADReader
@@ -28,66 +28,41 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
 
     override var isConnected: Bool { inner.isConnected }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        do {
-            var plaintext = Data()
-            lock.lock()
-            if let header = addressHeader {
-                plaintext.append(header)
-                addressHeader = nil
-            }
-            lock.unlock()
-            plaintext.append(data)
+    override func sendRaw(_ data: Data) async throws {
+        var plaintext = Data()
+        lock.lock()
+        if let header = addressHeader {
+            plaintext.append(header)
+            addressHeader = nil
+        }
+        lock.unlock()
+        plaintext.append(data)
 
-            let encrypted = try writer.seal(plaintext: plaintext)
-            inner.sendRaw(data: encrypted, completion: completion)
-        } catch {
-            completion(error)
+        let encrypted = try writer.seal(plaintext: plaintext)
+        try await inner.sendRaw(encrypted)
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        while true {
+            guard let data = try await inner.receiveRaw(), !data.isEmpty else {
+                return nil
+            }
+            let plaintext = try reader.open(ciphertext: data)
+            if plaintext.isEmpty {
+                continue
+            }
+            return plaintext
         }
     }
 
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-
-            do {
-                let plaintext = try self.reader.open(ciphertext: data)
-                if plaintext.isEmpty {
-                    self.receiveRaw(completion: completion)
-                } else {
-                    completion(plaintext, nil)
-                }
-            } catch {
-                completion(nil, error)
-            }
-        }
-    }
-
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 }
 
 // MARK: - ShadowsocksUDPConnection
 
-nonisolated class ShadowsocksUDPConnection: ProxyConnection {
+nonisolated class ShadowsocksUDPConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let masterKey: Data
@@ -106,52 +81,25 @@ nonisolated class ShadowsocksUDPConnection: ProxyConnection {
     override var isConnected: Bool { inner.isConnected }
     override var deliversDatagrams: Bool { true }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        do {
-            let packet = ShadowsocksProtocol.encodeUDPPacket(host: dstHost, port: dstPort, payload: data)
-            let encrypted = try ShadowsocksUDPCrypto.encrypt(cipher: cipher, masterKey: masterKey, payload: packet)
-            // `inner.send` so any UoT framing wraps each encrypted datagram.
-            inner.send(data: encrypted, completion: completion)
-        } catch {
-            completion(error)
+    override func sendRaw(_ data: Data) async throws {
+        let packet = ShadowsocksProtocol.encodeUDPPacket(host: dstHost, port: dstPort, payload: data)
+        let encrypted = try ShadowsocksUDPCrypto.encrypt(cipher: cipher, masterKey: masterKey, payload: packet)
+        // `inner.send` so any UoT framing wraps each encrypted datagram.
+        try await inner.send(encrypted)
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        guard let data = try await inner.receive(), !data.isEmpty else {
+            return nil
         }
-    }
-
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-
-            do {
-                let decrypted = try ShadowsocksUDPCrypto.decrypt(cipher: self.cipher, masterKey: self.masterKey, data: data)
-                guard let parsed = ShadowsocksProtocol.decodeUDPPacket(data: decrypted) else {
-                    completion(nil, ShadowsocksError.invalidAddress)
-                    return
-                }
-                completion(parsed.payload, nil)
-            } catch {
-                completion(nil, error)
-            }
+        let decrypted = try ShadowsocksUDPCrypto.decrypt(cipher: cipher, masterKey: masterKey, data: data)
+        guard let parsed = ShadowsocksProtocol.decodeUDPPacket(data: decrypted) else {
+            throw ShadowsocksError.invalidAddress
         }
+        return parsed.payload
     }
 
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 }

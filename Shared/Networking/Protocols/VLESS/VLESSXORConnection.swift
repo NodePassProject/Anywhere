@@ -10,7 +10,7 @@ import Synchronization
 
 /// Stream-XOR wrapper for VLESS encryption's `random` XOR mode. Per direction:
 /// skip N bytes → XOR the 5-byte record header → skip the decoded body → repeat.
-nonisolated final class VLESSXORConnection: ProxyConnection {
+nonisolated final class VLESSXORConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
 
     private let outCTR: VLESSEncryptionCTR
@@ -44,6 +44,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         self.outCTR = outCTR
         self.sendState = Mutex(SendState(outSkip: outSkip))
         self.recvState = Mutex(RecvState(inCTR: inCTR, inSkip: inSkip))
+        super.init()
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -56,17 +57,13 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     // MARK: - Send
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        if data.isEmpty { completion(nil); return }
+    override func sendRaw(_ data: Data) async throws {
+        if data.isEmpty { return }
         var bytes = [UInt8](data)
         sendState.withLock { state in
             applyOutboundMask(&bytes, state: &state)
         }
-        inner.sendRaw(data: Data(bytes), completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        sendRaw(data: data, completion: { _ in })
+        try await inner.sendRaw(Data(bytes))
     }
 
     /// XORs each TLS-record header in place, leaving sealed bodies and the skip region alone.
@@ -103,7 +100,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     // MARK: - Receive
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+    override func receiveRaw() async throws -> Data? {
         // Drain stashed bytes first to preserve record-framing order.
         let stashed: Data? = recvState.withLock { state in
             guard !state.pendingPostSkip.isEmpty, state.inCTR != nil else { return nil }
@@ -113,25 +110,18 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
             return data
         }
         if let stashed {
-            completion(stashed, nil)
-            return
+            return stashed
         }
 
-        inner.receiveRaw { [weak self] data, error in
-            guard let self else {
-                completion(nil, VLESSEncryptionError.connectionClosed)
-                return
-            }
-            if let error { completion(nil, error); return }
-            guard var data, !data.isEmpty else {
-                completion(data, nil)
-                return
-            }
-            self.recvState.withLock { state in
-                self.applyInboundMask(&data, state: &state)
-            }
-            completion(data, nil)
+        let received = try await inner.receiveRaw()
+        guard var data = received, !data.isEmpty else {
+            // EOF (nil) or an empty chunk passes through unchanged.
+            return received
         }
+        recvState.withLock { state in
+            applyInboundMask(&data, state: &state)
+        }
+        return data
     }
 
     /// Inbound counterpart of `applyOutboundMask`. Call inside `recvState.withLock`;
@@ -176,7 +166,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 

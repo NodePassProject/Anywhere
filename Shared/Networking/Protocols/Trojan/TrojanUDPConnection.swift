@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
 // MARK: - TrojanUDPConnection
 
 /// Each datagram is framed as `addr:port + length + CRLF + payload`, after a one-shot UDP request header.
-nonisolated final class TrojanUDPConnection: ProxyConnection {
+nonisolated final class TrojanUDPConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private let passwordKey: Data
     private let destinationHost: String
@@ -34,19 +34,15 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
     override var deliversDatagrams: Bool { true }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: frame(data), completion: completion)
+    override func sendRaw(_ data: Data) async throws {
+        try await inner.sendRaw(frame(data))
     }
 
-    override func sendRaw(data: Data) {
-        inner.sendRaw(data: frame(data))
+    override func receiveRaw() async throws -> Data? {
+        try await nextPacket()
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        deliverNextPacket(completion: completion)
-    }
-
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 
@@ -69,36 +65,20 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
         return out
     }
 
-    private func deliverNextPacket(completion: @escaping (Data?, Error?) -> Void) {
-        do {
+    private func nextPacket() async throws -> Data? {
+        while true {
             let parsed: (payload: Data, consumed: Int)? = try lock.withLock {
                 try TrojanProtocol.tryDecodeUDPPacket(buffer: receiveBuffer)
             }
             if let parsed {
                 lock.withLock { receiveBuffer.removeFirst(parsed.consumed) }
-                completion(parsed.payload, nil)
-                return
+                return parsed.payload
             }
-        } catch {
-            completion(nil, error)
-            return
-        }
 
-        inner.receiveRaw { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Trojan UDP deallocated"))
-                return
+            guard let data = try await inner.receiveRaw(), !data.isEmpty else {
+                return nil
             }
-            if let error {
-                completion(nil, error)
-                return
-            }
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-            self.lock.withLock { self.receiveBuffer.append(data) }
-            self.deliverNextPacket(completion: completion)
+            lock.withLock { receiveBuffer.append(data) }
         }
     }
 }

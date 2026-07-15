@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "TrojanConnection")
 // MARK: - TrojanConnection
 
 /// Prepends the Trojan TCP request header to the first outbound payload inside the same TLS record; server replies are unframed pass-through.
-nonisolated final class TrojanConnection: ProxyConnection {
+nonisolated final class TrojanConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private var pendingHeader: Data?
 
@@ -30,19 +30,15 @@ nonisolated final class TrojanConnection: ProxyConnection {
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: consumeHeader().map { $0 + data } ?? data, completion: completion)
+    override func sendRaw(_ data: Data) async throws {
+        try await inner.sendRaw(consumeHeader().map { $0 + data } ?? data)
     }
 
-    override func sendRaw(data: Data) {
-        inner.sendRaw(data: consumeHeader().map { $0 + data } ?? data)
+    override func receiveRaw() async throws -> Data? {
+        try await inner.receiveRaw()
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw(completion: completion)
-    }
-
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 

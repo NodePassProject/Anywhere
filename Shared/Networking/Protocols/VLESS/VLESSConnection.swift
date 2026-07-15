@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class VLESSConnection: ProxyConnection {
+nonisolated final class VLESSConnection: AsyncProxyConnection {
 
     private let inner: ProxyConnection
 
@@ -21,6 +21,7 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     init(inner: ProxyConnection) {
         self.inner = inner
+        super.init()
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -43,38 +44,37 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     // MARK: - Send (passthrough)
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: data, completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        inner.sendRaw(data: data)
+    override func sendRaw(_ data: Data) async throws {
+        try await inner.sendRaw(data)
     }
 
     // MARK: - Receive (strip VLESS response header on first bytes)
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
+    override func receiveRaw() async throws -> Data? {
+        while true {
+            let received = try await inner.receiveRaw()
+            guard let data = received, !data.isEmpty else {
+                // EOF (nil) or an empty chunk passes through unchanged.
+                return received
             }
-            if let error {
-                completion(nil, error)
-                return
+            switch processResponseHeader(data: data) {
+            case .deliver(let output):
+                return output
+            case .needMore:
+                continue
             }
-            guard let data, !data.isEmpty else {
-                completion(data, nil)
-                return
-            }
-            self.processResponseHeader(data: data, completion: completion)
         }
+    }
+
+    private enum HeaderResult {
+        case deliver(Data)
+        case needMore
     }
 
     /// Consumes the VLESS response header (version + addonsLength + addons), then
     /// delivers the remainder. A non-matching first byte passes the buffered bytes
     /// through as-is — some servers omit the response header entirely.
-    private func processResponseHeader(data: Data, completion: @escaping (Data?, Error?) -> Void) {
+    private func processResponseHeader(data: Data) -> HeaderResult {
         var output: Data?
         var shouldReceiveMore = false
 
@@ -110,11 +110,11 @@ nonisolated final class VLESSConnection: ProxyConnection {
         }
 
         if let output {
-            completion(output, nil)
+            return .deliver(output)
         } else if shouldReceiveMore {
-            receiveRaw(completion: completion)
+            return .needMore
         } else {
-            completion(data, nil)
+            return .deliver(data)
         }
     }
 
@@ -134,7 +134,7 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 }

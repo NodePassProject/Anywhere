@@ -23,7 +23,7 @@ private let tagSize = 16
 // MARK: - Shadowsocks2022Connection (TCP)
 
 /// Wire format: salt + seal(fixedHeader) + seal(variableHeader+payload) [+ AEAD chunks].
-nonisolated class Shadowsocks2022Connection: ProxyConnection {
+nonisolated class Shadowsocks2022Connection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let psk: Data
@@ -64,61 +64,39 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
 
     override var isConnected: Bool { inner.isConnected }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        do {
-            lock.lock()
-            let needsHandshake = !handshakeSent
-            let header = addressHeader
-            if needsHandshake {
-                handshakeSent = true
-                addressHeader = nil
-            }
-            lock.unlock()
+    override func sendRaw(_ data: Data) async throws {
+        lock.lock()
+        let needsHandshake = !handshakeSent
+        let header = addressHeader
+        if needsHandshake {
+            handshakeSent = true
+            addressHeader = nil
+        }
+        lock.unlock()
 
-            if needsHandshake {
-                let output = try buildRequest(payload: data, addressHeader: header!)
-                inner.sendRaw(data: output, completion: completion)
-            } else {
-                let encrypted = try sealChunks(plaintext: data)
-                inner.sendRaw(data: encrypted, completion: completion)
-            }
-        } catch {
-            completion(error)
+        if needsHandshake {
+            let output = try buildRequest(payload: data, addressHeader: header!)
+            try await inner.sendRaw(output)
+        } else {
+            let encrypted = try sealChunks(plaintext: data)
+            try await inner.sendRaw(encrypted)
         }
     }
 
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
+    override func receiveRaw() async throws -> Data? {
+        while true {
+            guard let data = try await inner.receiveRaw(), !data.isEmpty else {
+                return nil
             }
-            if let error {
-                completion(nil, error)
-                return
+            let plaintext = try processReceived(data)
+            if plaintext.isEmpty {
+                continue
             }
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-            do {
-                let plaintext = try self.processReceived(data)
-                if plaintext.isEmpty {
-                    self.receiveRaw(completion: completion)
-                } else {
-                    completion(plaintext, nil)
-                }
-            } catch {
-                completion(nil, error)
-            }
+            return plaintext
         }
     }
 
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 
@@ -392,7 +370,7 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
 // MARK: - Shadowsocks2022UDPConnection (AES variant)
 
 /// Packet: AES-ECB(sessionID(8) + packetID(8)) + AEAD(body), nonce = header[4:16].
-nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
+nonisolated class Shadowsocks2022AESUDPConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let psk: Data             // last PSK (for session key derivation)
@@ -440,44 +418,20 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
     override var isConnected: Bool { inner.isConnected }
     override var deliversDatagrams: Bool { true }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        do {
-            let encrypted = try encryptPacket(payload: data)
-            // `inner.send` so any UoT framing wraps each encrypted datagram.
-            inner.send(data: encrypted, completion: completion)
-        } catch {
-            completion(error)
+    override func sendRaw(_ data: Data) async throws {
+        let encrypted = try encryptPacket(payload: data)
+        // `inner.send` so any UoT framing wraps each encrypted datagram.
+        try await inner.send(encrypted)
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        guard let data = try await inner.receive(), !data.isEmpty else {
+            return nil
         }
+        return try decryptPacket(data)
     }
 
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-            if let error {
-                completion(nil, error)
-                return
-            }
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-            do {
-                let payload = try self.decryptPacket(data)
-                completion(payload, nil)
-            } catch {
-                completion(nil, error)
-            }
-        }
-    }
-
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 
@@ -617,7 +571,7 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
 // MARK: - Shadowsocks2022ChaChaUDPConnection
 
 /// Packet: nonce(24) + XChaCha20-Poly1305(sessionID + packetID + type + timestamp + padding + address + payload).
-nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
+nonisolated class Shadowsocks2022ChaChaUDPConnection: AsyncProxyConnection {
     private let inner: ProxyConnection
     private let psk: Data
     private let dstHost: String
@@ -643,44 +597,20 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     override var isConnected: Bool { inner.isConnected }
     override var deliversDatagrams: Bool { true }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        do {
-            let encrypted = try encryptPacket(payload: data)
-            // `inner.send` so any UoT framing wraps each encrypted datagram.
-            inner.send(data: encrypted, completion: completion)
-        } catch {
-            completion(error)
+    override func sendRaw(_ data: Data) async throws {
+        let encrypted = try encryptPacket(payload: data)
+        // `inner.send` so any UoT framing wraps each encrypted datagram.
+        try await inner.send(encrypted)
+    }
+
+    override func receiveRaw() async throws -> Data? {
+        guard let data = try await inner.receive(), !data.isEmpty else {
+            return nil
         }
+        return try decryptPacket(data)
     }
 
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-            if let error {
-                completion(nil, error)
-                return
-            }
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-            do {
-                let payload = try self.decryptPacket(data)
-                completion(payload, nil)
-            } catch {
-                completion(nil, error)
-            }
-        }
-    }
-
-    override func cancel() {
+    override func performCancel() {
         inner.cancel()
     }
 
