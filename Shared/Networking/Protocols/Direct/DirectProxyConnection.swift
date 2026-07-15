@@ -7,43 +7,13 @@
 
 import Foundation
 
-nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Sendable {
+nonisolated final class DirectProxyConnection: AsyncProxyConnection, @unchecked Sendable {
 
     private let transport: any AsyncByteTransport
-    
-    private struct SendJob: @unchecked Sendable {
-        let data: Data
-        let endOfStream: Bool
-        let completion: ((Error?) -> Void)?
-    }
-
-    private let jobsContinuation: AsyncStream<SendJob>.Continuation
-    private let pump: Task<Void, Never>
 
     init(transport: any AsyncByteTransport) {
         self.transport = transport
-        let (stream, continuation) = AsyncStream.makeStream(of: SendJob.self)
-        self.jobsContinuation = continuation
-        pump = Task {
-            for await job in stream {
-                do {
-                    if job.endOfStream {
-                        try await transport.finishSend()
-                    } else {
-                        try await transport.send(job.data)
-                    }
-                    job.completion?(nil)
-                } catch {
-                    job.completion?(error)
-                }
-            }
-        }
         super.init()
-    }
-
-    deinit {
-        jobsContinuation.finish()
-        pump.cancel()
     }
 
     override var isConnected: Bool { transport.isReady }
@@ -63,9 +33,7 @@ nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Senda
         try await transport.finishSend()
     }
 
-    override func cancel() {
-        jobsContinuation.finish()
-        pump.cancel()
+    override func performCancel() {
         transport.cancel()
     }
 }

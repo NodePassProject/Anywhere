@@ -51,6 +51,7 @@ class UDPFlow {
     // Non-mux path
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
+    private var proxyReceiveTask: Task<Void, Never>?
 
     // Shared SS UDP session owned by TunnelStack; borrowed only.
     private weak var ssUDPSession: ShadowsocksUDPSession?
@@ -334,8 +335,16 @@ class UDPFlow {
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         self.proxyClient = client
-
-        client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in
+        
+        let host = dstHost
+        let port = dstPort
+        Task { [weak self] in
+            let result: Result<ProxyConnection, Error>
+            do {
+                result = .success(try await client.connectUDP(to: host, port: port))
+            } catch {
+                result = .failure(error)
+            }
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
                 return
@@ -533,17 +542,27 @@ class UDPFlow {
     }
 
     private func startProxyReceiving(proxyConnection: ProxyConnection) {
-        proxyConnection.startReceiving { [weak self] data in
-            guard let self else { return }
-            self.handleProxyData(data)
-        } errorHandler: { [weak self] error in
-            guard let self else { return }
-            self.flowQueue.async {
-                if let error {
-                    self.reportFailure("Receive", error: error)
+        proxyReceiveTask = Task { [weak self] in
+            do {
+                while let data = try await proxyConnection.receive() {
+                    if Task.isCancelled { return }
+                    self?.handleProxyData(data)
                 }
-                self.close()
-                self.stack?.removeUDPFlow(self)
+                // Clean EOF: close without reporting a failure.
+                guard let self, !Task.isCancelled else { return }
+                self.flowQueue.async {
+                    guard !self.closed else { return }
+                    self.close()
+                    self.stack?.removeUDPFlow(self)
+                }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.flowQueue.async {
+                    guard !self.closed else { return }
+                    self.reportFailure("Receive", error: error)
+                    self.close()
+                    self.stack?.removeUDPFlow(self)
+                }
             }
         }
     }
@@ -582,6 +601,8 @@ class UDPFlow {
         let session = udpStream
         directReceiveTask?.cancel()
         directReceiveTask = nil
+        proxyReceiveTask?.cancel()
+        proxyReceiveTask = nil
         directTransport = nil
         ssUDPSession = nil
         ssUDPSessionToken = nil

@@ -816,8 +816,16 @@ class TCPConnection {
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         self.proxyClient = client
-
-        client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
+        
+        let host = dstHost
+        let port = dstPort
+        Task { [weak self] in
+            let result: Result<ProxyConnection, Error>
+            do {
+                result = .success(try await client.connect(to: host, port: port, initialData: initialData))
+            } catch {
+                result = .failure(error)
+            }
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
                 return
@@ -1093,7 +1101,13 @@ class TCPConnection {
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         dial.cancel = { [weak client] in client?.cancel() }
-        client.connect(to: host, port: port, initialData: nil) { [weak self] result in
+        Task { [weak self] in
+            let result: Result<ProxyConnection, Error>
+            do {
+                result = .success(try await client.connect(to: host, port: port, initialData: nil))
+            } catch {
+                result = .failure(error)
+            }
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
                 client.cancel()
