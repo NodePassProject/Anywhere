@@ -5,7 +5,7 @@ plus a custom Apple/CryptoKit crypto backend and a "brutal" congestion-control a
 
 - **Current version:** `1.23.0` (see `ngtcp2/version.h`)
 - **Upstream layout** (`lib/`, `crypto/`, `lib/includes/`) is **flattened** into this single
-  directory. Header search path is just `$(SRCROOT)/Shared/Networking/ngtcp2`.
+  directory. Header search path is just `$(SRCROOT)/Shared/Networking/QUIC/ngtcp2`.
 
 The single rule that makes upgrades mechanical:
 
@@ -80,7 +80,7 @@ They are expected to be undefined in the C objects — that is normal.
 
 - `GCC_PREPROCESSOR_DEFINITIONS` includes `HAVE_CONFIG_H=1` → stock headers `#include <config.h>`,
   which resolves to our hand-written `config.h`.
-- `HEADER_SEARCH_PATHS = $(SRCROOT)/Shared/Networking/ngtcp2` → makes both `<ngtcp2/ngtcp2.h>`
+- `HEADER_SEARCH_PATHS = $(SRCROOT)/Shared/Networking/QUIC/ngtcp2` → makes both `<ngtcp2/ngtcp2.h>`
   and `<config.h>` resolve.
 - Project uses **file-system-synchronized groups**. All `.c` here are members of the
   **Anywhere** and **Anywhere TV** targets, and are *excluded* from the **Network Extension**
@@ -101,7 +101,7 @@ They are expected to be undefined in the C objects — that is normal.
 Set `UP` to the unpacked upstream release, then run from this directory.
 
 ```sh
-cd /Volumes/Work/Anywhere/Shared/Networking/ngtcp2
+cd /Volumes/Work/Anywhere/Shared/Networking/QUIC/ngtcp2
 UP=/Volumes/Work/ngtcp2-<NEW_VERSION>     # e.g. ngtcp2-1.24.0
 CUSTOM="config.h ngtcp2_bridge.h ngtcp2_crypto_apple.c ngtcp2_swift_bridge.h ngtcp2_swift_brutal.c"
 ```
@@ -176,9 +176,9 @@ Anything else in (b) is a **missing backend function** to implement in `ngtcp2_c
 
 Finally, confirm only stock files + `version.h` changed and the 5 other custom files are untouched:
 ```sh
-git -C /Volumes/Work/Anywhere status --short -- Shared/Networking/ngtcp2
+git -C /Volumes/Work/Anywhere status --short -- Shared/Networking/QUIC/ngtcp2
 for f in config.h ngtcp2_bridge.h ngtcp2_crypto_apple.c ngtcp2_swift_bridge.h ngtcp2_swift_brutal.c; do
-  git -C /Volumes/Work/Anywhere diff --quiet -- "Shared/Networking/ngtcp2/$f" || echo "REVIEW: $f changed"
+  git -C /Volumes/Work/Anywhere diff --quiet -- "Shared/Networking/QUIC/ngtcp2/$f" || echo "REVIEW: $f changed"
 done
 ```
 

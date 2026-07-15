@@ -13,7 +13,7 @@ deployment. Every in-source modification is bracketed with
 so the full set can be located with:
 
 ```
-grep -rn "Anywhere Patch" "Anywhere Network Extension/lwip/src"
+grep -rn "Anywhere Patch" "Anywhere Network Extension/Network/lwip/src"
 ```
 
 ## Deployment context
