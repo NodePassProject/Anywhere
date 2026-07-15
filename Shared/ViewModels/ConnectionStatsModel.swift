@@ -90,6 +90,8 @@ class ConnectionStatsModel {
                 continuation.resume(returning: nil)
             }
         }
+        
+        guard !Task.isCancelled else { return }
 
         guard let response,
               let stats = try? JSONDecoder().decode(StatsResponse.self, from: response) else { return }

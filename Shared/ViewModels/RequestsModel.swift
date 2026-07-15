@@ -76,6 +76,8 @@ class RequestsModel {
             }
         }
 
+        guard !Task.isCancelled else { return }
+
         guard let response,
               let payload = try? JSONDecoder().decode(RequestsResponse.self, from: response) else { return }
 

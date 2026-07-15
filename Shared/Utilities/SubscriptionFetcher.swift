@@ -46,10 +46,15 @@ struct SubscriptionFetcher {
         }
 
         let allowInsecure = AWCore.getAllowInsecure()
-        let delegate: InsecureSessionDelegate? = allowInsecure ? InsecureSessionDelegate() : nil
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession(configuration: .default, delegate: delegate, delegateQueue: nil).data(for: request)
+            if allowInsecure {
+                let session = URLSession(configuration: .default, delegate: InsecureSessionDelegate(), delegateQueue: nil)
+                defer { session.finishTasksAndInvalidate() }
+                (data, response) = try await session.data(for: request)
+            } else {
+                (data, response) = try await URLSession.shared.data(for: request)
+            }
         } catch {
             throw FetchError.networkError(error.localizedDescription)
         }

@@ -163,7 +163,10 @@ class VPNViewModel {
         let useIPC = vpnStatus == .connected
         latencyTask = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: configuration, viaIPC: useIPC, session: useIPC ? self?.providerSession : nil)
-            await MainActor.run { self?.recordLatencyResult(result, for: configurationId) }
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                self?.recordLatencyResult(result, for: configurationId)
+            }
         }
     }
 
@@ -176,7 +179,10 @@ class VPNViewModel {
         let session = useIPC ? providerSession : nil
         latencyTask = Task { [weak self] in
             await Self.runLatencyTests(targets, viaIPC: useIPC, session: session) { id, result in
-                await MainActor.run { self?.recordLatencyResult(result, for: id) }
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    self?.recordLatencyResult(result, for: id)
+                }
             }
         }
     }
@@ -194,7 +200,10 @@ class VPNViewModel {
         chainLatencyTask?.cancel()
         chainLatencyTask = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: resolved, viaIPC: useIPC, session: session)
-            await MainActor.run { self?.recordChainLatencyResult(result, for: chainId) }
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                self?.recordChainLatencyResult(result, for: chainId)
+            }
         }
     }
 
@@ -213,7 +222,10 @@ class VPNViewModel {
         chainLatencyTask = Task { [weak self] in
             await Self.runLatencyTests(chainData.map(\.1), viaIPC: useIPC, session: session) { configId, result in
                 if let chainId = chainIdByConfigId[configId] {
-                    await MainActor.run { self?.recordChainLatencyResult(result, for: chainId) }
+                    await MainActor.run {
+                        guard !Task.isCancelled else { return }
+                        self?.recordChainLatencyResult(result, for: chainId)
+                    }
                 }
             }
         }

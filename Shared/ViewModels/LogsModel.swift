@@ -70,6 +70,8 @@ class LogsModel {
                 continuation.resume(returning: nil)
             }
         }
+        
+        guard !Task.isCancelled else { return }
 
         guard let response,
               let payload = try? JSONDecoder().decode(LogsResponse.self, from: response) else { return }
