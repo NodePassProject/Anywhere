@@ -589,19 +589,75 @@ nonisolated class ProxyClient {
         }
     }
 
+    /// Bridges the still-callback TLS handshake to `async` (removed in Stage 14). Dials over the
+    /// chain tunnel when present, else directly to the configured server.
+    private func connectTLSRecord(_ tlsClient: TLSClient) async throws -> TLSRecordConnection {
+        try await bridged { completion in
+            if let tunnel = self.tunnel {
+                tlsClient.connect(overTunnel: tunnel, completion: completion)
+            } else {
+                tlsClient.connect(host: self.directDialHost, port: self.configuration.serverPort, completion: completion)
+            }
+        }
+    }
+
+    /// Bridges the still-callback Reality handshake to `async` (removed in Stage 14). Dials over
+    /// the chain tunnel when present, else directly to the configured server.
+    private func connectRealityRecord(_ realityClient: RealityClient) async throws -> TLSRecordConnection {
+        try await bridged { completion in
+            if let tunnel = self.tunnel {
+                realityClient.connect(overTunnel: tunnel, completion: completion)
+            } else {
+                realityClient.connect(host: self.directDialHost, port: self.configuration.serverPort, completion: completion)
+            }
+        }
+    }
+
+    // MARK: - WebSocket Connection
+
     private func connectWithWebSocket(
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithWebSocket(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
+        guard case .ws(let wsConfig) = configuration.xrayTransportLayer else {
+            throw ProxyError.connectionFailed("WebSocket transport specified but no WebSocket configuration")
         }
+
+        let wsConnection: WebSocketConnection
+        if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
+            let wsTlsConfig = TLSConfiguration(
+                serverName: baseTLSConfig.serverName,
+                alpn: ["http/1.1"],
+                echEnabled: baseTLSConfig.echEnabled,
+                echConfig: baseTLSConfig.echConfig,
+                fingerprint: baseTLSConfig.fingerprint
+            )
+            let tlsClient = TLSClient(configuration: wsTlsConfig)
+            self.own(tlsClient)
+            let tlsConnection = try await connectTLSRecord(tlsClient)
+            self.own(tlsConnection)
+            wsConnection = WebSocketConnection(tlsConnection: tlsConnection, configuration: wsConfig)
+        } else if let tunnel = self.tunnel {
+            wsConnection = WebSocketConnection(tunnel: tunnel, configuration: wsConfig)
+        } else {
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            self.own(transport)
+            try await transport.connect()
+            wsConnection = WebSocketConnection(transport: transport, configuration: wsConfig)
+        }
+
+        own(wsConnection)
+        try await wsConnection.performUpgrade()
+        let webSocketProxyConnection = WebSocketProxyConnection(wsConnection: wsConnection)
+        return try await sendProtocolHandshake(
+            over: webSocketProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData, supportsVision: transportSupportsVision
+        )
     }
+
+    // MARK: - HTTP Upgrade Connection
 
     private func connectWithHTTPUpgrade(
         command: ProxyCommand,
@@ -609,12 +665,33 @@ nonisolated class ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithHTTPUpgrade(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
+        guard case .httpUpgrade(let huConfig) = configuration.xrayTransportLayer else {
+            throw ProxyError.connectionFailed("HTTP upgrade transport specified but no configuration")
         }
+
+        let huConnection: HTTPUpgradeConnection
+        if case .tls(let tlsConfiguration) = configuration.xraySecurityLayer {
+            let tlsClient = TLSClient(configuration: tlsConfiguration)
+            self.own(tlsClient)
+            let tlsConnection = try await connectTLSRecord(tlsClient)
+            self.own(tlsConnection)
+            huConnection = HTTPUpgradeConnection(tlsConnection: tlsConnection, configuration: huConfig)
+        } else if let tunnel = self.tunnel {
+            huConnection = HTTPUpgradeConnection(tunnel: tunnel, configuration: huConfig)
+        } else {
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            self.own(transport)
+            try await transport.connect()
+            huConnection = HTTPUpgradeConnection(transport: transport, configuration: huConfig)
+        }
+
+        own(huConnection)
+        try await huConnection.performUpgrade()
+        let httpUpgradeProxyConnection = HTTPUpgradeProxyConnection(huConnection: huConnection)
+        return try await sendProtocolHandshake(
+            over: httpUpgradeProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData, supportsVision: transportSupportsVision
+        )
     }
 
     private func connectWithGRPC(
@@ -623,12 +700,52 @@ nonisolated class ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithGRPC(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
+        guard case .grpc(let grpcConfig) = configuration.xrayTransportLayer else {
+            throw ProxyError.connectionFailed("gRPC transport specified but no gRPC configuration")
         }
+
+        // The :authority falls back to the TLS/Reality SNI when no override is configured.
+        let tlsServerName: String?
+        if case .tls(let tls) = configuration.xraySecurityLayer { tlsServerName = tls.serverName } else { tlsServerName = nil }
+        let realityServerName: String?
+        if case .reality(let reality) = configuration.xraySecurityLayer { realityServerName = reality.serverName } else { realityServerName = nil }
+        let authority = grpcConfig.resolvedAuthority(
+            tlsServerName: tlsServerName,
+            realityServerName: realityServerName,
+            serverAddress: configuration.serverAddress
+        )
+
+        let grpcConnection: GRPCConnection
+        if case .reality(let realityConfig) = configuration.xraySecurityLayer {
+            // Reality handles its own ALPN internally; layer gRPC on top.
+            let realityClient = RealityClient(configuration: realityConfig)
+            self.own(realityClient)
+            let realityConnection = try await connectRealityRecord(realityClient)
+            self.own(realityConnection)
+            grpcConnection = GRPCConnection(tlsConnection: realityConnection, configuration: grpcConfig, authority: authority)
+        } else if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
+            let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
+            let tlsClient = TLSClient(configuration: grpcTLSConfig)
+            self.own(tlsClient)
+            let tlsConnection = try await connectTLSRecord(tlsClient)
+            self.own(tlsConnection)
+            grpcConnection = GRPCConnection(tlsConnection: tlsConnection, configuration: grpcConfig, authority: authority)
+        } else if let tunnel = self.tunnel {
+            grpcConnection = GRPCConnection(tunnel: tunnel, configuration: grpcConfig, authority: authority)
+        } else {
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            self.own(transport)
+            try await transport.connect()
+            grpcConnection = GRPCConnection(transport: transport, configuration: grpcConfig, authority: authority)
+        }
+
+        own(grpcConnection)
+        try await grpcConnection.performSetup()
+        let grpcProxyConnection = GRPCProxyConnection(grpcConnection: grpcConnection)
+        return try await sendProtocolHandshake(
+            over: grpcProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData, supportsVision: transportSupportsVision
+        )
     }
 
     private func connectWithXHTTP(
@@ -748,215 +865,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    // MARK: - WebSocket Connection
-
-    private func connectWithWebSocket(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        guard case .ws(let wsConfig) = configuration.xrayTransportLayer else {
-            completion(.failure(ProxyError.connectionFailed("WebSocket transport specified but no WebSocket configuration")))
-            return
-        }
-
-        if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
-            let wsTlsConfig = TLSConfiguration(
-                serverName: baseTLSConfig.serverName,
-                alpn: ["http/1.1"],
-                echEnabled: baseTLSConfig.echEnabled,
-                echConfig: baseTLSConfig.echConfig,
-                fingerprint: baseTLSConfig.fingerprint
-            )
-            let tlsClient = TLSClient(configuration: wsTlsConfig)
-            self.own(tlsClient)
-
-            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                switch result {
-                case .success(let tlsConnection):
-                    self.own(tlsConnection)
-                    let wsConnection = WebSocketConnection(tlsConnection: tlsConnection, configuration: wsConfig)
-                    self.performWebSocketUpgrade(
-                        wsConnection: wsConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-
-            if let tunnel = self.tunnel {
-                tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-            } else {
-                tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
-            }
-        } else {
-            if let tunnel = self.tunnel {
-                let wsConnection = WebSocketConnection(tunnel: tunnel, configuration: wsConfig)
-                performWebSocketUpgrade(
-                    wsConnection: wsConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData, completion: completion
-                )
-            } else {
-                let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
-                self.own(transport)
-
-                Task { [weak self] in
-                    do {
-                        try await transport.connect()
-                    } catch {
-                        completion(.failure(error))
-                        return
-                    }
-                    guard let self else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    let wsConnection = WebSocketConnection(transport: CallbackByteTransport(transport), configuration: wsConfig)
-                    self.performWebSocketUpgrade(
-                        wsConnection: wsConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                }
-            }
-        }
-    }
-
-    private func performWebSocketUpgrade(
-        wsConnection: WebSocketConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        own(wsConnection)
-
-        wsConnection.performUpgrade { [weak self] error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            let webSocketProxyConnection = WebSocketProxyConnection(wsConnection: wsConnection)
-            self.sendProtocolHandshake(
-                over: webSocketProxyConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData,
-                supportsVision: transportSupportsVision, completion: completion
-            )
-        }
-    }
-
-    // MARK: - HTTP Upgrade Connection
-
-    private func connectWithHTTPUpgrade(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        guard case .httpUpgrade(let huConfig) = configuration.xrayTransportLayer else {
-            completion(.failure(ProxyError.connectionFailed("HTTP upgrade transport specified but no configuration")))
-            return
-        }
-
-        if case .tls(let tlsConfiguration) = configuration.xraySecurityLayer {
-            let tlsClient = TLSClient(configuration: tlsConfiguration)
-            self.own(tlsClient)
-
-            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                switch result {
-                case .success(let tlsConnection):
-                    self.own(tlsConnection)
-                    let huConnection = HTTPUpgradeConnection(tlsConnection: tlsConnection, configuration: huConfig)
-                    self.performHTTPUpgrade(
-                        huConnection: huConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-
-            if let tunnel = self.tunnel {
-                tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-            } else {
-                tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
-            }
-        } else {
-            if let tunnel = self.tunnel {
-                let huConnection = HTTPUpgradeConnection(tunnel: tunnel, configuration: huConfig)
-                performHTTPUpgrade(
-                    huConnection: huConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData, completion: completion
-                )
-            } else {
-                let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
-                self.own(transport)
-
-                Task { [weak self] in
-                    do {
-                        try await transport.connect()
-                    } catch {
-                        completion(.failure(error))
-                        return
-                    }
-                    guard let self else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    let huConnection = HTTPUpgradeConnection(transport: CallbackByteTransport(transport), configuration: huConfig)
-                    self.performHTTPUpgrade(
-                        huConnection: huConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                }
-            }
-        }
-    }
-
-    private func performHTTPUpgrade(
-        huConnection: HTTPUpgradeConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        own(huConnection)
-
-        huConnection.performUpgrade { [weak self] error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            let httpUpgradeProxyConnection = HTTPUpgradeProxyConnection(huConnection: huConnection)
-            self.sendProtocolHandshake(
-                over: httpUpgradeProxyConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData,
-                supportsVision: transportSupportsVision, completion: completion
-            )
-        }
-    }
-
     // MARK: - gRPC Connection
 
     /// ALPN is forced to `h2` because gRPC requires HTTP/2.
@@ -968,158 +876,6 @@ nonisolated class ProxyClient {
             echConfig: base.echConfig,
             fingerprint: base.fingerprint
         )
-    }
-
-    private func connectWithGRPC(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        guard case .grpc(let grpcConfig) = configuration.xrayTransportLayer else {
-            completion(.failure(ProxyError.connectionFailed("gRPC transport specified but no gRPC configuration")))
-            return
-        }
-
-        // The :authority falls back to the TLS/Reality SNI when no override is configured.
-        let tlsServerName: String?
-        if case .tls(let tls) = configuration.xraySecurityLayer { tlsServerName = tls.serverName }
-        else { tlsServerName = nil }
-        let realityServerName: String?
-        if case .reality(let reality) = configuration.xraySecurityLayer { realityServerName = reality.serverName }
-        else { realityServerName = nil }
-        let authority = grpcConfig.resolvedAuthority(
-            tlsServerName: tlsServerName,
-            realityServerName: realityServerName,
-            serverAddress: configuration.serverAddress
-        )
-
-        if case .reality(let realityConfig) = configuration.xraySecurityLayer {
-            // Reality handles its own ALPN internally; layer gRPC on top.
-            let realityClient = RealityClient(configuration: realityConfig)
-            self.own(realityClient)
-
-            let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                switch result {
-                case .success(let realityConnection):
-                    self.own(realityConnection)
-                    let grpcConnection = GRPCConnection(
-                        tlsConnection: realityConnection,
-                        configuration: grpcConfig,
-                        authority: authority
-                    )
-                    self.performGRPCSetup(
-                        grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-
-            if let tunnel = self.tunnel {
-                realityClient.connect(overTunnel: tunnel, completion: handleRealityResult)
-            } else {
-                realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
-            }
-            return
-        }
-
-        if case .tls(let baseTLSConfig) = configuration.xraySecurityLayer {
-            let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
-            let tlsClient = TLSClient(configuration: grpcTLSConfig)
-            self.own(tlsClient)
-
-            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                switch result {
-                case .success(let tlsConnection):
-                    self.own(tlsConnection)
-                    let grpcConnection = GRPCConnection(
-                        tlsConnection: tlsConnection,
-                        configuration: grpcConfig,
-                        authority: authority
-                    )
-                    self.performGRPCSetup(
-                        grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-
-            if let tunnel = self.tunnel {
-                tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-            } else {
-                tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
-            }
-            return
-        }
-
-        if let tunnel = self.tunnel {
-            let grpcConnection = GRPCConnection(tunnel: tunnel, configuration: grpcConfig, authority: authority)
-            performGRPCSetup(
-                grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
-        } else {
-            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
-            self.own(transport)
-            Task { [weak self] in
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                let grpcConnection = GRPCConnection(transport: CallbackByteTransport(transport), configuration: grpcConfig, authority: authority)
-                self.performGRPCSetup(
-                    grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData, completion: completion
-                )
-            }
-        }
-    }
-
-    private func performGRPCSetup(
-        grpcConnection: GRPCConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        own(grpcConnection)
-
-        grpcConnection.performSetup { [weak self] error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            let grpcProxyConnection = GRPCProxyConnection(grpcConnection: grpcConnection)
-            self.sendProtocolHandshake(
-                over: grpcProxyConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData,
-                supportsVision: transportSupportsVision, completion: completion
-            )
-        }
     }
 
     // MARK: - XHTTP Connection

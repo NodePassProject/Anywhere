@@ -42,6 +42,22 @@ extension AsyncTransportClosures {
         )
     }
 
+    /// Over a ``TLSRecordConnection``'s async surface, for framing that rides a TLS record
+    /// layer. `receive()` returns `nil`/empty at a clean close, which maps to ``TransportChunk/end``.
+    init(tls tlsConnection: TLSRecordConnection) {
+        self.init(
+            send: { try await tlsConnection.send($0) },
+            finishSend: { try await tlsConnection.closeWrite() },
+            receive: {
+                if let data = try await tlsConnection.receive(), !data.isEmpty {
+                    return .bytes(data)
+                }
+                return .end
+            },
+            cancel: { tlsConnection.cancel() }
+        )
+    }
+
     /// Over a ``ProxyConnection``'s async surface (for framing that rides another proxy
     /// hop). `receiveRaw()` returns `nil`/empty at EOF, which maps to ``TransportChunk/end``.
     init(proxyConnection connection: ProxyConnection) {

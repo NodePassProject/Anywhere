@@ -11,13 +11,11 @@ import Synchronization
 // MARK: - HTTPUpgradeConnection
 
 /// Performs an HTTP upgrade handshake, then passes data through as raw bytes (no WebSocket framing).
-nonisolated class HTTPUpgradeConnection {
+nonisolated final class HTTPUpgradeConnection: @unchecked Sendable {
 
-    // MARK: Transport closures
+    // MARK: Transport
 
-    private let transportSend: (Data, @escaping (Error?) -> Void) -> Void
-    private let transportReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
-    private let transportCancel: () -> Void
+    private let transport: AsyncTransportClosures
 
     // MARK: State
 
@@ -39,29 +37,27 @@ nonisolated class HTTPUpgradeConnection {
 
     // MARK: - Initializers
 
-    init(transport: TransportClosures, configuration: HTTPUpgradeConfiguration) {
+    init(transport: AsyncTransportClosures, configuration: HTTPUpgradeConfiguration) {
         self.configuration = configuration
-        self.transportSend = transport.send
-        self.transportReceive = transport.receive
-        self.transportCancel = transport.cancel
+        self.transport = transport
         self.state = Mutex(ConnectionState(isConnected: true))
     }
 
-    convenience init(transport: any RawTransport, configuration: HTTPUpgradeConfiguration) {
-        self.init(transport: TransportClosures(tcp: transport), configuration: configuration)
+    convenience init(transport: any AsyncByteTransport, configuration: HTTPUpgradeConfiguration) {
+        self.init(transport: AsyncTransportClosures(transport), configuration: configuration)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: HTTPUpgradeConfiguration) {
-        self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration)
+        self.init(transport: AsyncTransportClosures(tls: tlsConnection), configuration: configuration)
     }
 
     convenience init(tunnel: ProxyConnection, configuration: HTTPUpgradeConfiguration) {
-        self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration)
+        self.init(transport: AsyncTransportClosures(proxyConnection: tunnel), configuration: configuration)
     }
 
     // MARK: - HTTP Upgrade Handshake
 
-    func performUpgrade(completion: @escaping (Error?) -> Void) {
+    func performUpgrade() async throws {
         var request = "GET \(configuration.normalizedPath) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"
         request += "Connection: Upgrade\r\n"
@@ -78,38 +74,33 @@ nonisolated class HTTPUpgradeConnection {
         request += "\r\n"
 
         guard let requestData = request.data(using: .utf8) else {
-            completion(HTTPUpgradeError.upgradeFailed("Failed to encode upgrade request"))
-            return
+            throw HTTPUpgradeError.upgradeFailed("Failed to encode upgrade request")
         }
 
-        transportSend(requestData) { [weak self] error in
-            if let error {
-                completion(HTTPUpgradeError.upgradeFailed(error.localizedDescription))
-                return
-            }
-            self?.receiveUpgradeResponse(completion: completion)
+        do {
+            try await transport.send(requestData)
+        } catch {
+            throw HTTPUpgradeError.upgradeFailed(error.localizedDescription)
         }
+
+        try await receiveUpgradeResponse()
     }
 
     /// Reads the HTTP 101 response, validating status and Upgrade/Connection headers (case-insensitive).
-    private func receiveUpgradeResponse(completion: @escaping (Error?) -> Void) {
-        transportReceive { [weak self] data, _, error in
-            guard let self else {
-                completion(HTTPUpgradeError.upgradeFailed("Connection deallocated"))
-                return
+    private func receiveUpgradeResponse() async throws {
+        while true {
+            let chunk: TransportChunk
+            do {
+                chunk = try await transport.receive()
+            } catch {
+                throw HTTPUpgradeError.upgradeFailed(error.localizedDescription)
             }
 
-            if let error {
-                completion(HTTPUpgradeError.upgradeFailed(error.localizedDescription))
-                return
+            guard case .bytes(let data) = chunk, !data.isEmpty else {
+                throw HTTPUpgradeError.upgradeFailed("Empty response from server")
             }
 
-            guard let data, !data.isEmpty else {
-                completion(HTTPUpgradeError.upgradeFailed("Empty response from server"))
-                return
-            }
-
-            let headerData: Data? = self.state.withLock { state in
+            let headerData: Data? = state.withLock { state in
                 state.leftoverBuffer.append(data)
 
                 let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
@@ -124,24 +115,20 @@ nonisolated class HTTPUpgradeConnection {
             }
 
             guard let headerData else {
-                self.receiveUpgradeResponse(completion: completion)
-                return
+                continue // need more bytes
             }
 
             guard let headerString = String(data: headerData, encoding: .utf8) else {
-                completion(HTTPUpgradeError.upgradeFailed("Cannot decode response headers"))
-                return
+                throw HTTPUpgradeError.upgradeFailed("Cannot decode response headers")
             }
 
             let lines = headerString.split(separator: "\r\n")
             guard let statusLine = lines.first else {
-                completion(HTTPUpgradeError.upgradeFailed("Empty response"))
-                return
+                throw HTTPUpgradeError.upgradeFailed("Empty response")
             }
 
             guard statusLine.contains("101") else {
-                completion(HTTPUpgradeError.upgradeFailed("Expected HTTP 101, got: \(statusLine)"))
-                return
+                throw HTTPUpgradeError.upgradeFailed("Expected HTTP 101, got: \(statusLine)")
             }
 
             var hasUpgradeWebSocket = false
@@ -160,26 +147,21 @@ nonisolated class HTTPUpgradeConnection {
             }
 
             guard hasUpgradeWebSocket && hasConnectionUpgrade else {
-                completion(HTTPUpgradeError.upgradeFailed("Missing Upgrade/Connection headers in 101 response"))
-                return
+                throw HTTPUpgradeError.upgradeFailed("Missing Upgrade/Connection headers in 101 response")
             }
 
-            completion(nil)
+            return
         }
     }
 
     // MARK: - Public API (Raw TCP passthrough)
 
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        transportSend(data, completion)
-    }
-
-    func send(data: Data) {
-        transportSend(data) { _ in }
+    func send(_ data: Data) async throws {
+        try await transport.send(data)
     }
 
     /// Receives raw data; the first call drains bytes buffered past the 101 response headers.
-    func receive(completion: @escaping (Data?, Error?) -> Void) {
+    func receive() async throws -> Data? {
         let buffered: Data? = state.withLock { state in
             guard !state.leftoverBuffer.isEmpty else { return nil }
             let data = state.leftoverBuffer
@@ -187,43 +169,13 @@ nonisolated class HTTPUpgradeConnection {
             return data
         }
         if let buffered {
-            completion(buffered, nil)
-            return
+            return buffered
         }
 
-        transportReceive { data, _, error in
-            if let error {
-                completion(nil, error)
-                return
-            }
-            guard let data, !data.isEmpty else {
-                completion(nil, nil) // EOF
-                return
-            }
-            completion(data, nil)
+        guard case .bytes(let data) = try await transport.receive(), !data.isEmpty else {
+            return nil // EOF
         }
-    }
-
-    // MARK: - Async Surface
-
-    // Async-native send/receive for the flipped `HTTPUpgradeProxyConnection`, bridging the
-    // callback passthrough above. The callback methods stay for the callback dial path;
-    // both are deleted once the framing internals move to async.
-
-    func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    func receive() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receive { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
+        return data
     }
 
     func cancel() {
@@ -231,6 +183,6 @@ nonisolated class HTTPUpgradeConnection {
             $0.isConnected = false
             $0.leftoverBuffer.removeAll()
         }
-        transportCancel()
+        transport.cancel()
     }
 }

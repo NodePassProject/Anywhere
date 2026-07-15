@@ -9,13 +9,11 @@ import Foundation
 
 // MARK: - GRPCConnection
 
-nonisolated class GRPCConnection {
+nonisolated final class GRPCConnection: @unchecked Sendable {
 
-    // MARK: Transport closures
+    // MARK: Transport
 
-    private let transportSend: (Data, @escaping (Error?) -> Void) -> Void
-    private let transportReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
-    private let transportCancel: () -> Void
+    private let transport: AsyncTransportClosures
 
     // MARK: Configuration
 
@@ -36,9 +34,6 @@ nonisolated class GRPCConnection {
     private var grpcFrameBuffer = Data()
     /// Decoded app-layer bytes awaiting delivery to the caller.
     private var decodedBuffer = Data()
-
-    /// Consecutive synchronous frame parses; trampolined every 16th to avoid stack overflow.
-    private var h2ReadDepth: Int = 0
 
     /// Whether the gRPC response HEADERS (status 200) have been validated.
     private var h2ResponseReceived = false
@@ -61,7 +56,7 @@ nonisolated class GRPCConnection {
     private var h2StreamReceiveConsumed: Int = 0
 
     /// Send-side continuations waiting for a WINDOW_UPDATE that re-opens flow control.
-    private var h2FlowResumptions: [() -> Void] = []
+    private var h2FlowResumptions: [CheckedContinuation<Void, Never>] = []
 
     /// Keepalive ping timer (nil when idleTimeout == 0).
     private var keepaliveTimer: DispatchSourceTimer?
@@ -72,20 +67,15 @@ nonisolated class GRPCConnection {
     private static let maxGRPCFrameBufferSize = 16_777_216 // 16 MB
 
     var isConnected: Bool {
-        lock.lock()
-        let connected = _isConnected
-        lock.unlock()
-        return connected
+        lock.withLock { _isConnected }
     }
 
     // MARK: - Initializers
 
-    init(transport: TransportClosures, configuration: GRPCConfiguration, authority: String) {
+    init(transport: AsyncTransportClosures, configuration: GRPCConfiguration, authority: String) {
         self.configuration = configuration
         self.authority = authority
-        self.transportSend = transport.send
-        self.transportReceive = transport.receive
-        self.transportCancel = transport.cancel
+        self.transport = transport
         self._isConnected = true
 
         if configuration.initialWindowsSize > 0 {
@@ -93,23 +83,23 @@ nonisolated class GRPCConnection {
         }
     }
 
-    convenience init(transport: any RawTransport, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: TransportClosures(tcp: transport), configuration: configuration, authority: authority)
+    convenience init(transport: any AsyncByteTransport, configuration: GRPCConfiguration, authority: String) {
+        self.init(transport: AsyncTransportClosures(transport), configuration: configuration, authority: authority)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration, authority: authority)
+        self.init(transport: AsyncTransportClosures(tls: tlsConnection), configuration: configuration, authority: authority)
     }
 
     convenience init(tunnel: ProxyConnection, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration, authority: authority)
+        self.init(transport: AsyncTransportClosures(proxyConnection: tunnel), configuration: configuration, authority: authority)
     }
 
     // MARK: - Setup
 
     /// Sends the HTTP/2 preface + SETTINGS and opens the gRPC stream without waiting for
     /// the server's SETTINGS; some CDNs defer response HEADERS until the first DATA frame.
-    func performSetup(completion: @escaping (Error?) -> Void) {
+    func performSetup() async throws {
         var initData = Data()
 
         // HTTP/2 connection preface (RFC 7540 §3.5).
@@ -145,90 +135,78 @@ nonisolated class GRPCConnection {
             payload: headerBlock
         ))
 
-        transportSend(initData) { [weak self] error in
-            if let error {
-                completion(GRPCError.setupFailed("H2 preface/HEADERS write failed: \(error.localizedDescription)"))
-                return
-            }
-            self?.processInitialServerFrames(completion: completion)
+        do {
+            try await transport.send(initData)
+        } catch {
+            throw GRPCError.setupFailed("H2 preface/HEADERS write failed: \(error.localizedDescription)")
         }
+        try await processInitialServerFrames()
     }
 
     /// Reads frames until the server's SETTINGS is received and ACKed, handling
     /// WINDOW_UPDATE/PING and absorbing an early response HEADERS along the way.
-    private func processInitialServerFrames(completion: @escaping (Error?) -> Void) {
-        readH2Frame { [weak self] result in
-            guard let self else {
-                completion(GRPCError.connectionClosed)
-                return
+    private func processInitialServerFrames() async throws {
+        while true {
+            let frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)
+            do {
+                frame = try await readH2Frame()
+            } catch {
+                throw GRPCError.setupFailed("H2 setup read failed: \(error.localizedDescription)")
             }
-            switch result {
-            case .failure(let error):
-                completion(GRPCError.setupFailed("H2 setup read failed: \(error.localizedDescription)"))
 
-            case .success(let frame):
-                switch frame.type {
-                case Self.h2FrameSettings:
-                    if frame.flags & Self.h2FlagAck == 0 {
-                        self.parseH2Settings(frame.payload)
-                        let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
-                        self.transportSend(ack) { _ in }
-                        self.startKeepaliveIfNeeded()
-                        completion(nil)
-                    } else {
-                        // ACK for our own SETTINGS; keep reading for the server's.
-                        self.processInitialServerFrames(completion: completion)
-                    }
-
-                case Self.h2FrameHeaders:
-                    if frame.streamId == Self.streamId {
-                        if let rejection = self.checkH2ResponseStatus(frame.payload) {
-                            completion(GRPCError.setupFailed("gRPC response rejected: \(rejection)"))
-                            return
-                        }
-                        // Trailers-only response: HTTP 200 but the gRPC call itself failed.
-                        if frame.flags & Self.h2FlagEndStream != 0 {
-                            if let grpcError = Self.parseGRPCTrailer(frame.payload) {
-                                self.lock.lock()
-                                self.h2StreamClosed = true
-                                self.lock.unlock()
-                                completion(GRPCError.setupFailed(grpcError.localizedDescription))
-                                return
-                            }
-                        }
-                        self.lock.lock()
-                        self.h2ResponseReceived = true
-                        self.lock.unlock()
-                    }
-                    self.startKeepaliveIfNeeded()
-                    completion(nil)
-
-                case Self.h2FrameWindowUpdate:
-                    self.handleWindowUpdate(frame: frame)
-                    self.processInitialServerFrames(completion: completion)
-
-                case Self.h2FramePing:
-                    if frame.flags & Self.h2FlagAck == 0 {
-                        let pong = self.buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
-                        self.transportSend(pong) { _ in }
-                    }
-                    self.processInitialServerFrames(completion: completion)
-
-                case Self.h2FrameGoaway:
-                    let reason = Self.describeGoawayPayload(frame.payload)
-                    completion(GRPCError.setupFailed("Server sent GOAWAY during setup (\(reason))"))
-
-                case Self.h2FrameRstStream:
-                    if frame.streamId == Self.streamId {
-                        let reason = Self.describeRstStreamPayload(frame.payload)
-                        completion(GRPCError.setupFailed("Server reset the stream during setup (\(reason))"))
-                        return
-                    }
-                    self.processInitialServerFrames(completion: completion)
-
-                default:
-                    self.processInitialServerFrames(completion: completion)
+            switch frame.type {
+            case Self.h2FrameSettings:
+                if frame.flags & Self.h2FlagAck == 0 {
+                    parseH2Settings(frame.payload)
+                    let ack = buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
+                    try? await transport.send(ack)
+                    startKeepaliveIfNeeded()
+                    return
                 }
+                // ACK for our own SETTINGS; keep reading for the server's.
+                continue
+
+            case Self.h2FrameHeaders:
+                if frame.streamId == Self.streamId {
+                    if let rejection = checkH2ResponseStatus(frame.payload) {
+                        throw GRPCError.setupFailed("gRPC response rejected: \(rejection)")
+                    }
+                    // Trailers-only response: HTTP 200 but the gRPC call itself failed.
+                    if frame.flags & Self.h2FlagEndStream != 0 {
+                        if let grpcError = Self.parseGRPCTrailer(frame.payload) {
+                            lock.withLock { h2StreamClosed = true }
+                            throw GRPCError.setupFailed(grpcError.localizedDescription)
+                        }
+                    }
+                    lock.withLock { h2ResponseReceived = true }
+                }
+                startKeepaliveIfNeeded()
+                return
+
+            case Self.h2FrameWindowUpdate:
+                handleWindowUpdate(frame: frame)
+                continue
+
+            case Self.h2FramePing:
+                if frame.flags & Self.h2FlagAck == 0 {
+                    let pong = buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
+                    try? await transport.send(pong)
+                }
+                continue
+
+            case Self.h2FrameGoaway:
+                let reason = Self.describeGoawayPayload(frame.payload)
+                throw GRPCError.setupFailed("Server sent GOAWAY during setup (\(reason))")
+
+            case Self.h2FrameRstStream:
+                if frame.streamId == Self.streamId {
+                    let reason = Self.describeRstStreamPayload(frame.payload)
+                    throw GRPCError.setupFailed("Server reset the stream during setup (\(reason))")
+                }
+                continue
+
+            default:
+                continue
             }
         }
     }
@@ -236,73 +214,48 @@ nonisolated class GRPCConnection {
     // MARK: - Public send / receive
 
     /// Sends a raw byte chunk as one gRPC `Hunk` message on the open stream.
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
+    func send(_ data: Data) async throws {
         let message = Self.encodeHunk(data)
         let framed = Self.wrapGRPCMessage(message)
-        sendH2Data(data: framed, offset: 0, completion: completion)
-    }
-
-    func send(data: Data) {
-        send(data: data) { _ in }
+        try await sendH2Data(framed)
     }
 
     /// Delivers the next decoded payload, or `nil` on EOF; buffered leftovers are returned first.
-    func receive(completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        if !decodedBuffer.isEmpty {
-            let out = decodedBuffer
-            decodedBuffer.removeAll(keepingCapacity: true)
-            lock.unlock()
-            completion(out, nil)
-            return
-        }
-        if h2StreamClosed {
-            lock.unlock()
-            completion(nil, nil)
-            return
-        }
-        lock.unlock()
-
-        readAndDecode(completion: completion)
-    }
-
-    // MARK: - Async Surface
-
-    // Async-native send/receive for the flipped `GRPCProxyConnection`, bridging the
-    // callback framer above; deleted once the framing internals move to async.
-
-    func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
     func receive() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receive { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+        enum Ready { case data(Data); case eof; case read }
+        let ready: Ready = lock.withLock {
+            if !decodedBuffer.isEmpty {
+                let out = decodedBuffer
+                decodedBuffer.removeAll(keepingCapacity: true)
+                return .data(out)
             }
+            if h2StreamClosed { return .eof }
+            return .read
+        }
+        switch ready {
+        case .data(let out): return out
+        case .eof: return nil
+        case .read: return try await readAndDecode()
         }
     }
 
     // MARK: - Cancel
 
     func cancel() {
-        lock.lock()
-        _isConnected = false
-        h2StreamClosed = true
-        h2ReadBuffer.removeAll()
-        grpcFrameBuffer.removeAll()
-        decodedBuffer.removeAll()
-        keepaliveTimer?.cancel()
-        keepaliveTimer = nil
-        let waiters = h2FlowResumptions
-        h2FlowResumptions.removeAll()
-        lock.unlock()
-        for r in waiters { r() }
-        transportCancel()
+        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+            _isConnected = false
+            h2StreamClosed = true
+            h2ReadBuffer.removeAll()
+            grpcFrameBuffer.removeAll()
+            decodedBuffer.removeAll()
+            keepaliveTimer?.cancel()
+            keepaliveTimer = nil
+            let waiters = h2FlowResumptions
+            h2FlowResumptions.removeAll()
+            return waiters
+        }
+        for waiter in waiters { waiter.resume() }
+        transport.cancel()
     }
 
     deinit {
@@ -389,51 +342,31 @@ extension GRPCConnection {
     }
 
     /// Reads transport data until at least one complete H2 frame is available, then returns it.
-    fileprivate func readH2Frame(
-        completion: @escaping (Result<(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data), Error>) -> Void
-    ) {
-        lock.lock()
-        if let frame = parseH2FrameLocked() {
-            h2ReadDepth += 1
-            let needsTrampoline = h2ReadDepth >= 16
-            if needsTrampoline { h2ReadDepth = 0 }
-            lock.unlock()
-            if needsTrampoline {
-                DispatchQueue.global().async { completion(.success(frame)) }
-            } else {
-                completion(.success(frame))
+    /// The straight-line async loop replaces the callback recursion, so the old stack-overflow
+    /// trampoline is unnecessary.
+    fileprivate func readH2Frame() async throws -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) {
+        while true {
+            if let frame = lock.withLock({ parseH2FrameLocked() }) {
+                return frame
             }
-            return
-        }
-        h2ReadDepth = 0
-        lock.unlock()
 
-        transportReceive { [weak self] data, _, error in
-            guard let self else {
-                completion(.failure(GRPCError.connectionClosed))
-                return
-            }
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let data, !data.isEmpty else {
+            let chunk = try await transport.receive()
+            guard case .bytes(let data) = chunk, !data.isEmpty else {
                 // Clean transport FIN at a frame boundary is a graceful end of stream, not a failure.
-                completion(.failure(GRPCError.streamEnded))
-                return
+                throw GRPCError.streamEnded
             }
 
-            self.lock.lock()
-            self.h2ReadBuffer.append(data)
-            if self.h2ReadBuffer.count > Self.maxH2ReadBufferSize {
-                self.h2ReadBuffer.removeAll()
-                self.lock.unlock()
-                completion(.failure(GRPCError.connectionClosed))
-                return
+            let overflow: Bool = lock.withLock {
+                h2ReadBuffer.append(data)
+                if h2ReadBuffer.count > Self.maxH2ReadBufferSize {
+                    h2ReadBuffer.removeAll()
+                    return true
+                }
+                return false
             }
-            self.lock.unlock()
-
-            self.readH2Frame(completion: completion)
+            if overflow {
+                throw GRPCError.connectionClosed
+            }
         }
     }
 
@@ -480,7 +413,7 @@ extension GRPCConnection {
         let resumptions = h2FlowResumptions
         h2FlowResumptions.removeAll()
         lock.unlock()
-        for r in resumptions { r() }
+        for r in resumptions { r.resume() }
     }
 }
 
@@ -779,68 +712,75 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Sends `data` as DATA frames, batching as much as the flow-control window allows
-    /// into one transport write; the remainder waits for a WINDOW_UPDATE.
-    fileprivate func sendH2Data(data: Data, offset: Int, completion: @escaping (Error?) -> Void) {
-        guard offset < data.count else {
-            completion(nil)
-            return
+    /// Sends `data` as DATA frames, batching as much as the flow-control window allows into
+    /// one transport write; the remainder awaits a WINDOW_UPDATE.
+    fileprivate func sendH2Data(_ data: Data) async throws {
+        enum BuildStep {
+            case closed
+            case park
+            case built(frames: Data, nextOffset: Int)
         }
 
-        lock.lock()
-        if h2StreamClosed {
-            lock.unlock()
-            completion(GRPCError.connectionClosed)
-            return
-        }
-        let maxSize = h2MaxFrameSize
-        let window = min(h2PeerConnectionWindow, h2PeerStreamSendWindow)
+        var offset = 0
+        while offset < data.count {
+            let step: BuildStep = lock.withLock {
+                if h2StreamClosed { return .closed }
+                let maxSize = h2MaxFrameSize
+                let window = min(h2PeerConnectionWindow, h2PeerStreamSendWindow)
+                guard window > 0 else { return .park }
 
-        guard window > 0 else {
-            h2FlowResumptions.append { [weak self] in
-                self?.sendH2Data(data: data, offset: offset, completion: completion)
+                var frames = Data()
+                var currentOffset = offset
+                var windowRemaining = window
+                while currentOffset < data.count {
+                    let remaining = data.count - currentOffset
+                    let chunkSize = min(remaining, min(maxSize, windowRemaining))
+                    guard chunkSize > 0 else { break }
+
+                    let chunk = Data(data[data.startIndex + currentOffset ..< data.startIndex + currentOffset + chunkSize])
+                    frames.append(buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: Self.streamId, payload: chunk))
+                    currentOffset += chunkSize
+                    windowRemaining -= chunkSize
+                }
+                let totalSent = window - windowRemaining
+                h2PeerConnectionWindow -= totalSent
+                h2PeerStreamSendWindow -= totalSent
+                return .built(frames: frames, nextOffset: currentOffset)
             }
-            lock.unlock()
-            return
-        }
 
-        var frames = Data()
-        var currentOffset = offset
-        var windowRemaining = window
-        while currentOffset < data.count {
-            let remaining = data.count - currentOffset
-            let chunkSize = min(remaining, min(maxSize, windowRemaining))
-            guard chunkSize > 0 else { break }
-
-            let chunk = Data(data[data.startIndex + currentOffset ..< data.startIndex + currentOffset + chunkSize])
-            frames.append(buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: Self.streamId, payload: chunk))
-            currentOffset += chunkSize
-            windowRemaining -= chunkSize
-        }
-        let totalSent = window - windowRemaining
-        h2PeerConnectionWindow -= totalSent
-        h2PeerStreamSendWindow -= totalSent
-        lock.unlock()
-
-        let nextOffset = currentOffset
-        transportSend(frames) { [weak self] error in
-            if let error {
-                self?.markClosed()
-                completion(error)
-                return
-            }
-            if nextOffset < data.count {
-                self?.sendH2Data(data: data, offset: nextOffset, completion: completion)
-            } else {
-                completion(nil)
+            switch step {
+            case .closed:
+                throw GRPCError.connectionClosed
+            case .park:
+                await parkForFlowWindow()
+            case .built(let frames, let nextOffset):
+                do {
+                    try await transport.send(frames)
+                } catch {
+                    markClosed()
+                    throw error
+                }
+                offset = nextOffset
             }
         }
     }
 
+    /// Suspends until a WINDOW_UPDATE re-opens the send window (or the stream closes). Re-checks
+    /// under the lock before parking so a window re-open racing the caller's check isn't missed.
+    private func parkForFlowWindow() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = lock.withLock {
+                if h2StreamClosed { return true }
+                if min(h2PeerConnectionWindow, h2PeerStreamSendWindow) > 0 { return true }
+                h2FlowResumptions.append(continuation)
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
     private func markClosed() {
-        lock.lock()
-        h2StreamClosed = true
-        lock.unlock()
+        lock.withLock { h2StreamClosed = true }
     }
 }
 
@@ -848,260 +788,244 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
+    /// Outcome of processing one inbound H2 frame in the receive loop.
+    private enum FrameOutcome {
+        case deliver(Data?)   // payload to return, or nil for a clean EOF
+        case keepReading
+    }
+
     /// Pulls H2 frames until an application payload is ready; management frames are handled inline.
-    fileprivate func readAndDecode(completion: @escaping (Data?, Error?) -> Void) {
-        readH2Frame { [weak self] result in
-            guard let self else {
-                completion(nil, GRPCError.connectionClosed)
-                return
-            }
-            switch result {
-            case .failure(let error):
+    fileprivate func readAndDecode() async throws -> Data? {
+        while true {
+            let frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)
+            do {
+                frame = try await readH2Frame()
+            } catch {
                 if let grpcError = error as? GRPCError, case .streamEnded = grpcError {
                     // Graceful end of stream → flush any buffered payload, then EOF.
-                    self.lock.lock()
-                    self.h2StreamClosed = true
-                    let leftover = self.decodedBuffer
-                    self.decodedBuffer.removeAll(keepingCapacity: true)
-                    self.lock.unlock()
-                    completion(leftover.isEmpty ? nil : leftover, nil)
+                    let leftover: Data = lock.withLock {
+                        h2StreamClosed = true
+                        let leftover = decodedBuffer
+                        decodedBuffer.removeAll(keepingCapacity: true)
+                        return leftover
+                    }
+                    return leftover.isEmpty ? nil : leftover
+                }
+                throw error
+            }
+
+            let isOurStream = frame.streamId == Self.streamId
+            let outcome: FrameOutcome
+
+            switch frame.type {
+            case Self.h2FrameData:
+                outcome = try await handleDataFrame(frame: frame, isOurStream: isOurStream)
+
+            case Self.h2FrameHeaders:
+                // Could be the initial 200 OK response or the terminal trailer HEADERS.
+                if isOurStream {
+                    let endOfStream = (frame.flags & Self.h2FlagEndStream) != 0
+                    try markResponseReceivedIfNeeded(frame.payload)
+                    if endOfStream {
+                        // Trailer HEADERS end the stream; non-zero grpc-status surfaces as an error, not silent EOF.
+                        let grpcError = Self.parseGRPCTrailer(frame.payload)
+                        let leftover: Data = lock.withLock {
+                            h2StreamClosed = true
+                            let leftover = decodedBuffer
+                            decodedBuffer.removeAll(keepingCapacity: true)
+                            return leftover
+                        }
+                        if let grpcError { throw grpcError }
+                        outcome = .deliver(leftover.isEmpty ? nil : leftover)
+                    } else {
+                        outcome = .keepReading
+                    }
                 } else {
-                    completion(nil, error)
+                    outcome = .keepReading
                 }
 
-            case .success(let frame):
-                let isOurStream = frame.streamId == Self.streamId
-
-                switch frame.type {
-                case Self.h2FrameData:
-                    self.handleDataFrame(frame: frame, isOurStream: isOurStream, completion: completion)
-
-                case Self.h2FrameHeaders:
-                    // Could be the initial 200 OK response or the terminal trailer HEADERS.
-                    if isOurStream {
-                        let endOfStream = (frame.flags & Self.h2FlagEndStream) != 0
-                        if !self.markResponseReceivedIfNeeded(frame.payload, completion: completion) {
-                            return
-                        }
-                        if endOfStream {
-                            // Trailer HEADERS end the stream; non-zero grpc-status surfaces as an error, not silent EOF.
-                            let grpcError = Self.parseGRPCTrailer(frame.payload)
-                            self.lock.lock()
-                            self.h2StreamClosed = true
-                            let leftover = self.decodedBuffer
-                            self.decodedBuffer.removeAll(keepingCapacity: true)
-                            self.lock.unlock()
-                            if let grpcError {
-                                completion(nil, grpcError)
-                            } else if leftover.isEmpty {
-                                completion(nil, nil)
-                            } else {
-                                completion(leftover, nil)
-                            }
-                            return
-                        }
-                    }
-                    self.readAndDecode(completion: completion)
-
-                case Self.h2FrameSettings:
-                    if frame.flags & Self.h2FlagAck == 0 {
-                        self.parseH2Settings(frame.payload)
-                        let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
-                        self.transportSend(ack) { _ in }
-                    }
-                    self.readAndDecode(completion: completion)
-
-                case Self.h2FrameWindowUpdate:
-                    self.handleWindowUpdate(frame: frame)
-                    self.readAndDecode(completion: completion)
-
-                case Self.h2FramePing:
-                    if frame.flags & Self.h2FlagAck == 0 {
-                        let pong = self.buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
-                        self.transportSend(pong) { _ in }
-                    }
-                    self.readAndDecode(completion: completion)
-
-                case Self.h2FrameGoaway:
-                    self.lock.lock()
-                    self.h2StreamClosed = true
-                    let leftover = self.decodedBuffer
-                    self.decodedBuffer.removeAll(keepingCapacity: true)
-                    self.lock.unlock()
-                    if leftover.isEmpty {
-                        completion(nil, nil)
-                    } else {
-                        completion(leftover, nil)
-                    }
-
-                case Self.h2FrameRstStream:
-                    if isOurStream {
-                        self.lock.lock()
-                        self.h2StreamClosed = true
-                        let leftover = self.decodedBuffer
-                        self.decodedBuffer.removeAll(keepingCapacity: true)
-                        self.lock.unlock()
-                        if leftover.isEmpty {
-                            completion(nil, nil)
-                        } else {
-                            completion(leftover, nil)
-                        }
-                    } else {
-                        self.readAndDecode(completion: completion)
-                    }
-
-                default:
-                    self.readAndDecode(completion: completion)
+            case Self.h2FrameSettings:
+                if frame.flags & Self.h2FlagAck == 0 {
+                    parseH2Settings(frame.payload)
+                    let ack = buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
+                    try? await transport.send(ack)
                 }
+                outcome = .keepReading
+
+            case Self.h2FrameWindowUpdate:
+                handleWindowUpdate(frame: frame)
+                outcome = .keepReading
+
+            case Self.h2FramePing:
+                if frame.flags & Self.h2FlagAck == 0 {
+                    let pong = buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
+                    try? await transport.send(pong)
+                }
+                outcome = .keepReading
+
+            case Self.h2FrameGoaway:
+                let leftover: Data = lock.withLock {
+                    h2StreamClosed = true
+                    let leftover = decodedBuffer
+                    decodedBuffer.removeAll(keepingCapacity: true)
+                    return leftover
+                }
+                outcome = .deliver(leftover.isEmpty ? nil : leftover)
+
+            case Self.h2FrameRstStream:
+                if isOurStream {
+                    let leftover: Data = lock.withLock {
+                        h2StreamClosed = true
+                        let leftover = decodedBuffer
+                        decodedBuffer.removeAll(keepingCapacity: true)
+                        return leftover
+                    }
+                    outcome = .deliver(leftover.isEmpty ? nil : leftover)
+                } else {
+                    outcome = .keepReading
+                }
+
+            default:
+                outcome = .keepReading
+            }
+
+            switch outcome {
+            case .deliver(let payload): return payload
+            case .keepReading: continue
             }
         }
     }
 
-    /// Validates the first HEADERS on our stream; returns `false` if an error was already
-    /// delivered to `completion`.
-    private func markResponseReceivedIfNeeded(_ payload: Data, completion: @escaping (Data?, Error?) -> Void) -> Bool {
-        lock.lock()
-        if h2ResponseReceived {
-            lock.unlock()
-            return true
-        }
-        lock.unlock()
+    /// Validates the first HEADERS on our stream; throws if the gRPC response was rejected.
+    private func markResponseReceivedIfNeeded(_ payload: Data) throws {
+        if lock.withLock({ h2ResponseReceived }) { return }
 
         if let rejection = checkH2ResponseStatus(payload) {
-            lock.lock()
-            h2StreamClosed = true
-            lock.unlock()
-            completion(nil, GRPCError.invalidResponse("gRPC response rejected: \(rejection)"))
-            return false
+            lock.withLock { h2StreamClosed = true }
+            throw GRPCError.invalidResponse("gRPC response rejected: \(rejection)")
         }
-        lock.lock()
-        h2ResponseReceived = true
-        lock.unlock()
-        return true
+        lock.withLock { h2ResponseReceived = true }
     }
 
-    /// Buffers a DATA payload, decodes all complete gRPC messages, and delivers the bytes.
+    /// Buffers a DATA payload, decodes all complete gRPC messages, and reports the outcome.
     private func handleDataFrame(
         frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data),
-        isOurStream: Bool,
-        completion: @escaping (Data?, Error?) -> Void
-    ) {
+        isOurStream: Bool
+    ) async throws -> FrameOutcome {
         let endOfStream = (frame.flags & Self.h2FlagEndStream) != 0
 
         // Ack bytes even on unexpected streams so the connection window stays open.
-        emitWindowUpdatesIfNeeded(receivedBytes: frame.payload.count, onOurStream: isOurStream)
+        await emitWindowUpdatesIfNeeded(receivedBytes: frame.payload.count, onOurStream: isOurStream)
 
-        guard isOurStream else {
-            readAndDecode(completion: completion)
-            return
+        guard isOurStream else { return .keepReading }
+
+        enum DecodeResult {
+            case overflow
+            case parsed(decoded: Data, streamClosed: Bool, decodeError: Error?)
         }
 
-        var decoded = Data()
-        var streamClosed = false
-        var decodeError: Error?
-
-        lock.lock()
-        if !frame.payload.isEmpty {
-            grpcFrameBuffer.append(frame.payload)
-            if grpcFrameBuffer.count > Self.maxGRPCFrameBufferSize {
-                grpcFrameBuffer.removeAll()
-                lock.unlock()
-                completion(nil, GRPCError.invalidResponse("gRPC frame buffer overflow"))
-                return
-            }
-        }
-
-        while grpcFrameBuffer.count >= 5 {
-            let compressed = grpcFrameBuffer[grpcFrameBuffer.startIndex]
-            let length = (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 1]) << 24)
-                | (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 2]) << 16)
-                | (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 3]) << 8)
-                | UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 4])
-            let total = 5 + Int(length)
-            guard grpcFrameBuffer.count >= total else { break }
-
-            let messageData = grpcFrameBuffer.subdata(
-                in: grpcFrameBuffer.startIndex + 5 ..< grpcFrameBuffer.startIndex + total
-            )
-            grpcFrameBuffer.removeFirst(total)
-            if grpcFrameBuffer.isEmpty {
-                grpcFrameBuffer = Data()
-            } else {
-                grpcFrameBuffer = Data(grpcFrameBuffer)
-            }
-
-            if compressed != 0 {
-                decodeError = GRPCError.compressedMessageUnsupported
-                break
-            }
-            do {
-                let payload = try Self.decodeHunkPayload(messageData)
-                if !payload.isEmpty {
-                    decoded.append(payload)
+        let result: DecodeResult = lock.withLock {
+            if !frame.payload.isEmpty {
+                grpcFrameBuffer.append(frame.payload)
+                if grpcFrameBuffer.count > Self.maxGRPCFrameBufferSize {
+                    grpcFrameBuffer.removeAll()
+                    return .overflow
                 }
-            } catch {
-                decodeError = error
-                break
             }
-        }
 
-        if endOfStream {
-            h2StreamClosed = true
-            streamClosed = true
-        }
-        lock.unlock()
+            var decoded = Data()
+            var decodeError: Error?
 
-        if let decodeError {
-            completion(nil, decodeError)
-            return
-        }
+            while grpcFrameBuffer.count >= 5 {
+                let compressed = grpcFrameBuffer[grpcFrameBuffer.startIndex]
+                let length = (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 1]) << 24)
+                    | (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 2]) << 16)
+                    | (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 3]) << 8)
+                    | UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 4])
+                let total = 5 + Int(length)
+                guard grpcFrameBuffer.count >= total else { break }
 
-        if decoded.isEmpty {
-            if streamClosed {
-                completion(nil, nil)
-            } else {
-                readAndDecode(completion: completion)
+                let messageData = grpcFrameBuffer.subdata(
+                    in: grpcFrameBuffer.startIndex + 5 ..< grpcFrameBuffer.startIndex + total
+                )
+                grpcFrameBuffer.removeFirst(total)
+                if grpcFrameBuffer.isEmpty {
+                    grpcFrameBuffer = Data()
+                } else {
+                    grpcFrameBuffer = Data(grpcFrameBuffer)
+                }
+
+                if compressed != 0 {
+                    decodeError = GRPCError.compressedMessageUnsupported
+                    break
+                }
+                do {
+                    let payload = try Self.decodeHunkPayload(messageData)
+                    if !payload.isEmpty {
+                        decoded.append(payload)
+                    }
+                } catch {
+                    decodeError = error
+                    break
+                }
             }
-            return
+
+            var streamClosed = false
+            if endOfStream {
+                h2StreamClosed = true
+                streamClosed = true
+            }
+            return .parsed(decoded: decoded, streamClosed: streamClosed, decodeError: decodeError)
         }
 
-        completion(decoded, nil)
+        switch result {
+        case .overflow:
+            throw GRPCError.invalidResponse("gRPC frame buffer overflow")
+        case .parsed(let decoded, let streamClosed, let decodeError):
+            if let decodeError { throw decodeError }
+            if decoded.isEmpty {
+                return streamClosed ? .deliver(nil) : .keepReading
+            }
+            return .deliver(decoded)
+        }
     }
 
     /// Emits WINDOW_UPDATEs once half the local window is consumed, batching flow-control updates.
-    private func emitWindowUpdatesIfNeeded(receivedBytes: Int, onOurStream: Bool) {
+    private func emitWindowUpdatesIfNeeded(receivedBytes: Int, onOurStream: Bool) async {
         guard receivedBytes > 0 else { return }
 
-        lock.lock()
-        h2ConnectionReceiveConsumed += receivedBytes
-        if onOurStream {
-            h2StreamReceiveConsumed += receivedBytes
-        }
-        let windowSize = h2LocalWindowSize
-        let threshold = windowSize / 2
-        let connConsumed = h2ConnectionReceiveConsumed
-        let streamConsumed = h2StreamReceiveConsumed
-        if connConsumed >= threshold { h2ConnectionReceiveConsumed = 0 }
-        if onOurStream, streamConsumed >= threshold { h2StreamReceiveConsumed = 0 }
-        lock.unlock()
+        let updates: Data? = lock.withLock {
+            h2ConnectionReceiveConsumed += receivedBytes
+            if onOurStream {
+                h2StreamReceiveConsumed += receivedBytes
+            }
+            let windowSize = h2LocalWindowSize
+            let threshold = windowSize / 2
+            let connConsumed = h2ConnectionReceiveConsumed
+            let streamConsumed = h2StreamReceiveConsumed
+            if connConsumed >= threshold { h2ConnectionReceiveConsumed = 0 }
+            if onOurStream, streamConsumed >= threshold { h2StreamReceiveConsumed = 0 }
 
-        var updates = Data()
-        if connConsumed >= threshold {
-            let increment = UInt32(connConsumed)
-            var payload = Data(count: 4)
-            payload[0] = UInt8((increment >> 24) & 0xFF); payload[1] = UInt8((increment >> 16) & 0xFF)
-            payload[2] = UInt8((increment >> 8) & 0xFF); payload[3] = UInt8(increment & 0xFF)
-            updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: payload))
+            var updates = Data()
+            if connConsumed >= threshold {
+                let increment = UInt32(connConsumed)
+                var payload = Data(count: 4)
+                payload[0] = UInt8((increment >> 24) & 0xFF); payload[1] = UInt8((increment >> 16) & 0xFF)
+                payload[2] = UInt8((increment >> 8) & 0xFF); payload[3] = UInt8(increment & 0xFF)
+                updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: payload))
+            }
+            if onOurStream, streamConsumed >= threshold {
+                let increment = UInt32(streamConsumed)
+                var payload = Data(count: 4)
+                payload[0] = UInt8((increment >> 24) & 0xFF); payload[1] = UInt8((increment >> 16) & 0xFF)
+                payload[2] = UInt8((increment >> 8) & 0xFF); payload[3] = UInt8(increment & 0xFF)
+                updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: Self.streamId, payload: payload))
+            }
+            return updates.isEmpty ? nil : updates
         }
-        if onOurStream, streamConsumed >= threshold {
-            let increment = UInt32(streamConsumed)
-            var payload = Data(count: 4)
-            payload[0] = UInt8((increment >> 24) & 0xFF); payload[1] = UInt8((increment >> 16) & 0xFF)
-            payload[2] = UInt8((increment >> 8) & 0xFF); payload[3] = UInt8(increment & 0xFF)
-            updates.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: Self.streamId, payload: payload))
-        }
-        if !updates.isEmpty {
-            transportSend(updates) { _ in }
+
+        if let updates {
+            try? await transport.send(updates)
         }
     }
 }
@@ -1115,33 +1039,27 @@ extension GRPCConnection {
         let interval = configuration.idleTimeout
         guard interval > 0 else { return }
 
-        lock.lock()
-        if keepaliveTimer != nil {
-            lock.unlock()
-            return
+        // Handler state is lock-guarded and the async send is thread-safe, so the global queue suffices.
+        let timer: DispatchSourceTimer? = lock.withLock {
+            if keepaliveTimer != nil { return nil }
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+            timer.schedule(deadline: .now() + .seconds(interval), repeating: .seconds(interval))
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                Task { await self.sendKeepalivePing() }
+            }
+            keepaliveTimer = timer
+            return timer
         }
-        // Handler state is lock-guarded and transportSend is thread-safe, so the global queue suffices.
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-        timer.schedule(deadline: .now() + .seconds(interval), repeating: .seconds(interval))
-        timer.setEventHandler { [weak self] in
-            self?.sendKeepalivePing()
-        }
-        keepaliveTimer = timer
-        lock.unlock()
-        timer.resume()
+        timer?.resume()
     }
 
-    private func sendKeepalivePing() {
-        lock.lock()
-        if h2StreamClosed {
-            lock.unlock()
-            return
-        }
-        lock.unlock()
+    private func sendKeepalivePing() async {
+        if lock.withLock({ h2StreamClosed }) { return }
         // 8-byte opaque PING payload (RFC 7540 §6.7).
         let payload = Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         let ping = buildH2Frame(type: Self.h2FramePing, flags: 0, streamId: 0, payload: payload)
-        transportSend(ping) { _ in }
+        try? await transport.send(ping)
     }
 }
 

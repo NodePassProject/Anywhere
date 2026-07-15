@@ -732,17 +732,14 @@ nonisolated final class SudokuConnectionFactory: @unchecked Sendable {
             )
         )
         do {
-            // First of {upgrade completion, 30s deadline} wins; a late completion resolves
-            // the already-latched promise and is dropped (no continuation leak).
-            let promise = AsyncPromise<Void>()
-            ws.performUpgrade { error in
-                promise.resolve(error.map { .failure($0) } ?? .success(()))
-            }
+            // First of {upgrade, 30s deadline} wins; on expiry the ws is cancelled so the
+            // in-flight receive unwinds promptly.
             try await raceDialDeadline(
                 .seconds(30),
+                onExpire: { ws.cancel() },
                 timeout: SudokuNativeError.connectionFailed("timeout upgrading WebSocket transport")
             ) {
-                try await promise.value()
+                try await ws.performUpgrade()
             }
         } catch {
             releaseConnection(base)

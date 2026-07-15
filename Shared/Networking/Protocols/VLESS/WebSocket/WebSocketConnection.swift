@@ -11,13 +11,11 @@ import Synchronization
 // MARK: - WebSocketConnection
 
 /// WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
-nonisolated class WebSocketConnection {
+nonisolated final class WebSocketConnection: @unchecked Sendable {
 
-    // MARK: Transport closures
+    // MARK: Transport
 
-    private let transportSend: (Data, @escaping (Error?) -> Void) -> Void
-    private let transportReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
-    private let transportCancel: () -> Void
+    private let transport: AsyncTransportClosures
 
     // MARK: State
 
@@ -43,30 +41,28 @@ nonisolated class WebSocketConnection {
 
     // MARK: - Initializers
 
-    init(transport: TransportClosures, configuration: WebSocketConfiguration) {
+    init(transport: AsyncTransportClosures, configuration: WebSocketConfiguration) {
         self.configuration = configuration
-        self.transportSend = transport.send
-        self.transportReceive = transport.receive
-        self.transportCancel = transport.cancel
+        self.transport = transport
         self.state = Mutex(ConnectionState(isConnected: true))
     }
 
-    convenience init(transport: any RawTransport, configuration: WebSocketConfiguration) {
-        self.init(transport: TransportClosures(tcp: transport), configuration: configuration)
+    convenience init(transport: any AsyncByteTransport, configuration: WebSocketConfiguration) {
+        self.init(transport: AsyncTransportClosures(transport), configuration: configuration)
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
-        self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration)
+        self.init(transport: AsyncTransportClosures(tls: tlsConnection), configuration: configuration)
     }
 
     convenience init(tunnel: ProxyConnection, configuration: WebSocketConfiguration) {
-        self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration)
+        self.init(transport: AsyncTransportClosures(proxyConnection: tunnel), configuration: configuration)
     }
 
     // MARK: - HTTP Upgrade Handshake
 
     /// Performs the WebSocket HTTP upgrade handshake, optionally embedding early data in a request header.
-    func performUpgrade(earlyData: Data? = nil, completion: @escaping (Error?) -> Void) {
+    func performUpgrade(earlyData: Data? = nil) async throws {
         var keyBytes = [UInt8](repeating: 0, count: 16)
         _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
         let wsKey = Data(keyBytes).base64EncodedString()
@@ -95,35 +91,30 @@ nonisolated class WebSocketConnection {
         request += "\r\n"
 
         guard let requestData = request.data(using: .utf8) else {
-            completion(WebSocketError.upgradeFailed("Failed to encode upgrade request"))
-            return
+            throw WebSocketError.upgradeFailed("Failed to encode upgrade request")
         }
 
-        transportSend(requestData) { [weak self] error in
-            if let error {
-                completion(WebSocketError.upgradeFailed(error.localizedDescription))
-                return
-            }
-            self?.receiveUpgradeResponse(completion: completion)
+        do {
+            try await transport.send(requestData)
+        } catch {
+            throw WebSocketError.upgradeFailed(error.localizedDescription)
         }
+
+        try await receiveUpgradeResponse()
     }
 
     /// Reads the HTTP 101 response, buffers any leftover data after the header.
-    private func receiveUpgradeResponse(completion: @escaping (Error?) -> Void) {
-        transportReceive { [weak self] data, _, error in
-            guard let self else {
-                completion(WebSocketError.upgradeFailed("Connection deallocated"))
-                return
+    private func receiveUpgradeResponse() async throws {
+        while true {
+            let chunk: TransportChunk
+            do {
+                chunk = try await transport.receive()
+            } catch {
+                throw WebSocketError.upgradeFailed(error.localizedDescription)
             }
 
-            if let error {
-                completion(WebSocketError.upgradeFailed(error.localizedDescription))
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(WebSocketError.upgradeFailed("Empty response from server"))
-                return
+            guard case .bytes(let data) = chunk, !data.isEmpty else {
+                throw WebSocketError.upgradeFailed("Empty response from server")
             }
 
             let headerData: Data? = self.state.withLock { state in
@@ -141,65 +132,78 @@ nonisolated class WebSocketConnection {
             }
 
             guard let headerData else {
-                self.receiveUpgradeResponse(completion: completion)
-                return
+                continue // need more bytes
             }
 
             guard let headerString = String(data: headerData, encoding: .utf8) else {
-                completion(WebSocketError.upgradeFailed("Cannot decode response headers"))
-                return
+                throw WebSocketError.upgradeFailed("Cannot decode response headers")
             }
 
             let firstLine = headerString.split(separator: "\r\n", maxSplits: 1).first ?? ""
             guard firstLine.contains("101") else {
-                completion(WebSocketError.upgradeFailed("Expected HTTP 101, got: \(firstLine)"))
-                return
+                throw WebSocketError.upgradeFailed("Expected HTTP 101, got: \(firstLine)")
             }
 
             self.state.withLock { $0.upgraded = true }
             self.startHeartbeat()
-            completion(nil)
+            return
         }
     }
 
     // MARK: - Public API
 
     /// Sends data as a binary WebSocket frame (masked, opcode 0x02).
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        let frame = buildFrame(opcode: 0x02, payload: data)
-        transportSend(frame, completion)
-    }
-
-    func send(data: Data) {
-        send(data: data) { _ in }
-    }
-
-    func receive(completion: @escaping (Data?, Error?) -> Void) {
-        if let result = state.withLock({ tryExtractFrame(&$0) }) {
-            handleFrameResult(result, completion: completion)
-            return
-        }
-        receiveMore(completion: completion)
-    }
-
-    // MARK: - Async Surface
-
-    // Async-native send/receive for the flipped `WebSocketProxyConnection`, bridging the
-    // callback frame writer/reader above. The callback methods stay for the callback dial
-    // path and Sudoku; both are deleted once the framing internals move to async.
-
     func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        let frame = buildFrame(opcode: 0x02, payload: data)
+        try await transport.send(frame)
     }
 
+    /// Receives one application-data frame; `nil` signals a clean close (EOF). Ping/Pong/Close
+    /// control frames are handled inline (auto-Pong, Close acknowledgement) without surfacing.
     func receive() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receive { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+        while true {
+            if let result = state.withLock({ tryExtractFrame(&$0) }) {
+                switch result {
+                case .binary(let data):
+                    return data
+                case .ping(let payload):
+                    // RFC 6455: echo payload in Pong (best-effort), then keep reading.
+                    let pongFrame = buildFrame(opcode: 0x0A, payload: payload)
+                    try? await transport.send(pongFrame)
+                    continue
+                case .pong:
+                    continue
+                case .close(let code, let reason):
+                    var closePayload = Data()
+                    closePayload.append(UInt8(code >> 8))
+                    closePayload.append(UInt8(code & 0xFF))
+                    let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
+                    try? await transport.send(closeFrame)
+                    state.withLock { $0.isConnected = false }
+                    // A normal (1000) or no-status (1005) close is a graceful end-of-stream, not a
+                    // failure — surface it as EOF so callers half-close instead of resetting.
+                    if code == 1000 || code == 1005 {
+                        return nil
+                    }
+                    throw WebSocketError.connectionClosed(code, reason)
+                }
+            }
+
+            // No complete frame buffered: read more bytes.
+            guard case .bytes(let data) = try await transport.receive(), !data.isEmpty else {
+                return nil // EOF
+            }
+
+            let overflow: Bool = state.withLock { state in
+                state.receiveBuffer.append(data)
+                if state.receiveBuffer.count > Self.maxReceiveBufferSize {
+                    state.receiveBuffer.removeAll()
+                    return true
+                }
+                return false
+            }
+            if overflow {
+                throw WebSocketError.invalidFrame("Receive buffer exceeded limit")
             }
         }
     }
@@ -211,7 +215,7 @@ nonisolated class WebSocketConnection {
             $0.heartbeatTimer?.cancel()
             $0.heartbeatTimer = nil
         }
-        transportCancel()
+        transport.cancel()
     }
 
     deinit {
@@ -238,9 +242,12 @@ nonisolated class WebSocketConnection {
                 return
             }
             let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
-            self.transportSend(pingFrame) { [weak self] error in
-                if error != nil {
-                    self?.state.withLock {
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.transport.send(pingFrame)
+                } catch {
+                    self.state.withLock {
                         $0.heartbeatTimer?.cancel()
                         $0.heartbeatTimer = nil
                     }
@@ -382,83 +389,4 @@ nonisolated class WebSocketConnection {
             return .binary(payload)
         }
     }
-
-    /// Handles a parsed frame result, auto-responding to pings and propagating close.
-    private func handleFrameResult(_ result: FrameResult, completion: @escaping (Data?, Error?) -> Void) {
-        switch result {
-        case .binary(let data):
-            completion(data, nil)
-        case .ping(let payload):
-            // RFC 6455: echo payload in Pong
-            let pongFrame = buildFrame(opcode: 0x0A, payload: payload)
-            transportSend(pongFrame) { [weak self] _ in
-                self?.receive(completion: completion)
-            }
-        case .pong:
-            receive(completion: completion)
-        case .close(let code, let reason):
-            var closePayload = Data()
-            closePayload.append(UInt8(code >> 8))
-            closePayload.append(UInt8(code & 0xFF))
-            let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
-            transportSend(closeFrame) { _ in }
-            state.withLock { $0.isConnected = false }
-            // A normal (1000) or no-status (1005) close is a graceful end-of-stream, not a
-            // failure — surface it as EOF so callers half-close instead of resetting.
-            if code == 1000 || code == 1005 {
-                completion(nil, nil)
-            } else {
-                completion(nil, WebSocketError.connectionClosed(code, reason))
-            }
-        }
-    }
-
-    private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
-        transportReceive { [weak self] data, _, error in
-            guard let self else {
-                completion(nil, WebSocketError.invalidFrame("Connection deallocated"))
-                return
-            }
-
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(nil, nil) // EOF
-                return
-            }
-
-            enum ExtractResult {
-                case frame(FrameResult)
-                case needMore
-                case overflow
-            }
-
-            let status: ExtractResult = self.state.withLock { state in
-                state.receiveBuffer.append(data)
-
-                if state.receiveBuffer.count > Self.maxReceiveBufferSize {
-                    state.receiveBuffer.removeAll()
-                    return .overflow
-                }
-
-                if let result = self.tryExtractFrame(&state) {
-                    return .frame(result)
-                }
-                return .needMore
-            }
-
-            switch status {
-            case .frame(let result):
-                self.handleFrameResult(result, completion: completion)
-            case .needMore:
-                self.receiveMore(completion: completion)
-            case .overflow:
-                completion(nil, WebSocketError.invalidFrame("Receive buffer exceeded limit"))
-            }
-        }
-    }
-
 }
