@@ -17,12 +17,12 @@ protocol HTTPTunnel: AnyObject {
     /// for tunnels that don't expose headers (e.g. HTTP/1.1).
     var responseHeaders: [(name: String, value: String)] { get }
 
-    func openTunnel(completion: @escaping (Error?) -> Void)
+    func openTunnel() async throws
 
-    func sendData(_ data: Data, completion: @escaping (Error?) -> Void)
+    func sendData(_ data: Data) async throws
 
-    /// `nil` data signals EOF.
-    func receiveData(completion: @escaping (Data?, Error?) -> Void)
+    /// `nil` signals EOF.
+    func receiveData() async throws -> Data?
 
     func close()
 }

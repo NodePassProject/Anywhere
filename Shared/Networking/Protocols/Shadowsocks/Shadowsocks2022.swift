@@ -23,7 +23,8 @@ private let tagSize = 16
 // MARK: - Shadowsocks2022Connection (TCP)
 
 /// Wire format: salt + seal(fixedHeader) + seal(variableHeader+payload) [+ AEAD chunks].
-nonisolated class Shadowsocks2022Connection: AsyncProxyConnection {
+nonisolated class Shadowsocks2022Connection: ProxyConnection {
+    private let lock = UnfairLock()
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let psk: Data
@@ -96,7 +97,7 @@ nonisolated class Shadowsocks2022Connection: AsyncProxyConnection {
         }
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 
@@ -370,7 +371,7 @@ nonisolated class Shadowsocks2022Connection: AsyncProxyConnection {
 // MARK: - Shadowsocks2022UDPConnection (AES variant)
 
 /// Packet: AES-ECB(sessionID(8) + packetID(8)) + AEAD(body), nonce = header[4:16].
-nonisolated class Shadowsocks2022AESUDPConnection: AsyncProxyConnection {
+nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let psk: Data             // last PSK (for session key derivation)
@@ -431,7 +432,7 @@ nonisolated class Shadowsocks2022AESUDPConnection: AsyncProxyConnection {
         return try decryptPacket(data)
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 
@@ -571,7 +572,7 @@ nonisolated class Shadowsocks2022AESUDPConnection: AsyncProxyConnection {
 // MARK: - Shadowsocks2022ChaChaUDPConnection
 
 /// Packet: nonce(24) + XChaCha20-Poly1305(sessionID + packetID + type + timestamp + padding + address + payload).
-nonisolated class Shadowsocks2022ChaChaUDPConnection: AsyncProxyConnection {
+nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let psk: Data
     private let dstHost: String
@@ -610,7 +611,7 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: AsyncProxyConnection {
         return try decryptPacket(data)
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 

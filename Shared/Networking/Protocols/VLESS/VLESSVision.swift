@@ -334,7 +334,9 @@ private func isCompleteTLSRecord(data: Data) -> Bool {
 
 // MARK: - Vision Connection Wrapper
 
-nonisolated class VLESSVisionConnection: AsyncProxyConnection {
+nonisolated class VLESSVisionConnection: ProxyConnection {
+    /// Guards `trafficState` mutations across the async send/receive paths.
+    private let lock = UnfairLock()
     private let innerConnection: ProxyConnection
     private let trafficState: VisionTrafficState
 
@@ -345,12 +347,12 @@ nonisolated class VLESSVisionConnection: AsyncProxyConnection {
     }
 
     /// Sends an empty padding frame to camouflage the VLESS header when no initial
-    /// data is available. Callers must wait on `completion` before subsequent sends.
-    func sendEmptyPadding(completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        let padded = visionPadding(data: nil, command: .paddingContinue, state: trafficState, longPadding: true)
-        lock.unlock()
-        innerConnection.send(data: padded, completion: completion)
+    /// data is available. Callers must await it before subsequent sends.
+    func sendEmptyPadding() async throws {
+        let padded = lock.withLock {
+            visionPadding(data: nil, command: .paddingContinue, state: trafficState, longPadding: true)
+        }
+        try await innerConnection.send(padded)
     }
     
     override var isConnected: Bool {
@@ -495,7 +497,7 @@ nonisolated class VLESSVisionConnection: AsyncProxyConnection {
         return data
     }
 
-    override func performCancel() {
+    override func cancel() {
         innerConnection.cancel()
     }
 }

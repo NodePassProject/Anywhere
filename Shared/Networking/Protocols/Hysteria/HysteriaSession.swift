@@ -419,6 +419,11 @@ nonisolated final class HysteriaSession {
         quic.writeStream(sid, data: data, completion: completion)
     }
 
+    /// Async stream write, over the QUIC ngtcp2-boundary continuation.
+    func writeStream(_ sid: Int64, data: Data) async throws {
+        try await quic.writeStream(sid, data: data)
+    }
+
     func extendStreamOffset(_ sid: Int64, count: Int) {
         quic.extendStreamOffset(sid, count: count)
     }
@@ -502,8 +507,18 @@ nonisolated final class HysteriaSession {
         quic.writeDatagrams(datagrams, completion: completion)
     }
 
+    /// Async DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
+    func writeDatagrams(_ datagrams: [Data]) async throws {
+        try await quic.writeDatagrams(datagrams)
+    }
+
     var maxDatagramPayloadSize: Int {
         quic.maxDatagramPayloadSize
+    }
+
+    /// Async reader for the path-MTU-bounded datagram payload size (hops onto `queue`).
+    func currentMaxDatagramPayloadSize() async -> Int {
+        await quic.currentMaxDatagramPayloadSize()
     }
 
     // MARK: - Close

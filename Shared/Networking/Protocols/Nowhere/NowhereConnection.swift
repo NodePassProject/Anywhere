@@ -17,7 +17,7 @@ protocol NowhereTerminationObservable: AnyObject {
     func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
 }
 
-nonisolated final class NowhereConnection: AsyncProxyConnection {
+nonisolated final class NowhereConnection: ProxyConnection {
 
     enum State { case idle, openingStream, handshaking, waitingResult, ready, closed }
     enum BufferedFlowResultStep: Equatable {
@@ -42,13 +42,20 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
     }
     private let _isReady = Atomic<Bool>(false)
 
-    private var streamID: Int64 = -1
+    /// Stored atomically: set once on `session.queue` during open, then read from the
+    /// async send/close paths off-queue.
+    private let _streamID = Atomic<Int64>(-1)
+    private var streamID: Int64 {
+        get { _streamID.load(ordering: .relaxed) }
+        set { _streamID.store(newValue, ordering: .relaxed) }
+    }
     private var readClosed = false
     private var receiveBuffer = Data()
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var pendingQuicBytes = 0
+    /// Post-result stream bytes / EOF / error from the session demux; the async
+    /// replacement for the parked `pendingReceive`. Stream credit is returned in
+    /// ``receiveRaw()`` only once the app takes the bytes (backpressure preserved).
+    private let inbox = AsyncByteChannel()
     private var openCompletion: ((Error?) -> Void)?
-    private var didBecomeReady = false
     private var setupTerminationError: Error?
 
     init(
@@ -136,9 +143,12 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
     }
 
     func handleStreamData(_ data: Data, fin: Bool) {
+        // On session.queue, synchronously inside ngtcp2's read_pkt; `data` is a zero-copy
+        // view that must be detached before it escapes to the inbox.
+        guard state != .closed else { return }
+
         if state == .openingStream || state == .handshaking || state == .waitingResult {
             if !data.isEmpty {
-                pendingQuicBytes += data.count
                 receiveBuffer.append(data)
             }
             if fin { readClosed = true }
@@ -151,26 +161,15 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
             return
         }
 
-        if state == .ready, receiveBuffer.isEmpty, !data.isEmpty,
-           let callback = pendingReceive {
-            pendingReceive = nil
-            let ackCount = pendingQuicBytes + data.count
-            pendingQuicBytes = 0
-            let out = Data(data)
-            if fin { readClosed = true }
-            session.extendStreamOffset(streamID, count: ackCount)
-            callback(out, nil)
-            return
-        }
+        guard state == .ready else { return }
 
         if !data.isEmpty {
-            pendingQuicBytes += data.count
-            receiveBuffer.append(data)
+            inbox.yield(Data(data))
         }
-        if fin { readClosed = true }
-
-        guard state == .ready else { return }
-        deliverBufferedOrEOF(eof: readClosed)
+        if fin {
+            readClosed = true
+            inbox.finish()
+        }
     }
 
     private func processFlowResultIfAvailable() {
@@ -181,7 +180,8 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
             fail(NowhereError.connectionFailed("Invalid flow result"))
         case .ready:
             receiveBuffer.removeFirst(NowhereProtocol.flowResultSize)
-            pendingQuicBytes = max(0, pendingQuicBytes - NowhereProtocol.flowResultSize)
+            // Credit the consumed flow-result frame now; post-result app data is
+            // credited lazily as the app consumes it in `receiveRaw`.
             session.extendStreamOffset(streamID, count: NowhereProtocol.flowResultSize)
             if let setupTerminationError {
                 fail(setupTerminationError)
@@ -190,7 +190,6 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
             }
         case .reject(let code):
             receiveBuffer.removeFirst(NowhereProtocol.flowResultSize)
-            pendingQuicBytes = max(0, pendingQuicBytes - NowhereProtocol.flowResultSize)
             session.extendStreamOffset(streamID, count: NowhereProtocol.flowResultSize)
             fail(NowhereError.flowRejected(code))
         }
@@ -222,34 +221,20 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
     private func finishOpen() {
         guard state != .closed else { return }
         state = .ready
-        didBecomeReady = true
         let callback = openCompletion
         openCompletion = nil
         callback?(nil)
-        deliverBufferedOrEOF(eof: readClosed)
+        // Flush any coalesced post-result app data, then honour a buffered FIN.
+        flushBufferToInbox()
+        if readClosed { inbox.finish() }
     }
 
-    private func deliverBufferedOrEOF(eof: Bool) {
-        if let callback = pendingReceive, !receiveBuffer.isEmpty {
-            pendingReceive = nil
-            let out = receiveBuffer
-            receiveBuffer = Data()
-            let ackCount = takePendingQuicBytes()
-            session.extendStreamOffset(streamID, count: ackCount)
-            callback(out, nil)
-            return
-        }
-
-        if eof, let callback = pendingReceive {
-            pendingReceive = nil
-            callback(nil, nil)
-        }
-    }
-
-    private func takePendingQuicBytes() -> Int {
-        let count = pendingQuicBytes
-        pendingQuicBytes = 0
-        return count
+    /// Hands buffered post-result app bytes to the inbox. Runs on `session.queue`.
+    private func flushBufferToInbox() {
+        guard !receiveBuffer.isEmpty else { return }
+        let out = receiveBuffer
+        receiveBuffer = Data()
+        inbox.yield(out)
     }
 
     func handleSessionError(_ error: Error) {
@@ -285,10 +270,8 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
         }
         readClosed = true
         state = .closed
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            callback(nil, nil)
-        }
+        // EOF ordered after every byte already queued in the inbox.
+        inbox.finish()
     }
 
     private func fail(_ error: Error) {
@@ -304,94 +287,35 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
             openCompletion = nil
             callback(error)
         }
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            callback(nil, error)
-        }
+        inbox.fail(error)
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(NowhereError.streamClosed); return }
-            guard self.state == .ready else {
-                completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
-                return
-            }
-            self.session.writeStream(self.streamID, data: data, completion: completion)
-        }
-    }
-
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else {
-                completion(nil, NowhereError.streamClosed)
-                return
-            }
-            if !self.receiveBuffer.isEmpty && self.didBecomeReady {
-                let out = self.receiveBuffer
-                self.receiveBuffer = Data()
-                let ackCount = self.takePendingQuicBytes()
-                self.session.extendStreamOffset(self.streamID, count: ackCount)
-                completion(out, nil)
-                return
-            }
-            if self.state == .closed {
-                completion(nil, nil)
-                return
-            }
-            if self.readClosed {
-                completion(nil, nil)
-                return
-            }
-            let stale = self.pendingReceive
-            self.pendingReceive = completion
-            stale?(nil, NowhereError.connectionFailed(
-                "overlapping receiveRaw on Nowhere QUIC stream"
-            ))
-        }
-    }
-
-    override func closeWrite(completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self, self.state == .ready else {
-                completion(NowhereError.streamClosed)
-                return
-            }
-            self.session.finishStream(self.streamID, completion: completion)
-        }
-    }
-
-    // MARK: - Async Surface (bridges the callback stream I/O above; deleted with it later)
+    // MARK: - ProxyConnection overrides
 
     override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+        guard _isReady.load(ordering: .relaxed) else {
+            throw NowhereError.streamClosed
         }
+        try await session.writeStream(streamID, data: data)
     }
 
     override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
+        let data = try await inbox.next()
+        if let data, !data.isEmpty {
+            // Return stream flow-control credit only now the app has taken the bytes.
+            session.extendStreamOffset(streamID, count: data.count)
         }
+        return data
     }
 
     override func closeWrite() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            closeWrite { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+        guard _isReady.load(ordering: .relaxed) else {
+            throw NowhereError.streamClosed
         }
+        try await session.finishStream(streamID)
     }
 
-    override func performCancel() {
+    override func cancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
@@ -399,10 +323,7 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)
             }
-            if let callback = self.pendingReceive {
-                self.pendingReceive = nil
-                callback(nil, NowhereError.streamClosed)
-            }
+            self.inbox.cancel()
             if let callback = self.openCompletion {
                 self.openCompletion = nil
                 callback(NowhereError.streamClosed)
@@ -411,7 +332,7 @@ nonisolated final class NowhereConnection: AsyncProxyConnection {
     }
 }
 
-nonisolated final class NowhereTCPUDPConnection: AsyncProxyConnection, NowhereTerminationObservable {
+nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTerminationObservable {
 
     private let inner: NowhereTCPConnection
     private let udpState = Mutex(UDPFramingState())
@@ -475,21 +396,15 @@ nonisolated final class NowhereTCPUDPConnection: AsyncProxyConnection, NowhereTe
         handler?(error)
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+    override func sendRaw(_ data: Data) async throws {
+        let frame: Data
         do {
-            let frame = try NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data)
-            inner.sendRaw(data: frame, completion: completion)
+            frame = try NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data)
         } catch NowhereError.udpPacketTooLarge {
             // UDP is lossy by contract. Drop only this packet; keep the flow alive.
-            completion(nil)
-        } catch {
-            completion(error)
+            return
         }
-    }
-
-    override func sendRaw(data: Data) {
-        guard let frame = try? NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data) else { return }
-        inner.sendRaw(data: frame)
+        try await inner.sendRaw(frame)
     }
 
     private enum PacketStep {
@@ -530,75 +445,37 @@ nonisolated final class NowhereTCPUDPConnection: AsyncProxyConnection, NowhereTe
         }
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        switch udpState.withLock({ nextPacketStep(&$0) }) {
-        case .deliver(let packet):
-            completion(packet, nil)
-        case .close:
-            notifyTermination(error: nil)
-            completion(nil, nil)
-        case .fail(let error):
-            notifyTermination(error: error)
-            completion(nil, error)
-        case .needMore:
-            receiveMore(completion: completion)
-        }
-    }
-
-    private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-            if let error {
-                self.notifyTermination(error: error)
-                completion(nil, error)
-                return
-            }
-            guard let data else {
-                self.notifyTermination(error: nil)
-                completion(nil, nil)
-                return
-            }
-            let step = self.udpState.withLock { state -> PacketStep in
-                state.buffer.append(data)
-                return self.nextPacketStep(&state)
-            }
+    override func receiveRaw() async throws -> Data? {
+        // Pull typed UoT frames from `inner` on demand (backpressure via the app's read rate).
+        while true {
+            let step = udpState.withLock { nextPacketStep(&$0) }
             switch step {
             case .deliver(let packet):
-                completion(packet, nil)
+                return packet
             case .close:
-                self.notifyTermination(error: nil)
-                completion(nil, nil)
+                notifyTermination(error: nil)
+                return nil
             case .fail(let error):
-                self.notifyTermination(error: error)
-                completion(nil, error)
+                notifyTermination(error: error)
+                throw error
             case .needMore:
-                self.receiveMore(completion: completion)
+                let data: Data?
+                do {
+                    data = try await inner.receive()
+                } catch {
+                    notifyTermination(error: error)
+                    throw error
+                }
+                guard let data, !data.isEmpty else {
+                    notifyTermination(error: nil)
+                    return nil
+                }
+                udpState.withLock { $0.buffer.append(data) }
             }
         }
     }
 
-    // MARK: - Async Surface (bridges the callback datagram I/O above; deleted with it later)
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
-    }
-
-    override func performCancel() {
+    override func cancel() {
         let shouldStart = cancelState.withLock { state in
             guard !state.started else { return false }
             state.started = true
@@ -614,7 +491,11 @@ nonisolated final class NowhereTCPUDPConnection: AsyncProxyConnection, NowhereTe
             finishCancel()
             return
         }
-        inner.sendRaw(data: close) { [weak self] _ in self?.finishCancel() }
+        Task { [weak self] in
+            guard let self else { return }
+            try? await self.inner.sendRaw(close)
+            self.finishCancel()
+        }
         Self.closeFlushQueue.asyncAfter(deadline: .now() + Self.closeFlushBound) { [self] in
             finishCancel()
         }
@@ -630,10 +511,12 @@ nonisolated final class NowhereTCPUDPConnection: AsyncProxyConnection, NowhereTe
     }
 }
 
-nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTerminationObservable {
+nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
 
     private enum State { case idle, connecting, authenticating, prepared, requesting, waitingResult, ready, closed }
 
+    /// Guards this connection's flow-open state machine.
+    private let lock = UnfairLock()
     private let configuration: NowhereConfiguration
     private let connectHost: String
     private let tunnel: ProxyConnection?
@@ -806,7 +689,7 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
             return
         }
 
-        connection.sendRaw(data: request) { [weak self] error in
+        let onRequestSent: (Error?) -> Void = { [weak self] error in
             guard let self else { return }
             if flowHeader.role != .open {
                 let canProcess = self.lock.withLock {
@@ -843,6 +726,10 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
             }
             callback?(nil)
             self.deliverPendingReceive()
+        }
+        Task {
+            do { try await connection.sendRaw(request); onRequestSent(nil) }
+            catch { onRequestSent(error) }
         }
     }
 
@@ -909,7 +796,7 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
                     proxy.cancel()
                     return
                 }
-                proxy.sendRaw(data: payload) { [weak self] error in
+                let onPayloadSent: (Error?) -> Void = { [weak self] error in
                     guard let self else { return }
                     if let error {
                         self.fail(error)
@@ -929,6 +816,10 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
                     }
                     if !expectsFlowResult { callback?(nil) }
                     self.armTransportRead(on: proxy)
+                }
+                Task {
+                    do { try await proxy.sendRaw(payload); onPayloadSent(nil) }
+                    catch { onPayloadSent(error) }
                 }
             }
         }
@@ -954,9 +845,14 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
             return true
         }
         guard shouldRead else { return }
-        connection.receiveRaw { [weak self, weak connection] data, error in
+        Task { [weak self, weak connection] in
             guard let self, let connection else { return }
-            self.handleTransportRead(connection: connection, data: data, error: error)
+            do {
+                let data = try await connection.receiveRaw()
+                self.handleTransportRead(connection: connection, data: data, error: nil)
+            } catch {
+                self.handleTransportRead(connection: connection, data: nil, error: error)
+            }
         }
     }
 
@@ -1282,111 +1178,80 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
         notifyTermination(error: error)
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+    // MARK: - ProxyConnection overrides
+
+    override func sendRaw(_ data: Data) async throws {
         let connection = lock.withLock {
             state == .ready && !transportWriteClosed ? inner : nil
         }
         guard let connection else {
-            completion(NowhereError.streamClosed)
-            return
+            throw NowhereError.streamClosed
         }
-        connection.sendRaw(data: data, completion: completion)
+        try await connection.sendRaw(data)
     }
 
-    override func sendRaw(data: Data) {
-        let connection = lock.withLock {
-            state == .ready && !transportWriteClosed ? inner : nil
+    /// The intricate setup/read machinery (`armTransportRead`/`handleTransportRead`) still
+    /// fulfils `pendingReceive`; the async surface parks the caller's continuation there, so
+    /// the verified state machine is preserved verbatim (the one continuation left here is the
+    /// receive park — see MIGRATION.md's residual-continuations note).
+    override func receiveRaw() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            let completion: (Data?, Error?) -> Void = { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+            var result: (Data?, Error?)?
+            var staleReceive: ((Data?, Error?) -> Void)?
+            lock.lock()
+            if didBecomeReady, !receiveBuffer.isEmpty {
+                let data = receiveBuffer
+                receiveBuffer.removeAll(keepingCapacity: true)
+                result = (data, nil)
+            } else if transportReadClosed {
+                result = (nil, nil)
+            } else if state == .closed {
+                result = (nil, terminalError)
+            } else if state == .ready {
+                staleReceive = pendingReceive
+                pendingReceive = completion
+            } else {
+                result = (nil, NowhereError.notReady)
+            }
+            lock.unlock()
+            staleReceive?(nil, NowhereError.connectionFailed(
+                "overlapping receiveRaw on Nowhere TCP stream"
+            ))
+            if let result { completion(result.0, result.1) }
+            else if let connection = lock.withLock({ state == .ready ? inner : nil }) {
+                armTransportRead(on: connection)
+            }
         }
-        connection?.sendRaw(data: data)
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        var result: (Data?, Error?)?
-        var staleReceive: ((Data?, Error?) -> Void)?
-        lock.lock()
-        if didBecomeReady, !receiveBuffer.isEmpty {
-            let data = receiveBuffer
-            receiveBuffer.removeAll(keepingCapacity: true)
-            result = (data, nil)
-        } else if transportReadClosed {
-            result = (nil, nil)
-        } else if state == .closed {
-            result = (nil, terminalError)
-        } else if state == .ready {
-            staleReceive = pendingReceive
-            pendingReceive = completion
-        } else {
-            result = (nil, NowhereError.notReady)
-        }
-        lock.unlock()
-        staleReceive?(nil, NowhereError.connectionFailed(
-            "overlapping receiveRaw on Nowhere TCP stream"
-        ))
-        if let result { completion(result.0, result.1) }
-        else if let connection = lock.withLock({ state == .ready ? inner : nil }) {
-            armTransportRead(on: connection)
-        }
-    }
-
-    override func closeWrite(completion: @escaping (Error?) -> Void) {
+    override func closeWrite() async throws {
         let connection: TLSProxyConnection? = lock.withLock {
             guard state == .ready, !transportWriteClosed else { return nil }
             return inner
         }
         guard let connection else {
             let alreadyClosed = lock.withLock { state == .ready && transportWriteClosed }
-            completion(alreadyClosed ? nil : NowhereError.streamClosed)
-            return
+            if alreadyClosed { return }
+            throw NowhereError.streamClosed
         }
-        connection.closeWrite { [weak self, weak connection] error in
-            guard let self, let connection else {
-                completion(error ?? NowhereError.streamClosed)
-                return
+        try await connection.closeWrite()
+        var shouldCancel = false
+        lock.withLock {
+            guard self.inner === connection, self.state == .ready else { return }
+            self.transportWriteClosed = true
+            if self.transportReadClosed {
+                self.state = .closed
+                self.inner = nil
+                shouldCancel = true
             }
-            var shouldCancel = false
-            if error == nil {
-                self.lock.withLock {
-                    guard self.inner === connection, self.state == .ready else { return }
-                    self.transportWriteClosed = true
-                    if self.transportReadClosed {
-                        self.state = .closed
-                        self.inner = nil
-                        shouldCancel = true
-                    }
-                }
-            }
-            if shouldCancel { connection.cancel() }
-            completion(error)
         }
+        if shouldCancel { connection.cancel() }
     }
 
-    // MARK: - Async Surface (bridges the callback stream I/O above; deleted with it later)
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
-    }
-
-    override func closeWrite() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            closeWrite { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func performCancel() {
+    override func cancel() {
         let resources: (TLSClient?, TLSProxyConnection?, ((Error?) -> Void)?, ((Data?, Error?) -> Void)?, (() -> Void)?) = lock.withLock {
             guard state != .closed else { return (nil, nil, nil, nil, nil) }
             let wasPrepared = state == .prepared
@@ -1410,7 +1275,7 @@ nonisolated final class NowhereTCPConnection: AsyncProxyConnection, NowhereTermi
 }
 
 /// Presents one logical proxy flow while retaining independent carrier halves.
-nonisolated final class NowhereDirectionalConnection: AsyncProxyConnection {
+nonisolated final class NowhereDirectionalConnection: ProxyConnection {
     private let uplink: ProxyConnection
     private let downlink: ProxyConnection
     private let kind: NowhereProtocol.FlowKind
@@ -1446,96 +1311,47 @@ nonisolated final class NowhereDirectionalConnection: AsyncProxyConnection {
     override var outerTLSVersion: TLSVersion? { uplink.outerTLSVersion ?? downlink.outerTLSVersion }
     override var deliversDatagrams: Bool { uplink.deliversDatagrams || downlink.deliversDatagrams }
 
-    override func send(data: Data, completion: @escaping (Error?) -> Void) {
-        uplink.send(data: data) { [weak self] error in
-            if let self, error != nil { self.hardFail() }
-            completion(error)
-        }
-    }
-
-    override func send(data: Data) { send(data: data) { _ in } }
-
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        uplink.sendRaw(data: data) { [weak self] error in
-            if let self, error != nil { self.hardFail() }
-            completion(error)
-        }
-    }
-
-    override func sendRaw(data: Data) { sendRaw(data: data) { _ in } }
-
-    override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        downlink.receive { [weak self] data, error in
-            if let self, error != nil || (self.kind == .udp && data == nil) {
-                self.hardFail()
-            }
-            completion(data, error)
-        }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        downlink.receiveRaw { [weak self] data, error in
-            if let self, error != nil || (self.kind == .udp && data == nil) {
-                self.hardFail()
-            }
-            completion(data, error)
-        }
-    }
-
-    override func closeWrite(completion: @escaping (Error?) -> Void) {
-        guard kind == .tcp else {
-            completion(nil)
-            return
-        }
-        uplink.closeWrite { [weak self] error in
-            if let self, error != nil { self.hardFail() }
-            completion(error)
-        }
-    }
-
-    // MARK: - Async Surface (bridges the callback directional routing above; deleted with it later)
+    // MARK: - ProxyConnection overrides (directional routing; hardFail on any error)
 
     override func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func receive() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receive { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
+        do { try await uplink.send(data) }
+        catch { hardFail(); throw error }
     }
 
     override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+        do { try await uplink.sendRaw(data) }
+        catch { hardFail(); throw error }
+    }
+
+    override func receive() async throws -> Data? {
+        do {
+            let data = try await downlink.receive()
+            if kind == .udp, data == nil { hardFail() }
+            return data
+        } catch {
+            hardFail()
+            throw error
         }
     }
 
     override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
+        do {
+            let data = try await downlink.receiveRaw()
+            if kind == .udp, data == nil { hardFail() }
+            return data
+        } catch {
+            hardFail()
+            throw error
         }
     }
 
     override func closeWrite() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            closeWrite { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        guard kind == .tcp else { return }
+        do { try await uplink.closeWrite() }
+        catch { hardFail(); throw error }
     }
 
-    override func performCancel() {
+    override func cancel() {
         let shouldCancel = lifecycle.withLock { state in
             guard !state.terminated else { return false }
             state.terminated = true

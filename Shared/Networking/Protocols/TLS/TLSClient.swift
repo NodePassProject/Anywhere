@@ -134,7 +134,7 @@ nonisolated class TLSClient {
             guard let privateKey = ephemeralPrivateKey else {
                 throw TLSError.handshakeFailed("No ephemeral key")
             }
-            self.connection = RawToAsyncByteTransport(TunneledTransport(tunnel: tunnel))
+            self.connection = TunneledTransport(tunnel: tunnel)
 
             let clientHello = try buildTLSClientHello(privateKey: privateKey)
             storedClientHello = clientHello.subdata(in: 5..<clientHello.count)

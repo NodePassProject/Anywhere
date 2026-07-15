@@ -318,68 +318,23 @@ nonisolated enum SOCKS5Handshake {
     }
 }
 
-// MARK: - TLSRecordTransport
-
-/// Adapts a ``TLSRecordConnection`` to ``RawTransport`` so the SOCKS5 handshake can run over TLS.
-nonisolated class TLSRecordTransport: RawTransport {
-    private let tlsConnection: TLSRecordConnection
-
-    init(tlsConnection: TLSRecordConnection) {
-        self.tlsConnection = tlsConnection
-    }
-
-    var isTransportReady: Bool {
-        tlsConnection.connection?.isReady ?? false
-    }
-
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        tlsConnection.send(data: data, completion: completion)
-    }
-
-    func send(data: Data) {
-        tlsConnection.send(data: data)
-    }
-
-    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
-        tlsConnection.receive { data, error in
-            if let error {
-                completion(nil, true, error)
-            } else if let data, !data.isEmpty {
-                completion(data, false, nil)
-            } else {
-                completion(nil, true, nil)
-            }
-        }
-    }
-
-    func forceCancel() {
-        tlsConnection.cancel()
-    }
-}
-
 // MARK: - SOCKS5UDPProxyConnection
 
 /// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
 /// The TCP control connection is retained because closing it ends the UDP session.
-nonisolated class SOCKS5UDPProxyConnection: AsyncProxyConnection {
+nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, @unchecked Sendable {
     private let tcpTransport: any AsyncByteTransport
-    private let tlsClient: TLSClient?
-    private let tlsConnection: TLSRecordConnection?
     private let relay: ProxyConnection
     private let udpHeader: Data
-    private var cancelled = false
+    private let cancelled = Atomic<Bool>(false)
 
     init(
         tcpTransport: any AsyncByteTransport,
-        tlsClient: TLSClient?,
-        tlsConnection: TLSRecordConnection?,
         relay: ProxyConnection,
         destinationHost: String,
         destinationPort: UInt16
     ) {
         self.tcpTransport = tcpTransport
-        self.tlsClient = tlsClient
-        self.tlsConnection = tlsConnection
         self.relay = relay
 
         // Pre-build the SOCKS5 UDP header: RSV(2) + FRAG(1) + ATYP + DST.ADDR + DST.PORT
@@ -395,71 +350,33 @@ nonisolated class SOCKS5UDPProxyConnection: AsyncProxyConnection {
     override var isConnected: Bool { relay.isConnected }
     override var deliversDatagrams: Bool { true }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        guard !cancelled else {
-            completion(ProxyError.connectionFailed("SOCKS5 UDP not connected"))
-            return
+    override func sendRaw(_ data: Data) async throws {
+        guard !cancelled.load(ordering: .relaxed) else {
+            throw ProxyError.connectionFailed("SOCKS5 UDP not connected")
         }
         var packet = udpHeader
         packet.append(data)
         // `relay.send` so any chain-level framing wraps each datagram.
-        relay.send(data: packet, completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        guard !cancelled else { return }
-        var packet = udpHeader
-        packet.append(data)
-        relay.send(data: packet)
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        guard !cancelled else {
-            completion(nil, ProxyError.connectionFailed("SOCKS5 UDP not connected"))
-            return
-        }
-        relay.receive { [weak self] data, error in
-            if let error {
-                completion(nil, error)
-                return
-            }
-            guard let self, let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-            if let payload = self.stripUDPHeader(data) {
-                completion(payload, nil)
-            } else {
-                // Re-issue async: `relay.receive` can deliver inline, so direct
-                // recursion would grow the stack under a malformed burst.
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    self?.receiveRaw(completion: completion)
-                }
-            }
-        }
-    }
-
-    // MARK: - Async Surface (bridges the callback relay I/O above; deleted with it later)
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await relay.send(packet)
     }
 
     override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+        while true {
+            guard !cancelled.load(ordering: .relaxed) else {
+                throw ProxyError.connectionFailed("SOCKS5 UDP not connected")
             }
+            guard let data = try await relay.receive(), !data.isEmpty else {
+                return nil
+            }
+            if let payload = stripUDPHeader(data) {
+                return payload
+            }
+            // Header-only / malformed datagram: loop to read the next one.
         }
     }
 
-    override func performCancel() {
-        guard !cancelled else { return }
-        cancelled = true
+    override func cancel() {
+        guard !cancelled.exchange(true, ordering: .relaxed) else { return }
         relay.cancel()
         tcpTransport.cancel()
     }

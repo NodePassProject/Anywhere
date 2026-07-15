@@ -33,6 +33,9 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
     /// Write serialization (frames must not interleave).
     private var writeQueue: [(Data, (Error?) -> Void)] = []
     private var isWriting = false
+    /// The single in-flight write's completion, carried on `flowQueue` so the async send
+    /// `Task` need not capture the (non-Sendable) completion closure.
+    private var inFlightWriteCompletion: ((Error?) -> Void)?
 
     private var frameParser = VLESSVisionUDPFrameParser()
 
@@ -253,16 +256,24 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
 
         isWriting = true
         let (data, completion) = writeQueue.removeFirst()
+        inFlightWriteCompletion = completion
 
-        connection.sendRaw(data: data) { [weak self] (error: Error?) in
-            guard let self else { return }
-            self.flowQueue.async { [weak self] in
+        Task { [weak self] in
+            var sendError: Error?
+            do {
+                try await connection.sendRaw(data)
+            } catch {
+                sendError = error
+            }
+            self?.flowQueue.async { [weak self] in
                 guard let self else { return }
                 self.isWriting = false
-                completion(error)
+                let completion = self.inFlightWriteCompletion
+                self.inFlightWriteCompletion = nil
+                completion?(sendError)
 
-                if let error {
-                    self.close(error: error)
+                if let sendError {
+                    self.close(error: sendError)
                 } else {
                     self.drainWriteQueue()
                 }
@@ -273,17 +284,27 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
     // MARK: - Read Loop
 
     private func startReadLoop(_ connection: ProxyConnection) {
-        connection.startReceiving(handler: { [weak self] (data: Data) in
-            guard let self else { return }
-            self.flowQueue.async { [weak self] in
-                self?.handleInbound(data)
+        Task { [weak self] in
+            do {
+                while true {
+                    guard let data = try await connection.receive(), !data.isEmpty else {
+                        self?.flowQueue.async { [weak self] in
+                            guard let self, !self.closed else { return }
+                            self.close(error: nil)   // clean EOF
+                        }
+                        return
+                    }
+                    self?.flowQueue.async { [weak self] in
+                        self?.handleInbound(data)
+                    }
+                }
+            } catch {
+                self?.flowQueue.async { [weak self] in
+                    guard let self, !self.closed else { return }
+                    self.close(error: error)
+                }
             }
-        }, errorHandler: { [weak self] (error: Error?) in
-            guard let self, !self.closed else { return }
-            self.flowQueue.async { [weak self] in
-                self?.close(error: error)
-            }
-        })
+        }
     }
 
     // MARK: - Demux
@@ -344,7 +365,19 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
         proxyClient = nil
 
         frameParser.reset()
+
+        // Fail every pending write so its async caller unblocks (rather than leaking a
+        // suspended continuation): the in-flight send plus anything still queued.
+        let closeError = error ?? ProxyError.connectionFailed("Mux client closed")
+        let pendingWrites = writeQueue
         writeQueue.removeAll()
+        let inFlight = inFlightWriteCompletion
+        inFlightWriteCompletion = nil
+        isWriting = false
+        inFlight?(closeError)
+        for (_, completion) in pendingWrites {
+            completion(closeError)
+        }
 
         let pendingCompletions = connectCompletions
         connectCompletions.removeAll()

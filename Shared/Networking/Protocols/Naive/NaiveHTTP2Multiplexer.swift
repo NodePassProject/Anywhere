@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Multiplexer")
 
-nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
+nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
     // MARK: - State
 
@@ -34,6 +34,9 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
     let sni: String
 
     private let transport: TLSStreamTransport
+    /// Ordered async send funnel over the TLS transport — frames reach the wire in
+    /// submission order (the callback `transport.send` this replaced serialized likewise).
+    private var sendPump: AsyncSendPump!
     /// Invoked once per stream so randomized values (auth, padding) differ per request.
     private let connectHeaders: () -> [(name: String, value: String)]
 
@@ -85,6 +88,14 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
             sni: sni,
             alpn: ["h2"],
             tunnel: tunnel
+        )
+        // Weak self so the pump task doesn't retain the multiplexer; it's stopped by close().
+        sendPump = AsyncSendPump(
+            send: { [weak self] data in
+                guard let self else { throw CancellationError() }
+                try await self.transport.send(data)
+            },
+            finish: {}
         )
     }
 
@@ -153,16 +164,17 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
     private func beginSetup() {
         state = .connecting
         updatePoolSnapshot()
-        transport.connect { [weak self] error in
+        Task { [weak self] in
             guard let self else { return }
-            self.queue.async {
-                if let error {
+            do {
+                try await self.transport.connect()
+                self.queue.async { self.sendConnectionPreface() }
+            } catch {
+                self.queue.async {
                     self.state = .closed
                     self.updatePoolSnapshot()
                     self.completeReadyCallbacks(error)
-                    return
                 }
-                self.sendConnectionPreface()
             }
         }
     }
@@ -216,12 +228,13 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
         )
         data.append(windowUpdate.serialized)
 
-        transport.send(data: data) { [weak self] error in
+        sendPump.enqueueSend(data) { [weak self] error in
             guard let self else { return }
             self.queue.async {
                 if let error {
                     self.state = .closed
                     self.transport.cancel()
+                    self.sendPump.finish()
                     self.updatePoolSnapshot()
                     self.completeReadyCallbacks(error)
                     return
@@ -235,19 +248,38 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
 
     // MARK: - Read Loop
 
-    /// Persistent read loop; runs from `prefaceSent` until `closed`.
+    /// Persistent read loop; runs from `prefaceSent` until `closed`. Each iteration processes
+    /// buffered frames on `queue`, then reads the next chunk via a `Task` (one per read, not
+    /// stack recursion), hopping back to `queue` to append and re-enter.
     private func startReadLoop() {
         handleInbound()
 
         guard state != .closed else { return }
 
-        readFromTransport { [weak self] error in
+        Task { [weak self] in
             guard let self else { return }
-            if let error {
-                self.handleSessionError(error)
-                return
+            do {
+                let data = try await self.transport.receive()
+                self.queue.async {
+                    guard self.state != .closed else { return }
+                    guard let data, !data.isEmpty else {
+                        self.handleSessionError(NaiveHTTP2Error.connectionFailed("Connection closed"))
+                        return
+                    }
+                    self.receiveBuffer.append(data)
+                    if self.receiveBuffer.count > Self.maxReceiveBufferSize {
+                        self.receiveBuffer.removeAll()
+                        self.handleSessionError(NaiveHTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                        return
+                    }
+                    self.startReadLoop()
+                }
+            } catch {
+                self.queue.async {
+                    guard self.state != .closed else { return }
+                    self.handleSessionError(error)
+                }
             }
-            self.startReadLoop()
         }
     }
 
@@ -383,7 +415,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
             endStream: false
         )
 
-        transport.send(data: headersFrame.serialized, completion: completion)
+        sendPump.enqueueSend(headersFrame.serialized, completion: completion)
     }
 
     /// Sends DATA frames for a stream, respecting connection + stream flow control.
@@ -423,7 +455,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
         }
 
         let nextOffset = currentOffset
-        transport.send(data: frames) { [weak self] error in
+        sendPump.enqueueSend(frames) { [weak self] error in
             guard let self else { return }
             self.queue.async {
                 if let error {
@@ -441,34 +473,9 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
 
     /// Sends a control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE). Fire-and-forget.
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
-        transport.send(data: frame.serialized) { error in
+        sendPump.enqueueSend(frame.serialized) { error in
             if let error {
                 logger.warning("[NaiveHTTP2Multiplexer] Failed to send control frame: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    // MARK: - Transport I/O
-
-    private func readFromTransport(completion: @escaping (Error?) -> Void) {
-        transport.receive { [weak self] data, error in
-            guard let self else { return }
-            self.queue.async {
-                if let error {
-                    completion(error)
-                    return
-                }
-                guard let data, !data.isEmpty else {
-                    completion(NaiveHTTP2Error.connectionFailed("Connection closed"))
-                    return
-                }
-                self.receiveBuffer.append(data)
-                if self.receiveBuffer.count > Self.maxReceiveBufferSize {
-                    self.receiveBuffer.removeAll()
-                    completion(NaiveHTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
-                    return
-                }
-                completion(nil)
             }
         }
     }
@@ -479,6 +486,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
         guard state != .closed else { return }
         state = .closed
         transport.cancel()
+        sendPump.finish()
         completeReadyCallbacks(error)
         for (_, stream) in streams {
             stream.handleSessionError(error)
@@ -501,6 +509,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer {
             guard state != .closed else { return }
             state = .closed
             transport.cancel()
+            sendPump.finish()
             for (_, stream) in streams {
                 stream.handleSessionError(NaiveHTTP2Error.connectionFailed("Session closed"))
             }

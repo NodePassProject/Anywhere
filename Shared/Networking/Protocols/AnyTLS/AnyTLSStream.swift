@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSStream")
 
-nonisolated final class AnyTLSStream: AsyncProxyConnection, MultiplexerStreamSink {
+nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
 
     let sid: UInt32
     private weak var multiplexer: AnyTLSMultiplexer?
@@ -18,11 +18,11 @@ nonisolated final class AnyTLSStream: AsyncProxyConnection, MultiplexerStreamSin
     /// Captured at construction so `outerTLSVersion` keeps working after the multiplexer goes away.
     private let cachedTLSVersion: TLSVersion?
 
+    /// Inbound cmdPSH payloads / EOF / error from the multiplexer's demux loop.
+    private let inbox = AsyncByteChannel()
+
     private struct ReceiveState {
-        var pendingReceive: ((Data?, Error?) -> Void)?
-        var incoming: [Data] = []
-        var receiveError: Error?
-        var eof: Bool = false
+        var ended: Bool = false
         /// Set by `cancel()` so the multiplexer does not echo a FIN back to itself.
         var locallyCancelled: Bool = false
     }
@@ -42,83 +42,29 @@ nonisolated final class AnyTLSStream: AsyncProxyConnection, MultiplexerStreamSin
     }
 
     override var isConnected: Bool {
-        receiveState.withLock { !$0.eof && $0.receiveError == nil } && (multiplexer?.isAlive ?? false)
+        !receiveState.withLock { $0.ended } && (multiplexer?.isAlive ?? false)
     }
 
     override var outerTLSVersion: TLSVersion? { cachedTLSVersion }
 
-    // MARK: - Async Surface
-
-    // Bridges the callback multiplexer sink below for the flipped class; deleted with it later.
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
-    }
-
     // MARK: - Send
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+    override func sendRaw(_ data: Data) async throws {
         guard let multiplexer else {
-            completion(ProxyError.connectionFailed("AnyTLS multiplexer deallocated"))
-            return
+            throw ProxyError.connectionFailed("AnyTLS multiplexer deallocated")
         }
-        multiplexer.writeData(sid: sid, data: data, completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        multiplexer?.writeData(sid: sid, data: data, completion: { _ in })
+        try await multiplexer.writeData(sid: sid, data: data)
     }
 
     // MARK: - Receive
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        enum Action {
-            case fail(Error)
-            case deliver(Data)
-            case eof
-            case parked
-        }
-        let action: Action = receiveState.withLock { state in
-            if let error = state.receiveError {
-                return .fail(error)
-            }
-            if !state.incoming.isEmpty {
-                return .deliver(state.incoming.removeFirst())
-            }
-            if state.eof {
-                return .eof
-            }
-            // Stash the callback; the recv loop delivers bytes or EOF/error later.
-            state.pendingReceive = completion
-            return .parked
-        }
-        switch action {
-        case .fail(let error):
-            completion(nil, error)
-        case .deliver(let chunk):
-            completion(chunk, nil)
-        case .eof:
-            completion(nil, nil)
-        case .parked:
-            break
-        }
+    override func receiveRaw() async throws -> Data? {
+        try await inbox.next()
     }
 
     // MARK: - Cancel
 
-    override func performCancel() {
+    override func cancel() {
         let already = receiveState.withLock { state -> Bool in
             let already = state.locallyCancelled
             state.locallyCancelled = true
@@ -126,6 +72,7 @@ nonisolated final class AnyTLSStream: AsyncProxyConnection, MultiplexerStreamSin
         }
         guard !already else { return }
         logger.debug("[AnyTLSStream] cancel sid=\(sid)")
+        inbox.cancel()
         multiplexer?.removeStream(sid: sid)
         fireOnEndOnce()
     }
@@ -134,37 +81,20 @@ nonisolated final class AnyTLSStream: AsyncProxyConnection, MultiplexerStreamSin
 
     /// Delivers a payload chunk from a cmdPSH frame addressed to this stream.
     func deliverData(_ data: Data) {
-        let callback: ((Data?, Error?) -> Void)? = receiveState.withLock { state in
-            if let callback = state.pendingReceive {
-                state.pendingReceive = nil
-                return callback
-            }
-            state.incoming.append(data)
-            return nil
-        }
-        callback?(data, nil)
+        inbox.yield(data)
     }
 
     /// Delivers a clean EOF (`nil`) or transport failure; further reads are rejected.
     func deliverClose(error: Error?) {
-        enum Action {
-            case ignore
-            case close(((Data?, Error?) -> Void)?)
+        let shouldClose = receiveState.withLock { state -> Bool in
+            guard !state.ended else { return false }
+            state.ended = true
+            return true
         }
-        let action: Action = receiveState.withLock { state in
-            if state.eof || state.receiveError != nil {
-                return .ignore
-            }
-            state.receiveError = error
-            state.eof = true
-            let callback = state.pendingReceive
-            state.pendingReceive = nil
-            return .close(callback)
-        }
-        guard case .close(let callback) = action else { return }
+        guard shouldClose else { return }
         let kind = error.map { "error=\($0.localizedDescription)" } ?? "EOF"
-        logger.debug("[AnyTLSStream] deliverClose sid=\(sid) \(kind) (pendingRead=\(callback != nil))")
-        callback?(nil, error)
+        logger.debug("[AnyTLSStream] deliverClose sid=\(sid) \(kind)")
+        if let error { inbox.fail(error) } else { inbox.finish() }
         fireOnEndOnce()
     }
 

@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class WebSocketProxyConnection: AsyncProxyConnection {
+nonisolated class WebSocketProxyConnection: ProxyConnection {
     private let wsConnection: WebSocketConnection
 
     init(wsConnection: WebSocketConnection) {
@@ -27,7 +27,7 @@ nonisolated class WebSocketProxyConnection: AsyncProxyConnection {
         try await wsConnection.receive()
     }
 
-    override func performCancel() {
+    override func cancel() {
         wsConnection.cancel()
     }
 }

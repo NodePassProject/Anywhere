@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class XHTTPProxyConnection: AsyncProxyConnection {
+nonisolated class XHTTPProxyConnection: ProxyConnection {
     private let xhttpConnection: XHTTPConnection
 
     init(xhttpConnection: XHTTPConnection) {
@@ -27,7 +27,7 @@ nonisolated class XHTTPProxyConnection: AsyncProxyConnection {
         try await xhttpConnection.receive()
     }
 
-    override func performCancel() {
+    override func cancel() {
         xhttpConnection.cancel()
     }
 }

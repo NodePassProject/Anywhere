@@ -51,22 +51,17 @@ nonisolated final class NaiveTunnelAdapter: NaiveTunnel {
 
     var isConnected: Bool { tunnel.isConnected }
 
-    func openTunnel(completion: @escaping (Error?) -> Void) {
-        tunnel.openTunnel { [weak self] error in
-            if error == nil, let self {
-                self.negotiatedPaddingType =
-                    NaivePaddingNegotiator.parseResponse(headers: self.tunnel.responseHeaders)
-            }
-            completion(error)
-        }
+    func openTunnel() async throws {
+        try await tunnel.openTunnel()
+        negotiatedPaddingType = NaivePaddingNegotiator.parseResponse(headers: tunnel.responseHeaders)
     }
 
-    func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
-        tunnel.sendData(data, completion: completion)
+    func sendData(_ data: Data) async throws {
+        try await tunnel.sendData(data)
     }
 
-    func receiveData(completion: @escaping (Data?, Error?) -> Void) {
-        tunnel.receiveData(completion: completion)
+    func receiveData() async throws -> Data? {
+        try await tunnel.receiveData()
     }
 
     func close() {

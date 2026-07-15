@@ -762,7 +762,7 @@ nonisolated class ProxyClient {
         let directProxyConnection: ProxyConnection
         let supportsVision = transportSupportsVision
         if let tunnel = self.tunnel {
-            directProxyConnection = LegacyDirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
+            directProxyConnection = DirectProxyConnection(transport: TunneledTransport(tunnel: tunnel))
         } else {
             let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)

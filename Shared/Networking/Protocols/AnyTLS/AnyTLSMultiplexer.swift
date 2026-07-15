@@ -48,6 +48,11 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     private let lock: Mutex<State>
 
+    /// Serializes wire sends so the padding-schedule packet order matches on-wire order:
+    /// each ``writeConnLocked`` computes its framed output and awaits the write as one
+    /// critical section.
+    private let sendMutex = AsyncMutex()
+
     var seq: UInt64 = 0
 
     private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSSessionTimerQueue)
@@ -88,7 +93,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     // MARK: - Lifecycle
 
     /// packetCounter intentionally stays 0 here so the padding schedule aligns with the server.
-    func start() {
+    func start() async {
         // Snapshot; the scheme can't change before startReadLoop() arms inbound handling.
         let padding = lock.withLock { $0.padding }
         var prologue = Data()
@@ -106,13 +111,14 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             prologue.append(Data(repeating: 0, count: paddingLen))
         }
         logger.debug("[AnyTLSMultiplexer] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
-        inner.send(data: prologue) { [weak self] error in
-            if let error {
-                logger.debug("[AnyTLSMultiplexer] prologue write failed: \(error.localizedDescription)")
-                self?.handleTransportFailure(error)
-            } else {
-                logger.debug("[AnyTLSMultiplexer] prologue write completed")
-            }
+        // The prologue rides ahead of the framed writes (not through the padding scheduler);
+        // ordered through `sendMutex` so it precedes every writeConnLocked flush.
+        do {
+            try await sendMutex.withLock { try await self.inner.send(prologue) }
+        } catch {
+            logger.debug("[AnyTLSMultiplexer] prologue write failed: \(error.localizedDescription)")
+            handleTransportFailure(error)
+            return
         }
 
         // cmdSettings — buffered until the first stream open flushes it.
@@ -123,7 +129,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         ]
         let payload = AnyTLSProtocol.encodeStringMap(settings)
         logger.debug("[AnyTLSMultiplexer] cmdSettings buffered (\(payload.count)B payload)")
-        writeControl(cmd: AnyTLSProtocol.cmdSettings, sid: 0, payload: payload, completion: { _ in })
+        try? await writeControl(cmd: AnyTLSProtocol.cmdSettings, sid: 0, payload: payload)
 
         startReadLoop()
     }
@@ -150,7 +156,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     /// Opens a new logical stream; the caller's first write (the destination address)
     /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
-    func openStream() -> AnyTLSStream? {
+    func openStream() async -> AnyTLSStream? {
         typealias Opened = (stream: AnyTLSStream, sid: UInt32, armWatchdog: Bool,
                             bufferedBytes: Int, peerVersion: UInt8)
         let opened: Opened? = lock.withLock { (state: inout State) -> Opened? in
@@ -177,8 +183,10 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
         logger.debug("[AnyTLSMultiplexer] openStream sid=\(opened.sid) peerVersion=\(opened.peerVersion) watchdog=\(opened.armWatchdog) buffered=\(opened.bufferedBytes)B")
 
+        // Awaited so the SYN is enqueued (buffered on the first stream, sent on a reused mux)
+        // strictly before the caller's first cmdPSH.
         let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: opened.sid, length: 0)
-        writeConnLocked(synFrame, completion: { _ in })
+        try? await writeConnLocked(synFrame)
 
         lock.withLock { $0.buffering = false }
         return opened.stream
@@ -192,21 +200,21 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         guard let stream = removed else { return }
 
         let finFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdFIN, sid: sid, length: 0)
-        writeConnLocked(finFrame, completion: { _ in })
+        Task { [weak self] in try? await self?.writeConnLocked(finFrame) }
 
-        // Surface a clean EOF locally so any waiting receive callback unblocks.
+        // Surface a clean EOF locally so any waiting receive unblocks.
         stream.deliverClose(error: nil)
     }
 
     // MARK: - Send
 
-    func writeData(sid: UInt32, data: Data, completion: @escaping (Error?) -> Void) {
-        guard !data.isEmpty else { completion(nil); return }
+    func writeData(sid: UInt32, data: Data) async throws {
+        guard !data.isEmpty else { return }
         // cmdPSH carries at most 65535 bytes per frame; chunk longer payloads.
         let max = Int(UInt16.max)
         if data.count <= max {
             let frame = AnyTLSProtocol.encodeFrame(cmd: AnyTLSProtocol.cmdPSH, sid: sid, payload: data)
-            writeConnLocked(frame, completion: completion)
+            try await writeConnLocked(frame)
             return
         }
         var offset = 0
@@ -214,94 +222,72 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             let end = min(offset + max, data.count)
             let chunk = data.subdata(in: offset..<end)
             let frame = AnyTLSProtocol.encodeFrame(cmd: AnyTLSProtocol.cmdPSH, sid: sid, payload: chunk)
-            let isLast = end == data.count
-            writeConnLocked(frame) { error in
-                if isLast { completion(error) }
-            }
+            try await writeConnLocked(frame)
             offset = end
         }
     }
 
-    private func writeControl(cmd: UInt8, sid: UInt32, payload: Data, completion: @escaping (Error?) -> Void) {
+    private func writeControl(cmd: UInt8, sid: UInt32, payload: Data) async throws {
         let frame = AnyTLSProtocol.encodeFrame(cmd: cmd, sid: sid, payload: payload)
-        writeConnLocked(frame, completion: completion)
+        try await writeConnLocked(frame)
     }
 
     /// Padding-aware writer: buffers while `buffering`, otherwise slices output per the
-    /// padding schedule, topping up with cmdWaste.
-    private func writeConnLocked(_ bytes: Data, completion: @escaping (Error?) -> Void) {
-        /// Follow-up decided under the lock; sends and completions run after it drops.
+    /// padding schedule, topping up with cmdWaste. Compute-and-send runs as one
+    /// ``sendMutex`` critical section so packet order matches on-wire order.
+    private func writeConnLocked(_ bytes: Data) async throws {
         enum Action {
             case rejected
-            case buffered(total: Int)
-            case sendRaw(pending: Data, prependedBufferSize: Int)
-            case sendRawPaddingOff(pending: Data, packet: UInt32, stop: UInt32)
-            case sendScheduled(pending: Data, packet: UInt32, prependedBufferSize: Int, schedule: [Int])
+            case buffered
+            case send(Data)
         }
 
-        let action: Action = lock.withLock { (state: inout State) -> Action in
-            if state.closed {
-                return .rejected
-            }
-            if state.buffering {
-                state.outboundBuffer.append(bytes)
-                return .buffered(total: state.outboundBuffer.count)
-            }
-            var pending = bytes
-            let prependedBufferSize = state.outboundBuffer.count
-            if !state.outboundBuffer.isEmpty {
-                pending = state.outboundBuffer + pending
-                state.outboundBuffer.removeAll(keepingCapacity: false)
+        try await sendMutex.withLock {
+            let action: Action = self.lock.withLock { (state: inout State) -> Action in
+                if state.closed {
+                    return .rejected
+                }
+                if state.buffering {
+                    state.outboundBuffer.append(bytes)
+                    return .buffered
+                }
+                var pending = bytes
+                if !state.outboundBuffer.isEmpty {
+                    pending = state.outboundBuffer + pending
+                    state.outboundBuffer.removeAll(keepingCapacity: false)
+                }
+
+                if !state.sendPadding {
+                    return .send(pending)
+                }
+
+                state.packetCounter &+= 1
+                let packet = state.packetCounter
+                let scheme = state.padding
+                if packet >= scheme.stop {
+                    state.sendPadding = false
+                    return .send(pending)
+                }
+                let schedule = scheme.generateRecordPayloadSizes(packet: packet)
+                return .send(Self.applyPaddingSchedule(pending: pending, schedule: schedule))
             }
 
-            if !state.sendPadding {
-                return .sendRaw(pending: pending, prependedBufferSize: prependedBufferSize)
+            switch action {
+            case .rejected:
+                logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
+                throw ProxyError.connectionFailed("AnyTLS multiplexer closed")
+            case .buffered:
+                return
+            case .send(let output):
+                try await self.inner.send(output)
             }
-
-            state.packetCounter &+= 1
-            let packet = state.packetCounter
-            let scheme = state.padding
-            if packet >= scheme.stop {
-                state.sendPadding = false
-                return .sendRawPaddingOff(pending: pending, packet: packet, stop: scheme.stop)
-            }
-            let schedule = scheme.generateRecordPayloadSizes(packet: packet)
-            return .sendScheduled(pending: pending, packet: packet,
-                                  prependedBufferSize: prependedBufferSize, schedule: schedule)
         }
+    }
 
-        let pending: Data
-        let schedule: [Int]
-        switch action {
-        case .rejected:
-            logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
-            completion(ProxyError.connectionFailed("AnyTLS multiplexer closed"))
-            return
-        case .buffered(let total):
-            logger.debug("[AnyTLSMultiplexer] writeConn buffered \(bytes.count)B (total=\(total)B)")
-            completion(nil)
-            return
-        case .sendRaw(let raw, let prependedBufferSize):
-            if prependedBufferSize > 0 {
-                logger.debug("[AnyTLSMultiplexer] writeConn flush+raw \(raw.count)B (was buffered=\(prependedBufferSize))")
-            }
-            inner.send(data: raw, completion: completion)
-            return
-        case .sendRawPaddingOff(let raw, let packet, let stop):
-            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) ≥ stop=\(stop) — sending raw, padding off")
-            inner.send(data: raw, completion: completion)
-            return
-        case .sendScheduled(let scheduledPending, let packet, let prependedBufferSize, let scheduledSizes):
-            logger.debug("[AnyTLSMultiplexer] writeConn pkt=\(packet) bytes=\(scheduledPending.count) (was buffered=\(prependedBufferSize)) schedule=\(scheduledSizes)")
-            pending = scheduledPending
-            schedule = scheduledSizes
-        }
-
-        if schedule.isEmpty {
-            inner.send(data: pending, completion: completion)
-            return
-        }
-
+    /// Slices `pending` into the padding schedule's record sizes, topping up short
+    /// chunks with cmdWaste frames.
+    private static func applyPaddingSchedule(pending: Data, schedule: [Int]) -> Data {
+        if schedule.isEmpty { return pending }
         var output = Data(capacity: pending.count + 64)
         var remaining = pending
         scheduleLoop: for size in schedule {
@@ -339,23 +325,27 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         if !remaining.isEmpty {
             output.append(remaining)
         }
-
-        inner.send(data: output, completion: completion)
+        return output
     }
 
     // MARK: - Read Loop
 
     private func startReadLoop() {
         logger.debug("[AnyTLSMultiplexer] recv loop started")
-        inner.startReceiving { [weak self] data in
-            self?.handleInbound(data)
-        } errorHandler: { [weak self] error in
-            if let error {
+        Task { [weak self] in
+            do {
+                while true {
+                    guard let self else { return }
+                    guard let data = try await self.inner.receive() else {
+                        logger.debug("[AnyTLSMultiplexer] inner transport EOF")
+                        self.handleTransportEOF()
+                        return
+                    }
+                    await self.handleInbound(data)
+                }
+            } catch {
                 logger.debug("[AnyTLSMultiplexer] inner transport error: \(error.localizedDescription)")
                 self?.handleTransportFailure(error)
-            } else {
-                logger.debug("[AnyTLSMultiplexer] inner transport EOF")
-                self?.handleTransportEOF()
             }
         }
     }
@@ -370,7 +360,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     // MARK: - Demux
 
-    private func handleInbound(_ data: Data) {
+    private func handleInbound(_ data: Data) async {
         let dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = lock.withLock { state in
             state.recvBuffer.appendCompacting(data)
             var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
@@ -386,11 +376,11 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         }
 
         for frame in dispatched {
-            routeFrame(cmd: frame.cmd, sid: frame.sid, payload: frame.payload)
+            await routeFrame(cmd: frame.cmd, sid: frame.sid, payload: frame.payload)
         }
     }
 
-    private func routeFrame(cmd: UInt8, sid: UInt32, payload: Data) {
+    private func routeFrame(cmd: UInt8, sid: UInt32, payload: Data) async {
         switch cmd {
         case AnyTLSProtocol.cmdPSH:
             let stream = lock.withLock { $0.streams[sid] }
@@ -448,7 +438,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         case AnyTLSProtocol.cmdHeartRequest:
             logger.debug("[AnyTLSMultiplexer] cmdHeartRequest sid=\(sid) — replying")
             let pong = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdHeartResponse, sid: sid, length: 0)
-            writeConnLocked(pong, completion: { _ in })
+            try? await writeConnLocked(pong)
 
         case AnyTLSProtocol.cmdHeartResponse:
             break

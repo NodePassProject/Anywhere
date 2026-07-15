@@ -55,7 +55,18 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     // MARK: - NaiveTunnel
 
-    func openTunnel(completion: @escaping (Error?) -> Void) {
+    // The HTTP/3 QUIC multiplexer pushes stream data on its own queue and fulfils the parked
+    // completions; the async surface parks the caller's continuation there (state machine preserved).
+
+    func openTunnel() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            openTunnel { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    private func openTunnel(completion: @escaping (Error?) -> Void) {
         guard let multiplexer else {
             completion(HTTP3Error.connectionFailed("No multiplexer"))
             return
@@ -120,7 +131,15 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         }
     }
 
-    func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
+    func sendData(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendData(data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    private func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
         guard let multiplexer else {
             completion(HTTP3Error.streamClosed)
             return
@@ -140,7 +159,15 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         }
     }
 
-    func receiveData(completion: @escaping (Data?, Error?) -> Void) {
+    func receiveData() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveData { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    private func receiveData(completion: @escaping (Data?, Error?) -> Void) {
         guard let multiplexer else {
             completion(nil, HTTP3Error.streamClosed)
             return

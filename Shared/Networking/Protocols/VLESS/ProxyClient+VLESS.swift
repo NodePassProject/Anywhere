@@ -157,8 +157,10 @@ extension ProxyClient {
         let vless = VLESSConnection(inner: connection)
         // For Vision flow, initial data needs separate padding — don't append to the header.
         let handshakeInitialData = isVision ? nil : initialData
-        vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData) { [weak self] error in
-            if let error {
+        Task { [weak self] in
+            do {
+                try await vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData)
+            } catch {
                 completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
@@ -179,17 +181,15 @@ extension ProxyClient {
                 let vision = self.wrapWithVision(proxyConnection)
                 // Await the Vision-padded intro before signalling success; a racing
                 // first send could otherwise precede it and corrupt the byte stream.
-                let introCompletion: (Error?) -> Void = { error in
-                    if let error {
-                        completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
+                do {
+                    if let initialData {
+                        try await vision.sendRaw(initialData)
                     } else {
-                        completion(.success(vision))
+                        try await vision.sendEmptyPadding()
                     }
-                }
-                if let initialData {
-                    vision.sendRaw(data: initialData, completion: introCompletion)
-                } else {
-                    vision.sendEmptyPadding(completion: introCompletion)
+                    completion(.success(vision))
+                } catch {
+                    completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 }
             } else {
                 completion(.success(proxyConnection))

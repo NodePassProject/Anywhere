@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class HTTPUpgradeProxyConnection: AsyncProxyConnection {
+nonisolated class HTTPUpgradeProxyConnection: ProxyConnection {
     private let huConnection: HTTPUpgradeConnection
 
     init(huConnection: HTTPUpgradeConnection) {
@@ -27,7 +27,7 @@ nonisolated class HTTPUpgradeProxyConnection: AsyncProxyConnection {
         try await huConnection.receive()
     }
 
-    override func performCancel() {
+    override func cancel() {
         huConnection.cancel()
     }
 }

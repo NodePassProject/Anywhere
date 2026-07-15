@@ -575,7 +575,10 @@ nonisolated final class VLESSEncryptionClient {
     ) {
         if index >= lengths.count {
             if !buffer.isEmpty {
-                connection.sendRaw(data: buffer, completion: completion)
+                Task {
+                    do { try await connection.sendRaw(buffer); completion(nil) }
+                    catch { completion(error) }
+                }
             } else {
                 completion(nil)
             }
@@ -611,9 +614,10 @@ nonisolated final class VLESSEncryptionClient {
         }
 
         if !head.isEmpty {
-            connection.sendRaw(data: Data(head)) { error in
-                if let error { completion(error); return }
-                proceed()
+            let chunk = Data(head)
+            Task {
+                do { try await connection.sendRaw(chunk); proceed() }
+                catch { completion(error) }
             }
         } else {
             proceed()
@@ -798,18 +802,21 @@ private final class VLESSEncryptionByteReader {
             completion(.success(head))
             return
         }
-        connection.receiveRaw { [weak self] data, error in
+        Task { [weak self] in
             guard let self else {
                 completion(.failure(VLESSEncryptionError.connectionClosed))
                 return
             }
-            if let error { completion(.failure(error)); return }
-            guard let data, !data.isEmpty else {
-                completion(.failure(VLESSEncryptionError.connectionClosed))
-                return
+            do {
+                guard let data = try await self.connection.receiveRaw(), !data.isEmpty else {
+                    completion(.failure(VLESSEncryptionError.connectionClosed))
+                    return
+                }
+                self.buffer.withLock { $0.append(data) }
+                self.readExact(count, completion: completion)
+            } catch {
+                completion(.failure(error))
             }
-            self.buffer.withLock { $0.append(data) }
-            self.readExact(count, completion: completion)
         }
     }
 
@@ -827,7 +834,7 @@ private final class VLESSEncryptionByteReader {
 /// AEAD-framed wrapper: application bytes travel as TLS-1.3-style records
 /// (5-byte header + sealed payload), with a BLAKE3 rekey when the nonce wraps.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
+nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     /// Snapshot of the cache entry behind a 0-RTT attempt, so first-record decode
     /// failure invalidates exactly that entry and not a newer ticket that raced in.
     struct ZeroRTTState {
@@ -892,40 +899,12 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
-    // MARK: - Async Surface
-
-    // Bridges the callback AEAD framing below for the flipped class; deleted with it later.
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
-    }
-
     // MARK: - Send
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        if data.isEmpty { completion(nil); return }
-        do {
-            let frames = try buildOutboundFrames(plaintext: data)
-            inner.sendRaw(data: frames, completion: completion)
-        } catch {
-            completion(error)
-        }
-    }
-
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
+    override func sendRaw(_ data: Data) async throws {
+        guard !data.isEmpty else { return }
+        let frames = try buildOutboundFrames(plaintext: data)
+        try await inner.sendRaw(frames)
     }
 
     private func buildOutboundFrames(plaintext: Data) throws -> Data {
@@ -962,53 +941,33 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
 
     // MARK: - Receive
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+    override func receiveRaw() async throws -> Data? {
         // 0-RTT: readAEAD is unknown until the server random arrives.
         if recvState.withLock({ $0.readAEAD == nil }) {
-            establishReadAEAD { [weak self] error in
-                guard let self else {
-                    completion(nil, VLESSEncryptionError.connectionClosed); return
-                }
-                if let error { completion(nil, error); return }
-                self.receiveAfterReadAEAD(completion: completion)
-            }
-            return
+            try await establishReadAEAD()
         }
-        receiveAfterReadAEAD(completion: completion)
-    }
-
-    private func receiveAfterReadAEAD(completion: @escaping (Data?, Error?) -> Void) {
-        pumpRecord(completion: completion)
+        try await drainServerPadding()
+        return try await readOneRecord()
     }
 
     /// Read 16-byte server random, derive the read AEAD, and install the inbound XOR CTR for random mode.
-    private func establishReadAEAD(completion: @escaping (Error?) -> Void) {
+    private func establishReadAEAD() async throws {
         let needed = 16
-        let serverRandom: Data? = recvState.withLock { state in
-            guard state.inboundBuffer.count >= needed else { return nil }
-            let serverRandom = Data(state.inboundBuffer.prefix(needed))
-            state.inboundBuffer.removeFirst(needed)
-            return serverRandom
-        }
-        if let serverRandom {
-            do {
+        while true {
+            let serverRandom: Data? = recvState.withLock { state in
+                guard state.inboundBuffer.count >= needed else { return nil }
+                let serverRandom = Data(state.inboundBuffer.prefix(needed))
+                state.inboundBuffer.removeFirst(needed)
+                return serverRandom
+            }
+            if let serverRandom {
                 try installReadAEAD(serverRandom: serverRandom)
-                completion(nil)
-            } catch {
-                completion(error)
+                return
             }
-            return
-        }
-        inner.receiveRaw { [weak self] data, error in
-            guard let self else {
-                completion(VLESSEncryptionError.connectionClosed); return
+            guard let data = try await inner.receiveRaw(), !data.isEmpty else {
+                throw VLESSEncryptionError.connectionClosed
             }
-            if let error { completion(error); return }
-            guard let data, !data.isEmpty else {
-                completion(VLESSEncryptionError.connectionClosed); return
-            }
-            self.recvState.withLock { $0.inboundBuffer.appendCompacting(data) }
-            self.establishReadAEAD(completion: completion)
+            recvState.withLock { $0.inboundBuffer.appendCompacting(data) }
         }
     }
 
@@ -1020,93 +979,76 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
         }
     }
 
-    private func pumpRecord(completion: @escaping (Data?, Error?) -> Void) {
-        // Drain server handshake-tail padding first (one-shot per connection).
+    /// Drains the server handshake-tail padding (one-shot per connection) before app data.
+    private func drainServerPadding() async throws {
         enum PaddingStep {
-            case none
+            case done
             case drain(Data, VLESSEncryptionAEAD?)
             case needMore
         }
-        let paddingStep: PaddingStep = recvState.withLock { state in
-            guard state.pendingServerPaddingLength > 0 else { return .none }
-            let needed = state.pendingServerPaddingLength
-            guard state.inboundBuffer.count >= needed else { return .needMore }
-            let sealedPadding = Data(state.inboundBuffer.prefix(needed))
-            state.inboundBuffer.removeFirst(needed)
-            return .drain(sealedPadding, state.readAEAD)
-        }
-        switch paddingStep {
-        case .none:
-            break
-        case .drain(let sealedPadding, let aead):
-            do {
+        while true {
+            let paddingStep: PaddingStep = recvState.withLock { state in
+                guard state.pendingServerPaddingLength > 0 else { return .done }
+                let needed = state.pendingServerPaddingLength
+                guard state.inboundBuffer.count >= needed else { return .needMore }
+                let sealedPadding = Data(state.inboundBuffer.prefix(needed))
+                state.inboundBuffer.removeFirst(needed)
+                return .drain(sealedPadding, state.readAEAD)
+            }
+            switch paddingStep {
+            case .done:
+                return
+            case .drain(let sealedPadding, let aead):
                 _ = try aead!.open(sealedPadding, additionalData: nil)
                 recvState.withLock { $0.pendingServerPaddingLength = 0 }
-                pumpRecord(completion: completion)
-            } catch {
-                completion(nil, error)
-            }
-            return
-        case .needMore:
-            inner.receiveRaw { [weak self] data, error in
-                guard let self else {
-                    completion(nil, VLESSEncryptionError.connectionClosed); return
+            case .needMore:
+                guard let data = try await inner.receiveRaw(), !data.isEmpty else {
+                    return   // EOF mid-padding surfaces as a clean close on the next read
                 }
-                if let error { completion(nil, error); return }
-                guard let data, !data.isEmpty else {
-                    completion(nil, error); return
-                }
-                self.recvState.withLock { $0.inboundBuffer.appendCompacting(data) }
-                self.pumpRecord(completion: completion)
+                recvState.withLock { $0.inboundBuffer.appendCompacting(data) }
             }
-            return
         }
+    }
 
+    /// Reads and decrypts one AEAD record; `nil` signals a clean close.
+    private func readOneRecord() async throws -> Data? {
         enum RecordStep {
             case needMore
             case decodeFailed(Error, firstRecordSeen: Bool)
             case record(Data, Int, VLESSEncryptionAEAD?)
         }
-        let recordStep: RecordStep = recvState.withLock { state in
-            guard state.inboundBuffer.count >= VLESSWire.headerLength else { return .needMore }
-            let headerBytes = Array(state.inboundBuffer.prefix(VLESSWire.headerLength))
-            let payloadLength: Int
-            do {
-                payloadLength = try VLESSHeader.decode(headerBytes)
-            } catch {
-                return .decodeFailed(error, firstRecordSeen: state.firstRecordSeen)
+        while true {
+            let recordStep: RecordStep = recvState.withLock { state in
+                guard state.inboundBuffer.count >= VLESSWire.headerLength else { return .needMore }
+                let headerBytes = Array(state.inboundBuffer.prefix(VLESSWire.headerLength))
+                let payloadLength: Int
+                do {
+                    payloadLength = try VLESSHeader.decode(headerBytes)
+                } catch {
+                    return .decodeFailed(error, firstRecordSeen: state.firstRecordSeen)
+                }
+                let recordTotal = VLESSWire.headerLength + payloadLength
+                guard state.inboundBuffer.count >= recordTotal else { return .needMore }
+                let recordBytes = Data(state.inboundBuffer.prefix(recordTotal))
+                state.inboundBuffer.removeFirst(recordTotal)
+                return .record(recordBytes, payloadLength, state.readAEAD)
             }
-            let recordTotal = VLESSWire.headerLength + payloadLength
-            guard state.inboundBuffer.count >= recordTotal else { return .needMore }
-            let recordBytes = Data(state.inboundBuffer.prefix(recordTotal))
-            state.inboundBuffer.removeFirst(recordTotal)
-            return .record(recordBytes, payloadLength, state.readAEAD)
-        }
 
-        switch recordStep {
-        case .needMore:
-            inner.receiveRaw { [weak self] data, error in
-                guard let self else {
-                    completion(nil, VLESSEncryptionError.connectionClosed); return
+            switch recordStep {
+            case .needMore:
+                guard let data = try await inner.receiveRaw(), !data.isEmpty else {
+                    return nil
                 }
-                if let error { completion(nil, error); return }
-                guard let data, !data.isEmpty else {
-                    completion(nil, error); return
+                recvState.withLock { $0.inboundBuffer.appendCompacting(data) }
+            case .decodeFailed(let error, let firstRecordSeen):
+                // 0-RTT rejection: the server wrote noise instead of a valid record;
+                // invalidate this ticket so a future dial re-handshakes.
+                if !firstRecordSeen, let zeroRTT = zeroRTTState {
+                    VLESSEncryption0RTTCache.shared.invalidate(key: zeroRTT.cacheKey, matching: zeroRTT.pfsKey)
+                    throw VLESSEncryptionError.handshakeFailed("new handshake needed")
                 }
-                self.recvState.withLock { $0.inboundBuffer.appendCompacting(data) }
-                self.pumpRecord(completion: completion)
-            }
-        case .decodeFailed(let error, let firstRecordSeen):
-            // 0-RTT rejection: the server wrote noise instead of a valid record;
-            // invalidate this ticket so a future dial re-handshakes.
-            if !firstRecordSeen, let zeroRTT = zeroRTTState {
-                VLESSEncryption0RTTCache.shared.invalidate(key: zeroRTT.cacheKey, matching: zeroRTT.pfsKey)
-                completion(nil, VLESSEncryptionError.handshakeFailed("new handshake needed"))
-                return
-            }
-            completion(nil, error)
-        case .record(let recordBytes, let payloadLength, let aead):
-            do {
+                throw error
+            case .record(let recordBytes, let payloadLength, let aead):
                 let header = Data(recordBytes.prefix(VLESSWire.headerLength))
                 let sealedPayload = recordBytes.suffix(payloadLength)
                 let willRekey = aead!.nonceIsAtMax
@@ -1119,9 +1061,7 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
                     let newAEAD = VLESSEncryptionAEAD(context: context, key: unitedKey, useAES: useAES)
                     recvState.withLock { $0.readAEAD = newAEAD }
                 }
-                completion(plaintext, nil)
-            } catch {
-                completion(nil, error)
+                return plaintext
             }
         }
     }
@@ -1149,7 +1089,7 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
         return try await inner.receiveRaw()
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 }

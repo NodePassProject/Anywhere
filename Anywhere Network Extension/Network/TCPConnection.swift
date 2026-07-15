@@ -917,16 +917,12 @@ class TCPConnection {
             isPlaintext: mitmPlaintext
         )
         // Inner-leg downlink: inner-leg output (TLS records or cleartext) goes straight to lwIP.
-        session.onSendToClient = { [weak self] data, completion in
-            guard let self else { completion?(TransportError.notConnected); return }
+        session.onSendToClient = { [weak self] data in
+            guard let self else { return }
             self.lwipQueue.async {
-                if self.closed {
-                    completion?(TransportError.notConnected)
-                    return
-                }
+                guard !self.closed else { return }
                 self.activityTimer?.update()
                 self.writeToLWIP(data)
-                completion?(nil)
             }
         }
         session.onTeardown = { [weak self] error in

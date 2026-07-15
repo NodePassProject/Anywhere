@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class GRPCProxyConnection: AsyncProxyConnection {
+nonisolated class GRPCProxyConnection: ProxyConnection {
     private let grpcConnection: GRPCConnection
 
     init(grpcConnection: GRPCConnection) {
@@ -27,7 +27,7 @@ nonisolated class GRPCProxyConnection: AsyncProxyConnection {
         try await grpcConnection.receive()
     }
 
-    override func performCancel() {
+    override func cancel() {
         grpcConnection.cancel()
     }
 }

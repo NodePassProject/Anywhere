@@ -10,7 +10,7 @@ import Synchronization
 
 /// Stream-XOR wrapper for VLESS encryption's `random` XOR mode. Per direction:
 /// skip N bytes → XOR the 5-byte record header → skip the decoded body → repeat.
-nonisolated final class VLESSXORConnection: AsyncProxyConnection {
+nonisolated final class VLESSXORConnection: ProxyConnection {
     private let inner: ProxyConnection
 
     private let outCTR: VLESSEncryptionCTR
@@ -166,7 +166,7 @@ nonisolated final class VLESSXORConnection: AsyncProxyConnection {
 
     // MARK: - Cancel
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 

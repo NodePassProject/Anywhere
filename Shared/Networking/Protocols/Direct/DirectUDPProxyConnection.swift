@@ -10,7 +10,7 @@ import Foundation
 /// A `ProxyConnection` over an async-native datagram transport; each `send`/`receive`
 /// preserves one datagram boundary. Pull-native — `receiveRaw()` is one
 /// `await transport.receive()`, so no push adapter or receive buffer is needed.
-nonisolated final class DirectUDPProxyConnection: AsyncProxyConnection {
+nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
     private let transport: any AsyncDatagramTransport
 
@@ -32,7 +32,7 @@ nonisolated final class DirectUDPProxyConnection: AsyncProxyConnection {
         try await transport.receive()
     }
 
-    override func performCancel() {
+    override func cancel() {
         transport.cancel()
     }
 }

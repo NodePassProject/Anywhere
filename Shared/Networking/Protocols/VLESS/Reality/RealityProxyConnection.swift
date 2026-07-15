@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class RealityProxyConnection: AsyncProxyConnection {
+nonisolated class RealityProxyConnection: ProxyConnection {
     private let realityConnection: TLSRecordConnection
 
     init(realityConnection: TLSRecordConnection) {
@@ -37,7 +37,7 @@ nonisolated class RealityProxyConnection: AsyncProxyConnection {
         }
     }
 
-    override func performCancel() {
+    override func cancel() {
         realityConnection.cancel()
     }
 

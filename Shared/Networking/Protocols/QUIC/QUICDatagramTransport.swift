@@ -22,7 +22,7 @@ protocol QUICDatagramTransport: AnyObject {
     func cancel()
 }
 
-final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
+final class ProxyConnectionDatagramTransport: QUICDatagramTransport, @unchecked Sendable {
     private let connection: ProxyConnection
 
     /// Guards `errorHandler` so it fires at most once across send- and receive-side failures.
@@ -33,17 +33,40 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
 
     private let failureState = Mutex(FailureState())
 
+    /// Ordered async send funnel — datagrams reach the wire in submission order (the base
+    /// `send(data:completion:)` this replaced serialized through the connection's own pump).
+    private let sendPump: AsyncSendPump
+
+    /// Push handler + receive loop, stored so the loop's `Task` captures only `self`
+    /// (the raw closures aren't `Sendable`).
+    private let receiveHandler = Mutex<((Data) -> Void)?>(nil)
+    private let receiveTask = Mutex<Task<Void, Never>?>(nil)
+
     init(connection: ProxyConnection) {
         self.connection = connection
+        // Weak: the pump task must not retain the connection through this closure (the
+        // connection strongly owns this transport, hence the pump), else it can't dealloc.
+        self.sendPump = AsyncSendPump(
+            send: { [weak connection] data in
+                guard let connection else { throw CancellationError() }
+                try await connection.send(data)
+            },
+            finish: {}
+        )
+    }
+
+    deinit {
+        sendPump.finish()
+        receiveTask.withLock { $0?.cancel() }
     }
 
     func sendDatagram(_ data: Data) {
-        connection.send(data: data) { [weak self] error in
-            guard let error else { return }
+        sendPump.enqueueSend(data) { [weak self] error in
+            guard let error, let self else { return }
             // Transient errors (PMTU shrink, fragmentation refusal, queue overflow) are not
             // terminal — outer QUIC loss recovery treats the drop as ordinary loss.
             if Self.isTransientDatagramError(error) { return }
-            self?.surfaceFailure(error)
+            self.surfaceFailure(error)
         }
     }
 
@@ -82,12 +105,30 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
     func startReceiving(handler: @escaping (Data) -> Void,
                         errorHandler: @escaping (Error?) -> Void) {
         failureState.withLock { $0.handler = errorHandler }
-        connection.startReceiving(handler: handler, errorHandler: { [weak self] err in
-            self?.surfaceFailure(err)
-        })
+        receiveHandler.withLock { $0 = handler }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                while true {
+                    guard let data = try await self.connection.receive() else {
+                        self.surfaceFailure(nil)   // clean EOF
+                        return
+                    }
+                    self.receiveHandler.withLock { $0 }?(data)
+                }
+            } catch {
+                self.surfaceFailure(error)
+            }
+        }
+        receiveTask.withLock { $0 = task }
     }
 
     func cancel() {
+        // Swallow the teardown-driven EOF/error the receive loop will observe once the
+        // connection is cancelled, so it isn't surfaced as a spurious transport failure.
+        failureState.withLock { $0.failed = true; $0.handler = nil }
+        receiveTask.withLock { $0?.cancel(); $0 = nil }
+        sendPump.finish()
         connection.cancel()
     }
 

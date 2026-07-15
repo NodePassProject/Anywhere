@@ -9,14 +9,6 @@ import Foundation
 
 // MARK: - AsyncTransportClosures
 
-/// The async-native counterpart of ``TransportClosures`` — a struct of closures over
-/// whatever byte transport a framing layer (gRPC, WebSocket, HTTP-Upgrade, XHTTP)
-/// rides, so the framing logic depends on this seam rather than a concrete transport.
-///
-/// Where ``TransportClosures`` exposes completion-handler `send`/`receive`, this exposes
-/// `async` ones, plus an explicit ``finishSend`` (half-close) that the legacy struct
-/// lacked. Migrating a framing layer means switching its stored `TransportClosures` to
-/// this and turning its recursive receive callbacks into an `await` loop.
 struct AsyncTransportClosures: Sendable {
     /// Sends one chunk, ordered after every prior send; `await` is backpressure.
     let send: @Sendable (Data) async throws -> Void

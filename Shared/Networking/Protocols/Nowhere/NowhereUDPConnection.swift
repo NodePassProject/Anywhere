@@ -39,10 +39,14 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     private var controlReadClosed = false
     private var openCompletion: ((Error?) -> Void)?
 
-    private var packetQueue: [Data] = []
-    static let maxQueuedPackets = 64
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var closureError: Error?
+    /// Reassembled inbound datagrams / EOF / error, pushed on `session.queue` (inside ngtcp2's
+    /// recv_datagram) and pulled by `receiveRaw`. The session's byte budget (`reserveUDPBuffer`)
+    /// bounds how much can queue here — datagrams are dropped once the budget is exhausted.
+    private let inbox = AsyncByteChannel()
+    /// Bytes reserved for datagrams still queued in `inbox`; released on consume or close.
+    private var reservedInboxBytes = 0
+    /// Serializes framed datagram writes (and PacketID allocation) across the wire `await`.
+    private let sendMutex = AsyncMutex()
 
     private struct TerminationState {
         var handler: ((Error?) -> Void)?
@@ -272,48 +276,40 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     }
 
     private func deliverReservedPacket(_ payload: Data, reservedBytes: Int) {
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            session.releaseUDPBuffer(bytes: reservedBytes, reassemblySlot: false)
-            callback(payload, nil)
-            return
-        }
-        guard packetQueue.count < Self.maxQueuedPackets else {
-            session.releaseUDPBuffer(bytes: reservedBytes, reassemblySlot: false)
-            return
-        }
-        packetQueue.append(payload)
+        // The reservation stays held until the app consumes this datagram in `receiveRaw`
+        // (or the flow closes); `reservedBytes` equals `payload.count`.
+        reservedInboxBytes += reservedBytes
+        inbox.yield(payload)
     }
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(NowhereError.streamClosed); return }
-            guard self.state == .ready else {
-                completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
-                return
-            }
-            self.attemptSend(
+    override func sendRaw(_ data: Data) async throws {
+        guard _isReady.load(ordering: .relaxed) else {
+            throw NowhereError.streamClosed
+        }
+        // Serialize so PacketID allocation and datagram order match on-wire order.
+        try await sendMutex.withLock {
+            try await self.attemptSend(
                 data: data,
                 packetID: self.newPacketID(),
                 maxSizeOverride: nil,
-                retriesLeft: 1,
-                completion: completion
+                retriesLeft: 1
             )
         }
     }
 
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
+    /// Runs under `sendMutex`.
     private func attemptSend(
         data: Data,
         packetID: UInt32,
         maxSizeOverride: Int?,
-        retriesLeft: Int,
-        completion: @escaping (Error?) -> Void
-    ) {
-        let maxSize = maxSizeOverride ?? session.maxDatagramPayloadSize
+        retriesLeft: Int
+    ) async throws {
+        let maxSize: Int
+        if let maxSizeOverride {
+            maxSize = maxSizeOverride
+        } else {
+            maxSize = await session.currentMaxDatagramPayloadSize()
+        }
         let frames: [Data]
         do {
             frames = try NowhereProtocol.encodeUDPDataFragments(
@@ -324,74 +320,59 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
             )
         } catch NowhereError.udpPacketTooLarge {
             // UDP is lossy by contract. Drop only this packet; keep the flow alive.
-            completion(nil)
-            return
-        } catch {
-            completion(error)
             return
         }
-        session.writeDatagrams(frames) { [weak self] error in
+        do {
+            try await session.writeDatagrams(frames)
+        } catch {
             if let quicError = error as? QUICConnection.QUICError,
                case .datagramTooLarge(let maxBound) = quicError,
-               retriesLeft > 0,
-               let self {
-                guard self.state == .ready else {
-                    completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
-                    return
+               retriesLeft > 0 {
+                guard _isReady.load(ordering: .relaxed) else {
+                    throw NowhereError.streamClosed
                 }
-                self.attemptSend(
+                // The first batch may have been partially transmitted before the path MTU
+                // changed. A new identity prevents the receiver from mixing fragments
+                // encoded with different geometry.
+                try await attemptSend(
                     data: data,
-                    // The first batch may have been partially transmitted before
-                    // the path MTU changed. A new identity prevents the receiver
-                    // from mixing fragments encoded with different geometry.
-                    packetID: self.newPacketID(),
+                    packetID: newPacketID(),
                     maxSizeOverride: maxBound,
-                    retriesLeft: retriesLeft - 1,
-                    completion: completion
+                    retriesLeft: retriesLeft - 1
                 )
                 return
             }
             if let quicError = error as? QUICConnection.QUICError,
                case .datagramTooLarge = quicError {
                 // The path bound changed again. Drop this packet without closing the flow.
-                completion(nil)
                 return
             }
             if let quicError = error as? QUICConnection.QUICError,
                case .datagramQueueFull = quicError {
                 // Reject newest packet atomically; preserve queued packets and the flow.
-                completion(nil)
                 return
             }
-            completion(error)
+            throw error
         }
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else {
-                completion(nil, NowhereError.streamClosed)
-                return
-            }
-            if !self.packetQueue.isEmpty {
-                let packet = self.packetQueue.removeFirst()
-                self.session.releaseUDPBuffer(bytes: packet.count, reassemblySlot: false)
-                completion(packet, nil)
-                return
-            }
-            if let error = self.closureError {
-                self.closureError = nil
-                completion(nil, error)
-                return
-            }
-            if self.state == .closed {
-                completion(nil, nil)
-                return
-            }
-            let stale = self.pendingReceive
-            self.pendingReceive = completion
-            stale?(nil, NowhereError.connectionFailed("overlapping receiveRaw on Nowhere UDP"))
+    override func receiveRaw() async throws -> Data? {
+        let data = try await inbox.next()
+        if let data {
+            consumeReservation(bytes: data.count)
         }
+        return data
+    }
+
+    /// Frees the byte budget held for a consumed datagram, on `session.queue`. Skips a
+    /// connection already closed (close released the whole reservation at once).
+    private func consumeReservation(bytes: Int) {
+        let body = { [weak self] in
+            guard let self, self.state != .closed else { return }
+            self.reservedInboxBytes = max(0, self.reservedInboxBytes - bytes)
+            self.session.releaseUDPBuffer(bytes: bytes, reassemblySlot: false)
+        }
+        if session.isOnQueue { body() } else { session.queue.async(execute: body) }
     }
 
     override func cancel() {
@@ -410,10 +391,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         releaseAllBufferedData()
         let open = openCompletion
         openCompletion = nil
-        let receive = pendingReceive
-        pendingReceive = nil
         open?(NowhereError.streamClosed)
-        receive?(nil, nil)
+        inbox.cancel()
         notifyTermination(error: nil)
     }
 
@@ -455,11 +434,10 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         releaseAllBufferedData()
         let open = openCompletion
         openCompletion = nil
-        let receive = pendingReceive
-        pendingReceive = nil
-        if open == nil, receive == nil { closureError = error }
         open?(error)
-        receive?(nil, error)
+        // Ordered after every datagram already queued in the inbox; the error surfaces
+        // on the next (or a parked) receive, replacing the old `closureError` stash.
+        inbox.fail(error)
         notifyTermination(error: error)
     }
 
@@ -581,10 +559,11 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     private func releaseAllBufferedData() {
         defragCleanup?.cancel()
         defragCleanup = nil
-        let queuedBytes = packetQueue.reduce(into: 0) { $0 += $1.count }
-        packetQueue.removeAll(keepingCapacity: false)
-        if queuedBytes > 0 {
-            session.releaseUDPBuffer(bytes: queuedBytes, reassemblySlot: false)
+        // Release reservations for datagrams still queued in the inbox (cancel/fail discards
+        // the queued items without a per-item consume hook).
+        if reservedInboxBytes > 0 {
+            session.releaseUDPBuffer(bytes: reservedInboxBytes, reassemblySlot: false)
+            reservedInboxBytes = 0
         }
         for slot in defragSlots.values {
             session.releaseUDPBuffer(bytes: slot.totalLength, reassemblySlot: true)
@@ -592,8 +571,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         defragSlots.removeAll(keepingCapacity: false)
     }
 
+    /// Next PacketID; called only under `sendMutex`, so no queue confinement is needed.
     private func newPacketID() -> UInt32 {
-        dispatchPrecondition(condition: .onQueue(session.queue))
         let packetID = nextPacketID
         nextPacketID = Self.advancedPacketID(after: packetID)
         return packetID

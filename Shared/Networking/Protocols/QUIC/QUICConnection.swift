@@ -344,6 +344,16 @@ nonisolated class QUICConnection {
         }
     }
 
+    /// Async stream write — the one irreducible continuation at the ngtcp2 C boundary
+    /// (the callback `writeStream` completion is single-shot, so this can't double-resume).
+    func writeStream(_ streamId: Int64, data: Data, fin: Bool = false) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            writeStream(streamId, data: data, fin: fin) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
     // MARK: Datagrams
 
     /// Queues a QUIC DATAGRAM frame; `completion` errs only on fatal conditions (closed, MTU exceeded).
@@ -357,6 +367,16 @@ nonisolated class QUICConnection {
             }
             self.enqueueDatagrams([PendingDatagram(data: data, completion: completion)])
             self.writeToUDP()
+        }
+    }
+
+    /// Async DATAGRAM batch write (localized ngtcp2-boundary continuation; the callback
+    /// fires exactly once after every frame reaches a terminal state).
+    func writeDatagrams(_ datagrams: [Data]) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            writeDatagrams(datagrams) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
         }
     }
 
@@ -387,6 +407,15 @@ nonisolated class QUICConnection {
             }
             self.enqueueDatagrams(pending)
             self.writeToUDP()
+        }
+    }
+
+    /// Async atomic DATAGRAM batch write (localized ngtcp2-boundary continuation).
+    func writeDatagramsAtomically(_ datagrams: [Data]) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            writeDatagramsAtomically(datagrams) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
         }
     }
 
@@ -447,6 +476,16 @@ nonisolated class QUICConnection {
         }
         let overflowError = QUICError.connectionFailed("Datagram send queue overflowed")
         for d in dropped { d.completion?(overflowError) }
+    }
+
+    /// Async reader for ``maxDatagramPayloadSize`` — the property asserts on-``queue``, so the
+    /// async datagram-send path (which runs off-queue) hops on to read it here.
+    func currentMaxDatagramPayloadSize() async -> Int {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Int, Never>) in
+            queue.async { [weak self] in
+                continuation.resume(returning: self?.maxDatagramPayloadSize ?? 0)
+            }
+        }
     }
 
     /// Max datagram payload per UDP packet (0 if unsupported): min(peer `max_datagram_frame_size` − 3

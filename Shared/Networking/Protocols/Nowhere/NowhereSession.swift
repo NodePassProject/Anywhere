@@ -278,6 +278,11 @@ nonisolated final class NowhereSession {
         quic.writeStream(sid, data: data, fin: fin, completion: completion)
     }
 
+    /// Async stream write, over the QUIC ngtcp2-boundary continuation.
+    func writeStream(_ sid: Int64, data: Data, fin: Bool = false) async throws {
+        try await quic.writeStream(sid, data: data, fin: fin)
+    }
+
     func extendStreamOffset(_ sid: Int64, count: Int) {
         quic.extendStreamOffset(sid, count: count)
     }
@@ -323,6 +328,11 @@ nonisolated final class NowhereSession {
 
     func finishStream(_ sid: Int64, completion: @escaping (Error?) -> Void) {
         quic.writeStream(sid, data: Data(), fin: true, completion: completion)
+    }
+
+    /// Async half-close of a stream, over the QUIC ngtcp2-boundary continuation.
+    func finishStream(_ sid: Int64) async throws {
+        try await quic.writeStream(sid, data: Data(), fin: true)
     }
 
     func registerUDPSession(
@@ -392,8 +402,18 @@ nonisolated final class NowhereSession {
         quic.writeDatagramsAtomically(datagrams, completion: completion)
     }
 
+    /// Async atomic DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
+    func writeDatagrams(_ datagrams: [Data]) async throws {
+        try await quic.writeDatagramsAtomically(datagrams)
+    }
+
     var maxDatagramPayloadSize: Int {
         quic.maxDatagramPayloadSize
+    }
+
+    /// Async reader for the path-MTU-bounded datagram payload size (hops onto `queue`).
+    func currentMaxDatagramPayloadSize() async -> Int {
+        await quic.currentMaxDatagramPayloadSize()
     }
 
     private func updateIdleCloseTimer() {

@@ -8,23 +8,11 @@
 import Foundation
 
 extension ProxyClient {
+    /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
     func connectWithNaive(
         destinationHost: String,
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-            self.connectWithNaive(
-                destinationHost: destinationHost, destinationPort: destinationPort
-            ) { continuation.resume(with: $0) }
-        }
-    }
-
-    /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
-    func connectWithNaive(
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
         let scheme: NaiveConfiguration.NaiveScheme
         let username: String?
         let password: String?
@@ -66,27 +54,27 @@ extension ProxyClient {
                 extraHeaders: NaiveProxyHeaders.http11(basicAuth: naiveConfig.basicAuth),
                 destination: destination
             )
-            openTunnelAndWrap(NaiveTunnelAdapter(http11), completion: completion)
+            return try await openTunnelAndWrap(NaiveTunnelAdapter(http11))
 
         case .http2:
-            NaiveHTTP2MultiplexerPool.shared.acquireStream(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                tunnel: self.tunnel,
-                connectHeaders: { NaiveProxyHeaders.http2(basicAuth: naiveConfig.basicAuth) },
-                destination: destination
-            ) { [self] stream in
-                openTunnelAndWrap(NaiveTunnelAdapter(stream), completion: completion)
+            let stream = await withCheckedContinuation { (continuation: CheckedContinuation<NaiveHTTP2Stream, Never>) in
+                NaiveHTTP2MultiplexerPool.shared.acquireStream(
+                    host: proxyHost,
+                    port: configuration.serverPort,
+                    sni: naiveConfig.effectiveSNI,
+                    tunnel: self.tunnel,
+                    connectHeaders: { NaiveProxyHeaders.http2(basicAuth: naiveConfig.basicAuth) },
+                    destination: destination
+                ) { continuation.resume(returning: $0) }
             }
+            return try await openTunnelAndWrap(NaiveTunnelAdapter(stream))
 
         case .http3:
-            acquireHTTP3StreamWithRetry(
+            return try await acquireHTTP3StreamWithRetry(
                 proxyHost: proxyHost,
                 naiveConfig: naiveConfig,
                 destination: destination,
-                retriesLeft: 1,
-                completion: completion
+                retriesLeft: 1
             )
         }
     }
@@ -97,40 +85,36 @@ extension ProxyClient {
         proxyHost: String,
         naiveConfig: NaiveConfiguration,
         destination: String,
-        retriesLeft: Int,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        NaiveHTTP3MultiplexerPool.shared.acquireStream(
-            host: proxyHost,
-            port: configuration.serverPort,
-            sni: naiveConfig.effectiveSNI,
-            configuration: naiveConfig,
-            destination: destination
-        ) { [self] stream in
-            own(stream)
-            stream.openTunnel { [self] error in
-                if let error {
-                    stream.close()
-                    if retriesLeft > 0 && Self.isRetryableHTTP3Error(error) {
-                        self.acquireHTTP3StreamWithRetry(
-                            proxyHost: proxyHost,
-                            naiveConfig: naiveConfig,
-                            destination: destination,
-                            retriesLeft: retriesLeft - 1,
-                            completion: completion
-                        )
-                        return
-                    }
-                    completion(.failure(error))
-                    return
-                }
-                let connection = NaiveProxyConnection(
-                    tunnel: stream,
-                    paddingType: stream.negotiatedPaddingType
-                )
-                completion(.success(connection))
-            }
+        retriesLeft: Int
+    ) async throws -> ProxyConnection {
+        let stream = await withCheckedContinuation { (continuation: CheckedContinuation<NaiveHTTP3Stream, Never>) in
+            NaiveHTTP3MultiplexerPool.shared.acquireStream(
+                host: proxyHost,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                configuration: naiveConfig,
+                destination: destination
+            ) { continuation.resume(returning: $0) }
         }
+        own(stream)
+        do {
+            try await stream.openTunnel()
+        } catch {
+            stream.close()
+            if retriesLeft > 0 && Self.isRetryableHTTP3Error(error) {
+                return try await acquireHTTP3StreamWithRetry(
+                    proxyHost: proxyHost,
+                    naiveConfig: naiveConfig,
+                    destination: destination,
+                    retriesLeft: retriesLeft - 1
+                )
+            }
+            throw error
+        }
+        return NaiveProxyConnection(
+            tunnel: stream,
+            paddingType: stream.negotiatedPaddingType
+        )
     }
 
     /// Session-level failures warrant a fresh-session retry; stream-level
@@ -146,22 +130,17 @@ extension ProxyClient {
         return false
     }
 
-    private func openTunnelAndWrap(
-        _ tunnel: NaiveTunnelAdapter,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+    private func openTunnelAndWrap(_ tunnel: NaiveTunnelAdapter) async throws -> ProxyConnection {
         own(tunnel)
-        tunnel.openTunnel { error in
-            if let error {
-                tunnel.close()
-                completion(.failure(error))
-                return
-            }
-            let connection = NaiveProxyConnection(
-                tunnel: tunnel,
-                paddingType: tunnel.negotiatedPaddingType
-            )
-            completion(.success(connection))
+        do {
+            try await tunnel.openTunnel()
+        } catch {
+            tunnel.close()
+            throw error
         }
+        return NaiveProxyConnection(
+            tunnel: tunnel,
+            paddingType: tunnel.negotiatedPaddingType
+        )
     }
 }

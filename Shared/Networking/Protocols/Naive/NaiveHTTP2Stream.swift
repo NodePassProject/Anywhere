@@ -59,7 +59,18 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
     // MARK: - HTTPTunnel
 
-    func openTunnel(completion: @escaping (Error?) -> Void) {
+    // The multiplexer pushes frames on its own queue and fulfils the parked completions;
+    // the async surface parks the caller's continuation there, preserving the state machine.
+
+    func openTunnel() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            openTunnel { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    private func openTunnel(completion: @escaping (Error?) -> Void) {
         guard let multiplexer else {
             completion(NaiveHTTP2Error.notReady)
             return
@@ -96,7 +107,15 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
         }
     }
 
-    func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
+    func sendData(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendData(data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    private func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
         guard let multiplexer else {
             completion(NaiveHTTP2Error.notReady)
             return
@@ -110,7 +129,15 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
         }
     }
 
-    func receiveData(completion: @escaping (Data?, Error?) -> Void) {
+    func receiveData() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receiveData { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
+        }
+    }
+
+    private func receiveData(completion: @escaping (Data?, Error?) -> Void) {
         guard let multiplexer else {
             completion(nil, NaiveHTTP2Error.notReady)
             return

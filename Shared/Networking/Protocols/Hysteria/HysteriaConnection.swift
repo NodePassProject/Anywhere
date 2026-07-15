@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaConnection")
 
-nonisolated final class HysteriaConnection: AsyncProxyConnection {
+nonisolated final class HysteriaConnection: ProxyConnection {
 
     enum State { case idle, openingStream, handshaking, ready, closed }
 
@@ -30,17 +30,23 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
     }
     private let _isReady = Atomic<Bool>(false)
 
-    private var streamID: Int64 = -1
+    /// Stored atomically: set once on `session.queue` during open, then read from the
+    /// async send/receive paths off-queue.
+    private let _streamID = Atomic<Int64>(-1)
+    private var streamID: Int64 {
+        get { _streamID.load(ordering: .relaxed) }
+        set { _streamID.store(newValue, ordering: .relaxed) }
+    }
 
-    /// FIN seen on the downlink. Kept separate from `.closed` to preserve
-    /// TCP half-close — the caller must still be able to send after the peer FINs.
-    private var readClosed = false
+    /// Post-response stream bytes / EOF / error from the session's demux loop. The async
+    /// replacement for the parked `pendingReceive` completion; QUIC stream credit is
+    /// returned in ``receiveRaw()`` only once ``AsyncByteChannel/next()`` hands bytes over,
+    /// so the buffered queue stays bounded by the stream window (backpressure preserved).
+    private let inbox = AsyncByteChannel()
 
-    /// Accumulates incoming bytes until the response header is parsed, then holds data not yet delivered to a pending `receiveRaw`.
+    /// Accumulates incoming bytes until the response header is parsed. Confined to `session.queue`.
     private var receiveBuffer = Data()
     private var responseParsed = false
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var pendingQuicBytes = 0
 
     private var openCompletion: ((Error?) -> Void)?
 
@@ -98,38 +104,33 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
 
     func handleStreamData(_ data: Data, fin: Bool) {
         // On session.queue, synchronously inside ngtcp2's read_pkt. `data` is
-        // a zero-copy view into ngtcp2's buffer — detach with Data(...)
-        // before escaping to another queue (Data.append also copies).
-
-        // Fast path: handshake done, nothing buffered, receiver waiting —
-        // deliver inline so the flow-control credit rides read_pkt's tail-flush.
-        if responseParsed, receiveBuffer.isEmpty, !data.isEmpty,
-           let callback = pendingReceive {
-            pendingReceive = nil
-            let ackCount = pendingQuicBytes + data.count
-            pendingQuicBytes = 0
-            session.extendStreamOffset(streamID, count: ackCount)
-            callback(Data(data), nil)
-            if fin { readClosed = true }
-            return
-        }
-
-        if !data.isEmpty {
-            pendingQuicBytes += data.count
-            receiveBuffer.append(data)
-        }
+        // a zero-copy view into ngtcp2's buffer — detach with Data(...) before
+        // handing it to the inbox (Data.append also copies).
+        guard state != .closed else { return }
 
         if !responseParsed {
+            if !data.isEmpty {
+                receiveBuffer.append(data)
+            }
             tryParseResponse()
+            // A failed status closes us inside tryParseResponse.
+            guard state != .closed else { return }
             if !responseParsed {
                 if fin {
                     fail(HysteriaError.connectionFailed("Stream closed before response"))
                 }
                 return
             }
+            // Just became ready: flush any post-header bytes, then honour FIN.
+            flushBufferToInbox()
+            if fin { inbox.finish() }
+            return
         }
 
-        deliverBufferedOrEOF(eof: fin)
+        if !data.isEmpty {
+            inbox.yield(Data(data))
+        }
+        if fin { inbox.finish() }
     }
 
     private func tryParseResponse() {
@@ -138,7 +139,11 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
         }
         responseParsed = true
         receiveBuffer.removeFirst(parsed.consumed)
-        // Flow-control credit is returned lazily when the app calls receive.
+        // Credit the consumed response header now (small, bounded); post-header data
+        // bytes are credited lazily as the app consumes them in `receiveRaw`.
+        if parsed.consumed > 0 {
+            session.extendStreamOffset(streamID, count: parsed.consumed)
+        }
 
         guard parsed.status == HysteriaProtocol.tcpResponseStatusOK else {
             fail(HysteriaError.tunnelFailed(message: parsed.message))
@@ -152,33 +157,12 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
         }
     }
 
-    private func deliverBufferedOrEOF(eof: Bool) {
-        // Set before both branches: with buffered data + pending receive +
-        // FIN, setting it only in the eof branch would lose the EOF and hang the caller.
-        if eof { readClosed = true }
-
-        if let callback = pendingReceive, !receiveBuffer.isEmpty {
-            pendingReceive = nil
-            let out = receiveBuffer
-            receiveBuffer = Data()
-            ackConsumedBytes()
-            callback(out, nil)
-            return
-        }
-
-        if eof {
-            if let callback = pendingReceive {
-                pendingReceive = nil
-                callback(nil, nil)
-            }
-        }
-    }
-
-    private func ackConsumedBytes() {
-        let count = pendingQuicBytes
-        guard count > 0 else { return }
-        pendingQuicBytes = 0
-        session.extendStreamOffset(streamID, count: count)
+    /// Hands any buffered post-header bytes to the inbox. Runs on `session.queue`.
+    private func flushBufferToInbox() {
+        guard !receiveBuffer.isEmpty else { return }
+        let out = receiveBuffer
+        receiveBuffer = Data()
+        inbox.yield(out)
     }
 
     func handleSessionError(_ error: Error) {
@@ -203,12 +187,9 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
             fail(HysteriaError.connectionFailed("Stream closed before TCP response"))
             return
         }
-        readClosed = true
         state = .closed
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            callback(nil, nil)
-        }
+        // EOF is ordered after every byte already queued in the inbox.
+        inbox.finish()
     }
 
     private func fail(_ error: Error) {
@@ -219,70 +200,28 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
             openCompletion = nil
             callback(error)
         }
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            callback(nil, error)
-        }
+        inbox.fail(error)
     }
 
     // MARK: - ProxyConnection overrides
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(HysteriaError.streamClosed); return }
-            guard self.state == .ready else {
-                completion(self.state == .closed ? HysteriaError.streamClosed : HysteriaError.notReady)
-                return
-            }
-            self.session.writeStream(self.streamID, data: data, completion: completion)
-        }
-    }
-
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(nil, HysteriaError.streamClosed); return }
-            if !self.receiveBuffer.isEmpty && self.responseParsed {
-                let out = self.receiveBuffer
-                self.receiveBuffer = Data()
-                self.ackConsumedBytes()
-                completion(out, nil)
-                return
-            }
-            if self.state == .closed {
-                completion(nil, nil)
-                return
-            }
-            if self.readClosed {
-                completion(nil, nil)
-                return
-            }
-            self.pendingReceive = completion
-        }
-    }
-
-    // MARK: - Async Surface (bridges the callback stream I/O above; deleted with it later)
-
     override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+        guard _isReady.load(ordering: .relaxed) else {
+            throw HysteriaError.streamClosed
         }
+        try await session.writeStream(streamID, data: data)
     }
 
     override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
+        let data = try await inbox.next()
+        if let data, !data.isEmpty {
+            // Return stream flow-control credit only now the app has taken the bytes.
+            session.extendStreamOffset(streamID, count: data.count)
         }
+        return data
     }
 
-    override func performCancel() {
+    override func cancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
@@ -290,10 +229,7 @@ nonisolated final class HysteriaConnection: AsyncProxyConnection {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)
             }
-            if let callback = self.pendingReceive {
-                self.pendingReceive = nil
-                callback(nil, HysteriaError.streamClosed)
-            }
+            self.inbox.cancel()
         }
     }
 }

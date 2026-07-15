@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class VLESSConnection: AsyncProxyConnection {
+nonisolated final class VLESSConnection: ProxyConnection {
 
     private let inner: ProxyConnection
 
@@ -30,16 +30,12 @@ nonisolated final class VLESSConnection: AsyncProxyConnection {
     // MARK: - Handshake
 
     /// Writes the VLESS request header (and optional initial payload); call once after construction.
-    func sendHandshake(
-        requestHeader: Data,
-        initialData: Data?,
-        completion: @escaping (Error?) -> Void
-    ) {
+    func sendHandshake(requestHeader: Data, initialData: Data?) async throws {
         var payload = requestHeader
         if let initialData, !initialData.isEmpty {
             payload.append(initialData)
         }
-        inner.sendRaw(data: payload, completion: completion)
+        try await inner.sendRaw(payload)
     }
 
     // MARK: - Send (passthrough)
@@ -130,7 +126,7 @@ nonisolated final class VLESSConnection: AsyncProxyConnection {
 
     // MARK: - Cancel
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 }

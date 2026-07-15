@@ -17,27 +17,15 @@ nonisolated class TLSRecordConnection {
 
     // MARK: Properties
 
-    /// The underlying async byte transport. Assigning it (re)builds ``sendPump`` so every
-    /// write — the async surface, the callback trio, the raw callbacks, and the internal
-    /// KeyUpdate response — drains in submission order over one task, exactly as the
-    /// old callback byte-transport pump did. `nil` after ``cancel()``.
-    var connection: (any AsyncByteTransport)? {
-        didSet {
-            sendPump?.finish()
-            if let connection {
-                sendPump = AsyncSendPump(
-                    send: { try await connection.send($0) },
-                    finish: { try await connection.finishSend() }
-                )
-            } else {
-                sendPump = nil
-            }
-        }
-    }
+    /// The underlying async byte transport. `nil` after ``cancel()``. Every write is serialized
+    /// through ``sendMutex`` so records reach the wire in submission order.
+    var connection: (any AsyncByteTransport)?
 
-    /// Serializes all writes to ``connection``. Rebuilt by `connection`'s `didSet`.
-    /// Internal so the +TLS13 KeyUpdate response (a different file) can enqueue through it.
-    var sendPump: AsyncSendPump?
+    /// Serializes every write to ``connection`` — the async `send`/`sendRaw`/`closeWrite`
+    /// surface and the internal TLS 1.3 KeyUpdate response — so on-wire order (and thus each
+    /// record's sequence number) is preserved. FIFO: submission order is wire order. Internal
+    /// so the +TLS13 KeyUpdate response (a different file) can drain through it.
+    let sendMutex = AsyncMutex()
 
     let tlsVersion: UInt16
 
@@ -162,86 +150,18 @@ nonisolated class TLSRecordConnection {
     }
     var ingressMACKey: Data { direction == .server ? clientMACKey : serverMACKey }
 
-    // MARK: - Send (Encrypted)
-
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        sendLock.lock()
-        guard let sendPump else {
-            sendLock.unlock()
-            completion(TLSRecordError.connectionUnavailable)
-            return
-        }
-        do {
-            let record = try buildTLSRecords(for: data)
-            sendLock.unlock()
-            sendPump.enqueueSend(record, completion: completion)
-        } catch {
-            sendLock.unlock()
-            completion(error)
-        }
-    }
-
-    func send(data: Data) {
-        sendLock.lock()
-        guard let sendPump else {
-            sendLock.unlock()
-            return
-        }
-        do {
-            let record = try buildTLSRecords(for: data)
-            sendLock.unlock()
-            sendPump.enqueueSend(record, completion: nil)
-        } catch {
-            sendLock.unlock()
-        }
-    }
-
-    // MARK: - Receive (Encrypted)
-
-    func receive(completion: @escaping (Data?, Error?) -> Void) {
-        receiveLock.lock()
-        let processed = processBuffer()
-        let needsKeyUpdateResponse = keyUpdateResponsePending
-        keyUpdateResponsePending = false
-        receiveLock.unlock()
-
-        if needsKeyUpdateResponse {
-            sendKeyUpdateResponseAndRekeyEgress()
-        }
-
-        if let result = processed {
-            switch result {
-            case .data(let data):
-                completion(data, nil)
-            case .error(let error):
-                completion(nil, error)
-            case .needMore:
-                fetchMore(completion: completion)
-            case .skip:
-                self.receive(completion: completion)
-            case .closed:
-                completion(nil, nil)
-            }
-            return
-        }
-
-        fetchMore(completion: completion)
-    }
-
     // MARK: - Send / Receive (Raw, Unencrypted)
 
     // Async raw (unencrypted) surface for the VLESS-Vision direct-copy path, which peels the record
     // crypto and shuttles already-framed TLS records straight through. A given connection is driven
     // by one consumer, so this never races the encrypted `receive()` on `receiveBuffer`.
 
-    /// Sends `data` verbatim (no record encryption), ordered through ``sendPump`` so it serializes
-    /// with the encrypted sends and the internal KeyUpdate response.
+    /// Sends `data` verbatim (no record encryption), serialized through ``sendMutex`` so it
+    /// orders with the encrypted sends and the internal KeyUpdate response.
     func sendRaw(_ data: Data) async throws {
-        guard let sendPump else { throw TLSRecordError.connectionUnavailable }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendPump.enqueueSend(data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+        try await sendMutex.withLock {
+            guard let connection else { throw TLSRecordError.connectionUnavailable }
+            try await connection.send(data)
         }
     }
 
@@ -264,72 +184,27 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Sends TLS close_notify, then half-closes the underlying byte stream while
-    /// leaving the receive direction available.
-    func closeWrite(completion: @escaping (Error?) -> Void) {
-        sendLock.lock()
-        guard let sendPump else {
-            sendLock.unlock()
-            completion(TLSRecordError.connectionUnavailable)
-            return
-        }
-        if sentCloseNotify {
-            sendLock.unlock()
-            sendPump.enqueueFinish(completion: completion)
-            return
-        }
-        do {
-            let alertPayload = Data([TLSAlertLevel.warning, TLSAlertDescription.closeNotify])
-            let record: Data
-            if tlsVersion >= 0x0304 {
-                record = try encryptTLS13Record(plaintext: alertPayload, contentType: TLSContentType.alert)
-            } else {
-                record = try encryptTLS12Record(plaintext: alertPayload, contentType: TLSContentType.alert)
-            }
-            sentCloseNotify = true
-            sendLock.unlock()
-            // Ordered by the pump: close_notify first, then the transport half-close.
-            sendPump.enqueueSend(record, completion: nil)
-            sendPump.enqueueFinish(completion: completion)
-        } catch {
-            sendLock.unlock()
-            completion(error)
-        }
-    }
-
     // MARK: - Async Surface
 
-    // Async-native counterparts of `send`/`receive`/`closeWrite`, over the transport's
-    // async surface (through `sendPump` for writes). These are the primary path for async
-    // consumers (`TLSProxyConnection`/`RealityProxyConnection`, the MITM `MITMByteLeg` legs,
-    // and the async raw direct-copy above); the callback `send`/`receive` methods above remain
-    // only for the still-callback `TLSStreamTransport` (Naive) and `TLSRecordTransport` (SOCKS5-
-    // over-TLS handshake) consumers. Both share the synchronous record crypto and `processBuffer`;
+    // The record layer's send/receive/closeWrite surface, over the transport's async surface
+    // (writes serialized through `sendMutex`). Its consumers are `TLSProxyConnection`/
+    // `RealityProxyConnection`, the MITM `MITMByteLeg` legs, and the async raw direct-copy above.
+    // Sends and the raw direct-copy share the synchronous record crypto and `processBuffer`;
     // a given connection is driven by one consumer, so the receive paths never touch
     // `receiveBuffer` concurrently.
 
-    /// Encrypts `data` into TLS records and sends them, awaiting the write. Records are
-    /// built under `sendLock` (sequence-number ordering) and enqueued on ``sendPump``, which
-    /// drains writes in submission order — serializing the awaited write with the callback
-    /// sends and the internal KeyUpdate response so on-wire order is preserved.
+    /// Encrypts `data` into TLS records and sends them, awaiting the write. The record build
+    /// (sequence-number assignment, under `sendLock`) and the wire send happen under a single
+    /// ``sendMutex`` hold, so a record's sequence number always matches its position on the
+    /// wire — even under concurrent callers — and it orders with the internal KeyUpdate response.
     func send(_ data: Data) async throws {
-        sendLock.lock()
-        guard let sendPump else {
-            sendLock.unlock()
-            throw TLSRecordError.connectionUnavailable
-        }
-        let record: Data
-        do {
-            record = try buildTLSRecords(for: data)
-        } catch {
-            sendLock.unlock()
-            throw error
-        }
-        sendLock.unlock()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendPump.enqueueSend(record) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        try await sendMutex.withLock {
+            let record = try sendLock.withLock { () throws -> Data in
+                guard connection != nil else { throw TLSRecordError.connectionUnavailable }
+                return try buildTLSRecords(for: data)
             }
+            guard let connection else { throw TLSRecordError.connectionUnavailable }
+            try await connection.send(record)
         }
     }
 
@@ -343,7 +218,7 @@ nonisolated class TLSRecordConnection {
             receiveLock.unlock()
 
             if needsKeyUpdateResponse {
-                sendKeyUpdateResponseAndRekeyEgress()
+                await sendKeyUpdateResponseAndRekeyEgress()
             }
 
             if let result = processed {
@@ -378,19 +253,12 @@ nonisolated class TLSRecordConnection {
 
     /// Half-closes the underlying byte stream (transport FIN / end-of-stream), leaving the
     /// receive direction open. The TLS close_notify alert is intentionally not sent — a
-    /// plain half-close is used for graceful shutdown. Ordered through ``sendPump`` after
+    /// plain half-close is used for graceful shutdown. Serialized through ``sendMutex`` after
     /// every prior send.
     func closeWrite() async throws {
-        sendLock.lock()
-        guard let sendPump else {
-            sendLock.unlock()
-            throw TLSRecordError.connectionUnavailable
-        }
-        sendLock.unlock()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendPump.enqueueFinish { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+        try await sendMutex.withLock {
+            guard let connection else { throw TLSRecordError.connectionUnavailable }
+            try await connection.finishSend()
         }
     }
 
@@ -400,7 +268,7 @@ nonisolated class TLSRecordConnection {
     func cancel() {
         sendLock.lock()
         let transport = connection
-        connection = nil            // didSet finishes the send pump
+        connection = nil            // in-flight and subsequent sends see nil and abort
         sendLock.unlock()
 
         receiveLock.lock()
@@ -418,60 +286,6 @@ nonisolated class TLSRecordConnection {
         case needMore
         case skip
         case closed
-    }
-
-    private func fetchMore(completion: @escaping (Data?, Error?) -> Void) {
-        guard let connection else {
-            completion(nil, TLSRecordError.connectionUnavailable)
-            return
-        }
-        Task { [weak self] in
-            let chunk: TransportChunk
-            do {
-                chunk = try await connection.receive()
-            } catch {
-                completion(nil, error)
-                return
-            }
-
-            guard let self else {
-                completion(nil, nil)
-                return
-            }
-
-            guard case .bytes(let data) = chunk else {
-                completion(nil, nil)   // .end → clean close
-                return
-            }
-
-            self.receiveLock.lock()
-            self.receiveBuffer.append(data)
-            let processed = self.processBuffer()
-            let needsKeyUpdateResponse = self.keyUpdateResponsePending
-            self.keyUpdateResponsePending = false
-            self.receiveLock.unlock()
-
-            if needsKeyUpdateResponse {
-                self.sendKeyUpdateResponseAndRekeyEgress()
-            }
-
-            if let result = processed {
-                switch result {
-                case .data(let data):
-                    completion(data, nil)
-                case .error(let error):
-                    completion(nil, error)
-                case .needMore:
-                    self.fetchMore(completion: completion)
-                case .skip:
-                    self.receive(completion: completion)
-                case .closed:
-                    completion(nil, nil)
-                }
-            } else {
-                self.fetchMore(completion: completion)
-            }
-        }
     }
 
     private func processBuffer() -> BufferResult? {

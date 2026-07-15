@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP11Connection")
 
@@ -21,13 +22,11 @@ nonisolated class NaiveHTTP11Connection: HTTPTunnel {
     private let extraHeaders: [(name: String, value: String)]
     private let destination: String
 
-    private var connected = false
-    /// `.userInitiated` matches the data-plane priority of the rest of the chain.
-    private let queue = DispatchQueue(label: AWCore.Identifier.http11Queue, qos: .userInitiated)
+    private let _connected = Atomic<Bool>(false)
 
     let responseHeaders: [(name: String, value: String)] = []
 
-    var isConnected: Bool { connected }
+    var isConnected: Bool { _connected.load(ordering: .relaxed) }
 
     // MARK: - Initialization
 
@@ -40,40 +39,29 @@ nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
     // MARK: - Open Tunnel
 
-    func openTunnel(completion: @escaping (Error?) -> Void) {
-        queue.async { [self] in
-            transport.connect { [weak self] error in
-                guard let self else { return }
-                self.queue.async {
-                    if let error {
-                        completion(error)
-                        return
-                    }
-                    self.sendConnectRequest(completion: completion)
-                }
-            }
-        }
+    func openTunnel() async throws {
+        try await transport.connect()
+        try await sendConnectRequest()
     }
 
     // MARK: - Data Transfer
 
-    func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
-        transport.send(data: data, completion: completion)
+    func sendData(_ data: Data) async throws {
+        try await transport.send(data)
     }
 
-    /// - Parameter completion: `(data, nil)` on success, `(nil, nil)` for EOF, `(nil, error)` on failure.
-    func receiveData(completion: @escaping (Data?, Error?) -> Void) {
-        transport.receive(completion: completion)
+    func receiveData() async throws -> Data? {
+        try await transport.receive()
     }
 
     func close() {
-        connected = false
+        _connected.store(false, ordering: .relaxed)
         transport.cancel()
     }
 
     // MARK: - CONNECT Request
 
-    private func sendConnectRequest(completion: @escaping (Error?) -> Void) {
+    private func sendConnectRequest() async throws {
         var request = "CONNECT \(destination) HTTP/1.1\r\n"
         request += "Host: \(destination)\r\n"
         request += "Proxy-Connection: keep-alive\r\n"
@@ -82,77 +70,55 @@ nonisolated class NaiveHTTP11Connection: HTTPTunnel {
         }
         request += "\r\n"
 
-        transport.send(data: Data(request.utf8)) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                completion(error)
-                return
-            }
-            self.receiveConnectResponse(buffer: Data(), completion: completion)
-        }
+        try await transport.send(Data(request.utf8))
+        try await receiveConnectResponse()
     }
 
     // MARK: - CONNECT Response
 
-    private func receiveConnectResponse(buffer: Data, completion: @escaping (Error?) -> Void) {
-        transport.receive { [weak self] data, error in
-            guard let self else { return }
-
-            if let error {
-                completion(error)
-                return
+    private func receiveConnectResponse() async throws {
+        var accumulated = Data()
+        while true {
+            guard let data = try await transport.receive(), !data.isEmpty else {
+                throw TLSStreamError.connectionFailed("Connection closed during CONNECT")
             }
-
-            guard let data, !data.isEmpty else {
-                completion(TLSStreamError.connectionFailed("Connection closed during CONNECT"))
-                return
-            }
-
-            var accumulated = buffer
             accumulated.append(data)
 
             guard let headerEnd = accumulated.findNaiveHTTP11HeaderEnd() else {
-                self.receiveConnectResponse(buffer: accumulated, completion: completion)
-                return
+                continue
             }
 
             let headerData = accumulated[..<headerEnd]
             guard let headerString = String(data: headerData, encoding: .utf8) else {
-                completion(TLSStreamError.connectionFailed("Invalid CONNECT response encoding"))
-                return
+                throw TLSStreamError.connectionFailed("Invalid CONNECT response encoding")
             }
 
             let statusLine = headerString.prefix(while: { $0 != "\r" && $0 != "\n" })
             let parts = statusLine.split(separator: " ", maxSplits: 2)
             guard parts.count >= 2 else {
-                completion(TLSStreamError.connectionFailed("Malformed CONNECT status line"))
-                return
+                throw TLSStreamError.connectionFailed("Malformed CONNECT status line")
             }
 
             guard parts[0].hasPrefix("HTTP/1.") else {
-                completion(TLSStreamError.connectionFailed("Invalid HTTP version in CONNECT response"))
-                return
+                throw TLSStreamError.connectionFailed("Invalid HTTP version in CONNECT response")
             }
 
             let statusCode = String(parts[1])
             guard statusCode == "200" else {
                 if statusCode == "407" {
-                    completion(TLSStreamError.connectionFailed("Proxy authentication required (407)"))
-                } else {
-                    completion(TLSStreamError.connectionFailed("CONNECT failed with status \(statusCode)"))
+                    throw TLSStreamError.connectionFailed("Proxy authentication required (407)")
                 }
-                return
+                throw TLSStreamError.connectionFailed("CONNECT failed with status \(statusCode)")
             }
 
             // Security hardening: the proxy must not send data before the tunnel is established.
             let afterHeaders = headerEnd + 4  // skip \r\n\r\n
             if afterHeaders < accumulated.count {
-                completion(TLSStreamError.connectionFailed("Proxy sent extraneous data after CONNECT response"))
-                return
+                throw TLSStreamError.connectionFailed("Proxy sent extraneous data after CONNECT response")
             }
 
-            self.connected = true
-            completion(nil)
+            _connected.store(true, ordering: .relaxed)
+            return
         }
     }
 }

@@ -7,19 +7,6 @@
 
 import Foundation
 
-// MARK: - AsyncSendPump
-
-/// Serializes callback-issued sends onto a single async task, preserving submission
-/// order and `await` backpressure.
-///
-/// A callback consumer can fire-and-forget `send(A); send(B)`, which would race if
-/// each were bridged to its own `Task`. This pump drains a submission-ordered
-/// `AsyncStream` on one task, so `send(A)` completes before `send(B)` starts, and a
-/// `finishSend` (half-close) is ordered after every send already enqueued.
-///
-/// Kept `nonisolated` and `@unchecked Sendable`: the caller's completion isn't
-/// `Sendable`, but each job runs only on the pump task. Used by
-/// ``AsyncProxyConnection`` and ``TLSRecordConnection``.
 nonisolated final class AsyncSendPump: @unchecked Sendable {
 
     /// One ordered send job. `@unchecked` because `completion` isn't `Sendable`;
@@ -38,7 +25,7 @@ nonisolated final class AsyncSendPump: @unchecked Sendable {
     ///   - finish: half-closes the send direction; ordered after every prior send.
     ///
     /// Capture only what the closures need — never the owning adapter strongly — so the
-    /// pump task doesn't retain it (see ``AsyncProxyConnection`` for the weak-self form).
+    /// pump task doesn't retain it (use a weak-self form when the closure needs the owner).
     init(
         send: @escaping @Sendable (Data) async throws -> Void,
         finish: @escaping @Sendable () async throws -> Void

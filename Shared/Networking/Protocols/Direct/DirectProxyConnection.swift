@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated final class DirectProxyConnection: AsyncProxyConnection, @unchecked Sendable {
+nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Sendable {
 
     private let transport: any AsyncByteTransport
 
@@ -33,7 +33,7 @@ nonisolated final class DirectProxyConnection: AsyncProxyConnection, @unchecked 
         try await transport.finishSend()
     }
 
-    override func performCancel() {
+    override func cancel() {
         transport.cancel()
     }
 }

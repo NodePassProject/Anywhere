@@ -25,119 +25,69 @@ typealias MITMDialer = (
 
 final class MITMSession {
 
-    // MARK: - Inner Transport (RawTransport adapter for the lwIP side)
+    // MARK: - Inner Transport (async byte transport for the lwIP side)
 
     /// Bidirectional pipe between the inner-leg TLS record connection and the lwIP-attached caller.
-    final class InnerTransport: RawTransport {
+    /// Client→session bytes arrive via ``feedFromClient(_:)``/``endOfClient()`` and drain through an
+    /// ``AsyncByteChannel``; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
+    /// lwIP write buffers and gives no backpressure signal).
+    final class InnerTransport: AsyncByteTransport, @unchecked Sendable {
         let queue: DispatchQueue
-        var onSendToClient: ((Data, ((Error?) -> Void)?) -> Void)?
+        var onSendToClient: ((Data) -> Void)?
 
+        private let inbox = AsyncByteChannel()
         private struct State {
-            var buffer = Data()
-            var pending: ((Data?, Bool, Error?) -> Void)?
             var closed = false
             /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
             /// the client stay open so an in-flight response still drains — matching the non-MITM path,
-            /// which keeps pumping downlink after a client FIN. `closed` (forceCancel) blocks both sides.
+            /// which keeps pumping downlink after a client FIN. `closed` (cancel) blocks both sides.
             var receiveClosed = false
         }
         private let state = Mutex(State())
 
-        var isTransportReady: Bool { state.withLock { !$0.closed } }
+        var isReady: Bool { state.withLock { !$0.closed } }
 
         init(queue: DispatchQueue) {
             self.queue = queue
         }
 
-        // MARK: RawTransport
+        // MARK: AsyncByteTransport
 
-        func send(data: Data, completion: @escaping (Error?) -> Void) {
-            queue.async { [self] in
-                guard !state.withLock({ $0.closed }) else {
-                    completion(TransportError.notConnected)
-                    return
-                }
-                if let onSendToClient {
-                    onSendToClient(data, completion)
-                } else {
-                    completion(nil)
-                }
-            }
-        }
-
-        func send(data: Data) {
+        func send(_ data: Data) async throws {
+            guard !state.withLock({ $0.closed }) else { throw TransportError.notConnected }
+            // Ordered onto the lwIP queue (the confinement for onSendToClient/writeToLWIP); the lwIP
+            // write buffers, so there is no completion to await — enqueueing preserves send order.
             queue.async { [self] in
                 guard !state.withLock({ $0.closed }) else { return }
-                onSendToClient?(data, nil)
+                onSendToClient?(data)
             }
         }
 
-        func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
-            // Extract under the lock; the completion is invoked outside it.
-            let immediate: (Data?, Bool)? = state.withLock { state in
-                if !state.buffer.isEmpty {
-                    let data = state.buffer
-                    state.buffer = Data()
-                    return (data, false)
-                }
-                if state.closed || state.receiveClosed {
-                    return (nil, true)
-                }
-                state.pending = completion
-                return nil
-            }
-            if let (data, isComplete) = immediate {
-                completion(data, isComplete, nil)
-            }
+        func finishSend() async throws {
+            // The inner leg never half-closes the lwIP downlink — an in-flight response still drains
+            // after a client FIN — so there is nothing to signal here.
         }
 
-        func forceCancel() {
-            // Capture the stored callback under the lock; invoke it after.
-            let callback = state.withLock { state -> ((Data?, Bool, Error?) -> Void)? in
-                state.closed = true
-                let callback = state.pending
-                state.pending = nil
-                state.buffer = Data()
-                return callback
-            }
-            callback?(nil, true, nil)
+        func receive() async throws -> TransportChunk {
+            if let data = try await inbox.next() { return .bytes(data) }
+            return .end
         }
 
-        // MARK: External Inputs
+        func cancel() {
+            state.withLock { $0.closed = true }
+            inbox.cancel()
+        }
+
+        // MARK: External Inputs (from the lwIP side, on `queue`)
 
         func feedFromClient(_ data: Data) {
-            // Capture the stored callback under the lock; invoke it after.
-            let callback = state.withLock { state -> ((Data?, Bool, Error?) -> Void)? in
-                if state.closed || state.receiveClosed {
-                    return nil
-                }
-                if let callback = state.pending {
-                    state.pending = nil
-                    return callback
-                }
-                state.buffer.append(data)
-                return nil
-            }
-            callback?(data, false, nil)
+            guard !state.withLock({ $0.closed || $0.receiveClosed }) else { return }
+            inbox.yield(data)
         }
 
         func endOfClient() {
-            // Capture the stored callback + buffered bytes under the lock; invoke after.
-            let (callback, pendingBuffer) = state.withLock { state -> (((Data?, Bool, Error?) -> Void)?, Data) in
-                state.receiveClosed = true
-                let callback = state.pending
-                state.pending = nil
-                let pendingBuffer = state.buffer
-                state.buffer = Data()
-                return (callback, pendingBuffer)
-            }
-            if let callback {
-                if pendingBuffer.isEmpty {
-                    callback(nil, true, nil)
-                } else {
-                    callback(pendingBuffer, true, nil)
-                }
-            }
+            state.withLock { $0.receiveClosed = true }
+            inbox.finish()
         }
     }
 
@@ -318,8 +268,8 @@ final class MITMSession {
 
     private var torn = false
 
-    /// Set by the lwIP-side caller to write inner-leg bytes back to the client.
-    var onSendToClient: ((Data, ((Error?) -> Void)?) -> Void)? {
+    /// Set by the lwIP-side caller to write inner-leg bytes back to the client (fire-and-forget).
+    var onSendToClient: ((Data) -> Void)? {
         didSet { innerTransport.onSendToClient = onSendToClient }
     }
 
@@ -505,7 +455,7 @@ final class MITMSession {
         proxyClient = nil
         pendingUpstreamBytes = Data()
         legSenders.removeAll()
-        innerTransport.forceCancel()
+        innerTransport.cancel()
         onTeardown?(error)
     }
 
@@ -1054,7 +1004,7 @@ final class MITMSession {
 extension MITMSession: TLSServerDelegate {
 
     func tlsServer(_ server: TLSServer, didProduceOutput data: Data) {
-        onSendToClient?(data, nil)
+        onSendToClient?(data)
     }
 
     func tlsServer(
@@ -1064,10 +1014,8 @@ extension MITMSession: TLSServerDelegate {
         alpn: String,
         clientFinishedHandshakeTrailer: Data
     ) {
-        // The inner leg's byte transport is the lwIP-attached `InnerTransport` (a callback
-        // `RawTransport`); adapt it to the record layer's async surface until the MITM data
-        // plane goes async-native.
-        record.connection = RawToAsyncByteTransport(innerTransport)
+        // The inner leg's byte transport is the lwIP-attached async-native `InnerTransport`.
+        record.connection = innerTransport
         record.prependToReceiveBuffer(clientFinishedHandshakeTrailer)
         innerRecord = record
         tlsServer = nil

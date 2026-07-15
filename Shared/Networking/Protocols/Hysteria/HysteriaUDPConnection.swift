@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaUDPConnection")
 
-nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
+nonisolated final class HysteriaUDPConnection: ProxyConnection {
 
     enum State { case idle, ready, closed }
 
@@ -18,8 +18,7 @@ nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
     private let destination: String
 
     /// Confined to `session.queue`. The setter mirrors readiness into
-    /// `_isReady` so `isConnected` avoids a sync hop onto `session.queue` —
-    /// one half of a udpQueue⇄quic.queue deadlock.
+    /// `_isReady` so `isConnected` avoids a sync hop onto `session.queue`.
     private var _state: State = .idle
     private var state: State {
         get { _state }
@@ -30,17 +29,21 @@ nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
     }
     private let _isReady = Atomic<Bool>(false)
 
-    private var sessionID: UInt32 = 0
+    /// Assigned once on `session.queue` during open, then read from the async send path.
+    private let _sessionID = Atomic<UInt32>(0)
+    private var sessionID: UInt32 {
+        get { _sessionID.load(ordering: .relaxed) }
+        set { _sessionID.store(newValue, ordering: .relaxed) }
+    }
 
-    /// Bounded FIFO with drop-oldest semantics (UDP is lossy). Mutated on `session.queue`.
-    private var packetQueue: [Data] = []
-    private static let maxQueuedPackets = 1024
+    /// Reassembled inbound datagrams / EOF / error, pushed from the session's datagram
+    /// demux (on `session.queue`, inside ngtcp2's recv_datagram) and pulled by `receiveRaw`.
+    /// The async replacement for the parked `pendingReceive`; datagrams aren't flow-controlled,
+    /// so steady-state depth stays near zero because `UDPFlow` drains it in a tight loop.
+    private let inbox = AsyncByteChannel()
 
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-
-    /// Error stashed when the session tears down with no pending receive;
-    /// surfaced on the next `receiveRaw`.
-    private var closureError: Error?
+    /// Serializes framed datagram writes (and thus PacketID allocation) across the wire `await`.
+    private let sendMutex = AsyncMutex()
 
     /// Per-PacketID reassembly slot; fragments arrive interleaved, so each
     /// PacketID owns one. Evicted on completion, TTL expiry, or cap overflow.
@@ -58,7 +61,7 @@ nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
 
     /// Monotonic PacketID, wrapping 0xFFFF → 1 and skipping 0 ("unfragmented"
     /// to some servers); colliding IDs would merge two packets into one
-    /// corrupt defrag slot. Mutated on `session.queue`.
+    /// corrupt defrag slot. Mutated only under `sendMutex`.
     private var nextPacketID: UInt16 = 1
 
     init(session: HysteriaSession, destination: String) {
@@ -103,20 +106,9 @@ nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
         } else {
             assembled = assembleFragment(message)
         }
-        // Drop empty payloads: receiveLoop treats empty Data as EOF, so a
-        // zero-byte datagram would close the flow.
+        // Drop empty payloads: an empty datagram would look like EOF to the reader.
         guard let payload = assembled, !payload.isEmpty else { return }
-
-        if let callback = pendingReceive {
-            pendingReceive = nil
-            // Hop so the completion never fires from ngtcp2's recv_datagram call stack.
-            session.queue.async { callback(payload, nil) }
-            return
-        }
-        if packetQueue.count >= Self.maxQueuedPackets {
-            packetQueue.removeFirst()
-        }
-        packetQueue.append(payload)
+        inbox.yield(payload)
     }
 
     private func assembleFragment(_ message: HysteriaProtocol.UDPMessage) -> Data? {
@@ -183,145 +175,73 @@ nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
     // MARK: - ProxyConnection overrides
 
     /// Wraps `data` in a Hysteria UDP datagram, fragmenting at the QUIC DATAGRAM MTU.
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+    override func sendRaw(_ data: Data) async throws {
         // The wire format requires ≥1 data byte after the address; the
         // server silently discards zero-byte payloads.
-        guard !data.isEmpty else {
-            completion(nil)
-            return
+        guard !data.isEmpty else { return }
+        guard _isReady.load(ordering: .relaxed) else {
+            throw HysteriaError.streamClosed
         }
-        session.queue.async { [weak self] in
-            guard let self else { completion(HysteriaError.streamClosed); return }
-            guard self.state == .ready else {
-                completion(self.state == .closed ? HysteriaError.streamClosed : HysteriaError.notReady)
-                return
-            }
-            self.attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1, completion: completion)
+        // Serialize so PacketID allocation and datagram order match on-wire order.
+        try await sendMutex.withLock {
+            try await self.attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1)
         }
     }
 
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    /// Fragments `data` and submits to QUIC; on `datagramTooLarge` (PMTU
-    /// shrank mid-send) retries once with the bound from the error.
-    /// Called on `session.queue`.
-    private func attemptSend(
-        data: Data,
-        maxSizeOverride: Int?,
-        retriesLeft: Int,
-        completion: @escaping (Error?) -> Void
-    ) {
+    /// Fragments `data` and submits to QUIC; on `datagramTooLarge` (PMTU shrank
+    /// mid-send) retries once with the bound from the error. Runs under `sendMutex`.
+    private func attemptSend(data: Data, maxSizeOverride: Int?, retriesLeft: Int) async throws {
         // maxSize 0 (DATAGRAM unsupported / MTU collapsed) is permanent for
         // this fixed destination — surface a terminal error.
-        let maxSize = maxSizeOverride ?? self.session.maxDatagramPayloadSize
-        let headerSize = HysteriaProtocol.udpHeaderSize(address: self.destination)
-        guard maxSize > headerSize else {
-            completion(HysteriaError.destinationTooLargeForDatagram(
-                maxFrame: maxSize, headerSize: headerSize
-            ))
-            return
+        let maxSize: Int
+        if let maxSizeOverride {
+            maxSize = maxSizeOverride
+        } else {
+            maxSize = await session.currentMaxDatagramPayloadSize()
         }
-        let packetID = self.newPacketID()
+        let headerSize = HysteriaProtocol.udpHeaderSize(address: destination)
+        guard maxSize > headerSize else {
+            throw HysteriaError.destinationTooLargeForDatagram(maxFrame: maxSize, headerSize: headerSize)
+        }
+        let packetID = newPacketID()
         let fragments = HysteriaProtocol.fragmentUDP(
-            sessionID: self.sessionID,
+            sessionID: sessionID,
             packetID: packetID,
-            address: self.destination,
+            address: destination,
             data: data,
             maxDatagramSize: maxSize
         )
         guard !fragments.isEmpty else {
-            completion(HysteriaError.connectionFailed("UDP payload too large to fragment"))
-            return
+            throw HysteriaError.connectionFailed("UDP payload too large to fragment")
         }
         let encoded = fragments.map { $0.encoded }
-        self.session.writeDatagrams(encoded) { [weak self] error in
-            // Fires on `session.queue`, so direct recursion into `attemptSend` is safe.
+        do {
+            try await session.writeDatagrams(encoded)
+        } catch {
             if let qErr = error as? QUICConnection.QUICError,
                case .datagramTooLarge(let maxBound) = qErr,
-               retriesLeft > 0,
-               let self = self {
-                guard self.state == .ready else {
-                    completion(self.state == .closed
-                        ? HysteriaError.streamClosed
-                        : HysteriaError.notReady)
-                    return
+               retriesLeft > 0 {
+                guard _isReady.load(ordering: .relaxed) else {
+                    throw HysteriaError.streamClosed
                 }
-                self.attemptSend(
-                    data: data,
-                    maxSizeOverride: maxBound,
-                    retriesLeft: retriesLeft - 1,
-                    completion: completion
-                )
+                try await attemptSend(data: data, maxSizeOverride: maxBound, retriesLeft: retriesLeft - 1)
                 return
             }
-            completion(error)
-        }
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        // Hop to the owning queue for packetQueue/pendingReceive/closureError.
-        session.queue.async { [weak self] in
-            guard let self else {
-                completion(nil, HysteriaError.streamClosed)
-                return
-            }
-            // Drain buffered packets before surfacing errors — they arrived
-            // before the failure and represent good data.
-            if !self.packetQueue.isEmpty {
-                let packet = self.packetQueue.removeFirst()
-                completion(packet, nil)
-                return
-            }
-            // Surface any error stashed by a teardown between calls.
-            if let error = self.closureError {
-                self.closureError = nil
-                completion(nil, error)
-                return
-            }
-            // No buffered data, no stashed error, already closed → EOF.
-            if self.state == .closed {
-                completion(nil, nil)
-                return
-            }
-            // Overlapping receives are an API violation; fail the stale
-            // completion rather than dropping it (it captures the receive
-            // loop closure and would hang it permanently).
-            let stale = self.pendingReceive
-            self.pendingReceive = completion
-            stale?(nil, HysteriaError.connectionFailed("overlapping receiveRaw on Hysteria UDP"))
-        }
-    }
-
-    // MARK: - Async Surface (bridges the callback datagram I/O above; deleted with it later)
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+            throw error
         }
     }
 
     override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
+        try await inbox.next()
     }
 
-    override func performCancel() {
+    override func cancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
             self.session.releaseUDPSession(self.sessionID)
-            let callback = self.pendingReceive
-            self.pendingReceive = nil
-            self.packetQueue.removeAll()
             self.defragSlots.removeAll()
-            callback?(nil, HysteriaError.streamClosed)
+            self.inbox.cancel()
         }
     }
 
@@ -329,20 +249,14 @@ nonisolated final class HysteriaUDPConnection: AsyncProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
-            let callback = self.pendingReceive
-            self.pendingReceive = nil
-            // No pending receive: stash so the next `receiveRaw` surfaces it.
-            if callback == nil {
-                self.closureError = error
-            }
-            callback?(nil, error)
+            self.inbox.fail(error)
         }
     }
 
     // MARK: - Helpers
 
+    /// Next PacketID; called only under `sendMutex`, so no queue confinement is needed.
     private func newPacketID() -> UInt16 {
-        dispatchPrecondition(condition: .onQueue(session.queue))
         let pid = nextPacketID
         nextPacketID = nextPacketID == UInt16.max ? 1 : nextPacketID + 1
         return pid

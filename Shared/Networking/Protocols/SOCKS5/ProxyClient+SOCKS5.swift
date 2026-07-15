@@ -21,7 +21,7 @@ extension ProxyClient {
 
         let transport: any AsyncByteTransport
         if let tunnel = self.tunnel {
-            transport = RawToAsyncByteTransport(TunneledTransport(tunnel: tunnel))
+            transport = TunneledTransport(tunnel: tunnel)
         } else {
             let tcp = TCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(tcp)
@@ -46,8 +46,6 @@ extension ProxyClient {
             )
             return SOCKS5UDPProxyConnection(
                 tcpTransport: transport,
-                tlsClient: nil,
-                tlsConnection: nil,
                 relay: relayConnection,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort

@@ -12,7 +12,8 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection
 // MARK: - ShadowsocksConnection
 
 /// Address header is prepended to the first send, encrypted as part of the AEAD stream.
-nonisolated class ShadowsocksConnection: AsyncProxyConnection {
+nonisolated class ShadowsocksConnection: ProxyConnection {
+    private let lock = UnfairLock()
     private let inner: ProxyConnection
     private let writer: ShadowsocksAEADWriter
     private let reader: ShadowsocksAEADReader
@@ -55,14 +56,14 @@ nonisolated class ShadowsocksConnection: AsyncProxyConnection {
         }
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 }
 
 // MARK: - ShadowsocksUDPConnection
 
-nonisolated class ShadowsocksUDPConnection: AsyncProxyConnection {
+nonisolated class ShadowsocksUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let masterKey: Data
@@ -99,7 +100,7 @@ nonisolated class ShadowsocksUDPConnection: AsyncProxyConnection {
         return parsed.payload
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 }

@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class VLESSUDPConnection: AsyncProxyConnection, UDPFramingCapable {
+nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: ProxyConnection
 
@@ -55,7 +55,7 @@ nonisolated final class VLESSUDPConnection: AsyncProxyConnection, UDPFramingCapa
 
     // MARK: - Cancel
 
-    override func performCancel() {
+    override func cancel() {
         udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
     }

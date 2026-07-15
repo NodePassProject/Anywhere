@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class TLSProxyConnection: AsyncProxyConnection {
+nonisolated class TLSProxyConnection: ProxyConnection {
     private let tlsConnection: TLSRecordConnection
 
     init(tlsConnection: TLSRecordConnection) {
@@ -33,7 +33,7 @@ nonisolated class TLSProxyConnection: AsyncProxyConnection {
         try await tlsConnection.closeWrite()
     }
 
-    override func performCancel() {
+    override func cancel() {
         tlsConnection.cancel()
     }
 

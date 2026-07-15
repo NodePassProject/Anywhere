@@ -12,7 +12,8 @@ nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
 // MARK: - TrojanUDPConnection
 
 /// Each datagram is framed as `addr:port + length + CRLF + payload`, after a one-shot UDP request header.
-nonisolated final class TrojanUDPConnection: AsyncProxyConnection {
+nonisolated final class TrojanUDPConnection: ProxyConnection {
+    private let lock = UnfairLock()
     private let inner: ProxyConnection
     private let passwordKey: Data
     private let destinationHost: String
@@ -42,7 +43,7 @@ nonisolated final class TrojanUDPConnection: AsyncProxyConnection {
         try await nextPacket()
     }
 
-    override func performCancel() {
+    override func cancel() {
         inner.cancel()
     }
 

@@ -15,16 +15,17 @@ nonisolated private let logger = AnywhereLogger(category: "NaiveProxyConnection"
 protocol NaiveTunnel: AnyObject {
     var isConnected: Bool { get }
     var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType { get }
-    func openTunnel(completion: @escaping (Error?) -> Void)
-    func sendData(_ data: Data, completion: @escaping (Error?) -> Void)
-    func receiveData(completion: @escaping (Data?, Error?) -> Void)
+    func openTunnel() async throws
+    func sendData(_ data: Data) async throws
+    /// `nil` signals EOF.
+    func receiveData() async throws -> Data?
     func close()
 }
 
 // MARK: - NaiveProxyConnection
 
 /// Padding framing applies only to the first 8 reads/writes, and only when the server negotiates variant 1.
-nonisolated class NaiveProxyConnection: AsyncProxyConnection {
+nonisolated class NaiveProxyConnection: ProxyConnection {
     private let tunnel: NaiveTunnel
     private var paddingFramer = NaivePaddingFramer()
     private let paddingType: NaivePaddingNegotiator.PaddingType
@@ -38,124 +39,80 @@ nonisolated class NaiveProxyConnection: AsyncProxyConnection {
     override var isConnected: Bool { tunnel.isConnected }
     override var outerTLSVersion: TLSVersion? { .tls13 }
 
-    // MARK: - Async Surface
-
-    // Bridges the callback padding framing below for the flipped class; deleted with it later.
-
-    override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
-        }
-    }
-
     // MARK: - Send
 
     /// Maximum payload that fits in one padding frame (2-byte length field).
     private static let maxPaddingPayload = 65535
 
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        if paddingFramer.isWritePaddingActive && paddingType == .variant1 {
-            if data.count >= 400 && data.count <= 1024 {
-                sendFragmented(data: data, offset: 0, completion: completion)
-                return
-            }
-            // Truncate to the 2-byte length cap; spill the remainder into a follow-up frame.
-            let payload = data.count > Self.maxPaddingPayload
-                ? Data(data.prefix(Self.maxPaddingPayload)) : data
-            let paddingSize = Self.generateSendPaddingSize(payloadSize: payload.count)
-            let framed = paddingFramer.write(payload: payload, paddingSize: paddingSize)
-            if payload.count < data.count {
-                tunnel.sendData(framed) { [weak self] error in
-                    if let error { completion(error); return }
-                    let rest = Data(data[payload.count...])
-                    self?.sendRaw(data: rest, completion: completion)
+    override func sendRaw(_ data: Data) async throws {
+        var data = data
+        while true {
+            if paddingFramer.isWritePaddingActive && paddingType == .variant1 {
+                if data.count >= 400 && data.count <= 1024 {
+                    try await sendFragmented(data: data)
+                    return
                 }
+                // Truncate to the 2-byte length cap; spill the remainder into a follow-up frame.
+                let payload = data.count > Self.maxPaddingPayload
+                    ? Data(data.prefix(Self.maxPaddingPayload)) : data
+                let paddingSize = Self.generateSendPaddingSize(payloadSize: payload.count)
+                let framed = paddingFramer.write(payload: payload, paddingSize: paddingSize)
+                try await tunnel.sendData(framed)
+                if payload.count < data.count {
+                    data = Data(data[payload.count...])
+                    continue
+                }
+                return
             } else {
-                tunnel.sendData(framed, completion: completion)
-            }
-        } else {
-            tunnel.sendData(data, completion: completion)
-        }
-    }
-
-    override func sendRaw(data: Data) {
-        sendRaw(data: data) { _ in }
-    }
-
-    private func sendFragmented(data: Data, offset: Int, completion: @escaping (Error?) -> Void) {
-        guard offset < data.count else {
-            completion(nil)
-            return
-        }
-
-        guard paddingFramer.isWritePaddingActive else {
-            let remaining = Data(data[offset...])
-            tunnel.sendData(remaining, completion: completion)
-            return
-        }
-
-        let remaining = data.count - offset
-        let chunkSize = remaining <= 300 ? remaining : Int.random(in: 200...300)
-        let chunk = Data(data[offset..<(offset + chunkSize)])
-        let paddingSize = Self.generateSendPaddingSize(payloadSize: chunk.count)
-        let framed = paddingFramer.write(payload: chunk, paddingSize: paddingSize)
-
-        tunnel.sendData(framed) { [weak self] error in
-            if let error {
-                completion(error)
+                try await tunnel.sendData(data)
                 return
             }
-            self?.sendFragmented(data: data, offset: offset + chunkSize, completion: completion)
+        }
+    }
+
+    private func sendFragmented(data: Data) async throws {
+        var offset = 0
+        while offset < data.count {
+            guard paddingFramer.isWritePaddingActive else {
+                let remaining = Data(data[offset...])
+                try await tunnel.sendData(remaining)
+                return
+            }
+
+            let remaining = data.count - offset
+            let chunkSize = remaining <= 300 ? remaining : Int.random(in: 200...300)
+            let chunk = Data(data[offset..<(offset + chunkSize)])
+            let paddingSize = Self.generateSendPaddingSize(payloadSize: chunk.count)
+            let framed = paddingFramer.write(payload: chunk, paddingSize: paddingSize)
+            try await tunnel.sendData(framed)
+            offset += chunkSize
         }
     }
 
     // MARK: - Receive
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        tunnel.receiveData { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
+    override func receiveRaw() async throws -> Data? {
+        while true {
+            guard let data = try await tunnel.receiveData(), !data.isEmpty else {
+                return nil
             }
 
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-
-            if self.paddingFramer.isReadPaddingActive && self.paddingType == .variant1 {
+            if paddingFramer.isReadPaddingActive && paddingType == .variant1 {
                 var output = Data()
-                let payloadBytes = self.paddingFramer.read(padded: data, into: &output)
+                let payloadBytes = paddingFramer.read(padded: data, into: &output)
                 if payloadBytes > 0 {
-                    completion(output, nil)
-                } else {
-                    // Pure-padding frame (0 payload bytes) — re-read
-                    self.receiveRaw(completion: completion)
+                    return output
                 }
-            } else {
-                completion(data, nil)
+                // Pure-padding frame (0 payload bytes) — re-read.
+                continue
             }
+            return data
         }
     }
 
     // MARK: - Cancel
 
-    override func performCancel() {
+    override func cancel() {
         tunnel.close()
     }
 

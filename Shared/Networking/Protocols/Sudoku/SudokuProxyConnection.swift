@@ -2775,9 +2775,10 @@ nonisolated final class SudokuMuxStream: @unchecked Sendable {
 }
 
 nonisolated final class SudokuTCPProxyConnection:
-    AsyncProxyConnection,
+    ProxyConnection,
     @unchecked Sendable
 {
+    private let lock = UnfairLock()
     private let stream: SudokuRecordStream
     private var closed = false
 
@@ -2803,13 +2804,14 @@ nonisolated final class SudokuTCPProxyConnection:
         try await stream.closeWrite()
     }
 
-    override func performCancel() { lock.withLock { closed = true }; stream.close() }
+    override func cancel() { lock.withLock { closed = true }; stream.close() }
 }
 
 nonisolated final class SudokuMuxTCPProxyConnection:
-    AsyncProxyConnection,
+    ProxyConnection,
     @unchecked Sendable
 {
+    private let lock = UnfairLock()
     private let client: SudokuMuxClient
     private let stream: SudokuMuxStream
     private let closesClientOnClose: Bool
@@ -2861,7 +2863,7 @@ nonisolated final class SudokuMuxTCPProxyConnection:
         try await stream.closeWrite()
     }
 
-    override func performCancel() {
+    override func cancel() {
         closeResources(closeStream: true)
     }
 
@@ -2879,7 +2881,8 @@ nonisolated final class SudokuMuxTCPProxyConnection:
     }
 }
 
-nonisolated final class SudokuUDPProxyConnection: AsyncProxyConnection, @unchecked Sendable {
+nonisolated final class SudokuUDPProxyConnection: ProxyConnection, @unchecked Sendable {
+    private let lock = UnfairLock()
     private let stream: SudokuRecordStream
     private let destinationHost: String
     private let destinationPort: UInt16
@@ -2920,5 +2923,5 @@ nonisolated final class SudokuUDPProxyConnection: AsyncProxyConnection, @uncheck
         }
     }
 
-    override func performCancel() { lock.withLock { closed = true }; stream.close() }
+    override func cancel() { lock.withLock { closed = true }; stream.close() }
 }

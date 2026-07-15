@@ -10,7 +10,7 @@ import Synchronization
 
 /// UDP-over-AnyTLS wrapper: after the UoT request `[isConnect=1][SocksaddrSerializer(dest)]`,
 /// every datagram in either direction is `[length BE u16][payload]`.
-nonisolated final class AnyTLSUDPConnection: AsyncProxyConnection, UDPFramingCapable {
+nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: AnyTLSStream
 
@@ -54,7 +54,7 @@ nonisolated final class AnyTLSUDPConnection: AsyncProxyConnection, UDPFramingCap
 
     // MARK: - Cancel
 
-    override func performCancel() {
+    override func cancel() {
         udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
     }

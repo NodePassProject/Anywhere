@@ -13,7 +13,7 @@ nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool
 /// a time — so each is reserved before its stream opens and released when it ends.
 nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer> {
 
-    typealias DialOut = (@escaping (Result<ProxyConnection, Error>) -> Void) -> Void
+    typealias DialOut = @Sendable () async throws -> ProxyConnection
 
     /// Single bucket — every mux here shares one endpoint + password.
     private static let bucket = "anytls"
@@ -41,64 +41,52 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
     }
 
     /// The opened stream expects a destination address as its first cmdPSH payload.
-    func acquireStream(completion: @escaping (Result<AnyTLSStream, Error>) -> Void) {
-        lock.lock()
-        if closed {
-            lock.unlock()
-            logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
-            completion(.failure(ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")))
-            return
+    func acquireStream() async throws -> AnyTLSStream {
+        let reused: AnyTLSMultiplexer? = try lock.withLock { () throws -> AnyTLSMultiplexer? in
+            if closed {
+                logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
+                throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
+            }
+            if let reused = multiplexers[Self.bucket]?.first(where: { $0.tryReserveStream() }) {
+                lastActivity[ObjectIdentifier(reused)] = MonotonicClock.now
+                return reused
+            }
+            return nil
         }
-        if let reused = multiplexers[Self.bucket]?.first(where: { $0.tryReserveStream() }) {
-            lastActivity[ObjectIdentifier(reused)] = MonotonicClock.now
-            lock.unlock()
+        if let reused {
             logger.debug("[AnyTLSMultiplexerPool] acquireStream reusing idle multiplexer seq=\(reused.seq)")
-            dispatchOpenStream(on: reused, completion: completion)
-            return
+            return try await dispatchOpenStream(on: reused)
         }
-        lock.unlock()
         logger.debug("[AnyTLSMultiplexerPool] acquireStream — no idle multiplexer, dialing fresh TLS multiplexer")
 
-        dialOut { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("AnyTLSMultiplexerPool deallocated")))
-                return
+        let connection = try await dialOut()
+        let multiplexer: AnyTLSMultiplexer = try lock.withLock { () throws -> AnyTLSMultiplexer in
+            if closed {
+                connection.cancel()
+                logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
+                throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
             }
-            switch result {
-            case .failure(let error):
-                logger.debug("[AnyTLSMultiplexerPool] dial failed: \(error.localizedDescription)")
-                completion(.failure(error))
-            case .success(let connection):
-                self.lock.lock()
-                if self.closed {
-                    self.lock.unlock()
-                    connection.cancel()
-                    logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
-                    completion(.failure(ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")))
-                    return
-                }
-                self.sessionCounter &+= 1
-                let seq = self.sessionCounter
-                let multiplexer = AnyTLSMultiplexer(
-                    inner: connection,
-                    passwordHash: self.passwordHash,
-                    padding: AnyTLSPaddingScheme.default
-                )
-                multiplexer.seq = seq
-                // Claim before publishing so a concurrent acquire can't grab it.
-                _ = multiplexer.tryReserveStream()
-                multiplexer.onClose = { [weak self, weak multiplexer] in
-                    guard let self, let multiplexer else { return }
-                    self.removeMultiplexer(multiplexer, key: Self.bucket)
-                }
-                self.multiplexers[Self.bucket, default: []].append(multiplexer)
-                self.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
-                self.lock.unlock()
-                logger.debug("[AnyTLSMultiplexerPool] new multiplexer seq=\(seq) — running handshake")
-                multiplexer.start()
-                self.dispatchOpenStream(on: multiplexer, completion: completion)
+            sessionCounter &+= 1
+            let seq = sessionCounter
+            let multiplexer = AnyTLSMultiplexer(
+                inner: connection,
+                passwordHash: passwordHash,
+                padding: AnyTLSPaddingScheme.default
+            )
+            multiplexer.seq = seq
+            // Claim before publishing so a concurrent acquire can't grab it.
+            _ = multiplexer.tryReserveStream()
+            multiplexer.onClose = { [weak self, weak multiplexer] in
+                guard let self, let multiplexer else { return }
+                self.removeMultiplexer(multiplexer, key: Self.bucket)
             }
+            multiplexers[Self.bucket, default: []].append(multiplexer)
+            lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            return multiplexer
         }
+        logger.debug("[AnyTLSMultiplexerPool] new multiplexer seq=\(multiplexer.seq) — running handshake")
+        await multiplexer.start()
+        return try await dispatchOpenStream(on: multiplexer)
     }
 
     /// Sets `closed` to reject new acquires, then defers to the base.
@@ -111,11 +99,10 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
 
     // MARK: - Private
 
-    private func dispatchOpenStream(on multiplexer: AnyTLSMultiplexer, completion: @escaping (Result<AnyTLSStream, Error>) -> Void) {
-        guard let stream = multiplexer.openStream() else {
+    private func dispatchOpenStream(on multiplexer: AnyTLSMultiplexer) async throws -> AnyTLSStream {
+        guard let stream = await multiplexer.openStream() else {
             logger.debug("[AnyTLSMultiplexerPool] openStream failed on multiplexer seq=\(multiplexer.seq)")
-            completion(.failure(ProxyError.connectionFailed("Failed to open AnyTLS stream")))
-            return
+            throw ProxyError.connectionFailed("Failed to open AnyTLS stream")
         }
         // Release the reservation and restart the idle clock at stream end, so a freed mux is
         // kept warm for the full idle timeout (not evicted right after a long transfer).
@@ -129,6 +116,6 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
             }
             self.lock.unlock()
         }
-        completion(.success(stream))
+        return stream
     }
 }

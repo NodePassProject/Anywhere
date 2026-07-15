@@ -32,7 +32,7 @@ extension ProxyClient {
         own(tlsConnection)
 
         let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
-        return try wrapTrojan(
+        return try await wrapTrojan(
             over: tlsProxyConnection,
             password: password,
             command: command,
@@ -44,6 +44,8 @@ extension ProxyClient {
 
     /// Wraps a TLS connection with Trojan framing; `initialData` is sent through
     /// the wrapper so the Trojan header and first payload coalesce into one TLS record.
+    /// The intro send is awaited before the connection is returned, so it is ordered
+    /// ahead of the caller's first send.
     private func wrapTrojan(
         over tlsConnection: ProxyConnection,
         password: String,
@@ -51,7 +53,7 @@ extension ProxyClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?
-    ) throws -> ProxyConnection {
+    ) async throws -> ProxyConnection {
         switch command {
         case .tcp:
             let trojan = TrojanConnection(
@@ -61,7 +63,7 @@ extension ProxyClient {
                 destinationPort: destinationPort
             )
             if let initialData, !initialData.isEmpty {
-                trojan.send(data: initialData)
+                try await trojan.send(initialData)
             }
             return trojan
         case .udp:

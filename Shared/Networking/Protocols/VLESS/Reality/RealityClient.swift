@@ -70,7 +70,7 @@ nonisolated class RealityClient {
             guard let privateKey = ephemeralPrivateKey else {
                 throw RealityError.handshakeFailed("No ephemeral key")
             }
-            self.connection = RawToAsyncByteTransport(TunneledTransport(tunnel: tunnel))
+            self.connection = TunneledTransport(tunnel: tunnel)
 
             let clientHello = try buildRealityClientHello(privateKey: privateKey)
             storedClientHello = clientHello.subdata(in: 5..<clientHello.count)

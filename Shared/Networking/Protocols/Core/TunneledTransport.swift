@@ -7,42 +7,31 @@
 
 import Foundation
 
-/// Adapts a ``ProxyConnection`` to ``RawTransport`` for proxy chaining: one link's output becomes the next link's socket.
-/// Sends/receives bypass the tunnel's traffic stats (each link tracks its own).
-nonisolated class TunneledTransport: RawTransport {
+nonisolated final class TunneledTransport: AsyncByteTransport, @unchecked Sendable {
     private let tunnel: ProxyConnection
 
     init(tunnel: ProxyConnection) {
         self.tunnel = tunnel
     }
 
-    var isTransportReady: Bool { tunnel.isConnected }
+    var isReady: Bool { tunnel.isConnected }
 
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        tunnel.sendRaw(data: data, completion: completion)
+    func send(_ data: Data) async throws {
+        try await tunnel.sendRaw(data)
     }
 
-    func send(data: Data) {
-        tunnel.sendRaw(data: data)
+    func finishSend() async throws {
+        try await tunnel.closeWrite()
     }
 
-    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
-        tunnel.receiveRaw { data, error in
-            if let error {
-                completion(nil, true, error)
-            } else if let data, !data.isEmpty {
-                completion(data, false, nil)
-            } else {
-                completion(nil, true, nil) // EOF
-            }
+    func receive() async throws -> TransportChunk {
+        if let data = try await tunnel.receiveRaw(), !data.isEmpty {
+            return .bytes(data)
         }
+        return .end
     }
 
-    func closeWrite(completion: @escaping (Error?) -> Void) {
-        tunnel.closeWrite(completion: completion)
-    }
-
-    func forceCancel() {
+    func cancel() {
         tunnel.cancel()
     }
 }

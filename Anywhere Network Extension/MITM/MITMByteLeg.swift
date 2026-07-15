@@ -25,7 +25,7 @@ extension TLSRecordConnection: MITMByteLeg {}
 nonisolated final class PlaintextLeg: MITMByteLeg {
     let negotiatedALPN: String = ""
 
-    private let transport: any RawTransport
+    private let transport: any AsyncByteTransport
 
     private struct State {
         var prepended = Data()
@@ -33,7 +33,7 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
     }
     private let state = Mutex(State())
 
-    init(transport: any RawTransport) {
+    init(transport: any AsyncByteTransport) {
         self.transport = transport
     }
 
@@ -55,25 +55,14 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
         if let buffered { return buffered }
         if isCancelled { return nil }
 
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            transport.receive { data, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let data, !data.isEmpty {
-                    continuation.resume(returning: data)
-                } else {
-                    continuation.resume(returning: nil)   // isComplete or empty → EOF
-                }
-            }
+        switch try await transport.receive() {
+        case .bytes(let data): return data
+        case .end:             return nil
         }
     }
 
     func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            transport.send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await transport.send(data)
     }
 
     func cancel() {
@@ -81,6 +70,6 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
             state.cancelled = true
             state.prepended = Data()
         }
-        transport.forceCancel()
+        transport.cancel()
     }
 }
