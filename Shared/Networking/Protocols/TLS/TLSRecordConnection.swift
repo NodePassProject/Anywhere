@@ -20,7 +20,7 @@ nonisolated class TLSRecordConnection {
     /// The underlying async byte transport. Assigning it (re)builds ``sendPump`` so every
     /// write — the async surface, the callback trio, the raw callbacks, and the internal
     /// KeyUpdate response — drains in submission order over one task, exactly as the
-    /// old ``CallbackByteTransport`` pump did. `nil` after ``cancel()``.
+    /// old callback byte-transport pump did. `nil` after ``cancel()``.
     var connection: (any AsyncByteTransport)? {
         didSet {
             sendPump?.finish()
@@ -230,43 +230,38 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Send / Receive (Raw, Unencrypted)
 
-    func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+    // Async raw (unencrypted) surface for the VLESS-Vision direct-copy path, which peels the record
+    // crypto and shuttles already-framed TLS records straight through. A given connection is driven
+    // by one consumer, so this never races the encrypted `receive()` on `receiveBuffer`.
+
+    /// Sends `data` verbatim (no record encryption), ordered through ``sendPump`` so it serializes
+    /// with the encrypted sends and the internal KeyUpdate response.
+    func sendRaw(_ data: Data) async throws {
+        guard let sendPump else { throw TLSRecordError.connectionUnavailable }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendPump.enqueueSend(data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    /// Receives raw (undecrypted) bytes: any handshake-buffered bytes first, then straight off the
+    /// transport. `nil` signals a clean close.
+    func receiveRaw() async throws -> Data? {
         receiveLock.lock()
         if !receiveBuffer.isEmpty {
             let data = receiveBuffer
             receiveBuffer.removeAll()
             receiveLock.unlock()
-            completion(data, nil)
-            return
+            return data
         }
         receiveLock.unlock()
 
-        guard let connection else {
-            completion(nil, TLSRecordError.connectionUnavailable)
-            return
+        guard let connection else { throw TLSRecordError.connectionUnavailable }
+        switch try await connection.receive() {
+        case .bytes(let data): return data
+        case .end: return nil
         }
-        Task {
-            do {
-                switch try await connection.receive() {
-                case .bytes(let data): completion(data, nil)
-                case .end: completion(nil, nil)
-                }
-            } catch {
-                completion(nil, error)
-            }
-        }
-    }
-
-    func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        guard let sendPump else {
-            completion(TLSRecordError.connectionUnavailable)
-            return
-        }
-        sendPump.enqueueSend(data, completion: completion)
-    }
-
-    func sendRaw(data: Data) {
-        sendPump?.enqueueSend(data, completion: nil)
     }
 
     /// Sends TLS close_notify, then half-closes the underlying byte stream while
@@ -306,10 +301,11 @@ nonisolated class TLSRecordConnection {
 
     // Async-native counterparts of `send`/`receive`/`closeWrite`, over the transport's
     // async surface (through `sendPump` for writes). These are the primary path for async
-    // consumers (`TLSProxyConnection`/`RealityProxyConnection`); the callback methods above
-    // remain for the MITM `MITMByteLeg` consumers and the VLESS-Vision direct-copy path, both
-    // dropped in Stage 16. Both share the synchronous record crypto and `processBuffer`; a
-    // given connection is driven by one consumer, so the two receive paths never touch
+    // consumers (`TLSProxyConnection`/`RealityProxyConnection`, the MITM `MITMByteLeg` legs,
+    // and the async raw direct-copy above); the callback `send`/`receive` methods above remain
+    // only for the still-callback `TLSStreamTransport` (Naive) and `TLSRecordTransport` (SOCKS5-
+    // over-TLS handshake) consumers. Both share the synchronous record crypto and `processBuffer`;
+    // a given connection is driven by one consumer, so the receive paths never touch
     // `receiveBuffer` concurrently.
 
     /// Encrypts `data` into TLS records and sends them, awaiting the write. Records are

@@ -295,11 +295,15 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         let bump = UInt32(Self.connectionRecvWindow - Self.httpVersionDefaultWindow)
         data.append(NaiveHTTP2Framer.windowUpdateFrame(streamID: 0, increment: bump).serialized)
 
-        connection.send(data: data) { [weak self] error in
+        let payload = data
+        Task { [weak self] in
+            let sendError: Error?
+            do { try await connection.send(payload); sendError = nil }
+            catch { sendError = error }
             guard let self else { return }
             self.queue.async {
                 guard self.state == .connecting else { return }
-                if let error { self.failSetup(error); return }
+                if let sendError { self.failSetup(sendError); return }
                 self.state = .prefaceSent
                 self.updatePoolSnapshot()
                 self.startReadLoop()
@@ -325,7 +329,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// Completion fires on `queue`.
     private func readFromTransport(_ completion: @escaping (Error?) -> Void) {
         guard let connection else { completion(MITMScriptHTTP2Error.notReady); return }
-        connection.receive { [weak self] data, error in
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await connection.receive(); error = nil }
+            catch let e { data = nil; error = e }
             guard let self else { return }
             self.queue.async {
                 if let error { completion(error); return }
@@ -613,14 +621,19 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// Fire-and-forget control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE, RST_STREAM).
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
         guard let connection else { return }
-        connection.send(data: frame.serialized) { error in
-            if let error { logger.debug("[MITMScriptHTTP2] control frame send failed: \(error.localizedDescription)") }
+        let serialized = frame.serialized
+        Task {
+            do { try await connection.send(serialized) }
+            catch { logger.debug("[MITMScriptHTTP2] control frame send failed: \(error.localizedDescription)") }
         }
     }
 
     private func sendRaw(_ data: Data, completion: @escaping (Error?) -> Void) {
         guard let connection else { completion(MITMScriptHTTP2Error.notReady); return }
-        connection.send(data: data, completion: completion)
+        Task {
+            do { try await connection.send(data); completion(nil) }
+            catch { completion(error) }
+        }
     }
 
     // MARK: - Stream teardown (called by streams on `queue`)

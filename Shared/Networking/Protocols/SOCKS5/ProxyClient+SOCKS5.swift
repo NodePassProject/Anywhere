@@ -8,145 +8,74 @@
 import Foundation
 
 extension ProxyClient {
-    /// Async entry for the SOCKS5 dial; bridges the still-callback body.
+    /// Dials the SOCKS5 outbound: establishes the control transport, runs the async
+    /// handshake over it, then wraps the result as a TCP stream or a UDP-associate relay.
     func connectWithSOCKS5(
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithSOCKS5(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, completion: completion
-            )
-        }
-    }
-
-    func connectWithSOCKS5(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        connectSOCKS5Direct(
-            command: command,
-            destinationHost: destinationHost, destinationPort: destinationPort,
-            completion: completion
-        )
-    }
-
-    private func connectSOCKS5Direct(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let onTransportReady: (any RawTransport) -> Void = { [weak self] transport in
-            self?.performSOCKS5Handshake(
-                transport: transport,
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, completion: completion
-            )
-        }
-
-        if let tunnel = self.tunnel {
-            onTransportReady(TunneledTransport(tunnel: tunnel))
-        } else {
-            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
-            self.own(transport)
-            Task {
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                onTransportReady(CallbackByteTransport(transport))
-            }
-        }
-    }
-
-    private func performSOCKS5Handshake(
-        transport: any RawTransport,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
         guard case .socks5(let username, let password) = configuration.outbound else {
-            completion(.failure(ProxyError.protocolError("SOCKS5 outbound expected")))
-            return
+            throw ProxyError.protocolError("SOCKS5 outbound expected")
         }
-        let buffer = SOCKS5Buffer(transport: transport)
+
+        let transport: any AsyncByteTransport
+        if let tunnel = self.tunnel {
+            transport = RawToAsyncByteTransport(TunneledTransport(tunnel: tunnel))
+        } else {
+            let tcp = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            self.own(tcp)
+            try await tcp.connect()
+            transport = tcp
+        }
+
+        let buffer = SOCKS5AsyncBuffer(transport: transport)
 
         if command == .udp {
-            SOCKS5Handshake.performUDPAssociate(
+            let relay = try await SOCKS5Handshake.performUDPAssociate(
                 buffer: buffer,
                 transport: transport,
                 username: username,
                 password: password,
                 serverAddress: configuration.serverAddress
-            ) { [weak self] result in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                switch result {
-                case .success(let relay):
-                    // The relay transport must ride the same chain as the control channel.
-                    self.openSOCKS5UDPRelay(
-                        relayHost: relay.host,
-                        relayPort: relay.port
-                    ) { relayResult in
-                        switch relayResult {
-                        case .success(let relayConn):
-                            let udpConnection = SOCKS5UDPProxyConnection(
-                                tcpTransport: transport,
-                                tlsClient: nil,
-                                tlsConnection: nil,
-                                relay: relayConn,
-                                destinationHost: destinationHost,
-                                destinationPort: destinationPort
-                            )
-                            completion(.success(udpConnection))
-                        case .failure(let error):
-                            completion(.failure(error))
-                        }
-                    }
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
+            )
+            // The relay transport must ride the same chain as the control channel.
+            let relayConnection = try await openSOCKS5UDPRelay(
+                relayHost: relay.host,
+                relayPort: relay.port
+            )
+            return SOCKS5UDPProxyConnection(
+                tcpTransport: transport,
+                tlsClient: nil,
+                tlsConnection: nil,
+                relay: relayConnection,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort
+            )
         } else {
-            SOCKS5Handshake.perform(
+            try await SOCKS5Handshake.perform(
                 buffer: buffer,
                 transport: transport,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
                 username: username,
                 password: password
-            ) { error in
-                if let error {
-                    completion(.failure(error))
-                    return
-                }
-                let wrappedTransport: any RawTransport
-                if let excess = buffer.remaining {
-                    wrappedTransport = SOCKS5Transport(inner: transport, initialData: excess)
-                } else {
-                    wrappedTransport = transport
-                }
-                let proxyConnection = LegacyDirectProxyConnection(connection: wrappedTransport)
-                completion(.success(proxyConnection))
+            )
+            let dataTransport: any AsyncByteTransport
+            if let excess = buffer.remaining {
+                // Handshake-leftover bytes belong to the tunneled stream; replay them first.
+                dataTransport = SOCKS5ReplayTransport(inner: transport, initialData: excess)
+            } else {
+                dataTransport = transport
             }
+            return DirectProxyConnection(transport: dataTransport)
         }
     }
 
     func openSOCKS5UDPRelay(
         relayHost: String,
-        relayPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        relayPort: UInt16
+    ) async throws -> ProxyConnection {
         let effectiveChain: [ProxyConfiguration]
         if let outerChain = configuration.chain, !outerChain.isEmpty {
             effectiveChain = outerChain
@@ -155,41 +84,21 @@ extension ProxyClient {
         } else {
             effectiveChain = []
         }
+
         if !effectiveChain.isEmpty {
-            let chain = effectiveChain
-            switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
-            case .success(let hopCommands):
-                Task { [weak self] in
-                    guard let self else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    do {
-                        let tunnel = try await self.buildChainTunnel(
-                            chain: chain, index: 0, currentTunnel: nil,
-                            hopCommands: hopCommands,
-                            finalDestination: (relayHost, relayPort)
-                        )
-                        completion(.success(tunnel))
-                    } catch {
-                        completion(.failure(error))
-                    }
-                }
-            case .failure(let error):
-                completion(.failure(error))
-            }
+            let hopCommands = try Self.computeChainHopCommands(
+                chain: effectiveChain, lastDeliver: .udp
+            ).get()
+            return try await buildChainTunnel(
+                chain: effectiveChain, index: 0, currentTunnel: nil,
+                hopCommands: hopCommands,
+                finalDestination: (relayHost, relayPort)
+            )
         } else {
             let transport = UDPTransport(host: relayHost, port: relayPort)
             self.own(transport)
-            Task {
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                completion(.success(DirectUDPProxyConnection(transport: transport)))
-            }
+            try await transport.connect()
+            return DirectUDPProxyConnection(transport: transport)
         }
     }
 }

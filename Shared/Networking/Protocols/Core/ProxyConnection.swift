@@ -82,20 +82,6 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
         fatalError("Subclass must override receiveRaw")
     }
 
-    /// Bypasses transport decryption; used for Vision direct copy mode.
-    func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
-        receiveRaw(completion: completion)
-    }
-
-    /// Bypasses transport encryption; used for Vision direct copy mode.
-    func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        sendRaw(data: data, completion: completion)
-    }
-
-    func sendDirectRaw(data: Data) {
-        sendRaw(data: data)
-    }
-
     // MARK: Async Surface
 
     // An async-native surface over the same primitives. The defaults bridge to the
@@ -135,6 +121,16 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
                 if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
             }
         }
+    }
+
+    /// Bypasses transport encryption; used for Vision direct copy mode. Async analogue.
+    func sendDirectRaw(_ data: Data) async throws {
+        try await sendRaw(data)
+    }
+
+    /// Bypasses transport decryption; used for Vision direct copy mode. Async analogue.
+    func receiveDirectRaw() async throws -> Data? {
+        try await receiveRaw()
     }
 
     /// Async half-close. Defaults to bridging `closeWrite(completion:)`.

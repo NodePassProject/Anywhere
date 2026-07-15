@@ -18,8 +18,8 @@ import Foundation
 /// `finishSend` (half-close) is ordered after every send already enqueued.
 ///
 /// Kept `nonisolated` and `@unchecked Sendable`: the caller's completion isn't
-/// `Sendable`, but each job runs only on the pump task. Shared by
-/// ``CallbackByteTransport`` and ``AsyncProxyConnection``.
+/// `Sendable`, but each job runs only on the pump task. Used by
+/// ``AsyncProxyConnection`` and ``TLSRecordConnection``.
 nonisolated final class AsyncSendPump: @unchecked Sendable {
 
     /// One ordered send job. `@unchecked` because `completion` isn't `Sendable`;

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "SOCKS5Connection")
 
@@ -24,36 +25,33 @@ private enum SOCKS5 {
     static let statusSuccess: UInt8 = 0x00
 }
 
-// MARK: - SOCKS5Buffer
+// MARK: - SOCKS5AsyncBuffer
 
-nonisolated class SOCKS5Buffer {
+/// Reads framed handshake responses off an ``AsyncByteTransport``, buffering any
+/// bytes that arrive past the requested length so the tunneled stream keeps them.
+/// Confined to the single dialing task, so it needs no locking.
+nonisolated final class SOCKS5AsyncBuffer {
     private var data = Data()
-    private let transport: any RawTransport
+    private let transport: any AsyncByteTransport
 
-    init(transport: any RawTransport) {
+    init(transport: any AsyncByteTransport) {
         self.transport = transport
     }
 
-    func readExact(count: Int, completion: @escaping (Data?, Error?) -> Void) {
-        if data.count >= count {
-            let result = data.subdata(in: data.startIndex..<data.startIndex + count)
-            data.removeFirst(count)
-            if data.isEmpty { data = Data() } else { data = Data(data) }
-            completion(result, nil)
-            return
-        }
-        transport.receive() { [self] newData, _, error in
-            if let error {
-                completion(nil, error)
-                return
+    /// Reads exactly `count` bytes; returns `nil` if the peer closes first.
+    func readExact(count: Int) async throws -> Data? {
+        while data.count < count {
+            switch try await transport.receive() {
+            case .bytes(let newData):
+                data.append(newData)
+            case .end:
+                return nil
             }
-            guard let newData, !newData.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-            data.append(newData)
-            readExact(count: count, completion: completion)
         }
+        let result = data.subdata(in: data.startIndex..<data.startIndex + count)
+        data.removeFirst(count)
+        if data.isEmpty { data = Data() } else { data = Data(data) }
+        return result
     }
 
     /// Data remaining in the buffer after the handshake; belongs to the tunneled stream and must not be discarded.
@@ -62,46 +60,47 @@ nonisolated class SOCKS5Buffer {
     }
 }
 
-// MARK: - SOCKS5Transport
+// MARK: - SOCKS5ReplayTransport
 
 /// Replays handshake-leftover bytes (e.g. the start of a TLS ServerHello) on the
 /// first `receive` before falling through to the underlying transport.
-nonisolated class SOCKS5Transport: RawTransport {
-    private var initialData: Data?
-    private let inner: any RawTransport
+nonisolated final class SOCKS5ReplayTransport: AsyncByteTransport, @unchecked Sendable {
+    private let inner: any AsyncByteTransport
+    private let pending: Mutex<Data?>
 
-    init(inner: any RawTransport, initialData: Data?) {
+    init(inner: any AsyncByteTransport, initialData: Data) {
         self.inner = inner
-        self.initialData = initialData
+        self.pending = Mutex(initialData)
     }
 
-    var isTransportReady: Bool { inner.isTransportReady }
+    var isReady: Bool { inner.isReady }
 
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.send(data: data, completion: completion)
+    func send(_ data: Data) async throws {
+        try await inner.send(data)
     }
 
-    func send(data: Data) {
-        inner.send(data: data)
+    func finishSend() async throws {
+        try await inner.finishSend()
     }
 
-    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
-        if let data = initialData {
-            initialData = nil
-            completion(data, false, nil)
-            return
+    func receive() async throws -> TransportChunk {
+        let replay = pending.withLock { pending -> Data? in
+            let snapshot = pending
+            pending = nil
+            return snapshot
         }
-        inner.receive(completion: completion)
+        if let replay { return .bytes(replay) }
+        return try await inner.receive()
     }
 
-    func forceCancel() {
-        inner.forceCancel()
+    func cancel() {
+        inner.cancel()
     }
 }
 
 // MARK: - SOCKS5Handshake
 
-enum SOCKS5Handshake {
+nonisolated enum SOCKS5Handshake {
 
     struct UDPRelayInfo {
         let host: String
@@ -109,121 +108,83 @@ enum SOCKS5Handshake {
     }
 
     static func perform(
-        buffer: SOCKS5Buffer,
-        transport: any RawTransport,
+        buffer: SOCKS5AsyncBuffer,
+        transport: any AsyncByteTransport,
         destinationHost: String,
         destinationPort: UInt16,
         username: String?,
-        password: String?,
-        completion: @escaping (Error?) -> Void
-    ) {
-        performAuth(buffer: buffer, transport: transport, username: username, password: password) { error in
-            if let error {
-                completion(error)
-                return
-            }
-            sendCommand(
-                buffer: buffer,
-                transport: transport,
-                command: SOCKS5.cmdConnect,
-                host: destinationHost,
-                port: destinationPort
-            ) { result in
-                switch result {
-                case .success:
-                    completion(nil)
-                case .failure(let error):
-                    completion(error)
-                }
-            }
-        }
+        password: String?
+    ) async throws {
+        try await performAuth(buffer: buffer, transport: transport, username: username, password: password)
+        _ = try await sendCommand(
+            buffer: buffer,
+            transport: transport,
+            command: SOCKS5.cmdConnect,
+            host: destinationHost,
+            port: destinationPort
+        )
     }
 
     /// UDP ASSOCIATE: per RFC 1928 the client sends 0.0.0.0:0 and the server replies with the relay endpoint.
     static func performUDPAssociate(
-        buffer: SOCKS5Buffer,
-        transport: any RawTransport,
+        buffer: SOCKS5AsyncBuffer,
+        transport: any AsyncByteTransport,
         username: String?,
         password: String?,
-        serverAddress: String,
-        completion: @escaping (Result<UDPRelayInfo, Error>) -> Void
-    ) {
-        performAuth(buffer: buffer, transport: transport, username: username, password: password) { error in
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            sendCommand(
-                buffer: buffer,
-                transport: transport,
-                command: SOCKS5.cmdUDPAssociate,
-                host: "0.0.0.0",
-                port: 0
-            ) { result in
-                switch result {
-                case .success(let info):
-                    // Servers often return an unreachable private IP for the relay
-                    // host; use the server's public address (the port is still valid).
-                    completion(.success(UDPRelayInfo(host: serverAddress, port: info.port)))
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-        }
+        serverAddress: String
+    ) async throws -> UDPRelayInfo {
+        try await performAuth(buffer: buffer, transport: transport, username: username, password: password)
+        let info = try await sendCommand(
+            buffer: buffer,
+            transport: transport,
+            command: SOCKS5.cmdUDPAssociate,
+            host: "0.0.0.0",
+            port: 0
+        )
+        // Servers often return an unreachable private IP for the relay host; use
+        // the server's public address (the port is still valid).
+        return UDPRelayInfo(host: serverAddress, port: info.port)
     }
 
     // MARK: - Authentication
 
     private static func performAuth(
-        buffer: SOCKS5Buffer,
-        transport: any RawTransport,
+        buffer: SOCKS5AsyncBuffer,
+        transport: any AsyncByteTransport,
         username: String?,
-        password: String?,
-        completion: @escaping (Error?) -> Void
-    ) {
+        password: String?
+    ) async throws {
         let hasAuth = username != nil && password != nil
         let authMethod = hasAuth ? SOCKS5.authPassword : SOCKS5.authNone
         let greeting = Data([SOCKS5.version, 0x01, authMethod])
 
-        transport.send(data: greeting) { error in
-            if let error { completion(error); return }
-            buffer.readExact(count: 2) { data, error in
-                if let error { completion(error); return }
-                guard let data else {
-                    completion(ProxyError.protocolError("SOCKS5 server closed during greeting"))
-                    return
-                }
-                guard data[0] == SOCKS5.version else {
-                    completion(ProxyError.protocolError("SOCKS5 unexpected server version: \(data[0])"))
-                    return
-                }
-                let expectedMethod = hasAuth ? SOCKS5.authPassword : SOCKS5.authNone
-                guard data[1] == expectedMethod else {
-                    if data[1] == SOCKS5.authNoMatch {
-                        completion(ProxyError.protocolError("SOCKS5 server: no matching auth method"))
-                    } else {
-                        completion(ProxyError.protocolError("SOCKS5 auth method mismatch: expected \(expectedMethod), got \(data[1])"))
-                    }
-                    return
-                }
-                if hasAuth {
-                    sendAuth(buffer: buffer, transport: transport, username: username!, password: password!, completion: completion)
-                } else {
-                    completion(nil)
-                }
+        try await transport.send(greeting)
+        guard let data = try await buffer.readExact(count: 2) else {
+            throw ProxyError.protocolError("SOCKS5 server closed during greeting")
+        }
+        guard data[0] == SOCKS5.version else {
+            throw ProxyError.protocolError("SOCKS5 unexpected server version: \(data[0])")
+        }
+        let expectedMethod = hasAuth ? SOCKS5.authPassword : SOCKS5.authNone
+        guard data[1] == expectedMethod else {
+            if data[1] == SOCKS5.authNoMatch {
+                throw ProxyError.protocolError("SOCKS5 server: no matching auth method")
             }
+            throw ProxyError.protocolError("SOCKS5 auth method mismatch: expected \(expectedMethod), got \(data[1])")
+        }
+        if hasAuth {
+            try await sendAuth(buffer: buffer, transport: transport, username: username!, password: password!)
         }
     }
 
     // MARK: - Authentication (RFC 1929)
 
     private static func sendAuth(
-        buffer: SOCKS5Buffer,
-        transport: any RawTransport,
+        buffer: SOCKS5AsyncBuffer,
+        transport: any AsyncByteTransport,
         username: String,
-        password: String,
-        completion: @escaping (Error?) -> Void
-    ) {
+        password: String
+    ) async throws {
         let usernameBytes = Data(username.utf8)
         let passwordBytes = Data(password.utf8)
         var authData = Data(capacity: 3 + usernameBytes.count + passwordBytes.count)
@@ -233,112 +194,80 @@ enum SOCKS5Handshake {
         authData.append(UInt8(min(passwordBytes.count, 255)))
         authData.append(passwordBytes.prefix(255))
 
-        transport.send(data: authData) { error in
-            if let error { completion(error); return }
-            buffer.readExact(count: 2) { data, error in
-                if let error { completion(error); return }
-                guard let data else {
-                    completion(ProxyError.protocolError("SOCKS5 server closed during auth"))
-                    return
-                }
-                guard data[1] == 0x00 else {
-                    completion(ProxyError.protocolError("SOCKS5 authentication failed (status \(data[1]))"))
-                    return
-                }
-                completion(nil)
-            }
+        try await transport.send(authData)
+        guard let data = try await buffer.readExact(count: 2) else {
+            throw ProxyError.protocolError("SOCKS5 server closed during auth")
+        }
+        guard data[1] == 0x00 else {
+            throw ProxyError.protocolError("SOCKS5 authentication failed (status \(data[1]))")
         }
     }
 
     // MARK: - Command (CONNECT / UDP ASSOCIATE)
 
+    @discardableResult
     private static func sendCommand(
-        buffer: SOCKS5Buffer,
-        transport: any RawTransport,
+        buffer: SOCKS5AsyncBuffer,
+        transport: any AsyncByteTransport,
         command: UInt8,
         host: String,
-        port: UInt16,
-        completion: @escaping (Result<UDPRelayInfo, Error>) -> Void
-    ) {
+        port: UInt16
+    ) async throws -> UDPRelayInfo {
         var request = Data([SOCKS5.version, command, 0x00])
         request.append(encodeAddress(host: host))
         request.append(UInt8(port >> 8))
         request.append(UInt8(port & 0xFF))
 
-        transport.send(data: request) { error in
-            if let error { completion(.failure(error)); return }
-            readCommandResponse(buffer: buffer, completion: completion)
-        }
+        try await transport.send(request)
+        return try await readCommandResponse(buffer: buffer)
     }
 
     /// Reads the command response: [VER, REP, RSV, ATYP, BND.ADDR, BND.PORT]
     private static func readCommandResponse(
-        buffer: SOCKS5Buffer,
-        completion: @escaping (Result<UDPRelayInfo, Error>) -> Void
-    ) {
-        buffer.readExact(count: 4) { data, error in
-            if let error { completion(.failure(error)); return }
-            guard let data else {
-                completion(.failure(ProxyError.protocolError("SOCKS5 server closed during command")))
-                return
+        buffer: SOCKS5AsyncBuffer
+    ) async throws -> UDPRelayInfo {
+        guard let data = try await buffer.readExact(count: 4) else {
+            throw ProxyError.protocolError("SOCKS5 server closed during command")
+        }
+        guard data[1] == SOCKS5.statusSuccess else {
+            throw ProxyError.protocolError("SOCKS5 command failed (reply \(data[1]))")
+        }
+
+        switch data[3] {
+        case SOCKS5.addrIPv4:
+            guard let addrData = try await buffer.readExact(count: 4 + 2) else {
+                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
             }
-            guard data[1] == SOCKS5.statusSuccess else {
-                completion(.failure(ProxyError.protocolError("SOCKS5 command failed (reply \(data[1]))")))
-                return
+            let ip = "\(addrData[0]).\(addrData[1]).\(addrData[2]).\(addrData[3])"
+            let port = UInt16(addrData[4]) << 8 | UInt16(addrData[5])
+            return UDPRelayInfo(host: ip, port: port)
+
+        case SOCKS5.addrIPv6:
+            guard let addrData = try await buffer.readExact(count: 16 + 2) else {
+                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
             }
-
-            switch data[3] {
-            case SOCKS5.addrIPv4:
-                buffer.readExact(count: 4 + 2) { addrData, error in
-                    if let error { completion(.failure(error)); return }
-                    guard let addrData else {
-                        completion(.failure(ProxyError.protocolError("SOCKS5 server closed reading bound address")))
-                        return
-                    }
-                    let ip = "\(addrData[0]).\(addrData[1]).\(addrData[2]).\(addrData[3])"
-                    let port = UInt16(addrData[4]) << 8 | UInt16(addrData[5])
-                    completion(.success(UDPRelayInfo(host: ip, port: port)))
-                }
-
-            case SOCKS5.addrIPv6:
-                buffer.readExact(count: 16 + 2) { addrData, error in
-                    if let error { completion(.failure(error)); return }
-                    guard let addrData else {
-                        completion(.failure(ProxyError.protocolError("SOCKS5 server closed reading bound address")))
-                        return
-                    }
-                    var parts: [String] = []
-                    for i in stride(from: 0, to: 16, by: 2) {
-                        parts.append(String(format: "%x", UInt16(addrData[i]) << 8 | UInt16(addrData[i + 1])))
-                    }
-                    let ip = parts.joined(separator: ":")
-                    let port = UInt16(addrData[16]) << 8 | UInt16(addrData[17])
-                    completion(.success(UDPRelayInfo(host: ip, port: port)))
-                }
-
-            case SOCKS5.addrDomain:
-                buffer.readExact(count: 1) { lenData, error in
-                    if let error { completion(.failure(error)); return }
-                    guard let lenData else {
-                        completion(.failure(ProxyError.protocolError("SOCKS5 server closed reading bound address")))
-                        return
-                    }
-                    let domainLen = Int(lenData[0])
-                    buffer.readExact(count: domainLen + 2) { domainData, error in
-                        if let error { completion(.failure(error)); return }
-                        guard let domainData else {
-                            completion(.failure(ProxyError.protocolError("SOCKS5 server closed reading bound address")))
-                            return
-                        }
-                        let domain = String(data: domainData.prefix(domainLen), encoding: .utf8) ?? ""
-                        let port = UInt16(domainData[domainLen]) << 8 | UInt16(domainData[domainLen + 1])
-                        completion(.success(UDPRelayInfo(host: domain, port: port)))
-                    }
-                }
-
-            default:
-                completion(.failure(ProxyError.protocolError("SOCKS5 unknown address type: \(data[3])")))
+            var parts: [String] = []
+            for i in stride(from: 0, to: 16, by: 2) {
+                parts.append(String(format: "%x", UInt16(addrData[i]) << 8 | UInt16(addrData[i + 1])))
             }
+            let ip = parts.joined(separator: ":")
+            let port = UInt16(addrData[16]) << 8 | UInt16(addrData[17])
+            return UDPRelayInfo(host: ip, port: port)
+
+        case SOCKS5.addrDomain:
+            guard let lenData = try await buffer.readExact(count: 1) else {
+                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
+            }
+            let domainLen = Int(lenData[0])
+            guard let domainData = try await buffer.readExact(count: domainLen + 2) else {
+                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
+            }
+            let domain = String(data: domainData.prefix(domainLen), encoding: .utf8) ?? ""
+            let port = UInt16(domainData[domainLen]) << 8 | UInt16(domainData[domainLen + 1])
+            return UDPRelayInfo(host: domain, port: port)
+
+        default:
+            throw ProxyError.protocolError("SOCKS5 unknown address type: \(data[3])")
         }
     }
 
@@ -433,7 +362,7 @@ nonisolated class TLSRecordTransport: RawTransport {
 /// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
 /// The TCP control connection is retained because closing it ends the UDP session.
 nonisolated class SOCKS5UDPProxyConnection: AsyncProxyConnection {
-    private let tcpTransport: any RawTransport
+    private let tcpTransport: any AsyncByteTransport
     private let tlsClient: TLSClient?
     private let tlsConnection: TLSRecordConnection?
     private let relay: ProxyConnection
@@ -441,7 +370,7 @@ nonisolated class SOCKS5UDPProxyConnection: AsyncProxyConnection {
     private var cancelled = false
 
     init(
-        tcpTransport: any RawTransport,
+        tcpTransport: any AsyncByteTransport,
         tlsClient: TLSClient?,
         tlsConnection: TLSRecordConnection?,
         relay: ProxyConnection,
@@ -532,7 +461,7 @@ nonisolated class SOCKS5UDPProxyConnection: AsyncProxyConnection {
         guard !cancelled else { return }
         cancelled = true
         relay.cancel()
-        tcpTransport.forceCancel()
+        tcpTransport.cancel()
     }
 
     private func stripUDPHeader(_ data: Data) -> Data? {

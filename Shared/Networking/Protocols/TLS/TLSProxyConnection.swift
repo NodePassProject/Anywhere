@@ -39,19 +39,13 @@ nonisolated class TLSProxyConnection: AsyncProxyConnection {
 
     // MARK: - Vision direct (unencrypted) passthroughs
 
-    // Bypass the record crypto for Vision direct-copy mode. These stay on the callback
-    // surface until their Vision consumer migrates; `tlsConnection`'s raw callback methods
-    // are unchanged by the async migration.
+    // Bypass the record crypto for Vision direct-copy mode, over `tlsConnection`'s async raw surface.
 
-    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
-        tlsConnection.receiveRaw(completion: completion)
+    override func receiveDirectRaw() async throws -> Data? {
+        try await tlsConnection.receiveRaw()
     }
 
-    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        tlsConnection.sendRaw(data: data, completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data) {
-        tlsConnection.sendRaw(data: data)
+    override func sendDirectRaw(_ data: Data) async throws {
+        try await tlsConnection.sendRaw(data)
     }
 }

@@ -120,16 +120,12 @@ nonisolated final class VLESSConnection: AsyncProxyConnection {
 
     // MARK: - Direct (Vision bypass) passthroughs
 
-    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveDirectRaw(completion: completion)
+    override func receiveDirectRaw() async throws -> Data? {
+        try await inner.receiveDirectRaw()
     }
 
-    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendDirectRaw(data: data, completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data) {
-        inner.sendDirectRaw(data: data)
+    override func sendDirectRaw(_ data: Data) async throws {
+        try await inner.sendDirectRaw(data)
     }
 
     // MARK: - Cancel

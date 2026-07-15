@@ -145,8 +145,6 @@
 				Networking/Async/AsyncSendPump.swift,
 				Networking/Async/AsyncTransport.swift,
 				Networking/Async/AsyncTransportClosures.swift,
-				Networking/Async/CallbackBridge.swift,
-				Networking/Async/CallbackByteTransport.swift,
 				Networking/ConnectionMetrics.swift,
 				Networking/DNSResolver.swift,
 				Networking/LatencyTester.swift,

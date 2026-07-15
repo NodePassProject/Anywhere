@@ -42,12 +42,12 @@ extension ProxyClient {
         initialData: Data?,
         supportsVision: Bool
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
             self.sendVLESSProtocolHandshake(
                 over: connection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: supportsVision, completion: completion
-            )
+                supportsVision: supportsVision
+            ) { continuation.resume(with: $0) }
         }
     }
 

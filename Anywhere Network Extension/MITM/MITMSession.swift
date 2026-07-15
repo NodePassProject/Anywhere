@@ -729,17 +729,26 @@ final class MITMSession {
             let chunkEnd = data.index(offset, offsetBy: take)
             // Copy so the encoder sees a contiguous slab.
             let chunk = Data(data[offset..<chunkEnd])
-            record.send(data: chunk) { [weak self] error in
+            let record = self.record
+            Task { [weak self] in
+                do {
+                    try await record.send(chunk)
+                } catch {
+                    guard let self else {
+                        completion(error)
+                        return
+                    }
+                    self.queue.async {
+                        completion(error)
+                        self.finishCurrent()
+                    }
+                    return
+                }
                 guard let self else {
-                    completion(error)
+                    completion(nil)
                     return
                 }
                 self.queue.async {
-                    if let error {
-                        completion(error)
-                        self.finishCurrent()
-                        return
-                    }
                     self.sendSlice(data, offset: chunkEnd, completion: completion)
                 }
             }
@@ -753,7 +762,11 @@ final class MITMSession {
 
     /// Pumps client plaintext upstream, or drains synthesized responses back to the client.
     private func startInboundPump(inner: any MITMByteLeg) {
-        inner.receive { [weak self] data, error in
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await inner.receive(); error = nil }
+            catch let e { data = nil; error = e }
             guard let self else { return }
             self.lwipQueue.async { [self] in
                 if let error {
@@ -987,7 +1000,11 @@ final class MITMSession {
     }
 
     private func startOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) {
-        outer.receive { [weak self] data, error in
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await outer.receive(); error = nil }
+            catch let e { data = nil; error = e }
             guard let self else { return }
             self.lwipQueue.async { [self] in
                 // If this leg was swapped out (host-change reconnect replaced `outerRecord`), ignore
@@ -1085,7 +1102,11 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     /// Pumps client plaintext into the bridge client leg; the leg drives per-stream
     /// upstream dials and client-bound writes via the delegate callbacks below.
     private func startBridgeInboundPump(inner: TLSRecordConnection) {
-        inner.receive { [weak self] data, error in
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await inner.receive(); error = nil }
+            catch let e { data = nil; error = e }
             guard let self else { return }
             self.lwipQueue.async { [self] in
                 guard !self.torn else { return }
@@ -1335,7 +1356,11 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     }
 
     private func startH2UpstreamPump(record: TLSRecordConnection) {
-        record.receive { [weak self] data, error in
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await record.receive(); error = nil }
+            catch let e { data = nil; error = e }
             guard let self else { return }
             self.lwipQueue.async { [self] in
                 guard !self.torn, let leg = self.h2Upstream else { return }
@@ -1567,7 +1592,11 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     /// and hands the rewritten http/1.1 bytes to the client leg to re-encode as h2.
     private func startBridgeUpstreamPump(streamID: UInt32) {
         guard let bs = bridgeStreams[streamID], let record = bs.upstreamRecord else { return }
-        record.receive { [weak self] data, error in
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await record.receive(); error = nil }
+            catch let e { data = nil; error = e }
             guard let self else { return }
             self.lwipQueue.async { [self] in
                 guard !self.torn, let bs = self.bridgeStreams[streamID], let client = self.bridgeClient else { return }

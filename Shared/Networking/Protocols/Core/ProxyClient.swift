@@ -83,19 +83,6 @@ nonisolated class ProxyClient {
         return connection
     }
 
-    /// Migration scaffold: bridges a one-shot completion dial to `async`. Wraps the
-    /// per-protocol handshake internals that are not yet native async so their entry
-    /// points can be `async throws`; each use is removed as its protocol stage lands.
-    func bridged<Value>(
-        _ operation: (@escaping (Result<Value, Error>) -> Void) -> Void
-    ) async throws -> Value {
-        let resumer = OneShotResumer<Value>()
-        return try await withCheckedThrowingContinuation { continuation in
-            resumer.arm(continuation)
-            operation { resumer.resume($0) }
-        }
-    }
-
     // MARK: - Public API
     
     var isQUICTransport: Bool {
@@ -756,11 +743,11 @@ nonisolated class ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
             self.connectWithXHTTP(
                 command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
+                destinationPort: destinationPort, initialData: initialData
+            ) { continuation.resume(with: $0) }
         }
     }
 

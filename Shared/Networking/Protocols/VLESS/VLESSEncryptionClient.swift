@@ -1131,15 +1131,11 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
     // Vision direct copy peels only our AEAD layer (unwrapping to the raw conn);
     // delegating to `inner` keeps random-mode XOR masking and outer TLS intact.
 
-    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: data, completion: completion)
+    override func sendDirectRaw(_ data: Data) async throws {
+        try await inner.sendRaw(data)
     }
 
-    override func sendDirectRaw(data: Data) {
-        inner.sendRaw(data: data)
-    }
-
-    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
+    override func receiveDirectRaw() async throws -> Data? {
         // Flush bytes over-read past the last AEAD record; `inner.receiveRaw` would not replay them.
         let leftover: Data? = recvState.withLock { state in
             guard !state.inboundBuffer.isEmpty else { return nil }
@@ -1148,10 +1144,9 @@ nonisolated final class VLESSEncryptedConnection: AsyncProxyConnection {
             return leftover
         }
         if let leftover {
-            completion(leftover, nil)
-            return
+            return leftover
         }
-        inner.receiveRaw(completion: completion)
+        return try await inner.receiveRaw()
     }
 
     override func performCancel() {

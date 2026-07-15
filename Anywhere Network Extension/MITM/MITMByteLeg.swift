@@ -10,13 +10,12 @@ import Synchronization
 
 protocol MITMByteLeg: AnyObject {
     var negotiatedALPN: String { get }
-    
-    func prependToReceiveBuffer(_ data: Data)
-    
-    func receive(completion: @escaping (Data?, Error?) -> Void)
 
-    func send(data: Data, completion: @escaping (Error?) -> Void)
-    func send(data: Data)
+    func prependToReceiveBuffer(_ data: Data)
+
+    func receive() async throws -> Data?
+
+    func send(_ data: Data) async throws
 
     func cancel()
 }
@@ -43,8 +42,8 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
         state.withLock { $0.prepended.append(data) }
     }
 
-    func receive(completion: @escaping (Data?, Error?) -> Void) {
-        // Extract under the lock; `completion` is invoked outside it.
+    func receive() async throws -> Data? {
+        // Deliver any handshake-buffered bytes first; extract under the lock.
         let (buffered, isCancelled): (Data?, Bool) = state.withLock { state in
             if !state.prepended.isEmpty {
                 let data = state.prepended
@@ -53,34 +52,28 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
             }
             return (nil, state.cancelled)
         }
-        if let buffered {
-            completion(buffered, nil)
-            return
-        }
-        if isCancelled {
-            completion(nil, nil)
-            return
-        }
+        if let buffered { return buffered }
+        if isCancelled { return nil }
 
-        transport.receive { data, isComplete, error in
-            if let error {
-                completion(nil, error)
-            } else if let data, !data.isEmpty {
-                completion(data, nil)
-            } else if isComplete {
-                completion(nil, nil)
-            } else {
-                completion(nil, nil)
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            transport.receive { data, isComplete, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let data, !data.isEmpty {
+                    continuation.resume(returning: data)
+                } else {
+                    continuation.resume(returning: nil)   // isComplete or empty → EOF
+                }
             }
         }
     }
 
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        transport.send(data: data, completion: completion)
-    }
-
-    func send(data: Data) {
-        transport.send(data: data)
+    func send(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            transport.send(data: data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
     }
 
     func cancel() {

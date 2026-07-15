@@ -113,10 +113,14 @@ final class TunneledHTTP1Exchange {
             fail(TransportError.connectionFailed("could not serialize request"))
             return
         }
-        connection.send(data: head) { [weak self] error in
+        let connection = self.connection
+        Task { [weak self] in
+            let sendError: Error?
+            do { try await connection.send(head); sendError = nil }
+            catch { sendError = error }
             self?.queue.async {
                 guard let self, !self.finished else { return }
-                if let error { self.fail(error); return }
+                if let sendError { self.fail(sendError); return }
                 self.receiveMore()
             }
         }
@@ -169,7 +173,12 @@ final class TunneledHTTP1Exchange {
     // MARK: - Receive
 
     private func receiveMore() {
-        connection.receive { [weak self] data, error in
+        let connection = self.connection
+        Task { [weak self] in
+            let data: Data?
+            let error: Error?
+            do { data = try await connection.receive(); error = nil }
+            catch let e { data = nil; error = e }
             self?.queue.async {
                 guard let self, !self.finished else { return }
                 if let error { self.fail(error); return }

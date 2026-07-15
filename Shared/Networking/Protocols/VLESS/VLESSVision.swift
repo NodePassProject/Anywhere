@@ -359,54 +359,24 @@ nonisolated class VLESSVisionConnection: AsyncProxyConnection {
 
     // MARK: - Async Surface
 
-    // Bridges the callback Vision framing below for the flipped class; deleted with it
-    // later. `receive()` delegates to `receiveRaw()` to match the callback override
-    // (the inner connection already handled response-header/byte accounting).
+    // Async-native Vision framing. `receive()` delegates to `receiveRaw()` because the inner
+    // connection already handled response-header/byte accounting.
 
     override func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendRaw(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
+        lock.lock()
+        let isDirectCopy = trafficState.writerDirectCopy
+        let paddedData = processSendData(data)
+        lock.unlock()
 
-    override func receiveRaw() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveRaw { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
+        if isDirectCopy {
+            try await innerConnection.sendDirectRaw(paddedData)
+        } else {
+            try await innerConnection.send(paddedData)
         }
     }
 
     override func receive() async throws -> Data? {
         try await receiveRaw()
-    }
-
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        let isDirectCopy = trafficState.writerDirectCopy
-        let paddedData = processSendData(data)
-        lock.unlock()
-
-        if isDirectCopy {
-            innerConnection.sendDirectRaw(data: paddedData, completion: completion)
-        } else {
-            innerConnection.send(data: paddedData, completion: completion)
-        }
-    }
-
-    override func sendRaw(data: Data) {
-        lock.lock()
-        let isDirectCopy = trafficState.writerDirectCopy
-        let paddedData = processSendData(data)
-        lock.unlock()
-
-        if isDirectCopy {
-            innerConnection.sendDirectRaw(data: paddedData)
-        } else {
-            innerConnection.send(data: paddedData)
-        }
     }
 
     private func processSendData(_ data: Data) -> Data {
@@ -470,64 +440,32 @@ nonisolated class VLESSVisionConnection: AsyncProxyConnection {
         return result
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        receiveRawInternal(completion: completion)
-    }
+    override func receiveRaw() async throws -> Data? {
+        while true {
+            lock.lock()
+            let isDirectCopy = trafficState.readerDirectCopy
+            lock.unlock()
 
-    private func receiveRawInternal(completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        let isDirectCopy = trafficState.readerDirectCopy
-        lock.unlock()
-
-        if isDirectCopy {
-            // Direct copy bypasses Reality decryption.
-            innerConnection.receiveDirectRaw { data, error in
-                if let error {
-                    completion(nil, error)
-                    return
-                }
-
-                guard let data = data, !data.isEmpty else {
-                    completion(nil, nil)
-                    return
-                }
-
-                completion(data, nil)
+            if isDirectCopy {
+                // Direct copy bypasses Reality decryption.
+                let data = try await innerConnection.receiveDirectRaw()
+                guard let data, !data.isEmpty else { return nil }
+                return data
             }
-        } else {
-            innerConnection.receive { [weak self] data, error in
-                guard let self else {
-                    completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                    return
-                }
 
-                if let error {
-                    completion(nil, error)
-                    return
-                }
+            let received = try await innerConnection.receive()
+            guard var data = received, !data.isEmpty else { return nil }
 
-                guard var data = data, !data.isEmpty else {
-                    completion(nil, nil)
-                    return
-                }
+            lock.lock()
+            let processedData = processReceiveData(&data)
+            lock.unlock()
 
-                self.lock.lock()
-                let processedData = self.processReceiveData(&data)
-                self.lock.unlock()
-
-                // Empty result means only padding was received; continue rather than signalling EOF.
-                if processedData.isEmpty {
-                    self.receiveRawInternal(completion: completion)
-                } else {
-                    completion(processedData, nil)
-                }
+            // Empty result means only padding was received; continue rather than signalling EOF.
+            if processedData.isEmpty {
+                continue
             }
+            return processedData
         }
-    }
-
-    // The inner connection already handles response-header processing.
-    override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        receiveRaw(completion: completion)
     }
 
     private func processReceiveData(_ data: inout Data) -> Data {

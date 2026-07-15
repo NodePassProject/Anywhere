@@ -49,10 +49,10 @@ extension ProxyClient {
         destinationHost: String,
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
             self.connectShadowsocksRealUDP(
-                destinationHost: destinationHost, destinationPort: destinationPort, completion: completion
-            )
+                destinationHost: destinationHost, destinationPort: destinationPort
+            ) { continuation.resume(with: $0) }
         }
     }
 

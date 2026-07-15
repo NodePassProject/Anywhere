@@ -43,15 +43,11 @@ nonisolated class RealityProxyConnection: AsyncProxyConnection {
 
     // MARK: - Vision direct (unencrypted) passthroughs
 
-    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
-        realityConnection.receiveRaw(completion: completion)
+    override func receiveDirectRaw() async throws -> Data? {
+        try await realityConnection.receiveRaw()
     }
 
-    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        realityConnection.sendRaw(data: data, completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data) {
-        realityConnection.sendRaw(data: data)
+    override func sendDirectRaw(_ data: Data) async throws {
+        try await realityConnection.sendRaw(data)
     }
 }

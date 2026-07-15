@@ -16,11 +16,11 @@ extension ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
             self.connectWithAnyTLS(
                 command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
+                destinationPort: destinationPort, initialData: initialData
+            ) { continuation.resume(with: $0) }
         }
     }
 
