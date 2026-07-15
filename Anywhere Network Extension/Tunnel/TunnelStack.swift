@@ -42,10 +42,14 @@ class TunnelStack {
 
     // MARK: Properties
 
-    /// Serial queue for all lwIP operations (lwIP is not thread-safe).
-    let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue,
-                                  qos: .userInitiated,
-                                  autoreleaseFrequency: .workItem)
+    /// The lwIP engine's concurrency boundary: owns the serial executor everything
+    /// lwIP-touching runs on, the async hop the relay drivers suspend across, and the
+    /// per-PCB `TCPConnection` token lifetime. lwIP is not thread-safe, so the executor's
+    /// single queue is the only place `tcp_*`/`pbuf_*` calls and callbacks may run.
+    let lwipBridge = LWIPConcurrencyBridge(label: AWCore.Identifier.lwipQueue)
+
+    /// Serial queue for all lwIP operations, vended by ``lwipBridge``'s custom executor.
+    var lwipQueue: DispatchQueue { lwipBridge.queue }
 
     /// Serial queue owning the UDP data plane.
     let udpQueue = DispatchQueue(label: AWCore.Identifier.udpQueue,

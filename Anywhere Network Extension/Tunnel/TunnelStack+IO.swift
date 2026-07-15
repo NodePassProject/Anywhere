@@ -150,14 +150,7 @@ extension TunnelStack {
     /// Feeds a TCP/ICMP sub-batch into lwIP. Must run on ``lwipQueue``. The
     /// batch bracket coalesces per-segment ACKs and walks every active PCB on `_end`.
     private func feedLwip(_ packets: [Data]) {
-        lwip_bridge_input_batch_begin()
-        for packet in packets {
-            packet.withUnsafeBytes { buffer in
-                guard let baseAddress = buffer.baseAddress else { return }
-                lwip_bridge_input(baseAddress, Int32(buffer.count))
-            }
-        }
-        lwip_bridge_input_batch_end()
+        lwipBridge.input(packets)
         // A fresh segment may have queued a timeout while the tick was suspended — re-arm.
         resumeLwipTickIfNeeded()
     }
@@ -185,7 +178,7 @@ extension TunnelStack {
         )
         timer.setEventHandler { [weak self] in
             guard let self, self.running else { return }
-            if lwip_bridge_check_timeouts() != 0 {
+            if lwipBridge.serviceTimeouts() {
                 self.suspendLwipTickIfNeeded()
             }
         }

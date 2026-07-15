@@ -33,8 +33,8 @@ extension TunnelStack {
             running = true
 
             configureRuntime(for: configuration)
-            registerCallbacks()
-            lwip_bridge_init()
+            lwipBridge.installCallbacks(host: self)
+            lwipBridge.initEngine()
             startTimeoutTimer()
             scheduleUDPCleanup()
             startReadingPackets()
@@ -54,7 +54,7 @@ extension TunnelStack {
             shutdownInternal()
             // After shutdown so the teardown's own callbacks (RSTs, errors)
             // still reach the stack.
-            lwip_bridge_set_host_ctx(nil)
+            lwipBridge.clearHost()
             OutboundConnector.setRoutingContext(nil)
             fakeIPPool.reset()
             configuration = nil
@@ -138,10 +138,7 @@ extension TunnelStack {
         // Close app-facing TCP legs BEFORE tearing down upstreams: close() sets
         // `closed` synchronously (on lwipQueue), so teardown error completions
         // can't pre-empt a graceful FIN into a RST.
-        lwip_bridge_for_each_tcp { arg in
-            guard let arg else { return }
-            Unmanaged<TCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
-        }
+        lwipBridge.closeAllActiveTCP()
 
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: true)
@@ -202,7 +199,7 @@ extension TunnelStack {
         reclaimInstanceTransports(rebuildMultiplexerPool: false)
 
         isTearingDown = true
-        lwip_bridge_shutdown()
+        lwipBridge.shutdownEngine()
         isTearingDown = false
         logger.debug("[TunnelStack] Shutdown complete")
     }
@@ -250,8 +247,8 @@ extension TunnelStack {
 
         self.configuration = configuration
         configureRuntime(for: configuration)
-        registerCallbacks()
-        lwip_bridge_init()
+        lwipBridge.installCallbacks(host: self)
+        lwipBridge.initEngine()
         startTimeoutTimer()
         scheduleUDPCleanup()
         logger.debug("[TunnelStack] Restarted")

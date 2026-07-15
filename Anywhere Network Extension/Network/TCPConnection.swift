@@ -23,7 +23,12 @@ private struct LWIPWriteFatalError: LocalizedError {
     }
 }
 
-class TCPConnection {
+actor TCPConnection {
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        bridge.executor.asUnownedSerialExecutor()
+    }
+
     /// The owning stack, for traffic accounting, MITM state, and teardown
     /// coordination. Weak: the stack can stop while late completions on this
     /// connection are still in flight.
@@ -31,6 +36,10 @@ class TCPConnection {
 
     let pcb: UnsafeMutableRawPointer
     let dstPort: UInt16
+
+    /// The lwIP concurrency boundary: the connection's serial executor, every `tcp_*`
+    /// call, and this connection's PCB-token lifetime all go through it.
+    let bridge: LWIPConcurrencyBridge
     let lwipQueue: DispatchQueue
 
     /// Dial destination, fixed at accept time; an SNI re-route deliberately
@@ -95,12 +104,13 @@ class TCPConnection {
 
     // MARK: Relay Drivers
     //
-    // The upload and download copy loops run as two long-lived `Task`s over the proxy
-    // connection's async surface: `await send` / `await receive` are the ordering and the
-    // single-flight, so there is no manual pump, pending-completion FIFO, or in-flight
-    // bookkeeping. lwipQueue-confined state is reached through `onLwip` hops; two
-    // `AsyncStream` wakeups nudge each driver when upload work appears (new bytes / the
-    // app's FIN) or download capacity opens (backlog drained below the low-water mark).
+    // The upload and download copy loops run as two long-lived, actor-isolated `Task`s over
+    // the proxy connection's async surface: `await send` / `await receive` are the ordering
+    // and the single-flight, so there is no manual pump, pending-completion FIFO, or
+    // in-flight bookkeeping. Because the drivers are actor-isolated, the code between awaits
+    // runs on the lwIP executor with no hop; two `AsyncStream` wakeups nudge each driver
+    // when upload work appears (new bytes / the app's FIN) or download capacity opens
+    // (backlog drained below the low-water mark).
     private var uploadDriver: Task<Void, Never>?
     private var downloadDriver: Task<Void, Never>?
     private let uploadWake: AsyncStream<Void>
@@ -109,7 +119,7 @@ class TCPConnection {
     private let downloadWakeContinuation: AsyncStream<Void>.Continuation
 
     /// True only while the upload driver is awaiting a `send`; gates the graceful deferred
-    /// close so it can't truncate an in-flight chunk. lwipQueue-confined.
+    /// close so it can't truncate an in-flight chunk.
     private var uploadSending = false
 
     // MARK: Upload Buffer
@@ -129,14 +139,17 @@ class TCPConnection {
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
-    /// Per-dial state (deadline, transport-cancel, settled flag), one instance per in-flight dial rather
-    /// than single-valued so the bridge's concurrent per-stream dials don't cross-wire timeouts or cancels.
+    /// Per-dial state (deadline, transport-cancel, settled flag, MITM completion), one instance per
+    /// in-flight dial rather than single-valued so the bridge's concurrent per-stream dials don't
+    /// cross-wire timeouts or cancels.
     private final class InFlightDial {
         var deadline: DispatchWorkItem?
         var cancel: (() -> Void)?
         var settled = false
+        /// The MITM session's completion, invoked exactly once by ``settleDial(_:_:)``.
+        var completion: ((Result<MITMDialResult, Error>) -> Void)?
     }
-    /// Dials awaiting resolution; `releaseProxy` cancels every one on teardown. lwipQueue-confined.
+    /// Dials awaiting resolution; `releaseProxy` cancels every one on teardown.
     private var inFlightDials: [InFlightDial] = []
     /// Commits the IP-based route if the sniff doesn't resolve in time.
     private var sniffDeadline: DispatchWorkItem?
@@ -152,7 +165,7 @@ class TCPConnection {
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
 
     /// Whether this connection is counted in `FlowGauge.pendingTCP`; settled
-    /// exactly once by `settlePendingAdmission()`. lwipQueue-confined.
+    /// exactly once by `settlePendingAdmission()`.
     private var pendingAdmissionCounted = true
 
     // MARK: Lifecycle
@@ -164,14 +177,15 @@ class TCPConnection {
          ruleSetName: String? = nil,
          sniffSNI: Bool = false,
          hostIsResolvedDomain: Bool = false,
-         lwipQueue: DispatchQueue) {
+         bridge: LWIPConcurrencyBridge) {
         FlowGauge.incrementPendingTCP()
         self.stack = stack
         self.pcb = pcb
         self.dstHost = dstHost
         self.dstPort = dstPort
         self.configuration = configuration
-        self.lwipQueue = lwipQueue
+        self.bridge = bridge
+        self.lwipQueue = bridge.queue
         self.routeTarget = routeTarget
         self.acceptedViaDefault = viaDefault
         self.ruleSetName = ruleSetName
@@ -187,18 +201,25 @@ class TCPConnection {
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
-        
+    }
+
+    /// Arms the handshake timer and either begins dialing or waits for the sniff deadline.
+    /// The bridge's accept trampoline calls this once, on the lwIP queue, right after `init`.
+    func start() {
         let timer = DispatchWorkItem { [weak self] in
-            guard let self, !self.closed else { return }
-            if self.isEstablishing {
-                let phase = self.isSniffing ? "protocol sniff" : (self.bypass ? "direct dial" : "proxy dial")
-                self.failureReporter.report(
-                    operation: "Handshake",
-                    endpoint: self.endpointDescription,
-                    error: HandshakeTimeoutError(phase: phase),
-                    context: DialDiagnostics.snapshot()
-                )
-                self.abort()
+            guard let self else { return }
+            self.assumeIsolated { me in
+                guard !me.closed else { return }
+                if me.isEstablishing {
+                    let phase = me.isSniffing ? "protocol sniff" : (me.bypass ? "direct dial" : "proxy dial")
+                    me.failureReporter.report(
+                        operation: "Handshake",
+                        endpoint: me.endpointDescription,
+                        error: HandshakeTimeoutError(phase: phase),
+                        context: DialDiagnostics.snapshot()
+                    )
+                    me.abort()
+                }
             }
         }
         handshakeTimer = timer
@@ -210,19 +231,21 @@ class TCPConnection {
             // Server-speaks-first protocols (SSH, SMTP, FTP) never send client
             // bytes; commit the IP-based route at the deadline.
             let deadline = DispatchWorkItem { [weak self] in
-                guard let self, !self.closed, self.isSniffing else { return }
-                self.sniffer = nil
-                self.httpSniffer = nil
-                self.beginConnecting()
+                guard let self else { return }
+                self.assumeIsolated { me in
+                    guard !me.closed, me.isSniffing else { return }
+                    me.sniffer = nil
+                    me.httpSniffer = nil
+                    me.beginConnecting()
+                }
             }
             sniffDeadline = deadline
             lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.sniffDeadline, execute: deadline)
         }
     }
-    
+
     deinit {
         guard pendingAdmissionCounted else { return }
-        pendingAdmissionCounted = false
         FlowGauge.decrementPendingTCP()
         logger.error("[TCP] Connection deallocated with its admission still counted — teardown never ran. Recovered the FlowGauge count in deinit; a teardown path has regressed.")
     }
@@ -264,7 +287,7 @@ class TCPConnection {
         stack?.mitmEnabled == true
     }
 
-    // MARK: - lwIP Callbacks (called on lwipQueue)
+    // MARK: - lwIP Callbacks (entered from the bridge via assumeIsolated, on the lwIP queue)
 
     /// Upload path: data from the local app via lwIP.
     func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
@@ -350,14 +373,7 @@ class TCPConnection {
 
     // MARK: - Relay Drivers
 
-    /// Hops onto `lwipQueue` to touch lwIP-confined state from an async driver, returning its result.
-    private func onLwip<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            lwipQueue.async { continuation.resume(returning: body()) }
-        }
-    }
-
-    /// Starts the upload/download copy loops once the proxy leg is up. Called on `lwipQueue`.
+    /// Starts the upload/download copy loops once the proxy leg is up.
     private func startRelayDrivers(_ connection: ProxyConnection) {
         uploadDriver = Task { [weak self] in await self?.runUploadDriver(connection) }
         downloadDriver = Task { [weak self] in await self?.runDownloadDriver(connection) }
@@ -372,27 +388,30 @@ class TCPConnection {
         case stop
     }
 
+    /// Computes the next upload action against the coalescing buffer and close state; runs
+    /// synchronously on the actor between the driver's `await`s.
+    private func nextUploadStep() -> UploadStep {
+        if closed { return .stop }
+        if uploadBufferCount > 0 {
+            let take = min(uploadBufferCount, TunnelConstants.uploadChunkSize)
+            uploadSending = true
+            return .send(sliceUploadBuffer(take))
+        }
+        // Buffer drained: forward the app's FIN as an ordered half-close.
+        if uplinkDone, uplinkCloseState == .open {
+            uplinkCloseState = .closing
+            return .finish
+        }
+        return .idle
+    }
+
     /// Uplink copy loop: drains the coalescing buffer to the proxy leg one `await send` at
     /// a time (natural single-flight), then forwards the app's FIN as an ordered half-close.
     /// `tcp_recved` is deferred to each send's completion, so the app is throttled to TCP_WND.
     private func runUploadDriver(_ connection: ProxyConnection) async {
         for await _ in uploadWake {
             drain: while true {
-                let step = await onLwip { () -> UploadStep in
-                    if self.closed { return .stop }
-                    if self.uploadBufferCount > 0 {
-                        let take = min(self.uploadBufferCount, TunnelConstants.uploadChunkSize)
-                        self.uploadSending = true
-                        return .send(self.sliceUploadBuffer(take))
-                    }
-                    // Buffer drained: forward the app's FIN as an ordered half-close.
-                    if self.uplinkDone, self.uplinkCloseState == .open {
-                        self.uplinkCloseState = .closing
-                        return .finish
-                    }
-                    return .idle
-                }
-                switch step {
+                switch nextUploadStep() {
                 case .stop:
                     return
                 case .idle:
@@ -401,39 +420,35 @@ class TCPConnection {
                     do {
                         try await connection.send(chunk)
                     } catch {
-                        await onLwip {
-                            self.uploadSending = false
-                            guard !self.closed else { return }
-                            self.reportFailure("Send", error: error)
-                            self.abort()
+                        uploadSending = false
+                        if !closed {
+                            reportFailure("Send", error: error)
+                            abort()
                         }
                         return
                     }
-                    await onLwip {
-                        self.uploadSending = false
-                        guard !self.closed else { return }
+                    uploadSending = false
+                    if !closed {
                         // Count proxy-side accepts as uplink activity; a long backpressured
                         // upload would otherwise look idle and close mid-stream.
-                        self.activityTimer?.update()
-                        self.acknowledgeReceivedBytes(chunk.count)
-                        self.attemptDeferredClose()
+                        activityTimer?.update()
+                        acknowledgeReceivedBytes(chunk.count)
+                        attemptDeferredClose()
                     }
                 case .finish:
                     do {
                         try await connection.closeWrite()
                     } catch {
-                        await onLwip {
-                            guard !self.closed else { return }
-                            self.uplinkCloseState = .closed
-                            self.reportFailure("Close write", error: error)
-                            self.abort()
+                        if !closed {
+                            uplinkCloseState = .closed
+                            reportFailure("Close write", error: error)
+                            abort()
                         }
                         return
                     }
-                    await onLwip {
-                        guard !self.closed else { return }
-                        self.uplinkCloseState = .closed
-                        self.attemptDeferredClose()
+                    if !closed {
+                        uplinkCloseState = .closed
+                        attemptDeferredClose()
                     }
                 }
             }
@@ -446,18 +461,40 @@ class TCPConnection {
         case stop
     }
 
+    /// Computes the next download action against the backlog and close state; runs
+    /// synchronously on the actor between the driver's `await`s.
+    private func nextDownloadStep() -> DownloadStep {
+        if closed || downlinkDone { return .stop }
+        if pendingWriteCount >= TunnelConstants.drainLowWaterMark { return .waitDrain }
+        return .receive
+    }
+
+    /// Handles one received chunk (or EOF) on the actor; returns `true` to stop the driver.
+    private func handleDownloaded(_ data: Data?) -> Bool {
+        guard !closed else { return true }
+        // nil and empty both mean EOF; transports never deliver zero-byte data.
+        guard let data, !data.isEmpty else {
+            downlinkDone = true
+            if uplinkDone {
+                closeWhenDrained()
+            } else {
+                activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
+                propagateDownlinkCloseIfReady()
+            }
+            return true
+        }
+        activityTimer?.update()
+        writeToLWIP(data)
+        return false
+    }
+
     /// Downlink copy loop: pulls from the proxy leg and hands each chunk to lwIP,
     /// prefetching only while the downlink backlog is below the low-water mark so the peer
     /// is throttled to what the app drains. Stops for good once the downlink EOF'd.
     private func runDownloadDriver(_ connection: ProxyConnection) async {
         var drainSignals = downloadWake.makeAsyncIterator()
         while true {
-            let step = await onLwip { () -> DownloadStep in
-                if self.closed || self.downlinkDone { return .stop }
-                if self.pendingWriteCount >= TunnelConstants.drainLowWaterMark { return .waitDrain }
-                return .receive
-            }
-            switch step {
+            switch nextDownloadStep() {
             case .stop:
                 return
             case .waitDrain:
@@ -468,31 +505,13 @@ class TCPConnection {
                 do {
                     data = try await connection.receive()
                 } catch {
-                    await onLwip {
-                        guard !self.closed else { return }
-                        self.reportFailure("Receive", error: error)
-                        self.abort()
+                    if !closed {
+                        reportFailure("Receive", error: error)
+                        abort()
                     }
                     return
                 }
-                let stop = await onLwip { () -> Bool in
-                    guard !self.closed else { return true }
-                    // nil and empty both mean EOF; transports never deliver zero-byte data.
-                    guard let data, !data.isEmpty else {
-                        self.downlinkDone = true
-                        if self.uplinkDone {
-                            self.closeWhenDrained()
-                        } else {
-                            self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
-                            self.propagateDownlinkCloseIfReady()
-                        }
-                        return true
-                    }
-                    self.activityTimer?.update()
-                    self.writeToLWIP(data)
-                    return false
-                }
-                if stop { return }
+                if handleDownloaded(data) { return }
             }
         }
     }
@@ -507,7 +526,7 @@ class TCPConnection {
               !closePending,
               pendingWriteCount == 0 else { return }
         downlinkShutdownSent = true
-        lwip_bridge_tcp_shutdown_tx(pcb)
+        bridge.tcpShutdownTx(pcb)
     }
 
     /// Acks local-app bytes to lwIP once the proxy leg accepted them, then
@@ -520,10 +539,10 @@ class TCPConnection {
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(part)
-            lwip_bridge_tcp_recved(pcb, part)
+            bridge.tcpRecved(pcb, part)
         }
         // tcp_output synchronously fires the output callback and kicks the drain loop.
-        lwip_bridge_tcp_output(pcb)
+        bridge.tcpOutput(pcb)
     }
 
     /// Removes and returns the `take`-byte head slice; whole-buffer consumption hands
@@ -576,7 +595,7 @@ class TCPConnection {
 
         // Propagate the orderly close through the inner TLS leg.
         mitmSession?.clientDidClose()
-        
+
         uplinkDone = true
         // Wake the upload driver so it drains the buffer, then forwards the FIN.
         uploadWakeContinuation.yield(())
@@ -617,13 +636,12 @@ class TCPConnection {
 
     /// Balances `FlowGauge.pendingTCP` exactly once — when the outbound dial
     /// starts (the transport's own gauge count takes over) or on teardown.
-    /// Must run on lwipQueue.
     private func settlePendingAdmission() {
         guard pendingAdmissionCounted else { return }
         pendingAdmissionCounted = false
         FlowGauge.decrementPendingTCP()
     }
-    
+
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
         failureReporter.report(operation: "Connect", endpoint: endpointDescription,
                                error: error, context: DialDiagnostics.snapshot())
@@ -761,35 +779,31 @@ class TCPConnection {
                 error = dialError
             }
             guard let self else { return }
-
-            self.lwipQueue.async { [self] in
-                self.proxyConnecting = false
-                guard !self.closed else { return }
-
-                if let error {
-                    self.handleConnectFailure(error, bufferedClientData: initialData)
-                    return
-                }
-                self.handshakeTimer?.cancel()
-                self.handshakeTimer = nil
-                self.activityTimer = ActivityTimer(
-                    queue: self.lwipQueue,
-                    timeout: self.initialIdleTimeout
-                ) { [weak self] in
-                    guard let self, !self.closed else { return }
-                    self.close()
-                }
-
-                if let initialData {
-                    self.uploadPipeline.buffer.append(initialData)
-                }
-                if !self.pendingData.isEmpty {
-                    self.uploadPipeline.buffer.append(self.pendingData)
-                    self.pendingData.removeAll(keepingCapacity: true)
-                }
-                self.startRelayDrivers(connection)
-            }
+            await self.finishDirectConnect(connection: connection, error: error, initialData: initialData)
         }
+    }
+
+    /// Completes a direct dial on the actor: wires the activity timer and starts the relay.
+    private func finishDirectConnect(connection: DirectProxyConnection, error: Error?, initialData: Data?) {
+        proxyConnecting = false
+        guard !closed else { return }
+
+        if let error {
+            handleConnectFailure(error, bufferedClientData: initialData)
+            return
+        }
+        handshakeTimer?.cancel()
+        handshakeTimer = nil
+        activityTimer = makeIdleTimer()
+
+        if let initialData {
+            uploadPipeline.buffer.append(initialData)
+        }
+        if !pendingData.isEmpty {
+            uploadPipeline.buffer.append(pendingData)
+            pendingData.removeAll(keepingCapacity: true)
+        }
+        startRelayDrivers(connection)
     }
 
     // MARK: - Proxy Connection
@@ -810,13 +824,13 @@ class TCPConnection {
         } else {
             initialData = nil
         }
-        
+
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
         self.proxyClient = client
-        
+
         let host = dstHost
         let port = dstPort
         Task { [weak self] in
@@ -830,40 +844,48 @@ class TCPConnection {
                 if case .success(let connection) = result { connection.cancel() }
                 return
             }
+            await self.finishProxyConnect(result: result, initialData: initialData)
+        }
+    }
 
-            self.lwipQueue.async { [self] in
-                self.proxyConnecting = false
-                guard !self.closed else {
-                    if case .success(let connection) = result { connection.cancel() }
-                    return
-                }
+    /// Completes a proxy dial on the actor: wires the activity timer and starts the relay,
+    /// or reports the failure. Cancels a late connection if teardown already closed us.
+    private func finishProxyConnect(result: Result<ProxyConnection, Error>, initialData: Data?) {
+        proxyConnecting = false
+        guard !closed else {
+            if case .success(let connection) = result { connection.cancel() }
+            return
+        }
 
-                switch result {
-                case .success(let proxyConnection):
-                    self.proxyConnection = proxyConnection
-                    self.handshakeTimer?.cancel()
-                    self.handshakeTimer = nil
-                    self.activityTimer = ActivityTimer(
-                        queue: self.lwipQueue,
-                        timeout: self.initialIdleTimeout
-                    ) { [weak self] in
-                        guard let self, !self.closed else { return }
-                        self.close()
-                    }
+        switch result {
+        case .success(let proxyConnection):
+            self.proxyConnection = proxyConnection
+            handshakeTimer?.cancel()
+            handshakeTimer = nil
+            activityTimer = makeIdleTimer()
 
-                    if let initialData {
-                        // Connect success implies handshake-carried initialData was accepted.
-                        self.acknowledgeReceivedBytes(initialData.count)
-                    }
-                    if !self.pendingData.isEmpty {
-                        self.uploadPipeline.buffer.append(self.pendingData)
-                        self.pendingData.removeAll(keepingCapacity: true)
-                    }
-                    self.startRelayDrivers(proxyConnection)
+            if let initialData {
+                // Connect success implies handshake-carried initialData was accepted.
+                acknowledgeReceivedBytes(initialData.count)
+            }
+            if !pendingData.isEmpty {
+                uploadPipeline.buffer.append(pendingData)
+                pendingData.removeAll(keepingCapacity: true)
+            }
+            startRelayDrivers(proxyConnection)
 
-                case .failure(let error):
-                    self.handleConnectFailure(error, bufferedClientData: initialData)
-                }
+        case .failure(let error):
+            handleConnectFailure(error, bufferedClientData: initialData)
+        }
+    }
+
+    /// The idle-timeout timer, firing `close()` on the actor when the connection goes quiet.
+    private func makeIdleTimer() -> ActivityTimer {
+        ActivityTimer(queue: lwipQueue, timeout: initialIdleTimeout) { [weak self] in
+            guard let self else { return }
+            self.assumeIsolated { me in
+                guard !me.closed else { return }
+                me.close()
             }
         }
     }
@@ -874,7 +896,7 @@ class TCPConnection {
         guard let stack else { abort(); return }
         settlePendingAdmission()
         let sni = mitmSNI ?? dstHost
-        
+
         let cache: MITMLeafCertCache?
         if mitmPlaintext {
             cache = nil
@@ -894,13 +916,7 @@ class TCPConnection {
 
         handshakeTimer?.cancel()
         handshakeTimer = nil
-        activityTimer = ActivityTimer(
-            queue: lwipQueue,
-            timeout: initialIdleTimeout
-        ) { [weak self] in
-            guard let self, !self.closed else { return }
-            self.close()
-        }
+        activityTimer = makeIdleTimer()
 
         let initialClientHello = pendingData
         pendingData.removeAll(keepingCapacity: true)
@@ -920,20 +936,24 @@ class TCPConnection {
         session.onSendToClient = { [weak self] data in
             guard let self else { return }
             self.lwipQueue.async {
-                guard !self.closed else { return }
-                self.activityTimer?.update()
-                self.writeToLWIP(data)
+                self.assumeIsolated { me in
+                    guard !me.closed else { return }
+                    me.activityTimer?.update()
+                    me.writeToLWIP(data)
+                }
             }
         }
         session.onTeardown = { [weak self] error in
             guard let self else { return }
             self.lwipQueue.async {
-                guard !self.closed else { return }
-                if let error {
-                    self.reportFailure("MITM", error: error)
-                    self.abort()
-                } else {
-                    self.closeWhenDrained()
+                self.assumeIsolated { me in
+                    guard !me.closed else { return }
+                    if let error {
+                        me.reportFailure("MITM", error: error)
+                        me.abort()
+                    } else {
+                        me.closeWhenDrained()
+                    }
                 }
             }
         }
@@ -952,13 +972,15 @@ class TCPConnection {
         case reject
         case proxy(routeTarget: RouteTarget, configuration: ProxyConfiguration)
     }
-    
+
     private func makeMITMDialer() -> MITMDialer {
         return { [weak self] host, port, completion in
             guard let self else { completion(.failure(TransportError.notConnected)); return }
             self.lwipQueue.async {
-                guard !self.closed else { completion(.failure(TransportError.notConnected)); return }
-                self.dialUpstreamBounded(host: host, port: port, completion: completion)
+                self.assumeIsolated { me in
+                    guard !me.closed else { completion(.failure(TransportError.notConnected)); return }
+                    me.dialUpstreamBounded(host: host, port: port, completion: completion)
+                }
             }
         }
     }
@@ -966,51 +988,56 @@ class TCPConnection {
     /// Bounds the deferred MITM upstream dial (TCP connect + proxy protocol handshake) — the gap between the
     /// per-connection `handshakeTimer` and the session's TLS-only `armUpstreamHandshakeTimeout`, where a stalled
     /// protocol handshake would otherwise linger on the 300 s idle timer. On expiry the transport is cancelled,
-    /// not just failed; `completion` fires exactly once. lwipQueue-confined.
+    /// not just failed; `completion` fires exactly once via ``settleDial(_:_:)``.
     private func dialUpstreamBounded(
         host: String, port: UInt16,
         completion: @escaping (Result<MITMDialResult, Error>) -> Void
     ) {
         let dial = InFlightDial()
+        dial.completion = completion
         inFlightDials.append(dial)
 
         let deadline = DispatchWorkItem { [weak self, weak dial] in
-            guard let self, let dial, !self.closed, !dial.settled else { return }
-            dial.settled = true
-            dial.cancel?()
-            self.forgetDial(dial)
-            completion(.failure(HandshakeTimeoutError(phase: "upstream dial")))
+            guard let self, let dial else { return }
+            self.assumeIsolated { me in
+                guard !me.closed, !dial.settled else { return }
+                dial.settled = true
+                dial.cancel?()
+                me.forgetDial(dial)
+                dial.completion?(.failure(HandshakeTimeoutError(phase: "upstream dial")))
+            }
         }
         dial.deadline = deadline
         lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: deadline)
 
-        // First of {dial resolves, deadline fires, teardown} wins; a late result cancels whatever it
-        // produced, so a timed-out or torn-down dial can't hand back a live socket.
-        let settle: (Result<MITMDialResult, Error>) -> Void = { [weak self, weak dial] result in
-            guard let self, let dial, !dial.settled else {
-                if case .success(let d) = result { d.connection.cancel(); d.proxyClient?.cancel() }
-                return
-            }
-            dial.settled = true
-            dial.deadline?.cancel()
-            self.forgetDial(dial)
-            completion(result)
-        }
-
         switch commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
-            settle(.failure(TransportError.connectionFailed("rejected by routing rule: \(host)")))
+            settleDial(dial, .failure(TransportError.connectionFailed("rejected by routing rule: \(host)")))
         case .direct:
-            dialDirectUpstream(host: host, port: port, dial: dial, completion: settle)
+            dialDirectUpstream(host: host, port: port, dial: dial)
         case .proxy(_, let configuration):
-            dialProxyUpstream(configuration: configuration, host: host, port: port, dial: dial, completion: settle)
+            dialProxyUpstream(configuration: configuration, host: host, port: port, dial: dial)
         }
+    }
+
+    /// Resolves a dial exactly once: first of {dial resolves, deadline fires, teardown} wins.
+    /// A late result cancels whatever it produced, so a timed-out or torn-down dial can't hand
+    /// back a live socket.
+    private func settleDial(_ dial: InFlightDial, _ result: Result<MITMDialResult, Error>) {
+        guard !dial.settled else {
+            if case .success(let d) = result { d.connection.cancel(); d.proxyClient?.cancel() }
+            return
+        }
+        dial.settled = true
+        dial.deadline?.cancel()
+        forgetDial(dial)
+        dial.completion?(result)
     }
 
     private func forgetDial(_ dial: InFlightDial) {
         inFlightDials.removeAll { $0 === dial }
     }
-    
+
     private func commitUpstreamRoute(forDialHost host: String, port: UInt16) -> UpstreamRoute {
         let resolved = resolveUpstreamRoute(forDialHost: host)
         switch resolved.route {
@@ -1048,7 +1075,7 @@ class TCPConnection {
         }
         return (defaultUpstreamRoute(), true, nil)
     }
-    
+
     private func defaultUpstreamRoute() -> UpstreamRoute {
         guard let stack,
               case .proxy = stack.defaultRouteTarget,
@@ -1057,9 +1084,8 @@ class TCPConnection {
         }
         return .proxy(routeTarget: stack.defaultRouteTarget, configuration: configuration)
     }
-    
-    private func dialDirectUpstream(host: String, port: UInt16, dial: InFlightDial,
-                                    completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
+
+    private func dialDirectUpstream(host: String, port: UInt16, dial: InFlightDial) {
         // Direct/bypass — not a proxied connection. TCPTransport has no dial
         // timer, so it stays out of the Dial stat automatically.
         let transport = TCPTransport(host: host, port: port)
@@ -1075,23 +1101,19 @@ class TCPConnection {
             }
             guard let self else {
                 connection.cancel()
-                completion(.failure(error ?? TransportError.notConnected))
                 return
             }
-            self.lwipQueue.async {
-                if let error {
-                    // onTeardown reports the failure; don't double-report.
-                    completion(.failure(error))
-                } else {
-                    completion(.success(MITMDialResult(connection: connection, proxyClient: nil)))
-                }
+            if let error {
+                // onTeardown reports the failure; don't double-report.
+                await self.settleDial(dial, .failure(error))
+            } else {
+                await self.settleDial(dial, .success(MITMDialResult(connection: connection, proxyClient: nil)))
             }
         }
     }
-    
+
     private func dialProxyUpstream(configuration: ProxyConfiguration, host: String, port: UInt16,
-                                   dial: InFlightDial,
-                                   completion: @escaping (Result<MITMDialResult, Error>) -> Void) {
+                                   dial: InFlightDial) {
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
@@ -1107,17 +1129,14 @@ class TCPConnection {
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
                 await client.cancel()
-                completion(.failure(TransportError.notConnected))
                 return
             }
-            self.lwipQueue.async {
-                switch result {
-                case .success(let connection):
-                    completion(.success(MITMDialResult(connection: connection, proxyClient: client)))
-                case .failure(let error):
-                    // onTeardown reports the failure; don't double-report.
-                    completion(.failure(error))
-                }
+            switch result {
+            case .success(let connection):
+                await self.settleDial(dial, .success(MITMDialResult(connection: connection, proxyClient: client)))
+            case .failure(let error):
+                // onTeardown reports the failure; don't double-report.
+                await self.settleDial(dial, .failure(error))
             }
         }
     }
@@ -1129,16 +1148,16 @@ class TCPConnection {
     private func feedLWIP(_ base: UnsafeRawPointer, count: Int, retryOnEmpty: Bool = false) -> Int {
         var offset = 0
         while offset < count {
-            var sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
+            var sndbuf = bridge.tcpSendBuffer(pcb)
             if sndbuf <= 0 {
                 if retryOnEmpty {
-                    lwip_bridge_tcp_output(pcb)
-                    sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
+                    bridge.tcpOutput(pcb)
+                    sndbuf = bridge.tcpSendBuffer(pcb)
                 }
                 guard sndbuf > 0 else { break }
             }
             let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
-            let error = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
+            let error = bridge.tcpWrite(pcb, base + offset, UInt16(chunkSize))
             if error != 0 {
                 if error == -1 { break }  // ERR_MEM: transient
                 return -1               // fatal error
@@ -1169,8 +1188,8 @@ class TCPConnection {
                 guard let base = buffer.baseAddress else { return 0 }
                 let n = feedLWIP(base + head, count: live, retryOnEmpty: true)
                 if n == -1 {
-                    let sndbuf = Int(lwip_bridge_tcp_sndbuf(self.pcb))
-                    let queuelen = Int(lwip_bridge_tcp_snd_queuelen(self.pcb))
+                    let sndbuf = bridge.tcpSendBuffer(self.pcb)
+                    let queuelen = bridge.tcpSendQueueLength(self.pcb)
                     self.reportFailure(
                         "Write",
                         error: LWIPWriteFatalError(pending: live, sndbuf: sndbuf, queuelen: queuelen)
@@ -1195,13 +1214,16 @@ class TCPConnection {
                     pendingWrite.removeSubrange(0..<pendingWriteOffset)
                     pendingWriteOffset = 0
                 }
-                lwip_bridge_tcp_output(pcb)
+                bridge.tcpOutput(pcb)
             } else {
                 // Nothing drained (ERR_MEM / zero window) — retry after a delay;
                 // don't rearm the receive while stalled.
                 lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
-                    guard let self, !self.closed else { return }
-                    self.drainPendingWrite()
+                    guard let self else { return }
+                    self.assumeIsolated { me in
+                        guard !me.closed else { return }
+                        me.drainPendingWrite()
+                    }
                 }
                 return
             }
@@ -1231,7 +1253,7 @@ class TCPConnection {
         }
 
         if written > 0 {
-            lwip_bridge_tcp_output(pcb)
+            bridge.tcpOutput(pcb)
         }
     }
 
@@ -1265,9 +1287,9 @@ class TCPConnection {
         guard !closed else { return }
         closed = true
         flushPendingToLWIP()
-        lwip_bridge_tcp_close(pcb)
+        bridge.tcpClose(pcb)
         releaseProxy(abortive: false)
-        Unmanaged.passUnretained(self).release()
+        bridge.discard(self)
     }
 
     /// Tears down with a clean FIN: lwIP's `tcp_close` downgrades to RST while
@@ -1278,7 +1300,7 @@ class TCPConnection {
         while remaining > 0 {
             let chunk = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(chunk)
-            lwip_bridge_tcp_recved(pcb, chunk)
+            bridge.tcpRecved(pcb, chunk)
         }
         close()
     }
@@ -1293,7 +1315,7 @@ class TCPConnection {
         alert.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
             _ = feedLWIP(UnsafeRawPointer(base), count: alert.count, retryOnEmpty: true)
-            lwip_bridge_tcp_output(pcb)
+            bridge.tcpOutput(pcb)
         }
         rejectGracefully()
     }
@@ -1301,9 +1323,9 @@ class TCPConnection {
     func abort() {
         guard !closed else { return }
         closed = true
-        lwip_bridge_tcp_abort(pcb)
+        bridge.tcpAbort(pcb)
         releaseProxy(abortive: true)
-        Unmanaged.passUnretained(self).release()
+        bridge.discard(self)
     }
 
     /// `abortive` closes the outbound leg with RST instead of a graceful FIN.
@@ -1334,8 +1356,7 @@ class TCPConnection {
         pendingWriteOffset = 0
         uploadPipeline = UploadPipeline()
         // Stop the relay drivers: finishing the wakeup streams ends any parked `for await`,
-        // and cancelling unblocks a driver stuck in `onLwip` on the next hop; the connection
-        // cancel below unblocks one awaiting `send`/`receive`.
+        // and cancelling unblocks a driver awaiting `send`/`receive` via the connection cancel below.
         uploadWakeContinuation.finish()
         downloadWakeContinuation.finish()
         uploadDriver?.cancel()

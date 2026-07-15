@@ -8,7 +8,7 @@
 #ifndef BridgingHeader_h
 #define BridgingHeader_h
 
-#include "./lwip/lwip_bridge.h"
+#include "lwip_bridge.h"
 #include "ngtcp2_bridge.h"
 #include "blake2.h"
 #include "blake3.h"

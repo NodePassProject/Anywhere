@@ -41,195 +41,139 @@ private final class RejectFloodTracker {
 
 private let rejectFloodTracker = RejectFloodTracker()
 
-extension TunnelStack {
+extension TunnelStack: LWIPBridgeHost {
 
-    // MARK: - Callback Registration
-
-    /// Fetches the stack behind the bridge's host context. All bridge
-    /// callbacks run on ``lwipQueue``, where the context is set/cleared, so
-    /// the read is queue-confined.
-    private static func stack() -> TunnelStack? {
-        guard let ctx = lwip_bridge_host_ctx() else { return nil }
-        return Unmanaged<TunnelStack>.fromOpaque(ctx).takeUnretainedValue()
+    /// lwIP has an IP packet to write back to the TUN. Batches it onto ``outputBuffer`` and
+    /// kicks a drain if idle; the release stays index-aligned and fires on ``lwipQueue``.
+    func lwipDidOutput(_ packet: Data, isIPv6: Bool,
+                       releaseCtx: UnsafeMutableRawPointer?,
+                       release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void) {
+        let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
+        let pending = PendingRelease(ctx: releaseCtx, fn: release)
+        let needsKick: Bool = outputBuffer.withLock { buffer in
+            buffer.packets.append(packet)
+            buffer.protocols.append(proto)
+            buffer.releases.append(pending)
+            if buffer.drainInFlight { return false }
+            buffer.drainInFlight = true
+            return true
+        }
+        if needsKick {
+            outputQueue.async { [self] in drainOutputLoop() }
+        }
     }
 
-    /// Publishes `self` as the bridge's host context and registers the C
-    /// callbacks that route lwIP events back to it. Must be called on
-    /// ``lwipQueue`` before `lwip_bridge_init`.
-    func registerCallbacks() {
-        lwip_bridge_set_host_ctx(Unmanaged.passUnretained(self).toOpaque())
+    /// Verdict for an incoming SYN: reject `.reject` destinations at SYN time — never
+    /// completing the 3WHS gives the client a clean ECONNREFUSED. SNI-based rejects (no
+    /// ClientHello yet) still land in ``TCPConnection``.
+    func lwipSynVerdict(dstIP: UnsafeRawPointer, dstPort: UInt16, isIPv6: Bool) -> Int32 {
+        let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
 
-        // Output: lwIP → tunnel packet flow, batched. `Data(bytesNoCopy:)` with
-        // a `.none` deallocator lets writePackets read lwIP's memory directly;
-        // ``OutputBufferState/releases`` is the actual owner, and releases must
-        // stay on lwipQueue (pbuf_free/mem_free mutate freelists with no locking
-        // under NO_SYS=1).
-        lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
-            guard let stack = TunnelStack.stack(), let data, let release else { return }
-            let byteCount = Int(len)
-            let mutableData = UnsafeMutableRawPointer(mutating: data)
-            let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .none)
-            let proto: NSNumber = isIPv6 != 0 ? TunnelStack.ipv6Proto : TunnelStack.ipv4Proto
-            let pending = TunnelStack.PendingRelease(ctx: releaseCtx, fn: release)
-            let needsKick: Bool = stack.outputBuffer.withLock { buffer in
-                buffer.packets.append(packet)
-                buffer.protocols.append(proto)
-                buffer.releases.append(pending)
-                if buffer.drainInFlight { return false }
-                buffer.drainInFlight = true
-                return true
-            }
-            if needsKick {
-                stack.outputQueue.async { stack.drainOutputLoop() }
-            }
-        }
-
-        // TCP SYN filter: reject `.reject` destinations at SYN time — never
-        // completes the 3WHS, giving the client a clean ECONNREFUSED. SNI-based
-        // rejects (no ClientHello yet) still land in `TCPConnection`.
-        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, dstPort, isIPv6 in
-            guard let stack = TunnelStack.stack(), let dstIP else {
-                return Int32(LWIP_BRIDGE_SYN_PASS)
-            }
-            let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
-
-            // DROP if the host is flooding, RESET otherwise.
-            func reject(host: String, reason: String, ruleSetName: String?) -> Int32 {
-                stack.requestLog.record(protocol: .tcp, host: host, port: dstPort, routeTarget: .reject, ruleSetName: ruleSetName)
-                if rejectFloodTracker.shouldDrop(host: host) {
-                    logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
-                    return Int32(LWIP_BRIDGE_SYN_DROP)
-                }
-                logger.debug("[TCP] SYN rejected by \(reason): \(host):\(dstPort)")
-                return Int32(LWIP_BRIDGE_SYN_RESET)
-            }
-
-            let decision = stack.connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
-            switch decision.action {
-            case .reject(let ruleSetName):
-                let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
-                return reject(host: decision.host, reason: reason, ruleSetName: ruleSetName)
-            case .unreachable:
-                // Stale fake-IP pool entry — drop silently rather than RST.
-                logger.debug("[TCP] SYN dropped (stale fake-IP): \(dstIPString):\(dstPort)")
+        // DROP if the host is flooding, RESET otherwise.
+        func reject(host: String, reason: String, ruleSetName: String?) -> Int32 {
+            requestLog.record(protocol: .tcp, host: host, port: dstPort, routeTarget: .reject, ruleSetName: ruleSetName)
+            if rejectFloodTracker.shouldDrop(host: host) {
+                logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
                 return Int32(LWIP_BRIDGE_SYN_DROP)
-            case .route, .routeViaDefault:
-                // Raw-IP destinations admit against the lower watermark.
-                return stack.admitSYN(rawIP: !decision.hostIsResolvedDomain)
             }
+            logger.debug("[TCP] SYN rejected by \(reason): \(host):\(dstPort)")
+            return Int32(LWIP_BRIDGE_SYN_RESET)
         }
 
-        // TCP accept: create a TCPConnection per incoming connection. `.reject`
-        // was already handled by the SYN filter.
-        lwip_bridge_set_tcp_accept_fn { srcIP, srcPort, dstIP, dstPort, isIPv6, pcb in
-            guard let stack = TunnelStack.stack(),
-                  let pcb, let dstIP,
-                  let defaultConfiguration = stack.configuration else {
-                logger.debug("[TunnelStack] tcp_accept: guard failed")
-                return nil
-            }
+        let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
+        switch decision.action {
+        case .reject(let ruleSetName):
+            let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
+            return reject(host: decision.host, reason: reason, ruleSetName: ruleSetName)
+        case .unreachable:
+            // Stale fake-IP pool entry — drop silently rather than RST.
+            logger.debug("[TCP] SYN dropped (stale fake-IP): \(dstIPString):\(dstPort)")
+            return Int32(LWIP_BRIDGE_SYN_DROP)
+        case .route, .routeViaDefault:
+            // Raw-IP destinations admit against the lower watermark.
+            return admitSYN(rawIP: !decision.hostIsResolvedDomain)
+        }
+    }
 
-            let activeTCP = Int(lwip_bridge_active_tcp_count())
-            if activeTCP > TunnelLimits.tcpMaxConnections {
-                if !stack.tcpConnectionCapWarned {
-                    stack.tcpConnectionCapWarned = true
-                    logger.warning("[TCP] Connection table at capacity (\(TunnelLimits.tcpMaxConnections)); refusing new connections to bound memory")
-                }
-                return nil  // bridge aborts newpcb (tcp_abort)
-            } else if stack.tcpConnectionCapWarned && activeTCP < TunnelLimits.tcpMaxConnections * 3 / 4 {
-                stack.tcpConnectionCapWarned = false
-            }
-
-            let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
-            let decision = stack.connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
-
-            var connectionConfiguration = defaultConfiguration
-            // Committed routing identity; drives the dial path and accounting.
-            var routeTarget = stack.defaultRouteTarget
-            // Rule set behind the committed route; nil while on the default.
-            var ruleSetName: String? = nil
-
-            switch decision.action {
-            case .route(let target, let configuration, let matchedRuleSet):
-                routeTarget = target
-                ruleSetName = matchedRuleSet
-                if let configuration {
-                    connectionConfiguration = configuration
-                }
-            case .routeViaDefault:
-                break
-            case .reject, .unreachable:
-                // Both were handled by the SYN filter; defensive return.
-                return nil
-            }
-
-            // `decision.host` is the dial destination; plaintext MITM trusts a
-            // DNS-resolved (fake-IP) host over the spoofable `Host` header.
-            let dstHost = decision.host
-
-            stack.requestLog.record(
-                protocol: .tcp,
-                host: dstHost,
-                port: dstPort,
-                routeTarget: routeTarget,
-                viaDefault: decision.viaDefault,
-                ruleSetName: ruleSetName
-            )
-
-            // Sniff TLS ClientHello only on real-IP connections — fake-IP ones
-            // already know the domain, and an SNI disagreeing with the
-            // DNS-resolved name could miscategorize. MITM is the exception: it
-            // needs the buffered ClientHello, so force sniffing even for a
-            // known fake-IP domain.
-            var sniffSNI = !decision.hostIsResolvedDomain
-            if stack.mitmEnabled && stack.mitmPolicy.matches(dstHost) {
-                sniffSNI = true
-            }
-
-            let connection = TCPConnection(
-                stack: stack,
-                pcb: pcb,
-                dstHost: dstHost,
-                dstPort: dstPort,
-                configuration: connectionConfiguration,
-                routeTarget: routeTarget,
-                viaDefault: decision.viaDefault,
-                ruleSetName: ruleSetName,
-                sniffSNI: sniffSNI,
-                hostIsResolvedDomain: decision.hostIsResolvedDomain,
-                lwipQueue: stack.lwipQueue
-            )
-            return Unmanaged.passRetained(connection).toOpaque()
+    /// Builds the ``TCPConnection`` for a just-accepted pcb, or `nil` to abort it (RST).
+    /// `.reject` was already handled by the SYN filter.
+    func lwipAccept(pcb: UnsafeMutableRawPointer, dstIP: UnsafeRawPointer,
+                    dstPort: UInt16, isIPv6: Bool) -> TCPConnection? {
+        guard let defaultConfiguration = configuration else {
+            logger.debug("[TunnelStack] tcp_accept: guard failed")
+            return nil
         }
 
-        lwip_bridge_set_tcp_recv_fn { connection, data, len in
-            guard let connection else {
-                logger.debug("[TunnelStack] tcp_recv: connection is nil")
-                return
+        let activeTCP = lwipBridge.activeTCPCount()
+        if activeTCP > TunnelLimits.tcpMaxConnections {
+            if !tcpConnectionCapWarned {
+                tcpConnectionCapWarned = true
+                logger.warning("[TCP] Connection table at capacity (\(TunnelLimits.tcpMaxConnections)); refusing new connections to bound memory")
             }
-            let tcpConnection = Unmanaged<TCPConnection>.fromOpaque(connection).takeUnretainedValue()
-            if let data, len > 0 {
-                tcpConnection.handleReceivedData(bytes: data, count: Int(len))
-            } else {
-                tcpConnection.handleRemoteClose()
-            }
+            return nil  // bridge aborts newpcb (tcp_abort)
+        } else if tcpConnectionCapWarned && activeTCP < TunnelLimits.tcpMaxConnections * 3 / 4 {
+            tcpConnectionCapWarned = false
         }
 
-        lwip_bridge_set_tcp_sent_fn { connection, len in
-            guard let connection else { return }
-            let tcpConnection = Unmanaged<TCPConnection>.fromOpaque(connection).takeUnretainedValue()
-            tcpConnection.handleSent(len: len)
+        let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
+        let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
+
+        var connectionConfiguration = defaultConfiguration
+        // Committed routing identity; drives the dial path and accounting.
+        var routeTarget = defaultRouteTarget
+        // Rule set behind the committed route; nil while on the default.
+        var ruleSetName: String? = nil
+
+        switch decision.action {
+        case .route(let target, let configuration, let matchedRuleSet):
+            routeTarget = target
+            ruleSetName = matchedRuleSet
+            if let configuration {
+                connectionConfiguration = configuration
+            }
+        case .routeViaDefault:
+            break
+        case .reject, .unreachable:
+            // Both were handled by the SYN filter; defensive return.
+            return nil
         }
 
-        // PCB already freed by lwIP — release our reference (takeRetainedValue).
-        lwip_bridge_set_tcp_err_fn { connection, err in
-            guard let connection else {
-                logger.debug("[TunnelStack] tcp_err: connection is nil, err=\(err)")
-                return
-            }
-            let tcpConnection = Unmanaged<TCPConnection>.fromOpaque(connection).takeRetainedValue()
-            tcpConnection.handleError(err: err)
+        // `decision.host` is the dial destination; plaintext MITM trusts a
+        // DNS-resolved (fake-IP) host over the spoofable `Host` header.
+        let dstHost = decision.host
+
+        requestLog.record(
+            protocol: .tcp,
+            host: dstHost,
+            port: dstPort,
+            routeTarget: routeTarget,
+            viaDefault: decision.viaDefault,
+            ruleSetName: ruleSetName
+        )
+
+        // Sniff TLS ClientHello only on real-IP connections — fake-IP ones
+        // already know the domain, and an SNI disagreeing with the
+        // DNS-resolved name could miscategorize. MITM is the exception: it
+        // needs the buffered ClientHello, so force sniffing even for a
+        // known fake-IP domain.
+        var sniffSNI = !decision.hostIsResolvedDomain
+        if mitmEnabled && mitmPolicy.matches(dstHost) {
+            sniffSNI = true
         }
+
+        return TCPConnection(
+            stack: self,
+            pcb: pcb,
+            dstHost: dstHost,
+            dstPort: dstPort,
+            configuration: connectionConfiguration,
+            routeTarget: routeTarget,
+            viaDefault: decision.viaDefault,
+            ruleSetName: ruleSetName,
+            sniffSNI: sniffSNI,
+            hostIsResolvedDomain: decision.hostIsResolvedDomain,
+            bridge: lwipBridge
+        )
     }
 
     // MARK: - Flow Admission
