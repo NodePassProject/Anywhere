@@ -69,3 +69,45 @@ nonisolated final class CallbackByteTransport: RawTransport, @unchecked Sendable
         transport.cancel()
     }
 }
+
+// MARK: - RawToAsyncByteTransport
+
+/// Presents a completion-handler ``RawTransport`` through the async-native
+/// ``AsyncByteTransport`` surface, bridging *up* to `async` via the `RawTransport`
+/// async extension. The inverse of ``CallbackByteTransport``.
+///
+/// Temporary scaffolding: the callback ``RawTransport``s that still sit under a
+/// ``TLSRecordConnection`` — the proxy-chain ``TunneledTransport`` and the MITM
+/// inner-leg transport — go async-native in later stages.
+nonisolated final class RawToAsyncByteTransport: AsyncByteTransport, @unchecked Sendable {
+
+    private let transport: any RawTransport
+
+    init(_ transport: any RawTransport) {
+        self.transport = transport
+    }
+
+    var isReady: Bool { transport.isTransportReady }
+
+    func send(_ data: Data) async throws {
+        try await transport.send(data)
+    }
+
+    func finishSend() async throws {
+        try await transport.closeWrite()
+    }
+
+    func receive() async throws -> TransportChunk {
+        // `RawTransport.receive` can report a spurious empty read without EOF; loop
+        // until real bytes or a clean end, matching `TransportChunk`'s bytes/end contract.
+        while true {
+            let (data, isComplete) = try await transport.receive()
+            if let data, !data.isEmpty { return .bytes(data) }
+            if isComplete { return .end }
+        }
+    }
+
+    func cancel() {
+        transport.forceCancel()
+    }
+}

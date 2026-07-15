@@ -566,12 +566,15 @@ nonisolated class ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithTLS(
-                tlsConfig: tlsConfig, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
-        }
+        let tlsClient = TLSClient(configuration: tlsConfig)
+        self.own(tlsClient)
+        let tlsConnection = try await connectTLSRecord(tlsClient)
+        self.own(tlsConnection)
+        let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
+        return try await sendProtocolHandshake(
+            over: tlsProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData, supportsVision: true
+        )
     }
 
     private func connectWithReality(
@@ -581,35 +584,34 @@ nonisolated class ProxyClient {
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithReality(
-                realityConfig: realityConfig, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
-        }
+        let realityClient = RealityClient(configuration: realityConfig)
+        self.own(realityClient)
+        let realityConnection = try await connectRealityRecord(realityClient)
+        self.own(realityConnection)
+        let realityProxyConnection = RealityProxyConnection(realityConnection: realityConnection)
+        return try await sendProtocolHandshake(
+            over: realityProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData, supportsVision: true
+        )
     }
 
-    /// Bridges the still-callback TLS handshake to `async` (removed in Stage 14). Dials over the
-    /// chain tunnel when present, else directly to the configured server.
+    /// Runs the TLS handshake async-natively. Dials over the chain tunnel when present, else
+    /// directly to the configured server.
     private func connectTLSRecord(_ tlsClient: TLSClient) async throws -> TLSRecordConnection {
-        try await bridged { completion in
-            if let tunnel = self.tunnel {
-                tlsClient.connect(overTunnel: tunnel, completion: completion)
-            } else {
-                tlsClient.connect(host: self.directDialHost, port: self.configuration.serverPort, completion: completion)
-            }
+        if let tunnel = self.tunnel {
+            return try await tlsClient.connect(overTunnel: tunnel)
+        } else {
+            return try await tlsClient.connect(host: self.directDialHost, port: self.configuration.serverPort)
         }
     }
 
-    /// Bridges the still-callback Reality handshake to `async` (removed in Stage 14). Dials over
-    /// the chain tunnel when present, else directly to the configured server.
+    /// Runs the Reality handshake async-natively. Dials over the chain tunnel when present, else
+    /// directly to the configured server.
     private func connectRealityRecord(_ realityClient: RealityClient) async throws -> TLSRecordConnection {
-        try await bridged { completion in
-            if let tunnel = self.tunnel {
-                realityClient.connect(overTunnel: tunnel, completion: completion)
-            } else {
-                realityClient.connect(host: self.directDialHost, port: self.configuration.serverPort, completion: completion)
-            }
+        if let tunnel = self.tunnel {
+            return try await realityClient.connect(overTunnel: tunnel)
+        } else {
+            return try await realityClient.connect(host: self.directDialHost, port: self.configuration.serverPort)
         }
     }
 
@@ -785,84 +787,6 @@ nonisolated class ProxyClient {
             destinationPort: destinationPort, initialData: initialData,
             supportsVision: supportsVision
         )
-    }
-
-    // MARK: - TLS Connection
-
-    private func connectWithTLS(
-        tlsConfig: TLSConfiguration,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let tlsClient = TLSClient(configuration: tlsConfig)
-        self.own(tlsClient)
-
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .success(let tlsConnection):
-                self.own(tlsConnection)
-                let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
-                self.sendProtocolHandshake(
-                    over: tlsProxyConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData,
-                    supportsVision: true, completion: completion
-                )
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        }
-
-        if let tunnel = self.tunnel {
-            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-        } else {
-            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
-        }
-    }
-
-    // MARK: - Reality Connection
-
-    private func connectWithReality(
-        realityConfig: RealityConfiguration,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let realityClient = RealityClient(configuration: realityConfig)
-        self.own(realityClient)
-
-        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .success(let realityConnection):
-                self.own(realityConnection)
-                let realityProxyConnection = RealityProxyConnection(realityConnection: realityConnection)
-                self.sendProtocolHandshake(
-                    over: realityProxyConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData,
-                    supportsVision: true, completion: completion
-                )
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        }
-
-        if let tunnel = self.tunnel {
-            realityClient.connect(overTunnel: tunnel, completion: handleRealityResult)
-        } else {
-            realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
-        }
     }
 
     // MARK: - gRPC Connection

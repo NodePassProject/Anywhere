@@ -400,7 +400,7 @@ nonisolated class TLSRecordTransport: RawTransport {
     }
 
     var isTransportReady: Bool {
-        tlsConnection.connection?.isTransportReady ?? false
+        tlsConnection.connection?.isReady ?? false
     }
 
     func send(data: Data, completion: @escaping (Error?) -> Void) {

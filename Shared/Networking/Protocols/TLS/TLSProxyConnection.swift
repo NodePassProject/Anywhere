@@ -18,7 +18,7 @@ nonisolated class TLSProxyConnection: AsyncProxyConnection {
     override var outerTLSVersion: TLSVersion? { TLSVersion(rawValue: tlsConnection.tlsVersion) }
 
     override var isConnected: Bool {
-        tlsConnection.connection?.isTransportReady ?? false
+        tlsConnection.connection?.isReady ?? false
     }
 
     override func sendRaw(_ data: Data) async throws {

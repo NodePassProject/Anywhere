@@ -8,65 +8,38 @@
 import Foundation
 
 extension ProxyClient {
+    /// Trojan requires TLS; on password (SHA224) mismatch the server silently serves its decoy site.
     func connectWithTrojan(
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?
     ) async throws -> ProxyConnection {
-        try await bridged { completion in
-            self.connectWithTrojan(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
-        }
-    }
-
-    /// Trojan requires TLS; on password (SHA224) mismatch the server silently serves its decoy site.
-    func connectWithTrojan(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
         guard case .trojan(let password, let securityLayer) = configuration.outbound, !password.isEmpty,
               let tlsConfig = securityLayer.tlsConfiguration else {
-            completion(.failure(ProxyError.protocolError("Trojan password not set")))
-            return
+            throw ProxyError.protocolError("Trojan password not set")
         }
 
         let tlsClient = TLSClient(configuration: tlsConfig)
         own(tlsClient)
 
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .success(let tlsConnection):
-                self.own(tlsConnection)
-                let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
-                self.wrapTrojan(
-                    over: tlsProxyConnection,
-                    password: password,
-                    command: command,
-                    destinationHost: destinationHost,
-                    destinationPort: destinationPort,
-                    initialData: initialData,
-                    completion: completion
-                )
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        }
-
+        let tlsConnection: TLSRecordConnection
         if let tunnel = self.tunnel {
-            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
+            tlsConnection = try await tlsClient.connect(overTunnel: tunnel)
         } else {
-            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
+            tlsConnection = try await tlsClient.connect(host: directDialHost, port: configuration.serverPort)
         }
+        own(tlsConnection)
+
+        let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
+        return try wrapTrojan(
+            over: tlsProxyConnection,
+            password: password,
+            command: command,
+            destinationHost: destinationHost,
+            destinationPort: destinationPort,
+            initialData: initialData
+        )
     }
 
     /// Wraps a TLS connection with Trojan framing; `initialData` is sent through
@@ -77,9 +50,8 @@ extension ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) throws -> ProxyConnection {
         switch command {
         case .tcp:
             let trojan = TrojanConnection(
@@ -91,17 +63,16 @@ extension ProxyClient {
             if let initialData, !initialData.isEmpty {
                 trojan.send(data: initialData)
             }
-            completion(.success(trojan))
+            return trojan
         case .udp:
-            let trojan = TrojanUDPConnection(
+            return TrojanUDPConnection(
                 inner: tlsConnection,
                 password: password,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort
             )
-            completion(.success(trojan))
         case .mux:
-            completion(.failure(ProxyError.protocolError("Mux is not supported with Trojan")))
+            throw ProxyError.protocolError("Mux is not supported with Trojan")
         }
     }
 }

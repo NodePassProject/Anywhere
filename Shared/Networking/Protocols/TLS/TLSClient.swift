@@ -25,7 +25,7 @@ private enum ServerHelloResult {
 
 nonisolated class TLSClient {
     let configuration: TLSConfiguration
-    var connection: (any RawTransport)?
+    var connection: (any AsyncByteTransport)?
 
     // Cleared after handshake.
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -95,55 +95,76 @@ nonisolated class TLSClient {
 
     // MARK: - Public API
 
+    /// Dials a fresh TCP connection and performs the TLS handshake async-natively over the
+    /// transport's async surface. The ClientHello rides the connect as initial data, saving a
+    /// round trip.
+    func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
+        do {
+            try await prepareECH()
+
+            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            guard let privateKey = ephemeralPrivateKey else {
+                throw TLSError.handshakeFailed("No ephemeral key")
+            }
+
+            let clientHello = try buildTLSClientHello(privateKey: privateKey)
+            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+            let transport = TCPTransport(host: host, port: port)
+            self.connection = transport
+            do {
+                try await transport.connect(initialData: clientHello)
+            } catch {
+                throw TLSError.connectionFailed(error.localizedDescription)
+            }
+
+            return try await receiveServerResponse()
+        } catch {
+            releaseOnFailure()
+            throw error
+        }
+    }
+
+    /// Performs the TLS handshake over an existing proxy tunnel (proxy chaining).
+    func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        do {
+            try await prepareECH()
+
+            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            guard let privateKey = ephemeralPrivateKey else {
+                throw TLSError.handshakeFailed("No ephemeral key")
+            }
+            self.connection = RawToAsyncByteTransport(TunneledTransport(tunnel: tunnel))
+
+            let clientHello = try buildTLSClientHello(privateKey: privateKey)
+            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+            guard let connection = self.connection else {
+                throw TLSError.connectionFailed("Connection cancelled")
+            }
+            do {
+                try await connection.send(clientHello)
+            } catch {
+                throw TLSError.handshakeFailed(error.localizedDescription)
+            }
+
+            return try await receiveServerResponse()
+        } catch {
+            releaseOnFailure()
+            throw error
+        }
+    }
+
+    // MARK: Callback bridges (for consumers not yet migrated to the async surface)
+
     func connect(
         host: String,
         port: UInt16,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        let completion = releasingConnectionOnFailure(completion)
-        prepareECH { [weak self] echError in
-            guard let self else {
-                completion(.failure(TLSError.connectionFailed("Client deallocated")))
-                return
-            }
-            if let echError {
-                completion(.failure(echError))
-                return
-            }
-
-            self.ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-            guard let privateKey = self.ephemeralPrivateKey else {
-                completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
-                return
-            }
-
-            let clientHello: Data
-            do {
-                clientHello = try self.buildTLSClientHello(privateKey: privateKey)
-            } catch {
-                completion(.failure(error))
-                return
-            }
-            self.storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-            let transport = TCPTransport(host: host, port: port)
-            self.connection = CallbackByteTransport(transport)
-
-            Task { [weak self] in
-                do {
-                    try await transport.connect(initialData: clientHello)
-                } catch {
-                    completion(.failure(TLSError.connectionFailed(error.localizedDescription)))
-                    return
-                }
-
-                guard let self else {
-                    completion(.failure(TLSError.connectionFailed("Client deallocated")))
-                    return
-                }
-
-                self.receiveServerResponse(completion: completion)
-            }
+        Task {
+            do { completion(.success(try await connect(host: host, port: port))) }
+            catch { completion(.failure(error)) }
         }
     }
 
@@ -151,98 +172,41 @@ nonisolated class TLSClient {
         overTunnel tunnel: ProxyConnection,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        let completion = releasingConnectionOnFailure(completion)
-        prepareECH { [weak self] echError in
-            guard let self else {
-                completion(.failure(TLSError.connectionFailed("Client deallocated")))
-                return
-            }
-            if let echError {
-                completion(.failure(echError))
-                return
-            }
-            self.ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-            self.connection = TunneledTransport(tunnel: tunnel)
-            self.performTLSHandshake(completion: completion)
+        Task {
+            do { completion(.success(try await connect(overTunnel: tunnel))) }
+            catch { completion(.failure(error)) }
         }
     }
 
     func cancel() {
         clearHandshakeState()
-        connection?.forceCancel()
+        connection?.cancel()
         connection = nil
     }
 
-    private func releasingConnectionOnFailure(
-        _ completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) -> (Result<TLSRecordConnection, Error>) -> Void {
-        return { [weak self] result in
-            if case .failure = result {
-                self?.connection?.forceCancel()
-                self?.connection = nil
-                self?.clearHandshakeState()
-            }
-            completion(result)
-        }
-    }
-
-    // MARK: - Handshake
-
-    private func performTLSHandshake(
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        guard let privateKey = ephemeralPrivateKey else {
-            completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
-            return
-        }
-
-        do {
-            let clientHello = try buildTLSClientHello(privateKey: privateKey)
-
-            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-            guard let connection else {
-                completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-                return
-            }
-            connection.send(data: clientHello) { [weak self] error in
-                guard let self else { return }
-
-                if let error {
-                    completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                    return
-                }
-
-                self.receiveServerResponse(completion: completion)
-            }
-        } catch {
-            completion(.failure(error))
-        }
+    private func releaseOnFailure() {
+        connection?.cancel()
+        connection = nil
+        clearHandshakeState()
     }
 
     // MARK: - ClientHello
 
     /// Resolves an opportunistic ECHConfigList from DNS before the handshake.
     /// Fail-closed: a discovery miss errors so the caller never falls back to a cleartext-SNI handshake.
-    private func prepareECH(completion: @escaping (Error?) -> Void) {
-        guard configuration.echIsOpportunistic else {
-            completion(nil)
-            return
-        }
+    private func prepareECH() async throws {
+        guard configuration.echIsOpportunistic else { return }
         let serverName = configuration.serverName
-        DNSResolver.shared.resolveECHConfigList(for: serverName) { [weak self] config in
-            guard let self else {
-                completion(TLSError.connectionFailed("Client deallocated"))
-                return
+        let config: Data? = await withCheckedContinuation { continuation in
+            DNSResolver.shared.resolveECHConfigList(for: serverName) { config in
+                continuation.resume(returning: config)
             }
-            guard let config else {
-                completion(TLSError.handshakeFailed(
-                    "Opportunistic ECH: no ECH config published in DNS for \(serverName)"))
-                return
-            }
-            self.resolvedECHConfigList = config
-            completion(nil)
         }
+        guard let config else {
+            throw TLSError.handshakeFailed(
+                "Opportunistic ECH: no ECH config published in DNS for \(serverName)")
+        }
+        self.resolvedECHConfigList = config
     }
 
     private func buildTLSClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
@@ -314,99 +278,64 @@ nonisolated class TLSClient {
     // MARK: - Server Response Processing
 
     /// Buffers until a complete TLS record header arrives, then dispatches on content type.
-    private func receiveServerResponse(
-        buffer: Data = Data(),
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        if buffer.count >= 5 {
-            let contentType = buffer[0]
-
-            if contentType == TLSContentType.handshake {
-                self.continueReceivingHandshake(buffer: buffer, completion: completion)
-            } else if contentType == TLSContentType.alert {
-                let alertLevel = buffer.count > 5 ? buffer[5] : 0
-                let alertDesc = buffer.count > 6 ? buffer[6] : 0
-                completion(.failure(TLSError.alert(level: alertLevel, description: alertDesc)))
-            } else {
-                completion(.failure(TLSError.handshakeFailed("Unexpected content type: \(contentType)")))
+    private func receiveServerResponse(buffer: Data = Data()) async throws -> TLSRecordConnection {
+        var buffer = buffer
+        while buffer.count < 5 {
+            guard let connection else {
+                throw TLSError.connectionFailed("Connection cancelled")
             }
-            return
+            switch try await connection.receive() {
+            case .bytes(let data):
+                buffer.append(data)
+            case .end:
+                throw TLSError.handshakeFailed("No server response")
+            }
         }
 
-        guard let connection else {
-            completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-            return
-        }
-        connection.receive() { [weak self] data, _, error in
-            guard let self else { return }
-
-            if let error {
-                completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(.failure(TLSError.handshakeFailed("No server response")))
-                return
-            }
-
-            var newBuffer = buffer
-            newBuffer.append(data)
-            self.receiveServerResponse(buffer: newBuffer, completion: completion)
+        let contentType = buffer[buffer.startIndex]
+        if contentType == TLSContentType.handshake {
+            return try await continueReceivingHandshake(buffer: buffer)
+        } else if contentType == TLSContentType.alert {
+            let alertLevel = buffer.count > 5 ? buffer[buffer.startIndex + 5] : 0
+            let alertDesc = buffer.count > 6 ? buffer[buffer.startIndex + 6] : 0
+            throw TLSError.alert(level: alertLevel, description: alertDesc)
+        } else {
+            throw TLSError.handshakeFailed("Unexpected content type: \(contentType)")
         }
     }
 
-    /// Continues receiving handshake messages until ServerHello is complete.
-    private func continueReceivingHandshake(
-        buffer: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        if !bufferContainsCompleteServerHello(buffer) {
+    /// Continues receiving handshake messages until ServerHello is complete, then dispatches.
+    private func continueReceivingHandshake(buffer: Data) async throws -> TLSRecordConnection {
+        var buffer = buffer
+        while !bufferContainsCompleteServerHello(buffer) {
             guard let connection else {
-                completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-                return
+                throw TLSError.connectionFailed("Connection cancelled")
             }
-            connection.receive() { [weak self] moreData, isComplete, error in
-                guard let self else { return }
-
-                if let error {
-                    completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                    return
-                }
-
-                guard let moreData, !moreData.isEmpty else {
-                    completion(.failure(TLSError.handshakeFailed("Connection closed before ServerHello")))
-                    return
-                }
-
-                var newBuffer = buffer
-                newBuffer.append(moreData)
-
-                self.continueReceivingHandshake(buffer: newBuffer, completion: completion)
+            switch try await connection.receive() {
+            case .bytes(let moreData):
+                buffer.append(moreData)
+            case .end:
+                throw TLSError.handshakeFailed("Connection closed before ServerHello")
             }
-            return
         }
 
         guard let serverHelloResult = parseServerHello(data: buffer),
               let clientHello = storedClientHello else {
-            completion(.failure(TLSError.handshakeFailed("Failed to parse ServerHello")))
-            return
+            throw TLSError.handshakeFailed("Failed to parse ServerHello")
         }
 
         switch serverHelloResult {
         case .helloRetryRequest:
             // We don't implement the second ClientHello flight HRR requires. Aborting
             // here doesn't leak the inner SNI, since the ClientHello is already sent.
-            completion(.failure(TLSError.helloRetryRequest))
-            return
+            throw TLSError.helloRetryRequest
 
         case .tls13(let serverKeyShare, let cipherSuite):
-            handleTLS13Handshake(
+            return try await handleTLS13Handshake(
                 buffer: buffer,
                 serverKeyShare: serverKeyShare,
                 cipherSuite: cipherSuite,
-                clientHello: clientHello,
-                completion: completion
+                clientHello: clientHello
             )
 
         case .tls12(let cipherSuite, let serverRandom, let version, let extendedMasterSecret):
@@ -414,10 +343,9 @@ nonisolated class TLSClient {
             self.tls12CipherSuite = cipherSuite
             self.negotiatedVersion = version
             self.useExtendedMasterSecret = extendedMasterSecret
-            handleTLS12Handshake(
+            return try await handleTLS12Handshake(
                 buffer: buffer,
-                clientHello: clientHello,
-                completion: completion
+                clientHello: clientHello
             )
         }
     }
@@ -609,16 +537,15 @@ nonisolated class TLSClient {
 
     // MARK: - Certificate Validation
 
-    func validateCertificate(completion: @escaping (Result<Void, Error>) -> Void) {
+    func validateCertificate() throws {
         if configuration.insecureSkipVerify {
-            completion(.success(()))
             return
         }
         switch CertificatePolicy.verify(chain: serverCertificates, serverName: configuration.serverName) {
         case .trusted:
-            completion(.success(()))
+            return
         case .rejected(let reason):
-            completion(.failure(TLSError.certificateValidationFailed(reason)))
+            throw TLSError.certificateValidationFailed(reason)
         }
     }
 

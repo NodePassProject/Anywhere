@@ -19,7 +19,7 @@ nonisolated class RealityProxyConnection: AsyncProxyConnection {
     override var outerTLSVersion: TLSVersion? { .tls13 }
 
     override var isConnected: Bool {
-        realityConnection.connection?.isTransportReady ?? false
+        realityConnection.connection?.isReady ?? false
     }
 
     override func sendRaw(_ data: Data) async throws {

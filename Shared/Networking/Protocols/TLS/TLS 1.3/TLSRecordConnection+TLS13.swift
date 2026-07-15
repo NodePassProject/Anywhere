@@ -160,13 +160,13 @@ extension TLSRecordConnection {
         sendLock.lock()
         defer { sendLock.unlock() }
 
-        guard let connection else { return }
+        guard let sendPump else { return }
 
         // KeyUpdate message: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).
         let keyUpdate = Data([TLSHandshakeType.keyUpdate, 0x00, 0x00, 0x01, 0x00])
         do {
             let record = try encryptTLS13Record(plaintext: keyUpdate, contentType: TLSContentType.handshake)
-            connection.send(data: record)
+            sendPump.enqueueSend(record, completion: nil)
         } catch {
             return
         }

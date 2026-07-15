@@ -21,12 +21,10 @@ extension TLSClient {
         buffer: Data,
         serverKeyShare: Data,
         cipherSuite: UInt16,
-        clientHello: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        clientHello: Data
+    ) async throws -> TLSRecordConnection {
         guard let privateKey = ephemeralPrivateKey else {
-            completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
-            return
+            throw TLSError.handshakeFailed("No ephemeral key")
         }
 
         do {
@@ -37,7 +35,7 @@ extension TLSClient {
             let serverHello = extractServerHelloMessage(from: buffer)
 
             tls13.keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
-            
+
             serverCertificates.removeAll()
             tls13.transcriptBeforeCertVerify = nil
             tls13.certificateVerifySignature = nil
@@ -66,11 +64,11 @@ extension TLSClient {
             tls13.handshakeKeys = keys
             tls13.handshakeTranscript = transcript
             negotiatedVersion = 0x0304
-
-            consumeRemainingTLS13Handshake(buffer: buffer, completion: completion)
         } catch {
-            completion(.failure(TLSError.handshakeFailed("Key derivation failed")))
+            throw TLSError.handshakeFailed("Key derivation failed")
         }
+
+        return try await consumeRemainingTLS13Handshake(buffer: buffer)
     }
 
     // MARK: - ECH Accept Confirmation
@@ -123,13 +121,15 @@ extension TLSClient {
     // MARK: - TLS 1.3 Encrypted Handshake Processing
 
     private func consumeRemainingTLS13Handshake(
-        buffer: Data,
-        startOffset: Int = 0,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        buffer initialBuffer: Data,
+        startOffset initialOffset: Int = 0
+    ) async throws -> TLSRecordConnection {
+        var buffer = initialBuffer
+        var startOffset = initialOffset
+
+        while true {
         guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
-            completion(.failure(TLSError.handshakeFailed("Missing handshake keys")))
-            return
+            throw TLSError.handshakeFailed("Missing handshake keys")
         }
 
         var offset = startOffset
@@ -181,8 +181,7 @@ extension TLSClient {
                                 ech.retryConfigList = parseECHRetryConfigList(fromEncryptedExtensions: hsBody)
                             } else if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
                                 guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(alpn) else {
-                                    completion(.failure(TLSError.handshakeFailed("Server selected an ALPN we didn't offer")))
-                                    return
+                                    throw TLSError.handshakeFailed("Server selected an ALPN we didn't offer")
                                 }
                                 self.negotiatedALPN = alpn
                             }
@@ -210,8 +209,7 @@ extension TLSClient {
                                 )
                                 guard hsBody.count == expectedVerifyData.count,
                                       constantTimeEqual(hsBody, expectedVerifyData) else {
-                                    completion(.failure(TLSError.handshakeFailed("Server Finished verification failed")))
-                                    return
+                                    throw TLSError.handshakeFailed("Server Finished verification failed")
                                 }
                             }
                             fullTranscript.append(hsMessage)
@@ -232,8 +230,7 @@ extension TLSClient {
                         hsOffset += 4 + hsLen
                     }
                 } catch {
-                    completion(.failure(TLSError.handshakeFailed("Record decryption failed")))
-                    return
+                    throw TLSError.handshakeFailed("Record decryption failed")
                 }
             }
 
@@ -253,63 +250,40 @@ extension TLSClient {
             // the intended server. Surface the rejection (with any retry configs)
             // rather than validating the wrong certificate.
             if let ech = echContext, ech.rejected {
-                completion(.failure(TLSError.echRejected(retryConfigList: ech.retryConfigList)))
-                return
+                throw TLSError.echRejected(retryConfigList: ech.retryConfigList)
             }
 
-            validateCertificate { [weak self] result in
-                guard let self else { return }
+            try validateCertificate()
 
-                switch result {
-                case .failure(let error):
-                    completion(.failure(error))
-                    return
-                case .success:
-                    break
+            // CertificateVerify is MANDATORY in a full TLS 1.3 handshake.
+            let skipVerification = self.configuration.insecureSkipVerify || CertificatePolicy.allowInsecure
+            if !skipVerification {
+                if let error = TLS13CertificateVerifier.verify(
+                    transcriptBeforeCertVerify: self.tls13.transcriptBeforeCertVerify,
+                    algorithm: self.tls13.certificateVerifyAlgorithm,
+                    signature: self.tls13.certificateVerifySignature,
+                    serverCertificates: self.serverCertificates,
+                    keyDerivation: self.tls13.keyDerivation
+                ) {
+                    throw error
                 }
-
-                // CertificateVerify is MANDATORY in a full TLS 1.3 handshake.
-                let skipVerification = self.configuration.insecureSkipVerify || CertificatePolicy.allowInsecure
-                if !skipVerification {
-                    if let error = TLS13CertificateVerifier.verify(
-                        transcriptBeforeCertVerify: self.tls13.transcriptBeforeCertVerify,
-                        algorithm: self.tls13.certificateVerifyAlgorithm,
-                        signature: self.tls13.certificateVerifySignature,
-                        serverCertificates: self.serverCertificates,
-                        keyDerivation: self.tls13.keyDerivation
-                    ) {
-                        completion(.failure(error))
-                        return
-                    }
-                }
-
-                self.finishTLS13Handshake(fullTranscript: fullTranscript, completion: completion)
             }
+
+            return try await finishTLS13Handshake(fullTranscript: fullTranscript)
         } else {
             guard let connection else {
-                completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-                return
+                throw TLSError.connectionFailed("Connection cancelled")
             }
-            connection.receive() { [weak self] moreData, isComplete, error in
-                guard let self else { return }
-
-                if let error {
-                    logger.warning("[TLS] Error receiving more handshake data: \(error.localizedDescription)")
-                    completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                    return
-                }
-
-                guard let moreData, !moreData.isEmpty else {
-                    completion(.failure(TLSError.handshakeFailed("Connection closed before TLS 1.3 handshake completed")))
-                    return
-                }
-
-                var newBuffer = buffer
-                newBuffer.append(moreData)
-
-                self.consumeRemainingTLS13Handshake(buffer: newBuffer, startOffset: processedOffset, completion: completion)
+            switch try await connection.receive() {
+            case .bytes(let moreData):
+                buffer.append(moreData)
+                startOffset = processedOffset
+                continue
+            case .end:
+                throw TLSError.handshakeFailed("Connection closed before TLS 1.3 handshake completed")
             }
         }
+        } // while true
     }
 
     // MARK: - TLS 1.3 Certificate Parsing
@@ -383,58 +357,45 @@ extension TLSClient {
 
     // MARK: - TLS 1.3 Finish Handshake
 
-    private func finishTLS13Handshake(
-        fullTranscript: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+    private func finishTLS13Handshake(fullTranscript: Data) async throws -> TLSRecordConnection {
         guard let kd = tls13.keyDerivation, let hs = tls13.handshakeSecret else {
-            completion(.failure(TLSError.handshakeFailed("Missing handshake state")))
-            return
+            throw TLSError.handshakeFailed("Missing handshake state")
         }
 
         tls13.applicationKeys = kd.deriveApplicationKeys(handshakeSecret: hs, fullTranscript: fullTranscript)
 
-        sendTLS13ClientFinished { [weak self] error in
-            guard let self else { return }
+        try await sendTLS13ClientFinished()
 
-            if let error {
-                completion(.failure(TLSError.handshakeFailed("Failed to send Client Finished")))
-                return
-            }
-
-            guard let appKeys = self.tls13.applicationKeys else {
-                completion(.failure(TLSError.handshakeFailed("Application keys not available")))
-                return
-            }
-
-            let tlsConnection = TLSRecordConnection(
-                clientKey: appKeys.clientKey,
-                clientIV: appKeys.clientIV,
-                serverKey: appKeys.serverKey,
-                serverIV: appKeys.serverIV,
-                cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
-                clientAppSecret: appKeys.clientTrafficSecret,
-                serverAppSecret: appKeys.serverTrafficSecret
-            )
-            tlsConnection.connection = self.connection
-            tlsConnection.negotiatedALPN = self.negotiatedALPN
-            self.connection = nil
-
-            if let remaining = self.postHandshakeBuffer, !remaining.isEmpty {
-                tlsConnection.prependToReceiveBuffer(remaining)
-            }
-
-            self.clearHandshakeState()
-            completion(.success(tlsConnection))
+        guard let appKeys = self.tls13.applicationKeys else {
+            throw TLSError.handshakeFailed("Application keys not available")
         }
+
+        let tlsConnection = TLSRecordConnection(
+            clientKey: appKeys.clientKey,
+            clientIV: appKeys.clientIV,
+            serverKey: appKeys.serverKey,
+            serverIV: appKeys.serverIV,
+            cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+            clientAppSecret: appKeys.clientTrafficSecret,
+            serverAppSecret: appKeys.serverTrafficSecret
+        )
+        tlsConnection.connection = self.connection
+        tlsConnection.negotiatedALPN = self.negotiatedALPN
+        self.connection = nil
+
+        if let remaining = self.postHandshakeBuffer, !remaining.isEmpty {
+            tlsConnection.prependToReceiveBuffer(remaining)
+        }
+
+        self.clearHandshakeState()
+        return tlsConnection
     }
 
-    private func sendTLS13ClientFinished(completion: @escaping (Error?) -> Void) {
+    private func sendTLS13ClientFinished() async throws {
         guard let keys = tls13.handshakeKeys,
               let transcript = tls13.handshakeTranscript,
               let kd = tls13.keyDerivation else {
-            completion(TLSError.handshakeFailed("Missing handshake keys"))
-            return
+            throw TLSError.handshakeFailed("Missing handshake keys")
         }
 
         var ccsRecord = Data([TLSContentType.changeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01])
@@ -448,24 +409,19 @@ extension TLSClient {
         finishedMsg.append(UInt8(verifyData.count))
         finishedMsg.append(verifyData)
 
-        do {
-            let finishedRecord = try TLSRecordCrypto.encryptHandshakeRecord(
-                plaintext: finishedMsg,
-                key: SymmetricKey(data: keys.clientKey),
-                iv: keys.clientIV,
-                sequenceNumber: 0,
-                cipherSuite: tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
-            )
-            ccsRecord.append(finishedRecord)
+        let finishedRecord = try TLSRecordCrypto.encryptHandshakeRecord(
+            plaintext: finishedMsg,
+            key: SymmetricKey(data: keys.clientKey),
+            iv: keys.clientIV,
+            sequenceNumber: 0,
+            cipherSuite: tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+        )
+        ccsRecord.append(finishedRecord)
 
-            guard let connection else {
-                completion(TLSError.connectionFailed("Connection cancelled"))
-                return
-            }
-            connection.send(data: ccsRecord, completion: completion)
-        } catch {
-            completion(error)
+        guard let connection else {
+            throw TLSError.connectionFailed("Connection cancelled")
         }
+        try await connection.send(ccsRecord)
     }
 
     // MARK: - CompressedCertificate (RFC 8879)

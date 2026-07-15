@@ -51,7 +51,7 @@ nonisolated class TLSStreamTransport {
 
     // MARK: - Connect
 
-    func connect(completion: @escaping (Error?) -> Void) {
+    func connect() async throws {
         let configuration = TLSConfiguration(
             serverName: sni,
             alpn: alpn
@@ -59,29 +59,49 @@ nonisolated class TLSStreamTransport {
         let client = TLSClient(configuration: configuration)
         self.tlsClient = client
 
-        let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let connection):
-                self.tlsConnection = connection
-                self.tlsClient = nil
-                self.isReady = true
-                completion(nil)
-            case .failure(let error):
-                self.tlsClient?.cancel()
-                self.tlsClient = nil
-                completion(error)
+        do {
+            let connection: TLSRecordConnection
+            if let tunnel {
+                connection = try await client.connect(overTunnel: tunnel)
+            } else {
+                connection = try await client.connect(host: host, port: port)
             }
-        }
-
-        if let tunnel {
-            client.connect(overTunnel: tunnel, completion: handleResult)
-        } else {
-            client.connect(host: host, port: port, completion: handleResult)
+            self.tlsConnection = connection
+            self.tlsClient = nil
+            self.isReady = true
+        } catch {
+            self.tlsClient?.cancel()
+            self.tlsClient = nil
+            throw error
         }
     }
 
     // MARK: - Send
+
+    func send(_ data: Data) async throws {
+        guard let tlsConnection, isReady else {
+            throw TLSStreamError.notConnected
+        }
+        try await tlsConnection.send(data)
+    }
+
+    // MARK: - Receive
+
+    func receive() async throws -> Data? {
+        guard let tlsConnection, isReady else {
+            throw TLSStreamError.notConnected
+        }
+        return try await tlsConnection.receive()
+    }
+
+    // MARK: - Callback bridges (for the still-callback Naive consumers)
+
+    func connect(completion: @escaping (Error?) -> Void) {
+        Task {
+            do { try await connect(); completion(nil) }
+            catch { completion(error) }
+        }
+    }
 
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         guard let tlsConnection, isReady else {
@@ -90,8 +110,6 @@ nonisolated class TLSStreamTransport {
         }
         tlsConnection.send(data: data, completion: completion)
     }
-
-    // MARK: - Receive
 
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         guard let tlsConnection, isReady else {

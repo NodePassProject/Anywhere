@@ -16,48 +16,34 @@ extension TLSClient {
 
     func handleTLS12Handshake(
         buffer: Data,
-        clientHello: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        clientHello: Data
+    ) async throws -> TLSRecordConnection {
         let serverHello = extractServerHelloMessage(from: buffer)
         var transcript = Data()
         transcript.append(clientHello)
         transcript.append(serverHello)
         self.tls12Transcript = transcript
 
-        receiveTLS12HandshakeMessages(buffer: buffer, completion: completion)
+        return try await receiveTLS12HandshakeMessages(buffer: buffer)
     }
 
     /// Loops until ServerHelloDone (0x0E) is seen.
-    private func receiveTLS12HandshakeMessages(
-        buffer: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        if let result = parseTLS12HandshakeMessages(buffer: buffer) {
-            processTLS12HandshakeResult(result, buffer: buffer, completion: completion)
-            return
-        }
-
-        guard let connection else {
-            completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-            return
-        }
-        connection.receive() { [weak self] moreData, isComplete, error in
-            guard let self else { return }
-
-            if let error {
-                completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                return
+    private func receiveTLS12HandshakeMessages(buffer initialBuffer: Data) async throws -> TLSRecordConnection {
+        var buffer = initialBuffer
+        while true {
+            if let result = parseTLS12HandshakeMessages(buffer: buffer) {
+                return try await processTLS12HandshakeResult(result, buffer: buffer)
             }
 
-            guard let moreData, !moreData.isEmpty else {
-                completion(.failure(TLSError.handshakeFailed("Connection closed before TLS 1.2 handshake completed")))
-                return
+            guard let connection else {
+                throw TLSError.connectionFailed("Connection cancelled")
             }
-
-            var newBuffer = buffer
-            newBuffer.append(moreData)
-            self.receiveTLS12HandshakeMessages(buffer: newBuffer, completion: completion)
+            switch try await connection.receive() {
+            case .bytes(let moreData):
+                buffer.append(moreData)
+            case .end:
+                throw TLSError.handshakeFailed("Connection closed before TLS 1.2 handshake completed")
+            }
         }
     }
 
@@ -159,49 +145,32 @@ extension TLSClient {
 
     private func processTLS12HandshakeResult(
         _ messages: TLS12HandshakeMessages,
-        buffer: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        buffer: Data
+    ) async throws -> TLSRecordConnection {
         serverCertificates = messages.certificates
 
         tls12Transcript?.append(messages.handshakeBytes)
 
-        validateCertificate { [weak self] result in
-            guard let self else { return }
+        try validateCertificate()
 
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-                return
-            case .success:
-                break
+        let preMasterSecret: Data
+        let clientKeyExchangeBody: Data
+
+        if TLSCipherSuite.isECDHE(self.tls12CipherSuite) {
+            guard let ske = messages.serverKeyExchange else {
+                throw TLSError.handshakeFailed("ECDHE cipher suite but no ServerKeyExchange")
             }
-
-            do {
-                let preMasterSecret: Data
-                let clientKeyExchangeBody: Data
-
-                if TLSCipherSuite.isECDHE(self.tls12CipherSuite) {
-                    guard let ske = messages.serverKeyExchange else {
-                        completion(.failure(TLSError.handshakeFailed("ECDHE cipher suite but no ServerKeyExchange")))
-                        return
-                    }
-                    try self.verifyServerKeyExchange(ske, certificates: messages.certificates)
-                    (preMasterSecret, clientKeyExchangeBody) = try self.processECDHEServerKeyExchange(ske)
-                } else {
-                    (preMasterSecret, clientKeyExchangeBody) = try self.processRSAKeyExchange(certificates: messages.certificates)
-                }
-
-                self.completeTLS12Handshake(
-                    preMasterSecret: preMasterSecret,
-                    clientKeyExchangeBody: clientKeyExchangeBody,
-                    remainingBuffer: buffer.count > messages.serverHelloDoneOffset ? Data(buffer[messages.serverHelloDoneOffset...]) : nil,
-                    completion: completion
-                )
-            } catch {
-                completion(.failure(error))
-            }
+            try self.verifyServerKeyExchange(ske, certificates: messages.certificates)
+            (preMasterSecret, clientKeyExchangeBody) = try self.processECDHEServerKeyExchange(ske)
+        } else {
+            (preMasterSecret, clientKeyExchangeBody) = try self.processRSAKeyExchange(certificates: messages.certificates)
         }
+
+        return try await self.completeTLS12Handshake(
+            preMasterSecret: preMasterSecret,
+            clientKeyExchangeBody: clientKeyExchangeBody,
+            remainingBuffer: buffer.count > messages.serverHelloDoneOffset ? Data(buffer[messages.serverHelloDoneOffset...]) : nil
+        )
     }
 
     // MARK: - TLS 1.2 ECDHE Key Exchange
@@ -363,12 +332,10 @@ extension TLSClient {
     private func completeTLS12Handshake(
         preMasterSecret: Data,
         clientKeyExchangeBody: Data,
-        remainingBuffer: Data?,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        remainingBuffer: Data?
+    ) async throws -> TLSRecordConnection {
         guard let cRandom = clientRandom, let sRandom = serverRandom else {
-            completion(.failure(TLSError.handshakeFailed("Missing randoms")))
-            return
+            throw TLSError.handshakeFailed("Missing randoms")
         }
 
         let useSHA384 = TLSCipherSuite.usesSHA384(tls12CipherSuite)
@@ -384,8 +351,7 @@ extension TLSClient {
         tls12Transcript?.append(ckeMessage)
 
         guard let transcript = tls12Transcript else {
-            completion(.failure(TLSError.handshakeFailed("Missing transcript")))
-            return
+            throw TLSError.handshakeFailed("Missing transcript")
         }
 
         let masterSecret: Data
@@ -445,8 +411,9 @@ extension TLSClient {
 
         wireData.append(contentsOf: [TLSContentType.changeCipherSpec, UInt8(version >> 8), UInt8(version & 0xFF), 0x00, 0x01, 0x01])
 
+        let encryptedFinished: Data
         do {
-            let encryptedFinished = try encryptTLS12Handshake(
+            encryptedFinished = try encryptTLS12Handshake(
                 plaintext: finishedMessage,
                 contentType: TLSContentType.handshake,
                 seqNum: 0,
@@ -455,32 +422,26 @@ extension TLSClient {
                 clientIV: keys.clientIV,
                 clientMACKey: keys.clientMACKey
             )
-            wireData.append(encryptedFinished)
         } catch {
-            completion(.failure(TLSError.handshakeFailed("Failed to encrypt Finished: \(error.localizedDescription)")))
-            return
+            throw TLSError.handshakeFailed("Failed to encrypt Finished: \(error.localizedDescription)")
         }
+        wireData.append(encryptedFinished)
 
         tls12Transcript?.append(finishedMessage)
 
         guard let connection else {
-            completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-            return
+            throw TLSError.connectionFailed("Connection cancelled")
         }
-        connection.send(data: wireData) { [weak self] error in
-            guard let self else { return }
-
-            if let error {
-                completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                return
-            }
-
-            self.receiveTLS12ServerFinished(
-                buffer: remainingBuffer ?? Data(),
-                keys: keys,
-                completion: completion
-            )
+        do {
+            try await connection.send(wireData)
+        } catch {
+            throw TLSError.handshakeFailed(error.localizedDescription)
         }
+
+        return try await receiveTLS12ServerFinished(
+            buffer: remainingBuffer ?? Data(),
+            keys: keys
+        )
     }
 
     private func encryptTLS12Handshake(
@@ -621,40 +582,29 @@ extension TLSClient {
     }
 
     private func receiveTLS12ServerFinished(
-        buffer: Data,
-        keys: TLS12HandshakeKeys,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        if let finishedResult = parseTLS12ServerCCSAndFinished(buffer: buffer, keys: keys) {
-            switch finishedResult {
-            case .success(let remainingData):
-                self.buildTLS12Connection(keys: keys, remainingBuffer: remainingData, completion: completion)
-            case .failure(let error):
-                completion(.failure(error))
-            }
-            return
-        }
-
-        guard let connection else {
-            completion(.failure(TLSError.connectionFailed("Connection cancelled")))
-            return
-        }
-        connection.receive() { [weak self] moreData, isComplete, error in
-            guard let self else { return }
-
-            if let error {
-                completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
-                return
+        buffer initialBuffer: Data,
+        keys: TLS12HandshakeKeys
+    ) async throws -> TLSRecordConnection {
+        var buffer = initialBuffer
+        while true {
+            if let finishedResult = parseTLS12ServerCCSAndFinished(buffer: buffer, keys: keys) {
+                switch finishedResult {
+                case .success(let remainingData):
+                    return buildTLS12Connection(keys: keys, remainingBuffer: remainingData)
+                case .failure(let error):
+                    throw error
+                }
             }
 
-            guard let moreData, !moreData.isEmpty else {
-                completion(.failure(TLSError.handshakeFailed("Connection closed before server Finished")))
-                return
+            guard let connection else {
+                throw TLSError.connectionFailed("Connection cancelled")
             }
-
-            var newBuffer = buffer
-            newBuffer.append(moreData)
-            self.receiveTLS12ServerFinished(buffer: newBuffer, keys: keys, completion: completion)
+            switch try await connection.receive() {
+            case .bytes(let moreData):
+                buffer.append(moreData)
+            case .end:
+                throw TLSError.handshakeFailed("Connection closed before server Finished")
+            }
         }
     }
 
@@ -879,9 +829,8 @@ extension TLSClient {
 
     private func buildTLS12Connection(
         keys: TLS12HandshakeKeys,
-        remainingBuffer: Data?,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        remainingBuffer: Data?
+    ) -> TLSRecordConnection {
         let tlsConnection = TLSRecordConnection(
             tls12ClientKey: keys.clientKey,
             clientIV: keys.clientIV,
@@ -903,6 +852,6 @@ extension TLSClient {
         }
 
         clearHandshakeState()
-        completion(.success(tlsConnection))
+        return tlsConnection
     }
 }

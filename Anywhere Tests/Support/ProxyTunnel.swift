@@ -37,20 +37,12 @@ final class TLSTransportStream: ByteStream {
     init(_ transport: TLSStreamTransport) { self.transport = transport }
 
     func sendBytes(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            transport.send(data: data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await transport.send(data)
     }
 
     func receiveBytes() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            transport.receive { data, error in
-                if let error { continuation.resume(throwing: error); return }
-                continuation.resume(returning: (data?.isEmpty == false) ? data : nil)
-            }
-        }
+        let data = try await transport.receive()
+        return (data?.isEmpty == false) ? data : nil
     }
 
     func closeStream() { transport.cancel() }
@@ -92,11 +84,7 @@ final class ProxyTunnel {
             alpn: alpn,
             tunnel: connection
         )
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            transport.connect { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await transport.connect()
         return TLSTransportStream(transport)
     }
     

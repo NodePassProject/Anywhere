@@ -16,7 +16,7 @@ nonisolated private let logger = AnywhereLogger(category: "RealityClient")
 
 nonisolated class RealityClient {
     private let configuration: RealityConfiguration
-    private var connection: (any RawTransport)?
+    private var connection: (any AsyncByteTransport)?
 
     // Handshake state, cleared after the handshake completes.
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -36,96 +36,94 @@ nonisolated class RealityClient {
 
     // MARK: - Public API
 
-    /// Connects to a Reality server and performs the TLS handshake.
+    /// Connects to a Reality server and performs the TLS handshake async-natively over the
+    /// transport's async surface. The ClientHello rides the connect as initial data.
+    func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
+        do {
+            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            guard let privateKey = ephemeralPrivateKey else {
+                throw RealityError.handshakeFailed("No ephemeral key")
+            }
+
+            let clientHello = try buildRealityClientHello(privateKey: privateKey)
+            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+            let transport = TCPTransport(host: host, port: port)
+            self.connection = transport
+            do {
+                try await transport.connect(initialData: clientHello)
+            } catch {
+                throw RealityError.connectionFailed(error.localizedDescription)
+            }
+
+            return try await receiveServerResponse()
+        } catch {
+            releaseOnFailure()
+            throw error
+        }
+    }
+
+    /// Connects over an existing proxy tunnel (proxy chaining) and performs the Reality handshake.
+    func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        do {
+            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            guard let privateKey = ephemeralPrivateKey else {
+                throw RealityError.handshakeFailed("No ephemeral key")
+            }
+            self.connection = RawToAsyncByteTransport(TunneledTransport(tunnel: tunnel))
+
+            let clientHello = try buildRealityClientHello(privateKey: privateKey)
+            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+            guard let connection = self.connection else {
+                throw RealityError.connectionFailed("Connection cancelled")
+            }
+            do {
+                try await connection.send(clientHello)
+            } catch {
+                throw RealityError.handshakeFailed(error.localizedDescription)
+            }
+
+            return try await receiveServerResponse()
+        } catch {
+            releaseOnFailure()
+            throw error
+        }
+    }
+
+    // MARK: Callback bridges (for consumers not yet migrated to the async surface)
+
     func connect(
         host: String,
         port: UInt16,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-
-        guard let privateKey = ephemeralPrivateKey else {
-            completion(.failure(RealityError.handshakeFailed("No ephemeral key")))
-            return
-        }
-
-        let clientHello: Data
-        do {
-            clientHello = try buildRealityClientHello(privateKey: privateKey)
-        } catch {
-            completion(.failure(error))
-            return
-        }
-        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-        let transport = TCPTransport(host: host, port: port)
-        self.connection = CallbackByteTransport(transport)
-
-        Task { [weak self] in
-            do {
-                try await transport.connect(initialData: clientHello)
-            } catch {
-                completion(.failure(RealityError.connectionFailed(error.localizedDescription)))
-                return
-            }
-
-            guard let self else {
-                completion(.failure(RealityError.connectionFailed("Client deallocated")))
-                return
-            }
-
-            self.receiveServerResponse(completion: completion)
+        Task {
+            do { completion(.success(try await connect(host: host, port: port))) }
+            catch { completion(.failure(error)) }
         }
     }
 
-    /// Connects over an existing proxy tunnel (proxy chaining) and performs the Reality handshake.
     func connect(
         overTunnel tunnel: ProxyConnection,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-        self.connection = TunneledTransport(tunnel: tunnel)
-        performRealityHandshake(completion: completion)
+        Task {
+            do { completion(.success(try await connect(overTunnel: tunnel))) }
+            catch { completion(.failure(error)) }
+        }
     }
 
     func cancel() {
         clearHandshakeState()
-        connection?.forceCancel()
+        connection?.cancel()
         connection = nil
     }
 
-    // MARK: - Handshake
-
-    private func performRealityHandshake(
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        guard let privateKey = ephemeralPrivateKey else {
-            completion(.failure(RealityError.handshakeFailed("No ephemeral key")))
-            return
-        }
-
-        do {
-            let clientHello = try buildRealityClientHello(privateKey: privateKey)
-
-            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-            guard let connection else {
-                completion(.failure(RealityError.connectionFailed("Connection cancelled")))
-                return
-            }
-            connection.send(data: clientHello) { [weak self] error in
-                guard let self else { return }
-
-                if let error {
-                    completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
-                    return
-                }
-
-                self.receiveServerResponse(completion: completion)
-            }
-        } catch {
-            completion(.failure(error))
-        }
+    private func releaseOnFailure() {
+        connection?.cancel()
+        connection = nil
+        clearHandshakeState()
     }
 
     // MARK: - ClientHello
@@ -207,88 +205,54 @@ nonisolated class RealityClient {
 
     /// Buffers the server's TLS response until a full 5-byte record header is available
     /// (partial chunks are plausible through proxy chains).
-    private func receiveServerResponse(
-        buffer: Data = Data(),
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        if buffer.count >= 5 {
-            let contentType = buffer[0]
-
-            if contentType == TLSContentType.handshake {
-                self.continueReceivingHandshake(buffer: buffer, completion: completion)
-            } else if contentType == TLSContentType.alert {
-                let alertLevel = buffer.count > 5 ? buffer[5] : 0
-                let alertDesc = buffer.count > 6 ? buffer[6] : 0
-                completion(.failure(RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
-            } else {
-                completion(.failure(RealityError.handshakeFailed("Unexpected content type: \(contentType)")))
+    private func receiveServerResponse(buffer: Data = Data()) async throws -> TLSRecordConnection {
+        var buffer = buffer
+        while buffer.count < 5 {
+            guard let connection else {
+                throw RealityError.connectionFailed("Connection cancelled")
             }
-            return
+            switch try await connection.receive() {
+            case .bytes(let data):
+                buffer.append(data)
+            case .end:
+                throw RealityError.handshakeFailed("No server response")
+            }
         }
 
-        guard let connection else {
-            completion(.failure(RealityError.connectionFailed("Connection cancelled")))
-            return
-        }
-        connection.receive() { [weak self] data, _, error in
-            guard let self else { return }
-
-            if let error {
-                completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(.failure(RealityError.handshakeFailed("No server response")))
-                return
-            }
-
-            var newBuffer = buffer
-            newBuffer.append(data)
-            self.receiveServerResponse(buffer: newBuffer, completion: completion)
+        let contentType = buffer[buffer.startIndex]
+        if contentType == TLSContentType.handshake {
+            return try await continueReceivingHandshake(buffer: buffer)
+        } else if contentType == TLSContentType.alert {
+            let alertLevel = buffer.count > 5 ? buffer[buffer.startIndex + 5] : 0
+            let alertDesc = buffer.count > 6 ? buffer[buffer.startIndex + 6] : 0
+            throw RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")
+        } else {
+            throw RealityError.handshakeFailed("Unexpected content type: \(contentType)")
         }
     }
 
-    private func continueReceivingHandshake(
-        buffer: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        if !bufferContainsCompleteServerHello(buffer) {
+    private func continueReceivingHandshake(buffer: Data) async throws -> TLSRecordConnection {
+        var buffer = buffer
+        while !bufferContainsCompleteServerHello(buffer) {
             guard let connection else {
-                completion(.failure(RealityError.connectionFailed("Connection cancelled")))
-                return
+                throw RealityError.connectionFailed("Connection cancelled")
             }
-            connection.receive() { [weak self] moreData, _, error in
-                guard let self else { return }
-
-                if let error {
-                    completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
-                    return
-                }
-
-                guard let moreData, !moreData.isEmpty else {
-                    completion(.failure(RealityError.handshakeFailed("Connection closed before ServerHello")))
-                    return
-                }
-
-                var newBuffer = buffer
-                newBuffer.append(moreData)
-
-                self.continueReceivingHandshake(buffer: newBuffer, completion: completion)
+            switch try await connection.receive() {
+            case .bytes(let moreData):
+                buffer.append(moreData)
+            case .end:
+                throw RealityError.handshakeFailed("Connection closed before ServerHello")
             }
-            return
         }
 
         guard verifyServerResponse(data: buffer) else {
-            completion(.failure(RealityError.authenticationFailed))
-            return
+            throw RealityError.authenticationFailed
         }
 
         guard let (serverKeyShare, keyShareGroup, cipherSuite) = parseServerHello(data: buffer),
               let privateKey = ephemeralPrivateKey,
               let clientHello = storedClientHello else {
-            completion(.failure(RealityError.handshakeFailed("Failed to parse ServerHello")))
-            return
+            throw RealityError.handshakeFailed("Failed to parse ServerHello")
         }
 
         do {
@@ -319,11 +283,11 @@ nonisolated class RealityClient {
             tls13State.handshakeSecret = handshakeSecret
             tls13State.handshakeKeys = keys
             tls13State.handshakeTranscript = transcript
-
-            consumeRemainingHandshake(buffer: buffer, completion: completion)
         } catch {
-            completion(.failure(RealityError.handshakeFailed("Key derivation failed")))
+            throw RealityError.handshakeFailed("Key derivation failed")
         }
+
+        return try await consumeRemainingHandshake(buffer: buffer)
     }
 
     // MARK: - ServerHello Parsing
@@ -455,13 +419,15 @@ nonisolated class RealityClient {
     /// Consumes encrypted TLS handshake records until Server Finished, then derives
     /// application keys and sends Client Finished.
     private func consumeRemainingHandshake(
-        buffer: Data,
-        startOffset: Int = 0,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
+        buffer initialBuffer: Data,
+        startOffset initialOffset: Int = 0
+    ) async throws -> TLSRecordConnection {
+        var buffer = initialBuffer
+        var startOffset = initialOffset
+
+        while true {
         guard let keys = tls13State.handshakeKeys, let keyDerivation = tls13State.keyDerivation else {
-            completion(.failure(RealityError.handshakeFailed("Missing handshake keys")))
-            return
+            throw RealityError.handshakeFailed("Missing handshake keys")
         }
 
         var offset = startOffset
@@ -523,8 +489,7 @@ nonisolated class RealityClient {
                             )
                             guard hsBody.count == expectedVerifyData.count,
                                   Self.constantTimeEqual(hsBody, expectedVerifyData) else {
-                                completion(.failure(RealityError.handshakeFailed("Server Finished verification failed")))
-                                return
+                                throw RealityError.handshakeFailed("Server Finished verification failed")
                             }
                             fullTranscript.append(hsMessage)
                             foundServerFinished = true
@@ -535,9 +500,10 @@ nonisolated class RealityClient {
 
                         hsOffset += 4 + hsLen
                     }
+                } catch let error as RealityError {
+                    throw error
                 } catch {
-                    completion(.failure(RealityError.handshakeFailed("Record decryption failed")))
-                    return
+                    throw RealityError.handshakeFailed("Record decryption failed")
                 }
             }
 
@@ -552,79 +518,63 @@ nonisolated class RealityClient {
 
         if foundServerFinished {
             guard serverCertVerified else {
-                completion(.failure(RealityError.authenticationFailed))
-                return
+                throw RealityError.authenticationFailed
             }
 
             tls13State.applicationKeys = keyDerivation.deriveApplicationKeys(handshakeSecret: tls13State.handshakeSecret!, fullTranscript: fullTranscript)
 
-            sendClientFinished { [weak self] error in
-                guard let self else { return }
-
-                if let error {
-                    completion(.failure(RealityError.handshakeFailed("Failed to send Client Finished")))
-                    return
-                }
-
-                guard let appKeys = self.tls13State.applicationKeys else {
-                    completion(.failure(RealityError.handshakeFailed("Application keys not available")))
-                    return
-                }
-
-                let realityConnection = TLSRecordConnection(
-                    clientKey: appKeys.clientKey,
-                    clientIV: appKeys.clientIV,
-                    serverKey: appKeys.serverKey,
-                    serverIV: appKeys.serverIV,
-                    cipherSuite: self.tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
-                    clientAppSecret: appKeys.clientTrafficSecret,
-                    serverAppSecret: appKeys.serverTrafficSecret
-                )
-                realityConnection.connection = self.connection
-                self.connection = nil
-
-                let remaining = buffer.subdata(in: processedOffset..<buffer.count)
-                if !remaining.isEmpty {
-                    realityConnection.prependToReceiveBuffer(remaining)
-                }
-
-                self.clearHandshakeState()
-                completion(.success(realityConnection))
+            do {
+                try await sendClientFinished()
+            } catch {
+                throw RealityError.handshakeFailed("Failed to send Client Finished")
             }
+
+            guard let appKeys = self.tls13State.applicationKeys else {
+                throw RealityError.handshakeFailed("Application keys not available")
+            }
+
+            let realityConnection = TLSRecordConnection(
+                clientKey: appKeys.clientKey,
+                clientIV: appKeys.clientIV,
+                serverKey: appKeys.serverKey,
+                serverIV: appKeys.serverIV,
+                cipherSuite: self.tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+                clientAppSecret: appKeys.clientTrafficSecret,
+                serverAppSecret: appKeys.serverTrafficSecret
+            )
+            realityConnection.connection = self.connection
+            self.connection = nil
+
+            let remaining = buffer.subdata(in: processedOffset..<buffer.count)
+            if !remaining.isEmpty {
+                realityConnection.prependToReceiveBuffer(remaining)
+            }
+
+            self.clearHandshakeState()
+            return realityConnection
         } else {
             guard let connection else {
-                completion(.failure(RealityError.connectionFailed("Connection cancelled")))
-                return
+                throw RealityError.connectionFailed("Connection cancelled")
             }
-            connection.receive() { [weak self] moreData, _, error in
-                guard let self else { return }
-
-                if let error {
-                    completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
-                    return
-                }
-
-                guard let moreData, !moreData.isEmpty else {
-                    completion(.failure(RealityError.handshakeFailed("Connection closed before Server Finished")))
-                    return
-                }
-
-                var newBuffer = buffer
-                newBuffer.append(moreData)
-
-                self.consumeRemainingHandshake(buffer: newBuffer, startOffset: processedOffset, completion: completion)
+            switch try await connection.receive() {
+            case .bytes(let moreData):
+                buffer.append(moreData)
+                startOffset = processedOffset
+                continue
+            case .end:
+                throw RealityError.handshakeFailed("Connection closed before Server Finished")
             }
         }
+        } // while true
     }
 
     // MARK: - Client Finished
 
-    private func sendClientFinished(completion: @escaping (Error?) -> Void) {
+    private func sendClientFinished() async throws {
         guard let keys = tls13State.handshakeKeys,
               let transcript = tls13State.handshakeTranscript,
               let kd = tls13State.keyDerivation else {
-            completion(RealityError.handshakeFailed("Missing handshake keys"))
-            return
+            throw RealityError.handshakeFailed("Missing handshake keys")
         }
 
         var ccsRecord = Data([TLSContentType.changeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01])
@@ -638,24 +588,19 @@ nonisolated class RealityClient {
         finishedMsg.append(UInt8(verifyData.count))
         finishedMsg.append(verifyData)
 
-        do {
-            let finishedRecord = try TLSRecordCrypto.encryptHandshakeRecord(
-                plaintext: finishedMsg,
-                key: SymmetricKey(data: keys.clientKey),
-                iv: keys.clientIV,
-                sequenceNumber: 0,
-                cipherSuite: tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
-            )
-            ccsRecord.append(finishedRecord)
+        let finishedRecord = try TLSRecordCrypto.encryptHandshakeRecord(
+            plaintext: finishedMsg,
+            key: SymmetricKey(data: keys.clientKey),
+            iv: keys.clientIV,
+            sequenceNumber: 0,
+            cipherSuite: tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+        )
+        ccsRecord.append(finishedRecord)
 
-            guard let connection else {
-                completion(RealityError.connectionFailed("Connection cancelled"))
-                return
-            }
-            connection.send(data: ccsRecord, completion: completion)
-        } catch {
-            completion(error)
+        guard let connection else {
+            throw RealityError.connectionFailed("Connection cancelled")
         }
+        try await connection.send(ccsRecord)
     }
 
     // MARK: - Verification

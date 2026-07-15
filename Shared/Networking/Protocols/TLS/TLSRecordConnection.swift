@@ -17,7 +17,27 @@ nonisolated class TLSRecordConnection {
 
     // MARK: Properties
 
-    var connection: (any RawTransport)?
+    /// The underlying async byte transport. Assigning it (re)builds ``sendPump`` so every
+    /// write — the async surface, the callback trio, the raw callbacks, and the internal
+    /// KeyUpdate response — drains in submission order over one task, exactly as the
+    /// old ``CallbackByteTransport`` pump did. `nil` after ``cancel()``.
+    var connection: (any AsyncByteTransport)? {
+        didSet {
+            sendPump?.finish()
+            if let connection {
+                sendPump = AsyncSendPump(
+                    send: { try await connection.send($0) },
+                    finish: { try await connection.finishSend() }
+                )
+            } else {
+                sendPump = nil
+            }
+        }
+    }
+
+    /// Serializes all writes to ``connection``. Rebuilt by `connection`'s `didSet`.
+    /// Internal so the +TLS13 KeyUpdate response (a different file) can enqueue through it.
+    var sendPump: AsyncSendPump?
 
     let tlsVersion: UInt16
 
@@ -146,15 +166,15 @@ nonisolated class TLSRecordConnection {
 
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         sendLock.lock()
-        guard let connection else {
+        guard let sendPump else {
             sendLock.unlock()
             completion(TLSRecordError.connectionUnavailable)
             return
         }
         do {
             let record = try buildTLSRecords(for: data)
-            connection.send(data: record, completion: completion)
             sendLock.unlock()
+            sendPump.enqueueSend(record, completion: completion)
         } catch {
             sendLock.unlock()
             completion(error)
@@ -163,14 +183,14 @@ nonisolated class TLSRecordConnection {
 
     func send(data: Data) {
         sendLock.lock()
-        guard let connection else {
+        guard let sendPump else {
             sendLock.unlock()
             return
         }
         do {
             let record = try buildTLSRecords(for: data)
-            connection.send(data: record)
             sendLock.unlock()
+            sendPump.enqueueSend(record, completion: nil)
         } catch {
             sendLock.unlock()
         }
@@ -225,50 +245,42 @@ nonisolated class TLSRecordConnection {
             completion(nil, TLSRecordError.connectionUnavailable)
             return
         }
-        connection.receive() { [weak self] data, isComplete, error in
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                if isComplete {
-                    completion(nil, nil)
-                } else {
-                    self?.receiveRaw(completion: completion)
+        Task {
+            do {
+                switch try await connection.receive() {
+                case .bytes(let data): completion(data, nil)
+                case .end: completion(nil, nil)
                 }
-                return
+            } catch {
+                completion(nil, error)
             }
-
-            completion(data, nil)
         }
     }
 
     func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        guard let connection else {
+        guard let sendPump else {
             completion(TLSRecordError.connectionUnavailable)
             return
         }
-        connection.send(data: data, completion: completion)
+        sendPump.enqueueSend(data, completion: completion)
     }
 
     func sendRaw(data: Data) {
-        guard let connection else { return }
-        connection.send(data: data)
+        sendPump?.enqueueSend(data, completion: nil)
     }
 
     /// Sends TLS close_notify, then half-closes the underlying byte stream while
     /// leaving the receive direction available.
     func closeWrite(completion: @escaping (Error?) -> Void) {
         sendLock.lock()
-        guard let connection else {
+        guard let sendPump else {
             sendLock.unlock()
             completion(TLSRecordError.connectionUnavailable)
             return
         }
         if sentCloseNotify {
             sendLock.unlock()
-            connection.closeWrite(completion: completion)
+            sendPump.enqueueFinish(completion: completion)
             return
         }
         do {
@@ -280,11 +292,10 @@ nonisolated class TLSRecordConnection {
                 record = try encryptTLS12Record(plaintext: alertPayload, contentType: TLSContentType.alert)
             }
             sentCloseNotify = true
-            connection.send(data: record) { error in
-                if let error { completion(error) }
-                else { connection.closeWrite(completion: completion) }
-            }
             sendLock.unlock()
+            // Ordered by the pump: close_notify first, then the transport half-close.
+            sendPump.enqueueSend(record, completion: nil)
+            sendPump.enqueueFinish(completion: completion)
         } catch {
             sendLock.unlock()
             completion(error)
@@ -294,18 +305,20 @@ nonisolated class TLSRecordConnection {
     // MARK: - Async Surface
 
     // Async-native counterparts of `send`/`receive`/`closeWrite`, over the transport's
-    // async surface. These are the primary path for async consumers (`TLSProxyConnection`);
-    // the callback methods above remain for the framing consumers (WebSocket/HTTPUpgrade/
-    // XHTTP/Reality/TLSServer) not yet migrated. Both share the synchronous record crypto
-    // and `processBuffer`; a given connection is driven by one consumer, so the two receive
-    // paths never touch `receiveBuffer` concurrently.
+    // async surface (through `sendPump` for writes). These are the primary path for async
+    // consumers (`TLSProxyConnection`/`RealityProxyConnection`); the callback methods above
+    // remain for the MITM `MITMByteLeg` consumers and the VLESS-Vision direct-copy path, both
+    // dropped in Stage 16. Both share the synchronous record crypto and `processBuffer`; a
+    // given connection is driven by one consumer, so the two receive paths never touch
+    // `receiveBuffer` concurrently.
 
     /// Encrypts `data` into TLS records and sends them, awaiting the write. Records are
-    /// built under `sendLock` (sequence-number ordering); the awaited write is serialized
-    /// by the caller (each `await` completes before the next), preserving on-wire order.
+    /// built under `sendLock` (sequence-number ordering) and enqueued on ``sendPump``, which
+    /// drains writes in submission order — serializing the awaited write with the callback
+    /// sends and the internal KeyUpdate response so on-wire order is preserved.
     func send(_ data: Data) async throws {
         sendLock.lock()
-        guard let connection else {
+        guard let sendPump else {
             sendLock.unlock()
             throw TLSRecordError.connectionUnavailable
         }
@@ -317,7 +330,11 @@ nonisolated class TLSRecordConnection {
             throw error
         }
         sendLock.unlock()
-        try await connection.send(record)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendPump.enqueueSend(record) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
     }
 
     /// Receives and decrypts one chunk of application data; `nil` signals a clean close.
@@ -351,31 +368,34 @@ nonisolated class TLSRecordConnection {
             guard let connection else {
                 throw TLSRecordError.connectionUnavailable
             }
-            let (data, isComplete) = try await connection.receive()
-            if let data, !data.isEmpty {
+            switch try await connection.receive() {
+            case .bytes(let data):
                 receiveLock.lock()
                 receiveBuffer.append(data)
                 receiveLock.unlock()
                 continue             // re-process with the new bytes
-            }
-            if isComplete {
+            case .end:
                 return nil
             }
-            // Spurious empty read without EOF: read again.
         }
     }
 
     /// Half-closes the underlying byte stream (transport FIN / end-of-stream), leaving the
     /// receive direction open. The TLS close_notify alert is intentionally not sent — a
-    /// plain half-close is used for graceful shutdown.
+    /// plain half-close is used for graceful shutdown. Ordered through ``sendPump`` after
+    /// every prior send.
     func closeWrite() async throws {
         sendLock.lock()
-        let connection = self.connection
-        sendLock.unlock()
-        guard let connection else {
+        guard let sendPump else {
+            sendLock.unlock()
             throw TLSRecordError.connectionUnavailable
         }
-        try await connection.closeWrite()
+        sendLock.unlock()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendPump.enqueueFinish { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
     }
 
     // MARK: - Cancel
@@ -384,14 +404,14 @@ nonisolated class TLSRecordConnection {
     func cancel() {
         sendLock.lock()
         let transport = connection
-        connection = nil
+        connection = nil            // didSet finishes the send pump
         sendLock.unlock()
 
         receiveLock.lock()
         receiveBuffer.removeAll()
         receiveLock.unlock()
 
-        transport?.forceCancel()
+        transport?.cancel()
     }
 
     // MARK: - Internal Buffer Processing
@@ -409,23 +429,22 @@ nonisolated class TLSRecordConnection {
             completion(nil, TLSRecordError.connectionUnavailable)
             return
         }
-        connection.receive() { [weak self] data, isComplete, error in
+        Task { [weak self] in
+            let chunk: TransportChunk
+            do {
+                chunk = try await connection.receive()
+            } catch {
+                completion(nil, error)
+                return
+            }
+
             guard let self else {
                 completion(nil, nil)
                 return
             }
 
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                if isComplete {
-                    completion(nil, nil)
-                } else {
-                    self.fetchMore(completion: completion)
-                }
+            guard case .bytes(let data) = chunk else {
+                completion(nil, nil)   // .end → clean close
                 return
             }
 

@@ -1047,7 +1047,10 @@ extension MITMSession: TLSServerDelegate {
         alpn: String,
         clientFinishedHandshakeTrailer: Data
     ) {
-        record.connection = innerTransport
+        // The inner leg's byte transport is the lwIP-attached `InnerTransport` (a callback
+        // `RawTransport`); adapt it to the record layer's async surface until the MITM data
+        // plane goes async-native.
+        record.connection = RawToAsyncByteTransport(innerTransport)
         record.prependToReceiveBuffer(clientFinishedHandshakeTrailer)
         innerRecord = record
         tlsServer = nil
