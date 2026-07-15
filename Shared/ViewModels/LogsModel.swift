@@ -29,25 +29,8 @@ class LogsModel {
 
     private(set) var logs: [LogEntry] = []
 
-    @ObservationIgnored private var pollingTask: Task<Void, Never>?
-
-    func startPolling() {
-        guard pollingTask == nil else { return }
-        pollingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self, !Task.isCancelled else { break }
-                await self.pollLogs()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-    }
-
-    func stopPolling(clearLogs: Bool = true) {
-        pollingTask?.cancel()
-        pollingTask = nil
-        if clearLogs {
-            logs = []
-        }
+    func clear() {
+        logs = []
     }
 
     private func resolveSession() async -> NETunnelProviderSession? {
@@ -56,8 +39,8 @@ class LogsModel {
               connection.status == .connected else { return nil }
         return connection
     }
-
-    private func pollLogs() async {
+    
+    func poll() async {
         guard let session = await resolveSession() else { return }
         guard let data = try? JSONEncoder().encode(TunnelMessage.fetchLogs) else { return }
 

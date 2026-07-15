@@ -36,12 +36,15 @@ struct RequestsView: View {
                     }
                 }
             }
-            .onAppear {
-                requestsModel.startPolling()
+            .task(id: editMode) {
+                guard editMode == .inactive else { return }
+                selection.removeAll()
+                while !Task.isCancelled {
+                    await requestsModel.poll()
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
-            .onDisappear {
-                requestsModel.stopPolling()
-            }
+            .onDisappear { requestsModel.clear() }
     }
 
     @ViewBuilder
@@ -87,15 +90,6 @@ struct RequestsView: View {
             }
             .environment(\.editMode, $editMode)
             .animation(.default, value: requestsModel.requests)
-            .onChange(of: editMode) {
-                if editMode == .active {
-                    requestsModel.stopPolling(clearRequests: false)
-                }
-                if editMode == .inactive {
-                    requestsModel.startPolling()
-                    selection.removeAll()
-                }
-            }
         }
     }
 

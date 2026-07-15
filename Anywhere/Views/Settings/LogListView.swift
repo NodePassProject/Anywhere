@@ -34,8 +34,15 @@ struct LogListView: View {
                     }
                 }
             }
-            .onAppear { logsModel.startPolling() }
-            .onDisappear { logsModel.stopPolling() }
+            .task(id: editMode) {
+                guard editMode == .inactive else { return }
+                selection.removeAll()
+                while !Task.isCancelled {
+                    await logsModel.poll()
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+            .onDisappear { logsModel.clear() }
     }
     
     @ViewBuilder
@@ -65,15 +72,6 @@ struct LogListView: View {
             }
             .environment(\.editMode, $editMode)
             .animation(.default, value: logsModel.logs)
-            .onChange(of: editMode) {
-                if editMode == .active {
-                    logsModel.stopPolling(clearLogs: false)
-                }
-                if editMode == .inactive {
-                    logsModel.startPolling()
-                    selection.removeAll()
-                }
-            }
         }
     }
 

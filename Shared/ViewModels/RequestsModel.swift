@@ -34,25 +34,8 @@ class RequestsModel {
 
     private(set) var requests: [Entry] = []
 
-    @ObservationIgnored private var pollingTask: Task<Void, Never>?
-
-    func startPolling() {
-        guard pollingTask == nil else { return }
-        pollingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self, !Task.isCancelled else { break }
-                await self.pollRequests()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-    }
-
-    func stopPolling(clearRequests: Bool = true) {
-        pollingTask?.cancel()
-        pollingTask = nil
-        if clearRequests {
-            requests = []
-        }
+    func clear() {
+        requests = []
     }
 
     private func resolveSession() async -> NETunnelProviderSession? {
@@ -61,8 +44,8 @@ class RequestsModel {
               connection.status == .connected else { return nil }
         return connection
     }
-
-    private func pollRequests() async {
+    
+    func poll() async {
         guard let session = await resolveSession() else { return }
         guard let data = try? JSONEncoder().encode(TunnelMessage.fetchRequests) else { return }
 
