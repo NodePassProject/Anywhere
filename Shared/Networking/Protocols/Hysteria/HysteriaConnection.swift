@@ -225,6 +225,10 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
+            if let callback = self.openCompletion {
+                self.openCompletion = nil
+                callback(HysteriaError.streamClosed)
+            }
             if self.streamID >= 0 {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)

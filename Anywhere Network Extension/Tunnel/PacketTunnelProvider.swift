@@ -62,9 +62,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.tunnelStack.start(packetFlow: self.packetFlow,
                                        configuration: configuration)
                 self.startMonitoringPath()
-                self.statsRecorder.start {
+                self.statsRecorder.start { [weak self] in
                     return StatsRecorder.RawValues(
-                        byteCounts: self.tunnelStack.byteCounts,
+                        byteCounts: self?.tunnelStack.byteCounts ?? TrafficByteCounts(),
                         tcpConnectionCount: FlowGauge.liveTCP,
                         udpConnectionCount: FlowGauge.liveUDP,
                         memoryBytes: Self.memoryFootprint()

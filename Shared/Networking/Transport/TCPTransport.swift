@@ -33,12 +33,17 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
         var eofLatched = false
     }
 
-    private let state = Mutex(State())
-    /// Resolved when the dial reaches ready (success) or fails/times out.
-    private let connectPromise = AsyncPromise<Void>()
-    /// Resolved to unwind the driver: `cancel()`, a viability drop, or a fatal
-    /// send/receive error.
-    private let teardownPromise = AsyncPromise<Void>()
+    /// State and promises shared with the driver task.
+    private final class Guts: @unchecked Sendable {
+        let state = Mutex(State())
+        /// Resolved when the dial reaches ready (success) or fails/times out.
+        let connectPromise = AsyncPromise<Void>()
+        /// Resolved to unwind the driver: `cancel()`, a viability drop, or a fatal
+        /// send/receive error.
+        let teardownPromise = AsyncPromise<Void>()
+    }
+
+    private let guts = Guts()
 
     private let host: String
     private let port: UInt16
@@ -57,7 +62,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
     }
 
     var isReady: Bool {
-        state.withLock { $0.ready && !$0.cancelled }
+        guts.state.withLock { $0.ready && !$0.cancelled }
     }
 
     // MARK: - Connect
@@ -73,11 +78,12 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(.tcp, context: "[TCP] \(endpointDescription)")
 
-        let started: Bool = state.withLock { state in
+        let guts = self.guts
+        let started: Bool = guts.state.withLock { state in
             guard !state.cancelled else { return false }
             state.flowSlot = slot
-            state.driverTask = Task { [self] in
-                await runDriver(endpoint: endpoint, initialData: initialData, slot: slot)
+            state.driverTask = Task {
+                await Self.runDriver(guts: guts, endpoint: endpoint, initialData: initialData, slot: slot)
             }
             return true
         }
@@ -87,7 +93,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
         }
 
         try await withTaskCancellationHandler {
-            try await connectPromise.value()
+            try await guts.connectPromise.value()
         } onCancel: {
             cancel()
         }
@@ -96,57 +102,57 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
     /// Owns the connection scope for the whole session. Publishes the connection,
     /// resolves the dial, then parks on `teardownPromise` until cancel / viability loss /
     /// a fatal I/O error unwinds it.
-    private func runDriver(endpoint: NWEndpoint, initialData: Data?, slot: FlowSlot) async {
+    private static func runDriver(guts: Guts, endpoint: NWEndpoint, initialData: Data?, slot: FlowSlot) async {
         let hasInitialData = initialData?.isEmpty == false
         do {
-            try await withNetworkConnection(to: endpoint, using: { Self.makeProtocolStack() }) { [self] connection in
-                let live = state.withLock { state -> Bool in
+            try await withNetworkConnection(to: endpoint, using: { Self.makeProtocolStack() }) { connection in
+                let live = guts.state.withLock { state -> Bool in
                     guard !state.cancelled else { return false }
                     state.connection = connection
                     return true
                 }
                 guard live else { throw CancellationError() }
 
-                connection.onStateUpdate { [self] _, update in
+                connection.onStateUpdate { _, update in
                     switch update {
                     case .ready:
-                        state.withLock { $0.ready = true }
+                        guts.state.withLock { $0.ready = true }
                     case .failed(let error), .waiting(let error):
-                        connectPromise.resolve(.failure(error.transportError(op: .connect)))
-                        teardownPromise.resolve(.success(()))
+                        guts.connectPromise.resolve(.failure(error.transportError(op: .connect)))
+                        guts.teardownPromise.resolve(.success(()))
                     default:
                         break  // .setup, .preparing, .cancelled
                     }
                 }
-                .onViabilityUpdate { [self] _, viable in
-                    if !viable { teardownPromise.resolve(.success(())) }
+                .onViabilityUpdate { _, viable in
+                    if !viable { guts.teardownPromise.resolve(.success(())) }
                 }
 
                 if let initialData, hasInitialData {
                     do {
-                        try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in
-                            teardownPromise.resolve(.success(()))
+                        try await raceDialDeadline(Self.dialDeadline, onExpire: {
+                            guts.teardownPromise.resolve(.success(()))
                         }) {
                             try await connection.send(initialData, endOfStream: false)
                         }
                     } catch {
-                        connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
+                        guts.connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
                         throw error  // exit scope → tear the connection down
                     }
                 }
 
-                state.withLock { $0.ready = true }
-                connectPromise.resolve(.success(()))
+                guts.state.withLock { $0.ready = true }
+                guts.connectPromise.resolve(.success(()))
 
                 // Hold the connection open until something asks for teardown.
-                _ = try? await teardownPromise.value()
+                _ = try? await guts.teardownPromise.value()
             }
         } catch {
             // No-op if the dial already resolved; covers a pre-ready scope failure.
-            connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
+            guts.connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
         }
         slot.release()
-        state.withLock { $0.connection = nil }
+        guts.state.withLock { $0.connection = nil }
     }
 
     // MARK: - AsyncByteTransport
@@ -156,7 +162,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
         do {
             try await connection.send(data, endOfStream: false)
         } catch {
-            teardownPromise.resolve(.success(()))
+            guts.teardownPromise.resolve(.success(()))
             throw TransportError.from(error, op: .send)
         }
     }
@@ -166,21 +172,21 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
         do {
             try await connection.send(Data(), endOfStream: true)
         } catch {
-            teardownPromise.resolve(.success(()))
+            guts.teardownPromise.resolve(.success(()))
             throw TransportError.from(error, op: .send)
         }
     }
 
     func receive() async throws -> TransportChunk {
         while true {
-            if state.withLock({ $0.eofLatched }) { return .end }
+            if guts.state.withLock({ $0.eofLatched }) { return .end }
             let connection = try activeConnection()
 
             let message: (content: Data, metadata: TCP.Metadata)
             do {
                 message = try await connection.receive(atLeast: 1, atMost: Self.maxReceiveLength)
             } catch {
-                teardownPromise.resolve(.success(()))
+                guts.teardownPromise.resolve(.success(()))
                 throw TransportError.from(error, op: .receive)
             }
 
@@ -188,11 +194,11 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
             if !message.content.isEmpty {
                 // Deliver the data now; if this was the final segment, the next
                 // receive() returns .end.
-                if endOfStream { state.withLock { $0.eofLatched = true } }
+                if endOfStream { guts.state.withLock { $0.eofLatched = true } }
                 return .bytes(message.content)
             }
             if endOfStream {
-                state.withLock { $0.eofLatched = true }
+                guts.state.withLock { $0.eofLatched = true }
                 return .end
             }
             // Empty, not end-of-stream (shouldn't happen with atLeast: 1): retry.
@@ -200,7 +206,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
     }
 
     func cancel() {
-        let task: Task<Void, Never>? = state.withLock { state in
+        let task: Task<Void, Never>? = guts.state.withLock { state in
             guard !state.cancelled else { return nil }
             state.cancelled = true
             let task = state.driverTask
@@ -209,8 +215,8 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
         }
         // Unblock a pending connect() and the driver's hold-open; cancel the driver
         // so an in-flight establish send unwinds.
-        connectPromise.resolve(.failure(TransportError.connectionFailed("Cancelled")))
-        teardownPromise.resolve(.success(()))
+        guts.connectPromise.resolve(.failure(TransportError.connectionFailed("Cancelled")))
+        guts.teardownPromise.resolve(.success(()))
         task?.cancel()
     }
 
@@ -218,7 +224,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
 
     /// The live connection, or a throw if cancelled / not yet published.
     private func activeConnection() throws -> NetworkConnection<TCP> {
-        try state.withLock { state in
+        try guts.state.withLock { state in
             if state.cancelled { throw TransportError.connectionFailed("Cancelled") }
             guard let connection = state.connection else { throw TransportError.notConnected }
             return connection

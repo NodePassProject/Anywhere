@@ -27,11 +27,16 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
         var cancelled = false
     }
 
-    private let state = Mutex(State())
-    /// Resolved when the connection reaches ready (success) or fails/times out.
-    private let connectPromise = AsyncPromise<Void>()
-    /// Resolved to unwind the driver: `cancel()`, a viability drop, or a failure.
-    private let teardownPromise = AsyncPromise<Void>()
+    /// State and promises shared with the driver task.
+    private final class Guts: @unchecked Sendable {
+        let state = Mutex(State())
+        /// Resolved when the connection reaches ready (success) or fails/times out.
+        let connectPromise = AsyncPromise<Void>()
+        /// Resolved to unwind the driver: `cancel()`, a viability drop, or a failure.
+        let teardownPromise = AsyncPromise<Void>()
+    }
+
+    private let guts = Guts()
 
     private let host: String
     private let port: UInt16
@@ -50,7 +55,7 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
     }
 
     var isReady: Bool {
-        state.withLock { $0.ready && !$0.cancelled }
+        guts.state.withLock { $0.ready && !$0.cancelled }
     }
 
     // MARK: - Connect
@@ -65,11 +70,12 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(.udp, context: "[UDP] \(endpointDescription)")
 
-        let started: Bool = state.withLock { state in
+        let guts = self.guts
+        let started: Bool = guts.state.withLock { state in
             guard !state.cancelled else { return false }
             state.flowSlot = slot
-            state.driverTask = Task { [self] in
-                await runDriver(endpoint: endpoint, slot: slot)
+            state.driverTask = Task {
+                await Self.runDriver(guts: guts, endpoint: endpoint, slot: slot)
             }
             return true
         }
@@ -79,8 +85,8 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
         }
 
         try await withTaskCancellationHandler {
-            try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in cancel() }) { [self] in
-                try await connectPromise.value()
+            try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in cancel() }) {
+                try await guts.connectPromise.value()
             }
         } onCancel: {
             cancel()
@@ -90,49 +96,49 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
     /// Owns the connection scope for the whole session. Publishes the connection,
     /// resolves the dial on `.ready`, then parks on `teardownPromise` until
     /// cancel / viability loss / failure unwinds it.
-    private func runDriver(endpoint: NWEndpoint, slot: FlowSlot) async {
+    private static func runDriver(guts: Guts, endpoint: NWEndpoint, slot: FlowSlot) async {
         do {
-            try await withNetworkConnection(to: endpoint, using: { UDP() }) { [self] conn in
-                let live = state.withLock { state -> Bool in
+            try await withNetworkConnection(to: endpoint, using: { UDP() }) { conn in
+                let live = guts.state.withLock { state -> Bool in
                     guard !state.cancelled else { return false }
                     state.connection = conn
                     return true
                 }
                 guard live else { throw CancellationError() }
 
-                conn.onStateUpdate { [self] _, update in
+                conn.onStateUpdate { _, update in
                     switch update {
                     case .ready:
-                        state.withLock { $0.ready = true }
-                        connectPromise.resolve(.success(()))
+                        guts.state.withLock { $0.ready = true }
+                        guts.connectPromise.resolve(.success(()))
                     case .failed(let error), .waiting(let error):
                         // UDP drops viability before a receive would error; any
                         // failure/waiting fails the transport.
-                        connectPromise.resolve(.failure(error.transportError(op: .connect)))
-                        teardownPromise.resolve(.success(()))
+                        guts.connectPromise.resolve(.failure(error.transportError(op: .connect)))
+                        guts.teardownPromise.resolve(.success(()))
                     default:
                         break  // .setup, .preparing, .cancelled
                     }
                 }
-                .onViabilityUpdate { [self] _, viable in
-                    if !viable { teardownPromise.resolve(.success(())) }
+                .onViabilityUpdate { _, viable in
+                    if !viable { guts.teardownPromise.resolve(.success(())) }
                 }
 
                 // Covers the connection already being ready before the handler ran.
                 if case .ready = conn.state {
-                    state.withLock { $0.ready = true }
-                    connectPromise.resolve(.success(()))
+                    guts.state.withLock { $0.ready = true }
+                    guts.connectPromise.resolve(.success(()))
                 }
 
                 // Hold the connection open until something asks for teardown.
-                _ = try? await teardownPromise.value()
+                _ = try? await guts.teardownPromise.value()
             }
         } catch {
             // No-op if the dial already resolved; covers a pre-ready scope failure.
-            connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
+            guts.connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
         }
         slot.release()
-        state.withLock { $0.connection = nil }
+        guts.state.withLock { $0.connection = nil }
     }
 
     // MARK: - AsyncDatagramTransport
@@ -142,7 +148,7 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
         do {
             try await connection.send(datagram)
         } catch {
-            teardownPromise.resolve(.success(()))
+            guts.teardownPromise.resolve(.success(()))
             throw TransportError.from(error, op: .send)
         }
     }
@@ -154,7 +160,7 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
             do {
                 message = try await connection.receive()
             } catch {
-                teardownPromise.resolve(.success(()))
+                guts.teardownPromise.resolve(.success(()))
                 throw TransportError.from(error, op: .receive)
             }
             // Skip empty datagrams (keepalive artifacts).
@@ -163,15 +169,15 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
     }
 
     func cancel() {
-        let task: Task<Void, Never>? = state.withLock { state in
+        let task: Task<Void, Never>? = guts.state.withLock { state in
             guard !state.cancelled else { return nil }
             state.cancelled = true
             let task = state.driverTask
             state.driverTask = nil
             return task
         }
-        connectPromise.resolve(.failure(TransportError.connectionFailed("Cancelled")))
-        teardownPromise.resolve(.success(()))
+        guts.connectPromise.resolve(.failure(TransportError.connectionFailed("Cancelled")))
+        guts.teardownPromise.resolve(.success(()))
         task?.cancel()
     }
 
@@ -179,7 +185,7 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
 
     /// The live connection, or a throw if cancelled / not yet published.
     private func activeConnection() throws -> NetworkConnection<UDP> {
-        try state.withLock { state in
+        try guts.state.withLock { state in
             if state.cancelled { throw TransportError.connectionFailed("Cancelled") }
             guard let connection = state.connection else { throw TransportError.notConnected }
             return connection

@@ -182,8 +182,16 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Send
 
+    /// Marks the stream closed and wakes sends parked on flow control — a send awaiting a
+    /// WINDOW_UPDATE that will never arrive must observe the close, not hang until cancel().
     func markH2Closed() {
-        lock.withLock { h2StreamClosed = true }
+        let resumptions: [CheckedContinuation<Void, Never>] = lock.withLock {
+            h2StreamClosed = true
+            let resumptions = h2FlowResumptions
+            h2FlowResumptions.removeAll()
+            return resumptions
+        }
+        for continuation in resumptions { continuation.resume() }
     }
 
     /// Suspends until a WINDOW_UPDATE re-opens a send window (or the stream closes). `hasWindow`
@@ -413,7 +421,7 @@ extension XHTTPConnection {
             } catch {
                 if let xhttpError = error as? XHTTPError, case .streamEnded = xhttpError {
                     // Graceful end of stream (clean transport FIN) → EOF.
-                    lock.withLock { h2StreamClosed = true }
+                    markH2Closed()
                     return nil
                 }
                 throw error
@@ -463,7 +471,7 @@ extension XHTTPConnection {
 
                 if isDownloadStream {
                     if frame.flags & Self.h2FlagEndStream != 0 {
-                        lock.withLock { h2StreamClosed = true }
+                        markH2Closed()
                     }
                     if frame.payload.isEmpty {
                         if frame.flags & Self.h2FlagEndStream != 0 { return nil }
@@ -477,7 +485,7 @@ extension XHTTPConnection {
             case Self.h2FrameHeaders:
                 if isDownloadStream {
                     if frame.flags & Self.h2FlagEndStream != 0 {
-                        lock.withLock { h2StreamClosed = true }
+                        markH2Closed()
                         return nil
                     } else if !lock.withLock({ h2ResponseReceived }) {
                         if checkH2ResponseStatus(frame.payload) == nil {
@@ -521,12 +529,12 @@ extension XHTTPConnection {
                 try? await download.send(pong)
 
             case Self.h2FrameGoaway:
-                lock.withLock { h2StreamClosed = true }
+                markH2Closed()
                 return nil
 
             case Self.h2FrameRstStream:
                 if isDownloadStream {
-                    lock.withLock { h2StreamClosed = true }
+                    markH2Closed()
                     return nil
                 }
                 // Upload stream resets are expected after the POST completes; keep reading.

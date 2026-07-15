@@ -174,7 +174,7 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
                     // Trailers-only response: HTTP 200 but the gRPC call itself failed.
                     if frame.flags & Self.h2FlagEndStream != 0 {
                         if let grpcError = Self.parseGRPCTrailer(frame.payload) {
-                            lock.withLock { h2StreamClosed = true }
+                            markClosed()
                             throw GRPCError.setupFailed(grpcError.localizedDescription)
                         }
                     }
@@ -781,6 +781,16 @@ extension GRPCConnection {
 
     private func markClosed() {
         lock.withLock { h2StreamClosed = true }
+        drainFlowResumptions()
+    }
+    
+    private func drainFlowResumptions() {
+        let resumptions: [CheckedContinuation<Void, Never>] = lock.withLock {
+            let resumptions = h2FlowResumptions
+            h2FlowResumptions.removeAll()
+            return resumptions
+        }
+        for continuation in resumptions { continuation.resume() }
     }
 }
 
@@ -809,6 +819,7 @@ extension GRPCConnection {
                         decodedBuffer.removeAll(keepingCapacity: true)
                         return leftover
                     }
+                    drainFlowResumptions()
                     return leftover.isEmpty ? nil : leftover
                 }
                 throw error
@@ -835,6 +846,7 @@ extension GRPCConnection {
                             decodedBuffer.removeAll(keepingCapacity: true)
                             return leftover
                         }
+                        drainFlowResumptions()
                         if let grpcError { throw grpcError }
                         outcome = .deliver(leftover.isEmpty ? nil : leftover)
                     } else {
@@ -870,6 +882,7 @@ extension GRPCConnection {
                     decodedBuffer.removeAll(keepingCapacity: true)
                     return leftover
                 }
+                drainFlowResumptions()
                 outcome = .deliver(leftover.isEmpty ? nil : leftover)
 
             case Self.h2FrameRstStream:
@@ -880,6 +893,7 @@ extension GRPCConnection {
                         decodedBuffer.removeAll(keepingCapacity: true)
                         return leftover
                     }
+                    drainFlowResumptions()
                     outcome = .deliver(leftover.isEmpty ? nil : leftover)
                 } else {
                     outcome = .keepReading
@@ -901,7 +915,7 @@ extension GRPCConnection {
         if lock.withLock({ h2ResponseReceived }) { return }
 
         if let rejection = checkH2ResponseStatus(payload) {
-            lock.withLock { h2StreamClosed = true }
+            markClosed()
             throw GRPCError.invalidResponse("gRPC response rejected: \(rejection)")
         }
         lock.withLock { h2ResponseReceived = true }
@@ -977,6 +991,7 @@ extension GRPCConnection {
             }
             return .parsed(decoded: decoded, streamClosed: streamClosed, decodeError: decodeError)
         }
+        if endOfStream { drainFlowResumptions() }
 
         switch result {
         case .overflow:

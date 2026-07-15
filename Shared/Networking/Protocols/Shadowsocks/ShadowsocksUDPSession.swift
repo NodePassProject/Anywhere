@@ -251,6 +251,11 @@ nonisolated final class ShadowsocksUDPSession {
             completion?(ProxyError.connectionFailed("Session cancelled"))
         }
     }
+    
+    deinit {
+        receiveTask?.cancel()
+        asyncTransport.cancel()
+    }
 
     /// In-flight send completions may still fire after this returns.
     func cancel() {

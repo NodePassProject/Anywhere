@@ -58,10 +58,12 @@ nonisolated final class AsyncSendPump: @unchecked Sendable {
         continuation.yield(Job(data: Data(), endOfStream: true, completion: completion))
     }
 
-    /// Stops the pump. In-flight/queued jobs are abandoned (their completions may not
-    /// fire), matching abortive teardown; call the underlying `cancel()` alongside.
+    /// Stops the pump: no further jobs are accepted, and already-queued jobs drain
+    /// through `send`/`finish` so every completion fires exactly once. Call the
+    /// underlying `cancel()` alongside so drained sends fail fast instead of flushing;
+    /// awaiters parked on a completion (e.g. a bridged continuation) are then resumed
+    /// with that error rather than stranded.
     func finish() {
         continuation.finish()
-        task.cancel()
     }
 }

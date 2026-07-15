@@ -541,6 +541,10 @@ nonisolated final class HysteriaSession {
                 state.tcpCount = 0
                 state.udpCount = 0
             }
+            
+            let callbacks = self.readyCallbacks
+            self.readyCallbacks.removeAll()
+            for callback in callbacks { callback(HysteriaError.connectionFailed("Session closed")) }
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()
