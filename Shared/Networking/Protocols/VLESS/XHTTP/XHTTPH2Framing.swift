@@ -69,85 +69,48 @@ enum H2Framing {
 }
 
 /// Read buffer is independent of connection state and guarded by its own mutex, so both the
-/// 1:1 and shared-multiplexing H2 paths can drive one.
+/// 1:1 and shared-multiplexing H2 paths can drive one. The straight-line `async` read loop
+/// replaces the callback recursion, so the old stack-overflow trampoline is unnecessary.
 nonisolated final class H2FrameReader {
-    private let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
+    private let receive: @Sendable () async throws -> TransportChunk
     private let maxBufferSize: Int
 
-    private struct ReadState {
-        var buffer = Data()
-        /// Consecutive synchronous parses; trampolined every 16th to bound recursion depth.
-        var depth = 0
-    }
+    private let buffer = Mutex(Data())
 
-    private let state = Mutex(ReadState())
-
-    init(maxBufferSize: Int, receive: @escaping (@escaping (Data?, Bool, Error?) -> Void) -> Void) {
+    init(maxBufferSize: Int, receive: @escaping @Sendable () async throws -> TransportChunk) {
         self.maxBufferSize = maxBufferSize
         self.receive = receive
     }
 
-    /// Yields the next complete frame, reading from the transport as needed.
-    func readFrame(completion: @escaping (Result<H2Framing.Frame, Error>) -> Void) {
-        enum Step {
-            case parsed(H2Framing.Frame, trampoline: Bool)
-            case needMore
-        }
-        let step: Step = state.withLock { state in
-            if let frame = H2Framing.parseFrame(from: &state.buffer) {
-                state.depth += 1
-                let trampoline = state.depth >= 16
-                if trampoline { state.depth = 0 }
-                return .parsed(frame, trampoline: trampoline)
+    /// Yields the next complete frame, reading from the transport as needed. Throws
+    /// ``XHTTPError/streamEnded`` on a clean transport FIN at a frame boundary (a graceful
+    /// end of stream, which consumers convert to EOF).
+    func readFrame() async throws -> H2Framing.Frame {
+        while true {
+            if let frame = buffer.withLock({ H2Framing.parseFrame(from: &$0) }) {
+                return frame
             }
-            state.depth = 0
-            return .needMore
-        }
 
-        switch step {
-        case .parsed(let frame, let trampoline):
-            if trampoline {
-                DispatchQueue.global().async { completion(.success(frame)) }
-            } else {
-                completion(.success(frame))
+            let chunk = try await receive()
+            guard case .bytes(let data) = chunk, !data.isEmpty else {
+                throw XHTTPError.streamEnded
             }
-        case .needMore:
-            receive { [weak self] data, _, error in
-                guard let self else {
-                    completion(.failure(XHTTPError.connectionClosed))
-                    return
+
+            let overflowed = buffer.withLock { buffer -> Bool in
+                buffer.append(data)
+                if buffer.count > maxBufferSize {
+                    buffer.removeAll()
+                    return true
                 }
-                if let error {
-                    completion(.failure(error))
-                    return
-                }
-                guard let data, !data.isEmpty else {
-                    // Clean transport FIN at a frame boundary is graceful end of stream, not a
-                    // failure — consumers convert this to EOF.
-                    completion(.failure(XHTTPError.streamEnded))
-                    return
-                }
-                let overflowed = self.state.withLock { state -> Bool in
-                    state.buffer.append(data)
-                    if state.buffer.count > self.maxBufferSize {
-                        state.buffer.removeAll()
-                        return true
-                    }
-                    return false
-                }
-                if overflowed {
-                    completion(.failure(XHTTPError.connectionClosed))
-                    return
-                }
-                self.readFrame(completion: completion)
+                return false
+            }
+            if overflowed {
+                throw XHTTPError.connectionClosed
             }
         }
     }
 
     func reset() {
-        state.withLock {
-            $0.buffer = Data()
-            $0.depth = 0
-        }
+        buffer.withLock { $0 = Data() }
     }
 }

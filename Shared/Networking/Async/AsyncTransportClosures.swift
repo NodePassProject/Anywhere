@@ -74,37 +74,14 @@ extension AsyncTransportClosures {
         )
     }
 
-    /// Bridges a legacy ``TransportClosures`` into the async surface, so a framing layer
-    /// can move to this seam before its underlying transport is async-native. The legacy
-    /// struct has no half-close, so ``finishSend`` is a no-op.
-    init(bridging closures: TransportClosures) {
-        self.init(
-            send: { data in
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    closures.send(data) { error in
-                        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-                    }
-                }
-            },
+    /// For framing multiplexed over another carrier (e.g. XHTTP-over-HTTP/3, which rides
+    /// QUIC streams): the byte-transport seam is never touched, so every closure is inert.
+    static var unused: AsyncTransportClosures {
+        AsyncTransportClosures(
+            send: { _ in },
             finishSend: {},
-            receive: {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TransportChunk, Error>) in
-                    closures.receive { data, isComplete, error in
-                        if let error {
-                            continuation.resume(throwing: error)
-                        } else if let data, !data.isEmpty {
-                            continuation.resume(returning: .bytes(data))
-                        } else if isComplete {
-                            continuation.resume(returning: .end)
-                        } else {
-                            // Empty, not end-of-stream: treat as EOF to match the
-                            // three-way signal's collapse in `TransportClosures`.
-                            continuation.resume(returning: .end)
-                        }
-                    }
-                }
-            },
-            cancel: { closures.cancel() }
+            receive: { .end },
+            cancel: {}
         )
     }
 }

@@ -1059,8 +1059,10 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        xhttpConnection.performSetup { [weak self] error in
-            if let error {
+        Task { [weak self] in
+            do {
+                try await xhttpConnection.performSetup()
+            } catch {
                 completion(.failure(error))
                 return
             }
@@ -1072,7 +1074,7 @@ nonisolated class ProxyClient {
             self.sendProtocolHandshake(
                 over: xhttpProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: transportSupportsVision, completion: completion
+                supportsVision: self.transportSupportsVision, completion: completion
             )
         }
     }
@@ -1162,7 +1164,7 @@ nonisolated class ProxyClient {
     }
 
     private enum XHTTPDialedTransport {
-        case byteStream(TransportClosures)
+        case byteStream(AsyncTransportClosures)
         case http3(HTTP3Multiplexer)
     }
 
@@ -1207,7 +1209,7 @@ nonisolated class ProxyClient {
         mode: XHTTPMode,
         sessionId: String,
         role: XHTTPChannelRole,
-        uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)?,
+        uploadFactory: (() async throws -> AsyncTransportClosures)?,
         completion: @escaping (Result<XHTTPConnection, Error>) -> Void
     ) {
         // xmux: pool/multiplex direct-route XHTTP connections. XHTTP always pools — serial-reuse
@@ -1334,11 +1336,16 @@ nonisolated class ProxyClient {
         security: XraySecurityLayer,
         completion: @escaping (Result<XHTTPH2Multiplexer, Error>) -> Void
     ) {
-        func bringUp(_ closures: TransportClosures, retaining object: AnyObject?) {
-            let shared = XHTTPH2Multiplexer(transport: closures)
+        func bringUp(_ transport: AsyncTransportClosures, retaining object: AnyObject?) {
+            let shared = XHTTPH2Multiplexer(transport: transport)
             if let object { shared.retain(object) }
-            shared.connect { error in
-                if let error { completion(.failure(error)) } else { completion(.success(shared)) }
+            Task {
+                do {
+                    try await shared.connect()
+                    completion(.success(shared))
+                } catch {
+                    completion(.failure(error))
+                }
             }
         }
         switch security {
@@ -1351,8 +1358,7 @@ nonisolated class ProxyClient {
                     completion(.failure(error))
                     return
                 }
-                let wrapped = CallbackByteTransport(transport)
-                bringUp(TransportClosures(tcp: wrapped), retaining: wrapped)
+                bringUp(AsyncTransportClosures(transport), retaining: transport)
             }
         case .tls(let tlsConfig):
             // XHTTP rides h2; advertise it (fall back to http/1.1) regardless of the configured ALPN.
@@ -1363,7 +1369,7 @@ nonisolated class ProxyClient {
             let client = TLSClient(configuration: h2TLS)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let connection): bringUp(TransportClosures(tls: connection), retaining: client)
+                case .success(let connection): bringUp(AsyncTransportClosures(tls: connection), retaining: client)
                 case .failure(let error): completion(.failure(error))
                 }
             }
@@ -1371,7 +1377,7 @@ nonisolated class ProxyClient {
             let client = RealityClient(configuration: realityConfig)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let connection): bringUp(TransportClosures(tls: connection), retaining: client)
+                case .success(let connection): bringUp(AsyncTransportClosures(tls: connection), retaining: client)
                 case .failure(let error): completion(.failure(error))
                 }
             }
@@ -1427,7 +1433,7 @@ nonisolated class ProxyClient {
         switch security {
         case .none:
             if let tunnel = overTunnel {
-                completion(.success(.byteStream(TransportClosures(tunnel: tunnel))))
+                completion(.success(.byteStream(AsyncTransportClosures(proxyConnection: tunnel))))
             } else {
                 let transport = TCPTransport(host: host, port: port)
                 own(transport)
@@ -1438,14 +1444,14 @@ nonisolated class ProxyClient {
                         completion(.failure(error))
                         return
                     }
-                    completion(.success(.byteStream(TransportClosures(tcp: CallbackByteTransport(transport)))))
+                    completion(.success(.byteStream(AsyncTransportClosures(transport))))
                 }
             }
         case .tls(let tlsConfig):
             let client = TLSClient(configuration: sanitizedXHTTPTLSConfiguration(from: tlsConfig, httpVersion: httpVersion))
             own(client)
             let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
-                completion(result.map { .byteStream(TransportClosures(tls: $0)) })
+                completion(result.map { .byteStream(AsyncTransportClosures(tls: $0)) })
             }
             if let tunnel = overTunnel {
                 client.connect(overTunnel: tunnel, completion: handle)
@@ -1456,7 +1462,7 @@ nonisolated class ProxyClient {
             let client = RealityClient(configuration: realityConfig)
             own(client)
             let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
-                completion(result.map { .byteStream(TransportClosures(tls: $0)) })
+                completion(result.map { .byteStream(AsyncTransportClosures(tls: $0)) })
             }
             if let tunnel = overTunnel {
                 client.connect(overTunnel: tunnel, completion: handle)
@@ -1512,7 +1518,7 @@ nonisolated class ProxyClient {
         httpVersion: XHTTPHTTPVersion,
         mode: XHTTPMode,
         xmux: XHTTPXMUXMultiplexerConfiguration
-    ) -> (@escaping (Result<TransportClosures, Error>) -> Void) -> Void {
+    ) -> (() async throws -> AsyncTransportClosures) {
         // xmux: pool the packet-up upload socket across sessions for direct routes.
         // stream-up's upload is one indefinite POST (never reusable); chained routes can't pool.
         let hasChain = (configuration.chain?.isEmpty == false)
@@ -1534,22 +1540,23 @@ nonisolated class ProxyClient {
                     }
                 }
             }
-            return { completion in
-                manager.acquire { lease in
-                    guard let lease, let connection = lease.connection as? XHTTPH1Multiplexer else {
-                        completion(.failure(ProxyError.connectionFailed("xmux H1 upload acquisition failed")))
-                        return
+            return {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AsyncTransportClosures, Error>) in
+                    manager.acquire { lease in
+                        guard let lease, let connection = lease.connection as? XHTTPH1Multiplexer else {
+                            continuation.resume(throwing: ProxyError.connectionFailed("xmux H1 upload acquisition failed"))
+                            return
+                        }
+                        connection.lease = lease
+                        continuation.resume(returning: connection.sessionClosures)
                     }
-                    connection.lease = lease
-                    completion(.success(connection.sessionClosures))
                 }
             }
         }
 
-        return { [weak self] completion in
+        return { [weak self] in
             guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
+                throw ProxyError.connectionFailed("Client deallocated")
             }
             let route: XHTTPLegRoute
             if let chain = self.configuration.chain, !chain.isEmpty {
@@ -1557,14 +1564,16 @@ nonisolated class ProxyClient {
             } else {
                 route = .direct
             }
-            self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route) { result in
-                switch result {
-                case .success(.byteStream(let closures)):
-                    completion(.success(closures))
-                case .success(.http3):
-                    completion(.failure(ProxyError.connectionFailed("HTTP/3 has no separate upload connection")))
-                case .failure(let error):
-                    completion(.failure(error))
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AsyncTransportClosures, Error>) in
+                self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route) { result in
+                    switch result {
+                    case .success(.byteStream(let closures)):
+                        continuation.resume(returning: closures)
+                    case .success(.http3):
+                        continuation.resume(throwing: ProxyError.connectionFailed("HTTP/3 has no separate upload connection"))
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }
@@ -1578,8 +1587,8 @@ nonisolated class ProxyClient {
         security: XraySecurityLayer,
         completion: @escaping (XHTTPH1Multiplexer?) -> Void
     ) {
-        func wrap(_ closures: TransportClosures, retaining object: AnyObject?) {
-            let connection = XHTTPH1Multiplexer(transport: closures)
+        func wrap(_ transport: AsyncTransportClosures, retaining object: AnyObject?) {
+            let connection = XHTTPH1Multiplexer(transport: transport)
             if let object { connection.retain(object) }
             completion(connection)
         }
@@ -1593,8 +1602,7 @@ nonisolated class ProxyClient {
                     completion(nil)
                     return
                 }
-                let wrapped = CallbackByteTransport(transport)
-                wrap(TransportClosures(tcp: wrapped), retaining: wrapped)
+                wrap(AsyncTransportClosures(transport), retaining: transport)
             }
         case .tls(let tlsConfig):
             let h1TLS = TLSConfiguration(
@@ -1604,7 +1612,7 @@ nonisolated class ProxyClient {
             let client = TLSClient(configuration: h1TLS)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let connection): wrap(TransportClosures(tls: connection), retaining: client)
+                case .success(let connection): wrap(AsyncTransportClosures(tls: connection), retaining: client)
                 case .failure: completion(nil)
                 }
             }
@@ -1612,7 +1620,7 @@ nonisolated class ProxyClient {
             let client = RealityClient(configuration: realityConfig)
             client.connect(host: host, port: port) { result in
                 switch result {
-                case .success(let connection): wrap(TransportClosures(tls: connection), retaining: client)
+                case .success(let connection): wrap(AsyncTransportClosures(tls: connection), retaining: client)
                 case .failure: completion(nil)
                 }
             }

@@ -13,7 +13,7 @@ extension XHTTPConnection {
 
     // MARK: stream-one Setup
 
-    func performStreamOneSetup(completion: @escaping (Error?) -> Void) {
+    func performStreamOneSetup() async throws {
         let method = configuration.uplinkHTTPMethod
         let path = configuration.normalizedPath
         var request = ""
@@ -34,188 +34,140 @@ extension XHTTPConnection {
         request += "\r\n"
 
         guard let requestData = request.data(using: .utf8) else {
-            completion(XHTTPError.setupFailed("Failed to encode stream-one request"))
-            return
+            throw XHTTPError.setupFailed("Failed to encode stream-one request")
         }
 
-        downloadSend(requestData) { [weak self] error in
-            if let error {
-                completion(XHTTPError.setupFailed(error.localizedDescription))
-                return
-            }
-            self?.receiveResponseHeaders(completion: completion)
+        do {
+            try await download.send(requestData)
+        } catch {
+            throw XHTTPError.setupFailed(error.localizedDescription)
         }
+        try await receiveResponseHeaders()
     }
 
     // MARK: packet-up Setup
 
-    func performPacketUpSetup(completion: @escaping (Error?) -> Void) {
+    func performPacketUpSetup() async throws {
         let request = buildDownloadGETRequest()
 
         guard let requestData = request.data(using: .utf8) else {
-            completion(XHTTPError.setupFailed("Failed to encode GET request"))
-            return
+            throw XHTTPError.setupFailed("Failed to encode GET request")
         }
 
-        downloadSend(requestData) { [weak self] error in
-            if let error {
-                completion(XHTTPError.setupFailed(error.localizedDescription))
-                return
-            }
-            self?.receiveResponseHeaders { [weak self] headerError in
-                if let headerError {
-                    completion(headerError)
-                    return
-                }
-                guard let self, let factory = self.uploadConnectionFactory else {
-                    completion(XHTTPError.setupFailed("No upload connection factory"))
-                    return
-                }
-                factory { [weak self] result in
-                    switch result {
-                    case .success(let closures):
-                        self?.lock.lock()
-                        self?.uploadSend = closures.send
-                        self?.uploadReceive = closures.receive
-                        self?.uploadCancel = closures.cancel
-                        self?.lock.unlock()
-                        self?.startUploadResponseDrain()
-                        completion(nil)
-                    case .failure(let error):
-                        completion(XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)"))
-                    }
-                }
-            }
+        do {
+            try await download.send(requestData)
+        } catch {
+            throw XHTTPError.setupFailed(error.localizedDescription)
         }
+        try await receiveResponseHeaders()
+
+        guard let factory = uploadConnectionFactory else {
+            throw XHTTPError.setupFailed("No upload connection factory")
+        }
+        let closures: AsyncTransportClosures
+        do {
+            closures = try await factory()
+        } catch {
+            throw XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)")
+        }
+        lock.withLock { uploadTransport = closures }
+        startUploadResponseDrain()
     }
 
     // MARK: Upload Response Drain
 
     /// Discards POST responses in a loop; otherwise they fill the TCP receive buffer and stall the server.
     func startUploadResponseDrain() {
-        drainNextUploadResponse()
-    }
-
-    private func drainNextUploadResponse() {
-        lock.lock()
-        guard let uploadReceive = self.uploadReceive, _isConnected else {
-            lock.unlock()
-            return
-        }
-        lock.unlock()
-
-        uploadReceive { [weak self] data, isComplete, error in
-            guard let self else { return }
-            if error != nil || isComplete {
-                return
+        guard let upload = lock.withLock({ uploadTransport }) else { return }
+        Task { [weak self] in
+            while true {
+                guard let self, self.lock.withLock({ self._isConnected }) else { return }
+                let chunk: TransportChunk
+                do {
+                    chunk = try await upload.receive()
+                } catch {
+                    return
+                }
+                if case .end = chunk { return }
+                // .bytes → discard and keep draining.
             }
-            self.drainNextUploadResponse()
         }
     }
 
     // MARK: stream-up Setup
 
-    func performStreamUpSetup(completion: @escaping (Error?) -> Void) {
+    func performStreamUpSetup() async throws {
         let request = buildDownloadGETRequest()
 
         guard let requestData = request.data(using: .utf8) else {
-            completion(XHTTPError.setupFailed("Failed to encode GET request"))
-            return
+            throw XHTTPError.setupFailed("Failed to encode GET request")
         }
 
-        downloadSend(requestData) { [weak self] error in
-            if let error {
-                completion(XHTTPError.setupFailed(error.localizedDescription))
-                return
-            }
-            self?.receiveResponseHeaders { [weak self] headerError in
-                if let headerError {
-                    completion(headerError)
-                    return
-                }
+        do {
+            try await download.send(requestData)
+        } catch {
+            throw XHTTPError.setupFailed(error.localizedDescription)
+        }
+        try await receiveResponseHeaders()
 
-                guard let self, let factory = self.uploadConnectionFactory else {
-                    completion(XHTTPError.setupFailed("No upload connection factory"))
-                    return
-                }
+        guard let factory = uploadConnectionFactory else {
+            throw XHTTPError.setupFailed("No upload connection factory")
+        }
+        let closures: AsyncTransportClosures
+        do {
+            closures = try await factory()
+        } catch {
+            throw XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)")
+        }
+        lock.withLock { uploadTransport = closures }
 
-                factory { [weak self] result in
-                    switch result {
-                    case .success(let closures):
-                        guard let self else {
-                            completion(XHTTPError.setupFailed("Connection deallocated"))
-                            return
-                        }
-                        self.lock.lock()
-                        self.uploadSend = closures.send
-                        self.uploadReceive = closures.receive
-                        self.uploadCancel = closures.cancel
-                        self.lock.unlock()
-
-                        let postRequest = self.buildStreamUpPOSTRequest()
-
-                        guard let postData = postRequest.data(using: .utf8) else {
-                            completion(XHTTPError.setupFailed("Failed to encode stream-up POST request"))
-                            return
-                        }
-                        closures.send(postData) { error in
-                            if let error {
-                                completion(XHTTPError.setupFailed("Stream-up POST send failed: \(error.localizedDescription)"))
-                            } else {
-                                completion(nil)
-                            }
-                        }
-
-                    case .failure(let error):
-                        completion(XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)"))
-                    }
-                }
-            }
+        let postRequest = buildStreamUpPOSTRequest()
+        guard let postData = postRequest.data(using: .utf8) else {
+            throw XHTTPError.setupFailed("Failed to encode stream-up POST request")
+        }
+        do {
+            try await closures.send(postData)
+        } catch {
+            throw XHTTPError.setupFailed("Stream-up POST send failed: \(error.localizedDescription)")
         }
     }
 
     // MARK: Detached leg Setup (up/download detach)
 
-    func performDownloadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
+    func performDownloadOnlyHTTP11Setup() async throws {
         let request = buildDownloadGETRequest()
         guard let requestData = request.data(using: .utf8) else {
-            completion(XHTTPError.setupFailed("Failed to encode GET request"))
-            return
+            throw XHTTPError.setupFailed("Failed to encode GET request")
         }
-        downloadSend(requestData) { [weak self] error in
-            if let error {
-                completion(XHTTPError.setupFailed(error.localizedDescription))
-                return
-            }
-            self?.receiveResponseHeaders(completion: completion)
+        do {
+            try await download.send(requestData)
+        } catch {
+            throw XHTTPError.setupFailed(error.localizedDescription)
         }
+        try await receiveResponseHeaders()
     }
 
-    /// Its own transport *is* the upload connection, so `uploadSend`/`uploadReceive` alias it.
-    /// `uploadCancel` stays nil — `downloadCancel` already tears down this transport, avoiding a double cancel.
-    func performUploadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        uploadSend = downloadSend
-        uploadReceive = downloadReceive
-        lock.unlock()
+    /// Its own transport *is* the upload connection, so `uploadTransport` aliases it with a no-op
+    /// cancel — the download transport's own cancel already tears it down, avoiding a double cancel.
+    func performUploadOnlyHTTP11Setup() async throws {
+        let upload = AsyncTransportClosures(
+            send: download.send, finishSend: download.finishSend, receive: download.receive, cancel: {}
+        )
+        lock.withLock { uploadTransport = upload }
 
         if mode == .streamUp {
             let postRequest = buildStreamUpPOSTRequest()
             guard let postData = postRequest.data(using: .utf8) else {
-                completion(XHTTPError.setupFailed("Failed to encode stream-up POST request"))
-                return
+                throw XHTTPError.setupFailed("Failed to encode stream-up POST request")
             }
-            downloadSend(postData) { error in
-                if let error {
-                    completion(XHTTPError.setupFailed("Stream-up POST send failed: \(error.localizedDescription)"))
-                } else {
-                    completion(nil)
-                }
+            do {
+                try await download.send(postData)
+            } catch {
+                throw XHTTPError.setupFailed("Stream-up POST send failed: \(error.localizedDescription)")
             }
         } else {
             // packet-up: each send() is its own POST.
             startUploadResponseDrain()
-            completion(nil)
         }
     }
 
@@ -260,112 +212,72 @@ extension XHTTPConnection {
 
     // MARK: - HTTP Response Header Parsing
 
-    func receiveResponseHeaders(completion: @escaping (Error?) -> Void) {
-        downloadReceive { [weak self] data, _, error in
-            guard let self else {
-                completion(XHTTPError.setupFailed("Connection deallocated"))
-                return
+    func receiveResponseHeaders() async throws {
+        let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+        while true {
+            let chunk: TransportChunk
+            do {
+                chunk = try await download.receive()
+            } catch {
+                throw XHTTPError.setupFailed(error.localizedDescription)
+            }
+            guard case .bytes(let data) = chunk, !data.isEmpty else {
+                throw XHTTPError.setupFailed("Empty response from server")
             }
 
-            if let error {
-                completion(XHTTPError.setupFailed(error.localizedDescription))
-                return
+            let headerData: Data? = lock.withLock {
+                headerBuffer.append(data)
+                guard let range = headerBuffer.range(of: headerEnd) else { return nil }
+                let headerData = Data(headerBuffer[headerBuffer.startIndex..<range.lowerBound])
+                let leftover = Data(headerBuffer[range.upperBound...])
+                headerBuffer.removeAll()
+                downloadHeadersParsed = true
+                if !leftover.isEmpty { chunkedDecoder.feed(leftover) }
+                return headerData
             }
+            guard let headerData else { continue } // headers not yet complete; read more
 
-            guard let data, !data.isEmpty else {
-                completion(XHTTPError.setupFailed("Empty response from server"))
-                return
+            guard let headerString = String(data: headerData, encoding: .utf8) else {
+                throw XHTTPError.httpError("Cannot decode response headers")
             }
-
-            self.lock.lock()
-            self.headerBuffer.append(data)
-
-            let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
-            guard let range = self.headerBuffer.range(of: headerEnd) else {
-                self.lock.unlock()
-                self.receiveResponseHeaders(completion: completion)
-                return
-            }
-
-            let headerData = self.headerBuffer[self.headerBuffer.startIndex..<range.lowerBound]
-            let leftover = Data(self.headerBuffer[range.upperBound...])
-            self.headerBuffer.removeAll()
-            self.downloadHeadersParsed = true
-
-            if !leftover.isEmpty {
-                self.chunkedDecoder.feed(leftover)
-            }
-            self.lock.unlock()
-
-            guard let headerString = String(data: Data(headerData), encoding: .utf8) else {
-                completion(XHTTPError.httpError("Cannot decode response headers"))
-                return
-            }
-
             let firstLine = headerString.split(separator: "\r\n", maxSplits: 1).first ?? ""
             guard firstLine.contains("200") else {
-                completion(XHTTPError.httpError("Expected HTTP 200, got: \(firstLine)"))
-                return
+                throw XHTTPError.httpError("Expected HTTP 200, got: \(firstLine)")
             }
-
-            completion(nil)
+            return
         }
     }
 
     // MARK: - HTTP/1.1 Send
 
-    func sendStreamOne(data: Data, completion: @escaping (Error?) -> Void) {
-        let chunk = ChunkedTransferEncoder.encode(data)
-        downloadSend(chunk, completion)
+    func sendStreamOne(data: Data) async throws {
+        try await download.send(ChunkedTransferEncoder.encode(data))
     }
 
-    func sendStreamUp(data: Data, completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        guard let uploadSend = self.uploadSend else {
-            lock.unlock()
-            completion(XHTTPError.setupFailed("Upload connection not established"))
-            return
+    func sendStreamUp(data: Data) async throws {
+        guard let upload = lock.withLock({ uploadTransport }) else {
+            throw XHTTPError.setupFailed("Upload connection not established")
         }
-        lock.unlock()
-
-        let chunk = ChunkedTransferEncoder.encode(data)
-        uploadSend(chunk, completion)
+        try await upload.send(ChunkedTransferEncoder.encode(data))
     }
 
-    func sendPacketUp(data: Data, completion: @escaping (Error?) -> Void) {
-        lock.lock()
-        guard let uploadSend = self.uploadSend else {
-            lock.unlock()
-            completion(XHTTPError.setupFailed("Upload connection not established"))
-            return
+    /// Sends the packet-up payload as one POST, re-splitting an oversized payload into
+    /// back-to-back POSTs (each with its own seq). Called under `packetUpMutex`.
+    func sendPacketUpHTTP11(data: Data) async throws {
+        guard let upload = lock.withLock({ uploadTransport }) else {
+            throw XHTTPError.setupFailed("Upload connection not established")
         }
-
-        let seq = nextSeq
-        nextSeq += 1
-        lock.unlock()
-
-        let maxSize = configuration.scMaxEachPostBytes
-        if data.count <= maxSize {
-            sendSinglePost(data: data, seq: seq, uploadSend: uploadSend, completion: completion)
-        } else {
-            let firstChunk = data.prefix(maxSize)
-            let remaining = data.suffix(from: maxSize)
-            sendSinglePost(data: Data(firstChunk), seq: seq, uploadSend: uploadSend) { [weak self] error in
-                if let error {
-                    completion(error)
-                    return
-                }
-                self?.sendPacketUp(data: Data(remaining), completion: completion)
-            }
-        }
+        let maxSize = max(1, configuration.scMaxEachPostBytes)
+        var remaining = data
+        repeat {
+            let piece = Data(remaining.prefix(maxSize))
+            remaining = Data(remaining.dropFirst(maxSize))
+            let seq = lock.withLock { () -> Int64 in let s = nextSeq; nextSeq += 1; return s }
+            try await sendSinglePost(data: piece, seq: seq, upload: upload)
+        } while !remaining.isEmpty
     }
 
-    private func sendSinglePost(
-        data: Data,
-        seq: Int64,
-        uploadSend: @escaping (Data, @escaping (Error?) -> Void) -> Void,
-        completion: @escaping (Error?) -> Void
-    ) {
+    private func sendSinglePost(data: Data, seq: Int64, upload: AsyncTransportClosures) async throws {
         let method = configuration.uplinkHTTPMethod
         var path = configuration.normalizedPath
         var headerBlock = ""
@@ -402,12 +314,11 @@ extension XHTTPConnection {
         request += "\r\n"
 
         guard var requestData = request.data(using: .utf8) else {
-            completion(XHTTPError.setupFailed("Failed to encode POST request"))
-            return
+            throw XHTTPError.setupFailed("Failed to encode POST request")
         }
         requestData.append(bodyData)
 
-        // Rate limiting between POSTs is enforced upstream by flushPacketUpBatch.
-        uploadSend(requestData, completion)
+        // Rate limiting between POSTs is enforced upstream by `rateLimitPacketUp`.
+        try await upload.send(requestData)
     }
 }

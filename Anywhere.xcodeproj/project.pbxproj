@@ -220,7 +220,6 @@
 				"Networking/Protocols/Core/ProxyConfiguration+URLParsing.swift",
 				Networking/Protocols/Core/ProxyConnection.swift,
 				Networking/Protocols/Core/ProxyUserAgent.swift,
-				Networking/Protocols/Core/TransportClosures.swift,
 				Networking/Protocols/Core/TransportPool.swift,
 				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,

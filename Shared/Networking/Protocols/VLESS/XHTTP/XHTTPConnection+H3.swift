@@ -16,23 +16,20 @@ extension XHTTPConnection {
 
     // MARK: Setup
 
-    func performH3Setup(completion: @escaping (Error?) -> Void) {
+    func performH3Setup() async throws {
         guard let multiplexer = h3Multiplexer else {
-            completion(XHTTPError.setupFailed("H3 setup without a multiplexer"))
-            return
+            throw XHTTPError.setupFailed("H3 setup without a multiplexer")
         }
 
         switch role {
         case .downloadOnly:
             // Download leg of a detached multiplexer; the upload POST lives on a separate QUIC multiplexer.
-            setupH3Download(multiplexer: multiplexer, completion: completion)
+            try await setupH3Download(multiplexer: multiplexer)
 
         case .uploadOnly:
             // packet-up opens streams per batch, so only stream-up opens anything at setup.
             if mode == .streamUp {
-                openH3UploadStream(multiplexer: multiplexer, completion: completion)
-            } else {
-                completion(nil)
+                try await openH3UploadStream(multiplexer: multiplexer)
             }
 
         case .combined:
@@ -40,94 +37,86 @@ extension XHTTPConnection {
             case .streamOne:
                 // Can't wait for the response: the server only replies after seeing upload body.
                 let stream = XHTTPH3RequestStream(multiplexer: multiplexer)
-                lock.lock(); h3Download = stream; lock.unlock()
+                lock.withLock { h3Download = stream }
                 let headers = h3RequestHeaderBlock(method: "POST", includeMeta: false)
-                stream.sendRequest(headerBlock: headers, endStream: false) { error in
-                    if let error {
-                        completion(XHTTPError.setupFailed("H3 stream-one request failed: \(error.localizedDescription)"))
-                    } else {
-                        completion(nil)
-                    }
+                do {
+                    try await stream.sendRequestAsync(headerBlock: headers, endStream: false)
+                } catch {
+                    throw XHTTPError.setupFailed("H3 stream-one request failed: \(error.localizedDescription)")
                 }
 
             case .streamUp:
-                setupH3Download(multiplexer: multiplexer) { [weak self] error in
-                    if let error { completion(error); return }
-                    guard let self else { completion(XHTTPError.connectionClosed); return }
-                    self.openH3UploadStream(multiplexer: multiplexer, completion: completion)
-                }
+                try await setupH3Download(multiplexer: multiplexer)
+                try await openH3UploadStream(multiplexer: multiplexer)
 
             default:
                 // packet-up (and .auto, already resolved to packet-up for TLS upstream).
-                setupH3Download(multiplexer: multiplexer, completion: completion)
+                try await setupH3Download(multiplexer: multiplexer)
             }
         }
     }
 
     /// Opens the persistent stream-up upload POST; no seq or content length since the body streams indefinitely.
-    private func openH3UploadStream(multiplexer: HTTP3Multiplexer, completion: @escaping (Error?) -> Void) {
+    private func openH3UploadStream(multiplexer: HTTP3Multiplexer) async throws {
         let upload = XHTTPH3RequestStream(multiplexer: multiplexer)
-        lock.lock(); h3Upload = upload; lock.unlock()
+        lock.withLock { h3Upload = upload }
         xmuxLease?.noteRequest()
         let headers = h3UploadHeaderBlock(seq: nil, contentLength: nil)
-        upload.sendRequest(headerBlock: headers, endStream: false) { upErr in
-            if let upErr {
-                completion(XHTTPError.setupFailed("H3 upload stream open failed: \(upErr.localizedDescription)"))
-            } else {
-                completion(nil)
-            }
+        do {
+            try await upload.sendRequestAsync(headerBlock: headers, endStream: false)
+        } catch {
+            throw XHTTPError.setupFailed("H3 upload stream open failed: \(error.localizedDescription)")
         }
     }
 
-    /// Opens the download GET and completes on a 2xx response; waiting is safe
+    /// Opens the download GET and returns on a 2xx response; waiting is safe
     /// because the GET has no request body (the stream-one POST would deadlock).
-    private func setupH3Download(multiplexer: HTTP3Multiplexer, completion: @escaping (Error?) -> Void) {
+    private func setupH3Download(multiplexer: HTTP3Multiplexer) async throws {
         let stream = XHTTPH3RequestStream(multiplexer: multiplexer)
-        lock.lock(); h3Download = stream; lock.unlock()
+        lock.withLock { h3Download = stream }
         xmuxLease?.noteRequest()
         let headers = h3RequestHeaderBlock(method: "GET", includeMeta: true)
 
-        // Both callbacks run on the multiplexer queue, so `settled` is race-free.
-        var settled = false
-        stream.sendRequest(
-            headerBlock: headers,
-            endStream: true,
-            onResponse: { result in
-                guard !settled else { return }
-                settled = true
-                switch result {
-                case .success(let status):
-                    if (200...299).contains(status) {
-                        completion(nil)
-                    } else {
-                        completion(XHTTPError.setupFailed("H3 download rejected: status \(status)"))
-                    }
-                case .failure(let error):
-                    completion(XHTTPError.setupFailed("H3 download failed: \(error.localizedDescription)"))
-                }
-            },
-            completion: { error in
-                // Only surface send-side failures here; success is reported via onResponse.
-                if let error, !settled {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            // Both callbacks run on the multiplexer queue, so `settled` is race-free.
+            var settled = false
+            stream.sendRequest(
+                headerBlock: headers,
+                endStream: true,
+                onResponse: { result in
+                    guard !settled else { return }
                     settled = true
-                    completion(XHTTPError.setupFailed("H3 download request failed: \(error.localizedDescription)"))
+                    switch result {
+                    case .success(let status):
+                        if (200...299).contains(status) {
+                            continuation.resume()
+                        } else {
+                            continuation.resume(throwing: XHTTPError.setupFailed("H3 download rejected: status \(status)"))
+                        }
+                    case .failure(let error):
+                        continuation.resume(throwing: XHTTPError.setupFailed("H3 download failed: \(error.localizedDescription)"))
+                    }
+                },
+                completion: { error in
+                    // Only surface send-side failures here; success is reported via onResponse.
+                    if let error, !settled {
+                        settled = true
+                        continuation.resume(throwing: XHTTPError.setupFailed("H3 download request failed: \(error.localizedDescription)"))
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 
     // MARK: Send (packet-up)
 
-    /// Sends one packet-up batch as its own POST stream; the response only acks receipt and is discarded.
-    func sendH3PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
+    /// Sends one packet-up batch as its own POST stream; the response only acks receipt and is
+    /// discarded. Called under `packetUpMutex`.
+    func sendH3PacketUp(data: Data) async throws {
         guard let multiplexer = h3Multiplexer, !h3Closed else {
-            completion(XHTTPError.connectionClosed)
-            return
+            throw XHTTPError.connectionClosed
         }
-        lock.lock()
-        let seq = nextSeq
-        nextSeq += 1
-        lock.unlock()
+        let seq = lock.withLock { () -> Int64 in let s = nextSeq; nextSeq += 1; return s }
         xmuxLease?.noteRequest()
 
         // Header/cookie placement carries the payload in the header block; the body stays empty.
@@ -137,45 +126,33 @@ extension XHTTPConnection {
         let stream = XHTTPH3RequestStream(multiplexer: multiplexer)
         let headers = h3UploadHeaderBlock(seq: seq, contentLength: bodyLength, uplinkData: dataFields)
 
-        guard !bodyInHeaders, !data.isEmpty else {
-            stream.sendRequest(headerBlock: headers, endStream: true) { error in
-                if let error {
-                    stream.close()
-                    completion(error)
-                    return
-                }
-                stream.drainResponse()
-                completion(nil)
-            }
-            return
-        }
-
-        stream.sendRequest(headerBlock: headers, endStream: false) { error in
-            if let error {
+        if !bodyInHeaders, !data.isEmpty {
+            do {
+                try await stream.sendRequestAsync(headerBlock: headers, endStream: false)
+                try await stream.sendBodyAsync(data, fin: true)
+            } catch {
                 stream.close()
-                completion(error)
-                return
+                throw error
             }
-            stream.sendBody(data, fin: true) { sendErr in
-                if let sendErr {
-                    stream.close()
-                    completion(sendErr)
-                    return
-                }
-                stream.drainResponse()
-                completion(nil)
+            stream.drainResponse()
+        } else {
+            do {
+                try await stream.sendRequestAsync(headerBlock: headers, endStream: true)
+            } catch {
+                stream.close()
+                throw error
             }
+            stream.drainResponse()
         }
     }
 
     // MARK: Receive
 
-    func receiveH3Data(completion: @escaping (Data?, Error?) -> Void) {
-        guard let stream = h3Download else {
-            completion(nil, nil)
-            return
+    func receiveH3Data() async throws -> Data? {
+        guard let stream = lock.withLock({ h3Download }) else {
+            return nil
         }
-        stream.receive(completion: completion)
+        return try await stream.receiveAsync()
     }
 
     // MARK: Header construction (QPACK)
@@ -314,6 +291,36 @@ extension XHTTPConnection {
             headers.append((name: "cookie", value: "\(configuration.normalizedSeqKey)=\(seq)"))
         default:
             break // path / query handled in the request path
+        }
+    }
+}
+
+// MARK: - Async bridges over the callback H3 request stream
+
+/// `async` wrappers bridging *down* to the still-callback ``XHTTPH3RequestStream``; the H3
+/// stream and its QUIC multiplexer stay callback-driven (out of scope for this stage).
+extension XHTTPH3RequestStream {
+    func sendRequestAsync(headerBlock: Data, endStream: Bool) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendRequest(headerBlock: headerBlock, endStream: endStream) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    func sendBodyAsync(_ data: Data, fin: Bool) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendBody(data, fin: fin) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+
+    func receiveAsync() async throws -> Data? {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+            receive { data, error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
+            }
         }
     }
 }
