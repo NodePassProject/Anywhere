@@ -10,6 +10,20 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "ProxyClient+AnyTLS")
 
 extension ProxyClient {
+    func connectWithAnyTLS(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithAnyTLS(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
     /// Connects through an AnyTLS server: TCP → TLS → AnyTLS handshake → stream + destination.
     /// AnyTLS mandates TLS (the password SHA256 is the first thing the server reads after the
     /// handshake); UDP rides a UoT stream opened to the `sp.v2.udp-over-tcp.arpa` magic FQDN.

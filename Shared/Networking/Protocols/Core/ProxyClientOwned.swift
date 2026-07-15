@@ -14,7 +14,7 @@ protocol ProxyClientOwned: AnyObject {
 }
 
 protocol AwaitableProxyClientOwned: ProxyClientOwned {
-    func releaseOwned(completion: @escaping @Sendable () -> Void)
+    func releaseOwned() async
 }
 
 // MARK: - Transports
@@ -81,5 +81,5 @@ extension SudokuConnectionFactory: ProxyClientOwned {
 
 extension ProxyClient: AwaitableProxyClientOwned {
     func releaseOwned() { cancel() }
-    func releaseOwned(completion: @escaping @Sendable () -> Void) { cancel(completion: completion) }
+    func releaseOwned() async { await cancel() }
 }

@@ -8,6 +8,17 @@
 import Foundation
 
 extension ProxyClient {
+    func connectWithNaive(
+        destinationHost: String,
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithNaive(
+                destinationHost: destinationHost, destinationPort: destinationPort, completion: completion
+            )
+        }
+    }
+
     /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
     func connectWithNaive(
         destinationHost: String,

@@ -9,6 +9,19 @@ import Foundation
 import Synchronization
 
 extension ProxyClient {
+    func connectWithHysteria(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithHysteria(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, completion: completion
+            )
+        }
+    }
+
     /// Connects through a Hysteria v2 server. Routes by chain context:
     /// direct (no chain) shares one QUIC session; chained outer pools per
     /// `(server, chain)`; chain link reuses the inbound tunnel per-flow.

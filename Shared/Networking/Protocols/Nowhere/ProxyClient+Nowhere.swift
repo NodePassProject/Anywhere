@@ -20,6 +20,19 @@ private struct NowhereLogicalOpenError: Error {
 }
 
 extension ProxyClient {
+    func connectWithNowhere(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithNowhere(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, completion: completion
+            )
+        }
+    }
+
     /// Connects through a Nowhere server. The iOS TUN stack already splits
     /// TCP and UDP flows, so this goes directly to Nowhere stream/DATAGRAM
     /// sessions instead of using the SOCKS5 ingress.

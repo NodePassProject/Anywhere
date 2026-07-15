@@ -33,6 +33,23 @@ extension ProxyClient {
     }
 
     // MARK: - VLESS protocol handshake
+    
+    func sendVLESSProtocolHandshake(
+        over connection: ProxyConnection,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        supportsVision: Bool
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.sendVLESSProtocolHandshake(
+                over: connection, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData,
+                supportsVision: supportsVision, completion: completion
+            )
+        }
+    }
 
     /// VLESS protocol handshake on top of an established transport; runs the
     /// `mlkem768x25519plus` handshake first when encryption is configured.

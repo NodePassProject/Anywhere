@@ -8,6 +8,20 @@
 import Foundation
 
 extension ProxyClient {
+    func connectWithTrojan(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithTrojan(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
     /// Trojan requires TLS; on password (SHA224) mismatch the server silently serves its decoy site.
     func connectWithTrojan(
         command: ProxyCommand,

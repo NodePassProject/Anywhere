@@ -7,73 +7,113 @@
 
 import Foundation
 
-// MARK: - ProxyClient async surface
+// MARK: - ProxyClient callback-compat surface
 
-// Async-native entry points over the completion-handler dial/handshake API. These
-// bridge through `awaitCallback` so consumers (the NE flows, latency probes, chain
-// builders) can `await` a hop instead of nesting callbacks. Task cancellation unblocks
-// the in-flight await via the `PendingResumer`; the underlying client is torn down
-// separately by the caller through `cancelAndWait()` (matching the callback API, where
-// the connect and the fd-close teardown are distinct — see `LatencyTester`). A
-// connection that lands after cancellation is caught by the client's own
-// `owningDelivered` guard and released, so nothing leaks.
+// The `async` dial/handshake/cancel surface (see `ProxyClient.swift`) is now the
+// primary, native implementation: `connect`/`connectUDP`/`connectMultiplexer` run the
+// async chain builder and dispatch directly, and `cancel()` awaits fd teardown through
+// a `TaskGroup`. These thin wrappers bridge *up* to that surface for the callback
+// consumers that remain until their own stages land — the MITM `OutboundConnector`,
+// `LatencyTester`, the VLESS-Vision UDP multiplexer, the Sudoku chain builder, and the
+// protocol E2E harness — plus the pooled-QUIC chain builders (Hysteria/Nowhere) and the
+// SOCKS5/XHTTP chain dials that are still callback internally. All are removed in
+// later stage.
+//
+// A dial that lands after the client is torn down is caught by the async surface's own
+// `owningDelivered` guard and released, so nothing leaks; task teardown is driven by the
+// caller through `cancel(completion:)` / `cancel()`, matching the former callback API.
 
 extension ProxyClient {
 
-    /// Dials `destinationHost:destinationPort` for a TCP stream, resolving the proxied
-    /// ``ProxyConnection`` or throwing on failure/cancellation.
     func connect(
         to destinationHost: String,
         port destinationPort: UInt16,
-        initialData: Data? = nil
-    ) async throws -> ProxyConnection {
-        let resumer = PendingResumer()
-        return try await withTaskCancellationHandler {
-            try await awaitCallback(resumer: resumer) { completion in
-                self.connect(
-                    to: destinationHost,
-                    port: destinationPort,
-                    initialData: initialData,
-                    completion: completion
-                )
+        initialData: Data? = nil,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        Task {
+            do {
+                completion(.success(try await connect(
+                    to: destinationHost, port: destinationPort, initialData: initialData
+                )))
+            } catch {
+                completion(.failure(error))
             }
-        } onCancel: {
-            resumer.cancel()
         }
     }
 
-    /// Opens a UDP association to `destinationHost:destinationPort`.
     func connectUDP(
         to destinationHost: String,
-        port destinationPort: UInt16
-    ) async throws -> ProxyConnection {
-        let resumer = PendingResumer()
-        return try await withTaskCancellationHandler {
-            try await awaitCallback(resumer: resumer) { completion in
-                self.connectUDP(to: destinationHost, port: destinationPort, completion: completion)
+        port destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        Task {
+            do {
+                completion(.success(try await connectUDP(to: destinationHost, port: destinationPort)))
+            } catch {
+                completion(.failure(error))
             }
-        } onCancel: {
-            resumer.cancel()
         }
     }
 
-    /// Opens the protocol's stream multiplexer (VLESS Vision UDP-over-mux, etc.).
-    func connectMultiplexer() async throws -> ProxyConnection {
-        let resumer = PendingResumer()
-        return try await withTaskCancellationHandler {
-            try await awaitCallback(resumer: resumer) { completion in
-                self.connectMultiplexer(completion: completion)
+    func connectMultiplexer(completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        Task {
+            do {
+                completion(.success(try await connectMultiplexer()))
+            } catch {
+                completion(.failure(error))
             }
-        } onCancel: {
-            resumer.cancel()
         }
     }
 
-    /// Cancels the client and suspends until every underlying socket is fully torn down
-    /// (fd closed). The async analogue of `cancel(completion:)`.
-    func cancelAndWait() async {
-        await withCheckedContinuation { continuation in
-            self.cancel { continuation.resume() }
+    /// Fires `completion` once every underlying socket has fully torn down (fd closed).
+    func cancel(completion: @escaping @Sendable () -> Void) {
+        Task {
+            await cancel()
+            completion()
+        }
+    }
+
+    // MARK: Chain-builder compat
+
+    func buildChainTunnel(
+        chain: [ProxyConfiguration],
+        index: Int,
+        currentTunnel: ProxyConnection?,
+        hopCommands: [ProxyCommand],
+        finalDestination: (host: String, port: UInt16)? = nil,
+        track: ((ProxyClient) -> Void)? = nil,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        Task {
+            do {
+                completion(.success(try await buildChainTunnel(
+                    chain: chain, index: index, currentTunnel: currentTunnel,
+                    hopCommands: hopCommands, finalDestination: finalDestination, track: track
+                )))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    static func buildDetachedChainTunnel(
+        chain: [ProxyConfiguration],
+        hopCommands: [ProxyCommand],
+        finalDestination: (host: String, port: UInt16),
+        useResolvedAddressForDirectDial: Bool,
+        track: @escaping (ProxyClient) -> Void,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        Task {
+            do {
+                completion(.success(try await buildDetachedChainTunnel(
+                    chain: chain, hopCommands: hopCommands, finalDestination: finalDestination,
+                    useResolvedAddressForDirectDial: useResolvedAddressForDirectDial, track: track
+                )))
+            } catch {
+                completion(.failure(error))
+            }
         }
     }
 }

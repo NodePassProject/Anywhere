@@ -1110,7 +1110,7 @@ class TCPConnection {
             }
             guard let self else {
                 if case .success(let connection) = result { connection.cancel() }
-                client.cancel()
+                await client.cancel()
                 completion(.failure(TransportError.notConnected))
                 return
             }

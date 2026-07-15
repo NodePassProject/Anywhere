@@ -8,22 +8,6 @@
 import Foundation
 import Synchronization
 
-private final class TeardownCounter: Sendable {
-    private let remaining: Atomic<Int>
-    private let completion: @Sendable () -> Void
-
-    init(remaining: Int, completion: @escaping @Sendable () -> Void) {
-        self.remaining = Atomic(remaining)
-        self.completion = completion
-    }
-
-    func decrement() {
-        if remaining.wrappingSubtract(1, ordering: .sequentiallyConsistent).newValue == 0 {
-            completion()
-        }
-    }
-}
-
 // MARK: - ProxyClient
 
 nonisolated class ProxyClient {
@@ -85,21 +69,30 @@ nonisolated class ProxyClient {
         return accepted
     }
 
-    /// Wraps a connect completion so the delivered connection is client-owned before
-    /// the caller sees it; a delivery that races teardown is cancelled and reported as a
-    /// failure instead.
+    /// Owns the delivered connection before returning it; a delivery that races teardown
+    /// is cancelled and surfaced as a failure instead. The async analogue of the former
+    /// `owningDelivered` completion decorator.
     private func owningDelivered(
-        _ completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) -> (Result<ProxyConnection, Error>) -> Void {
-        return { [weak self] result in
-            if case .success(let connection) = result {
-                guard let self, self.own(connection) else {
-                    connection.cancel()
-                    completion(.failure(ProxyError.connectionFailed("Client released during connect")))
-                    return
-                }
-            }
-            completion(result)
+        _ dial: () async throws -> ProxyConnection
+    ) async throws -> ProxyConnection {
+        let connection = try await dial()
+        guard own(connection) else {
+            connection.cancel()
+            throw ProxyError.connectionFailed("Client released during connect")
+        }
+        return connection
+    }
+
+    /// Migration scaffold: bridges a one-shot completion dial to `async`. Wraps the
+    /// per-protocol handshake internals that are not yet native async so their entry
+    /// points can be `async throws`; each use is removed as its protocol stage lands.
+    func bridged<Value>(
+        _ operation: (@escaping (Result<Value, Error>) -> Void) -> Void
+    ) async throws -> Value {
+        let resumer = OneShotResumer<Value>()
+        return try await withCheckedThrowingContinuation { continuation in
+            resumer.arm(continuation)
+            operation { resumer.resume($0) }
         }
     }
 
@@ -116,127 +109,117 @@ nonisolated class ProxyClient {
             || (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
     }
     
-    private func handshakeTimed(
-        _ completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) -> (Result<ProxyConnection, Error>) -> Void {
-        guard isDefaultProxy else { return completion }
-        if poolsQUICSession { return completion }
+    /// Times the outbound handshake for the default proxy's live stats; matches the former
+    /// `handshakeTimed` decorator (records only on success, skips pooled QUIC sessions).
+    private func withHandshakeTiming(
+        _ dial: () async throws -> ProxyConnection
+    ) async throws -> ProxyConnection {
+        guard isDefaultProxy, !poolsQUICSession else { return try await dial() }
         let metric: ConnectionMetrics.Metric = isQUICTransport ? .handshakeNoDial : .handshake
-        return MetricTimer.timing(metric, completion)
+        var timer = MetricTimer(metric)
+        timer.start()
+        let connection = try await dial()
+        timer.stop()
+        return connection
     }
-    
+
+    /// Dials `destinationHost:destinationPort` for a TCP stream, resolving the proxied
+    /// ``ProxyConnection`` or throwing on failure/cancellation.
     func connect(
         to destinationHost: String,
         port destinationPort: UInt16,
-        initialData: Data? = nil,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        connectThroughChainIfNeeded(
-            command: .tcp,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort,
-            initialData: initialData,
-            completion: handshakeTimed(owningDelivered(completion))
-        )
+        initialData: Data? = nil
+    ) async throws -> ProxyConnection {
+        try await withHandshakeTiming {
+            try await self.owningDelivered {
+                try await self.connectThroughChainIfNeeded(
+                    command: .tcp,
+                    destinationHost: destinationHost,
+                    destinationPort: destinationPort,
+                    initialData: initialData
+                )
+            }
+        }
     }
-    
+
+    /// Opens a UDP association to `destinationHost:destinationPort`.
     func connectUDP(
         to destinationHost: String,
-        port destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        connectThroughChainIfNeeded(
-            command: .udp,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort,
-            initialData: nil,
-            completion: handshakeTimed(owningDelivered(completion))
-        )
+        port destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try await withHandshakeTiming {
+            try await self.owningDelivered {
+                try await self.connectThroughChainIfNeeded(
+                    command: .udp,
+                    destinationHost: destinationHost,
+                    destinationPort: destinationPort,
+                    initialData: nil
+                )
+            }
+        }
     }
-    
-    func connectMultiplexer(completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        connectThroughChainIfNeeded(
-            command: .mux,
-            destinationHost: "v1.mux.cool",
-            destinationPort: 666,
-            initialData: nil,
-            completion: handshakeTimed(owningDelivered(completion))
-        )
+
+    /// Opens the protocol's stream multiplexer (VLESS Vision UDP-over-mux, etc.).
+    func connectMultiplexer() async throws -> ProxyConnection {
+        try await withHandshakeTiming {
+            try await self.owningDelivered {
+                try await self.connectThroughChainIfNeeded(
+                    command: .mux,
+                    destinationHost: "v1.mux.cool",
+                    destinationPort: 666,
+                    initialData: nil
+                )
+            }
+        }
     }
-    
+
     private func connectThroughChainIfNeeded(
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
         guard let chain = configuration.chain, !chain.isEmpty, tunnel == nil else {
-            connectWithCommand(
+            return try await connectWithCommand(
                 command: command,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
-                initialData: initialData,
-                completion: completion
+                initialData: initialData
             )
-            return
         }
 
         if configuration.outboundProtocol == .nowhere,
            configuration.nowhereUplink != configuration.nowhereDownlink {
-            completion(.failure(ProxyError.protocolError("Asymmetric Nowhere carriers do not support proxy chains")))
-            return
+            throw ProxyError.protocolError("Asymmetric Nowhere carriers do not support proxy chains")
         }
 
         if isQUICTransport {
-            connectWithCommand(
+            return try await connectWithCommand(
                 command: command,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
-                initialData: initialData,
-                completion: completion
+                initialData: initialData
             )
-            return
         }
 
         guard let lastDeliver = configuration.upstreamCommand(for: command) else {
-            completion(.failure(ProxyError.protocolError(
+            throw ProxyError.protocolError(
                 "\(configuration.outboundProtocol.name) doesn't support \(command)"
-            )))
-            return
+            )
         }
 
-        let hopCommands: [ProxyCommand]
-        switch Self.computeChainHopCommands(chain: chain, lastDeliver: lastDeliver) {
-        case .success(let computed):
-            hopCommands = computed
-        case .failure(let error):
-            completion(.failure(error))
-            return
-        }
+        let hopCommands = try Self.computeChainHopCommands(chain: chain, lastDeliver: lastDeliver).get()
 
-        buildChainTunnel(
-            chain: chain, index: 0, currentTunnel: nil,
-            hopCommands: hopCommands
-        ) { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .success(let chainTunnel):
-                self.tunnel = chainTunnel
-                self.connectWithCommand(
-                    command: command,
-                    destinationHost: destinationHost,
-                    destinationPort: destinationPort,
-                    initialData: initialData,
-                    completion: completion
-                )
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        }
+        let chainTunnel = try await buildChainTunnel(
+            chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands
+        )
+        self.tunnel = chainTunnel
+        return try await connectWithCommand(
+            command: command,
+            destinationHost: destinationHost,
+            destinationPort: destinationPort,
+            initialData: initialData
+        )
     }
 
     /// Per-hop transport commands for a chain wrapped by `outerProtocol`; fails when a
@@ -283,29 +266,30 @@ nonisolated class ProxyClient {
         return .success(commands)
     }
 
+    /// Builds the chain of hop tunnels sequentially, each dialed over the previous hop.
+    /// Hop clients are registered via `track` (defaulting to `own`) so teardown reaches them.
+    @discardableResult
     func buildChainTunnel(
         chain: [ProxyConfiguration],
         index: Int,
         currentTunnel: ProxyConnection?,
         hopCommands: [ProxyCommand],
         finalDestination: (host: String, port: UInt16)? = nil,
-        track: ((ProxyClient) -> Void)? = nil,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        track: ((ProxyClient) -> Void)? = nil
+    ) async throws -> ProxyConnection {
         let resolvedDestination: (host: String, port: UInt16) = finalDestination
             ?? (host: configuration.serverAddress, port: configuration.serverPort)
         let resolvedTrack: (ProxyClient) -> Void = track ?? { [weak self] client in
             self?.own(client)
         }
-        Self.dispatchChainHop(
+        return try await Self.dialChain(
             chain: chain,
             index: index,
             currentTunnel: currentTunnel,
             hopCommands: hopCommands,
             finalDestination: resolvedDestination,
             useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
-            track: resolvedTrack,
-            completion: completion
+            track: resolvedTrack
         )
     }
 
@@ -316,113 +300,132 @@ nonisolated class ProxyClient {
         hopCommands: [ProxyCommand],
         finalDestination: (host: String, port: UInt16),
         useResolvedAddressForDirectDial: Bool,
-        track: @escaping (ProxyClient) -> Void,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        dispatchChainHop(
+        track: @escaping (ProxyClient) -> Void
+    ) async throws -> ProxyConnection {
+        try await dialChain(
             chain: chain,
             index: 0,
             currentTunnel: nil,
             hopCommands: hopCommands,
             finalDestination: finalDestination,
             useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
-            track: track,
-            completion: completion
+            track: track
         )
     }
 
-    /// Self-free recursive hop dispatch shared by the instance and detached chain builders.
-    private static func dispatchChainHop(
+    /// Self-free sequential hop dial shared by the instance and detached chain builders.
+    /// Replaces the former recursive `dispatchChainHop` with a `for hop in chain` loop:
+    /// each hop dials over the previous hop's tunnel; a throw aborts the remaining hops.
+    private static func dialChain(
         chain: [ProxyConfiguration],
         index: Int,
         currentTunnel: ProxyConnection?,
         hopCommands: [ProxyCommand],
         finalDestination: (host: String, port: UInt16),
         useResolvedAddressForDirectDial: Bool,
-        track: @escaping (ProxyClient) -> Void,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let chainConfig = chain[index]
-        let isLastHop = (index + 1 == chain.count)
+        track: @escaping (ProxyClient) -> Void
+    ) async throws -> ProxyConnection {
+        var currentTunnel = currentTunnel
+        for hopIndex in index..<chain.count {
+            let isLastHop = (hopIndex + 1 == chain.count)
+            let nextHost: String
+            let nextPort: UInt16
+            if !isLastHop {
+                nextHost = chain[hopIndex + 1].serverAddress
+                nextPort = chain[hopIndex + 1].serverPort
+            } else {
+                nextHost = finalDestination.host
+                nextPort = finalDestination.port
+            }
 
-        let nextHost: String
-        let nextPort: UInt16
-        if !isLastHop {
-            nextHost = chain[index + 1].serverAddress
-            nextPort = chain[index + 1].serverPort
-        } else {
-            nextHost = finalDestination.host
-            nextPort = finalDestination.port
-        }
+            let chainClient = ProxyClient(
+                configuration: chain[hopIndex],
+                tunnel: currentTunnel,
+                useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
+                parentChain: Array(chain[0..<hopIndex])
+            )
+            track(chainClient)
 
-        let chainClient = ProxyClient(
-            configuration: chainConfig,
-            tunnel: currentTunnel,
-            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
-            parentChain: Array(chain[0..<index])
-        )
-        track(chainClient)
-
-        let hopCompletion: (Result<ProxyConnection, Error>) -> Void = { result in
-            switch result {
-            case .success(let connection):
-                if !isLastHop {
-                    dispatchChainHop(
-                        chain: chain, index: index + 1, currentTunnel: connection,
-                        hopCommands: hopCommands,
-                        finalDestination: finalDestination,
-                        useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
-                        track: track,
-                        completion: completion
-                    )
-                } else {
-                    completion(.success(connection))
-                }
-            case .failure(let error):
-                completion(.failure(error))
+            if hopCommands[hopIndex] == .udp {
+                currentTunnel = try await chainClient.connectUDP(to: nextHost, port: nextPort)
+            } else {
+                currentTunnel = try await chainClient.connect(to: nextHost, port: nextPort)
             }
         }
+        guard let tunnel = currentTunnel else {
+            throw ProxyError.connectionFailed("Empty proxy chain")
+        }
+        return tunnel
+    }
 
-        let hopCommand = hopCommands[index]
-        if hopCommand == .udp {
-            chainClient.connectUDP(to: nextHost, port: nextPort, completion: hopCompletion)
-        } else {
-            chainClient.connect(to: nextHost, port: nextPort, completion: hopCompletion)
+    /// Fire-and-forget teardown for `deinit`/error paths: releases every owned resource
+    /// LIFO without awaiting fd close. Awaitable hops (chain clients) recurse through the
+    /// synchronous `releaseOwned()`.
+    func cancel() {
+        let owned = takeOwnedForCancel()
+        // LIFO: unwind wrappers before the transports they ride.
+        for resource in owned.reversed() {
+            resource.releaseOwned()
         }
     }
 
-    func cancel() {
-        cancel(completion: {})
+    /// Cancels the client and suspends until every underlying socket is fully torn down
+    /// (fd closed). Replaces the former `cancel(completion:)` + `TeardownCounter` with a
+    /// `TaskGroup` awaiting each awaitable hop's `releaseOwned()`.
+    func cancel() async {
+        let owned = takeOwnedForCancel()
+        await withTaskGroup(of: Void.self) { group in
+            // LIFO: unwind wrappers before the transports they ride.
+            for resource in owned.reversed() {
+                if let awaitable = resource as? any AwaitableProxyClientOwned {
+                    group.addTask { await awaitable.releaseOwned() }
+                } else {
+                    resource.releaseOwned()
+                }
+            }
+        }
     }
 
-    /// Fires `completion` once every underlying socket has fully torn down (fd closed).
-    func cancel(completion: @escaping @Sendable () -> Void) {
+    /// Marks the client cancelled and returns the owned resources for release. A chain
+    /// link's inbound tunnel belongs to the client that produced it, so it is dropped by
+    /// reference only.
+    private func takeOwnedForCancel() -> [any ProxyClientOwned] {
         let owned: [any ProxyClientOwned] = ownedState.withLock { state in
             state.cancelled = true
             let owned = state.resources
             state.resources.removeAll()
             return owned
         }
-
-        // A chain link's inbound tunnel belongs to the client that produced it; drop the reference only.
         tunnel = nil
-
-        // LIFO: unwind wrappers before the transports they ride. Awaitable resources
-        // (raw sockets, chain clients) report fd teardown through the counter; the
-        // +1 sentinel fires `completion` even when there are none.
-        let awaitables = owned.reduce(into: 0) { if $1 is any AwaitableProxyClientOwned { $0 += 1 } }
-        let counter = TeardownCounter(remaining: awaitables + 1, completion: completion)
-        for resource in owned.reversed() {
-            if let awaitable = resource as? any AwaitableProxyClientOwned {
-                awaitable.releaseOwned { counter.decrement() }
-            } else {
-                resource.releaseOwned()
-            }
-        }
-        counter.decrement()
+        return owned
     }
 
     // MARK: - Protocol Handshake
+
+    /// Async protocol handshake over an established transport; dispatches to the VLESS or
+    /// Shadowsocks handshake. Used by the native-async dial paths (Direct/TLS-record layers
+    /// migrate their consumers onto this as their stages land).
+    private func sendProtocolHandshake(
+        over connection: ProxyConnection,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        supportsVision: Bool
+    ) async throws -> ProxyConnection {
+        if isShadowsocks {
+            return try await sendShadowsocksProtocolHandshake(
+                over: connection, command: command,
+                destinationHost: destinationHost, destinationPort: destinationPort
+            )
+        } else {
+            return try await sendVLESSProtocolHandshake(
+                over: connection, command: command,
+                destinationHost: destinationHost, destinationPort: destinationPort,
+                initialData: initialData, supportsVision: supportsVision
+            )
+        }
+    }
 
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
@@ -460,122 +463,185 @@ nonisolated class ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
         // Vision silently drops UDP/443 (QUIC).
         if command == .udp && destinationPort == 443 && isVisionFlow {
-            completion(.failure(ProxyError.dropped))
-            return
+            throw ProxyError.dropped
         }
 
         if command == .mux, !configuration.outboundProtocol.supportsMux {
-            completion(.failure(ProxyError.protocolError(
+            throw ProxyError.protocolError(
                 "Mux is not supported with \(configuration.outboundProtocol.name)"
-            )))
-            return
+            )
         }
 
         if configuration.outboundProtocol == .hysteria {
-            connectWithHysteria(
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                completion: completion
+            return try await connectWithHysteria(
+                command: command, destinationHost: destinationHost, destinationPort: destinationPort
             )
-            return
         }
 
         if configuration.outboundProtocol == .nowhere {
-            connectWithNowhere(
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                completion: completion
+            return try await connectWithNowhere(
+                command: command, destinationHost: destinationHost, destinationPort: destinationPort
             )
-            return
         }
 
         if configuration.outboundProtocol == .trojan {
-            connectWithTrojan(
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                initialData: initialData,
-                completion: completion
+            return try await connectWithTrojan(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData
             )
-            return
         }
 
         if configuration.outboundProtocol == .anytls {
-            connectWithAnyTLS(
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                initialData: initialData,
-                completion: completion
+            return try await connectWithAnyTLS(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData
             )
-            return
         }
 
         if isShadowsocks {
             if command == .udp {
-                connectShadowsocksRealUDP(
-                    destinationHost: destinationHost,
-                    destinationPort: destinationPort,
-                    completion: completion
+                return try await connectShadowsocksRealUDP(
+                    destinationHost: destinationHost, destinationPort: destinationPort
                 )
-                return
             }
-            connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-            return
+            return try await connectDirect(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData
+            )
         }
 
         if configuration.outboundProtocol == .socks5 {
-            connectWithSOCKS5(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
-            return
+            return try await connectWithSOCKS5(
+                command: command, destinationHost: destinationHost, destinationPort: destinationPort
+            )
         }
 
         if configuration.outboundProtocol == .sudoku {
-            connectWithSudoku(
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                initialData: initialData,
-                completion: completion
+            return try await connectWithSudoku(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData
             )
-            return
         }
 
         if configuration.outboundProtocol.isNaive {
             if command != .tcp {
-                completion(.failure(ProxyError.dropped))
-                return
+                throw ProxyError.dropped
             }
-            connectWithNaive(destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
-            return
+            return try await connectWithNaive(destinationHost: destinationHost, destinationPort: destinationPort)
         }
 
         // Only VLESS reaches this point; Vision needs a TLS-record-like layer
         // (VLESS Encryption, or a raw TCP transport carrying TLS/Reality).
         switch configuration.xrayTransportLayer {
         case .ws:
-            connectWithWebSocket(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            return try await connectWithWebSocket(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
         case .httpUpgrade:
-            connectWithHTTPUpgrade(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            return try await connectWithHTTPUpgrade(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
         case .grpc:
-            connectWithGRPC(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            return try await connectWithGRPC(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
         case .xhttp:
-            connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            return try await connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
         case .raw:
             switch configuration.xraySecurityLayer {
             case .tls(let tlsConfig):
-                connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+                return try await connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
             case .reality(let realityConfig):
-                connectWithReality(realityConfig: realityConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+                return try await connectWithReality(realityConfig: realityConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
             case .none:
-                connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+                return try await connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData)
             }
+        }
+    }
+
+    // MARK: - Async dispatch bridges
+
+    private func connectWithTLS(
+        tlsConfig: TLSConfiguration,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithTLS(
+                tlsConfig: tlsConfig, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
+    private func connectWithReality(
+        realityConfig: RealityConfiguration,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithReality(
+                realityConfig: realityConfig, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
+    private func connectWithWebSocket(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithWebSocket(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
+    private func connectWithHTTPUpgrade(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithHTTPUpgrade(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
+    private func connectWithGRPC(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithGRPC(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
+    private func connectWithXHTTP(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithXHTTP(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
         }
     }
 
@@ -585,40 +651,23 @@ nonisolated class ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        let directProxyConnection: ProxyConnection
+        let supportsVision = transportSupportsVision
         if let tunnel = self.tunnel {
-            let directProxyConnection = LegacyDirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
-            sendProtocolHandshake(
-                over: directProxyConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData,
-                supportsVision: transportSupportsVision, completion: completion
-            )
+            directProxyConnection = LegacyDirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
         } else {
-            let supportsVision = transportSupportsVision
             let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
-
-            Task { [weak self] in
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                let directProxyConnection = DirectProxyConnection(transport: transport)
-                self.sendProtocolHandshake(
-                    over: directProxyConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData,
-                    supportsVision: supportsVision, completion: completion
-                )
-            }
+            try await transport.connect()
+            directProxyConnection = DirectProxyConnection(transport: transport)
         }
+        return try await sendProtocolHandshake(
+            over: directProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData,
+            supportsVision: supportsVision
+        )
     }
 
     // MARK: - TLS Connection

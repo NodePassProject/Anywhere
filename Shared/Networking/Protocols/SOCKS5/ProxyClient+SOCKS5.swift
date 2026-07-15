@@ -8,6 +8,20 @@
 import Foundation
 
 extension ProxyClient {
+    /// Async entry for the SOCKS5 dial; bridges the still-callback body.
+    func connectWithSOCKS5(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithSOCKS5(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, completion: completion
+            )
+        }
+    }
+
     func connectWithSOCKS5(
         command: ProxyCommand,
         destinationHost: String,

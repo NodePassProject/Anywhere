@@ -17,6 +17,20 @@ extension ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectWithSudoku(
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        }
+    }
+
+    func connectWithSudoku(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
         initialData: Data? = nil,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {

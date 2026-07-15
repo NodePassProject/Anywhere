@@ -13,6 +13,21 @@ extension ProxyClient {
         configuration.outboundProtocol == .shadowsocks
     }
 
+    /// No network round-trip — just wraps the transport with cipher/PSK. Native async.
+    func sendShadowsocksProtocolHandshake(
+        over connection: ProxyConnection,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try wrapWithShadowsocks(
+            inner: connection,
+            command: command,
+            destinationHost: destinationHost,
+            destinationPort: destinationPort
+        ).get()
+    }
+
     /// No network round-trip — just wraps the transport with cipher/PSK, completing synchronously.
     func sendShadowsocksProtocolHandshake(
         over connection: ProxyConnection,
@@ -27,6 +42,18 @@ extension ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort
         ))
+    }
+
+    /// Async entry for the SS real-UDP path; bridges the still-callback body.
+    func connectShadowsocksRealUDP(
+        destinationHost: String,
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
+        try await bridged { completion in
+            self.connectShadowsocksRealUDP(
+                destinationHost: destinationHost, destinationPort: destinationPort, completion: completion
+            )
+        }
     }
 
     /// Opens a real-UDP path to the SS server (chain-tunnel datagram or direct UDP transport)
