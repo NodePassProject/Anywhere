@@ -61,12 +61,11 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
 
         self.writeNonce = ShadowsocksNonce(size: cipher.nonceSize)
         self.readNonce = ShadowsocksNonce(size: cipher.nonceSize)
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
+    var isConnected: Bool { inner.isConnected }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let header: Data? = handshake.withLock { header in
             defer { header = nil }
             return header
@@ -81,7 +80,7 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
         }
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         while true {
             guard let data = try await inner.receiveRaw(), !data.isEmpty else {
                 return nil
@@ -94,7 +93,7 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
         }
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 
@@ -410,26 +409,25 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
         let sidData = Data(bytes: &sidBE, count: 8)
         self.sessionKey = ShadowsocksKeyDerivation.deriveSessionKey(psk: pskList.last!, salt: sidData, keySize: cipher.keySize)
 
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { inner.isConnected }
+    var deliversDatagrams: Bool { true }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let encrypted = try encryptPacket(payload: data)
         // `inner.send` so any UoT framing wraps each encrypted datagram.
         try await inner.send(encrypted)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         guard let data = try await inner.receive(), !data.isEmpty else {
             return nil
         }
         return try decryptPacket(data)
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 
@@ -589,26 +587,25 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
             SecRandomCopyBytes(kSecRandomDefault, 8, pointer.baseAddress!)
         }
         self.sessionID = sid
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { inner.isConnected }
+    var deliversDatagrams: Bool { true }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let encrypted = try encryptPacket(payload: data)
         // `inner.send` so any UoT framing wraps each encrypted datagram.
         try await inner.send(encrypted)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         guard let data = try await inner.receive(), !data.isEmpty else {
             return nil
         }
         return try decryptPacket(data)
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 

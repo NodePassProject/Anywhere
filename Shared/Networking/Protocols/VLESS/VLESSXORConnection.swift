@@ -44,11 +44,10 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         self.outCTR = outCTR
         self.sendState = Mutex(SendState(outSkip: outSkip))
         self.recvState = Mutex(RecvState(inCTR: inCTR, inSkip: inSkip))
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
     /// Call once the 0-RTT path has derived the inbound key from the 16-byte server random.
     func installInboundCTR(_ ctr: VLESSEncryptionCTR) {
@@ -57,7 +56,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     // MARK: - Send
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         if data.isEmpty { return }
         var bytes = [UInt8](data)
         sendState.withLock { state in
@@ -100,7 +99,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     // MARK: - Receive
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         // Drain stashed bytes first to preserve record-framing order.
         let stashed: Data? = recvState.withLock { state in
             guard !state.pendingPostSkip.isEmpty, state.inCTR != nil else { return nil }
@@ -166,7 +165,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 

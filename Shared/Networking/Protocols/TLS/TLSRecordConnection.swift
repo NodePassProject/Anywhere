@@ -16,11 +16,20 @@ nonisolated class TLSRecordConnection {
 
     // MARK: Properties
 
+    /// The underlying async byte transport, held in a mutex so the abortive nil-swap in
+    /// ``cancel()`` is atomic against the in-flight sends/receives that read it. The transport
+    /// reference is the real critical state; access it through the ``connection`` computed
+    /// property or, for the atomic take-and-clear, ``connectionBox`` directly.
+    private let connectionBox = Mutex<(any AsyncByteTransport)?>(nil)
+
     /// The underlying async byte transport. `nil` after ``cancel()``. Every write is serialized
     /// through ``sendMutex`` so records reach the wire in submission order.
-    var connection: (any AsyncByteTransport)?
+    var connection: (any AsyncByteTransport)? {
+        get { connectionBox.withLock { $0 } }
+        set { connectionBox.withLock { $0 = newValue } }
+    }
 
-    /// Serializes every write to ``connection`` — the async `send`/`sendRaw`/`closeWrite`
+    /// Serializes every write to ``connection`` — the async `send`/`sendRaw`
     /// surface and the internal TLS 1.3 KeyUpdate response — so on-wire order (and thus each
     /// record's sequence number) is preserved. FIFO: submission order is wire order. Internal
     /// so the +TLS13 KeyUpdate response (a different file) can drain through it.
@@ -33,7 +42,7 @@ nonisolated class TLSRecordConnection {
 
     // Mutable so a TLS 1.3 post-handshake KeyUpdate (RFC 8446 §7.2) can install the next
     // key generation. Egress (`*Key`/`*IV` for our send direction) is only mutated under
-    // `sendLock`; ingress (our read direction) only from the receive path. See `rekeyIngress`.
+    // `sendMutex`; ingress (our read direction) only from the receive path. See `rekeyIngress`.
     var clientKey: Data
     var clientIV: Data
     var serverKey: Data
@@ -53,25 +62,56 @@ nonisolated class TLSRecordConnection {
     var serverAppSecret: Data?
 
     /// Set on the receive path when a peer KeyUpdate(update_requested) arrives; consumed after
-    /// `receiveLock` is released so we can send our own KeyUpdate without holding it.
+    /// the `receiveBuffer` lock is released so we can send our own KeyUpdate without holding it.
     var keyUpdateResponsePending = false
 
-    var clientSeqNum: UInt64 = 0
-    var serverSeqNum: UInt64 = 0
-    /// Gate serializing the read-modify-write of the sequence counters and the per-direction key
-    /// epoch swap on a TLS 1.3 KeyUpdate. A pure critical-section gate: the guarded fields stay
-    /// plain stored properties (also read lock-free on the crypto hot path, ordered by
-    /// ``sendMutex`` on egress and the single reader on ingress).
-    let seqLock = Mutex<Void>(())
+    /// The per-direction AEAD record sequence counters. These are the true critical state:
+    /// each send/receive does a read-modify-write (fetch-then-increment), and a TLS 1.3
+    /// KeyUpdate resets one direction to zero. They live inside the mutex so the RMW is atomic
+    /// rather than being guarded by a bare lock. Egress writes are additionally ordered by
+    /// ``sendMutex`` and ingress by the single reader, so the counters never race across
+    /// directions — the mutex covers the same-direction RMW.
+    struct SeqNumbers {
+        var client: UInt64 = 0
+        var server: UInt64 = 0
+    }
+    private let seqNums: Mutex<SeqNumbers>
 
-    let sendLock = Mutex<Void>(())
+    /// Fetches and post-increments the egress (our send direction) record sequence number.
+    func nextEgressSeqNum() -> UInt64 {
+        seqNums.withLock { s in
+            if direction == .server { defer { s.server += 1 }; return s.server }
+            else { defer { s.client += 1 }; return s.client }
+        }
+    }
+
+    /// Fetches and post-increments the ingress (peer's send direction) record sequence number.
+    func nextIngressSeqNum() -> UInt64 {
+        seqNums.withLock { s in
+            if direction == .server { defer { s.client += 1 }; return s.client }
+            else { defer { s.server += 1 }; return s.server }
+        }
+    }
+
+    /// Resets the egress counter to zero on a TLS 1.3 egress KeyUpdate epoch switch.
+    func resetEgressSeqNum() {
+        seqNums.withLock { s in if direction == .server { s.server = 0 } else { s.client = 0 } }
+    }
+
+    /// Resets the ingress counter to zero on a TLS 1.3 ingress KeyUpdate epoch switch.
+    func resetIngressSeqNum() {
+        seqNums.withLock { s in if direction == .server { s.client = 0 } else { s.server = 0 } }
+    }
+
     private var sentCloseNotify = false
 
     private static let maxRecordPlaintext = 16384
 
-    private var receiveBuffer = Data(capacity: 256 * 1024)
-    private let receiveLock = Mutex<Void>(())
-    
+    /// The undecrypted receive buffer — the record layer's real receive-side critical state.
+    /// Held inside the mutex rather than guarded by a bare lock; every access runs under this
+    /// lock, and a given connection has a single receive consumer.
+    private let receiveBuffer = Mutex<Data>(Data(capacity: 256 * 1024))
+
     var receivedCloseNotify = false
 
     // MARK: Initialization
@@ -100,6 +140,7 @@ nonisolated class TLSRecordConnection {
         self.clientAppSecret = clientAppSecret
         self.serverAppSecret = serverAppSecret
         self.direction = direction
+        self.seqNums = Mutex(SeqNumbers())
     }
 
     init(
@@ -123,16 +164,15 @@ nonisolated class TLSRecordConnection {
         self.clientMACKey = clientMACKey
         self.serverMACKey = serverMACKey
         self.cipherSuite = cipherSuite
-        self.clientSeqNum = initialClientSeqNum
-        self.serverSeqNum = initialServerSeqNum
         self.clientSymmetricKey = SymmetricKey(data: clientKey)
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
         self.direction = direction
+        self.seqNums = Mutex(SeqNumbers(client: initialClientSeqNum, server: initialServerSeqNum))
     }
 
     /// Buffers application bytes read during the handshake; call before any `receive()`.
     func prependToReceiveBuffer(_ data: Data) {
-        receiveLock.withLock { _ in receiveBuffer.append(data) }
+        receiveBuffer.withLock { $0.append(data) }
     }
 
     // MARK: - Direction-aware Key/IV Selection
@@ -169,10 +209,10 @@ nonisolated class TLSRecordConnection {
     /// Receives raw (undecrypted) bytes: any handshake-buffered bytes first, then straight off the
     /// transport. `nil` signals a clean close.
     func receiveRaw() async throws -> Data? {
-        let buffered: Data? = receiveLock.withLock { _ in
-            guard !receiveBuffer.isEmpty else { return nil }
-            let data = receiveBuffer
-            receiveBuffer.removeAll()
+        let buffered: Data? = receiveBuffer.withLock { buffer in
+            guard !buffer.isEmpty else { return nil }
+            let data = buffer
+            buffer.removeAll()
             return data
         }
         if let buffered { return buffered }
@@ -186,7 +226,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Async Surface
 
-    // The record layer's send/receive/closeWrite surface, over the transport's async surface
+    // The record layer's send/receive surface, over the transport's async surface
     // (writes serialized through `sendMutex`). Its consumers are `TLSProxyConnection`/
     // `RealityProxyConnection`, the MITM `MITMByteLeg` legs, and the async raw direct-copy above.
     // Sends and the raw direct-copy share the synchronous record crypto and `processBuffer`;
@@ -194,16 +234,13 @@ nonisolated class TLSRecordConnection {
     // `receiveBuffer` concurrently.
 
     /// Encrypts `data` into TLS records and sends them, awaiting the write. The record build
-    /// (sequence-number assignment, under `sendLock`) and the wire send happen under a single
-    /// ``sendMutex`` hold, so a record's sequence number always matches its position on the
-    /// wire — even under concurrent callers — and it orders with the internal KeyUpdate response.
+    /// (sequence-number assignment) and the wire send happen under a single ``sendMutex`` hold,
+    /// so a record's sequence number always matches its position on the wire — even under
+    /// concurrent callers — and it orders with the internal KeyUpdate response.
     func send(_ data: Data) async throws {
         try await sendMutex.withLock {
-            let record = try sendLock.withLock { _ throws -> Data in
-                guard connection != nil else { throw TLSRecordError.connectionUnavailable }
-                return try buildTLSRecords(for: data)
-            }
             guard let connection else { throw TLSRecordError.connectionUnavailable }
+            let record = try buildTLSRecords(for: data)
             try await connection.send(record)
         }
     }
@@ -211,8 +248,8 @@ nonisolated class TLSRecordConnection {
     /// Receives and decrypts one chunk of application data; `nil` signals a clean close.
     func receive() async throws -> Data? {
         while true {
-            let (processed, needsKeyUpdateResponse) = receiveLock.withLock { _ -> (BufferResult?, Bool) in
-                let processed = processBuffer()
+            let (processed, needsKeyUpdateResponse) = receiveBuffer.withLock { buffer -> (BufferResult?, Bool) in
+                let processed = processBuffer(&buffer)
                 let needsKeyUpdateResponse = keyUpdateResponsePending
                 keyUpdateResponsePending = false
                 return (processed, needsKeyUpdateResponse)
@@ -242,7 +279,7 @@ nonisolated class TLSRecordConnection {
             }
             switch try await connection.receive() {
             case .bytes(let data):
-                receiveLock.withLock { _ in receiveBuffer.append(data) }
+                receiveBuffer.withLock { $0.append(data) }
                 continue             // re-process with the new bytes
             case .end:
                 return nil
@@ -250,28 +287,16 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Half-closes the underlying byte stream (transport FIN / end-of-stream), leaving the
-    /// receive direction open. The TLS close_notify alert is intentionally not sent — a
-    /// plain half-close is used for graceful shutdown. Serialized through ``sendMutex`` after
-    /// every prior send.
-    func closeWrite() async throws {
-        try await sendMutex.withLock {
-            guard let connection else { throw TLSRecordError.connectionUnavailable }
-            try await connection.finishSend()
-        }
-    }
-
     // MARK: - Cancel
-
-    /// Abortive teardown. Graceful callers must await `closeWrite` first.
+    
     func cancel() {
-        let transport = sendLock.withLock { _ -> (any AsyncByteTransport)? in
-            let transport = connection
-            connection = nil        // in-flight and subsequent sends see nil and abort
+        let transport = connectionBox.withLock { box -> (any AsyncByteTransport)? in
+            let transport = box
+            box = nil                // in-flight and subsequent sends see nil and abort
             return transport
         }
 
-        receiveLock.withLock { _ in receiveBuffer.removeAll() }
+        receiveBuffer.withLock { $0.removeAll() }
 
         transport?.cancel()
     }
@@ -286,27 +311,29 @@ nonisolated class TLSRecordConnection {
         case closed
     }
 
-    private func processBuffer() -> BufferResult? {
+    /// Processes framed records out of `buffer` (the mutex-guarded receive buffer, passed in
+    /// by the single receive consumer under the ``receiveBuffer`` lock).
+    private func processBuffer(_ buffer: inout Data) -> BufferResult? {
         if receivedCloseNotify {
             return .closed
         }
-        
-        if receiveBuffer.count == 0 {
+
+        if buffer.count == 0 {
             return nil
         }
 
-        var batchedData = Data(capacity: receiveBuffer.count)
+        var batchedData = Data(capacity: buffer.count)
         var hasError: Error? = nil
         var recordsProcessed = 0
         var bytesPendingReplay: Data? = nil
 
         var consumed = 0
 
-        while receiveBuffer.count - consumed >= 5 {
+        while buffer.count - consumed >= 5 {
             var contentType: UInt8 = 0
             var recordLen: UInt16 = 0
 
-            receiveBuffer.withUnsafeBytes { pointer in
+            buffer.withUnsafeBytes { pointer in
                 let p = pointer.bindMemory(to: UInt8.self)
                 contentType = p[consumed]
                 recordLen = UInt16(p[consumed + 3]) << 8 | UInt16(p[consumed + 4])
@@ -314,33 +341,25 @@ nonisolated class TLSRecordConnection {
 
             let maxCiphertext = tlsVersion >= 0x0304 ? 16384 + 256 : 16384 + 2048
             guard Int(recordLen) <= maxCiphertext else {
-                receiveBuffer.removeAll()
+                buffer.removeAll()
                 return .error(TLSRecordError.malformedRecord("record overflow (\(recordLen) bytes)"))
             }
 
             let totalLen = 5 + Int(recordLen)
-            guard receiveBuffer.count - consumed >= totalLen else { break }
+            guard buffer.count - consumed >= totalLen else { break }
 
-            let base = receiveBuffer.startIndex
+            let base = buffer.startIndex
             let headerStart = base + consumed
             let headerEnd = headerStart + 5
             let bodyEnd = headerStart + totalLen
 
-            let header = receiveBuffer[headerStart..<headerEnd]
-            let body = receiveBuffer[headerEnd..<bodyEnd]
+            let header = buffer[headerStart..<headerEnd]
+            let body = buffer[headerEnd..<bodyEnd]
 
             recordsProcessed += 1
 
             if contentType == TLSContentType.applicationData {
-                let seqNum: UInt64 = seqLock.withLock { _ in
-                    if direction == .server {
-                        defer { clientSeqNum += 1 }
-                        return clientSeqNum
-                    } else {
-                        defer { serverSeqNum += 1 }
-                        return serverSeqNum
-                    }
-                }
+                let seqNum = nextIngressSeqNum()
 
                 do {
                     let decrypted = try decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum)
@@ -351,13 +370,13 @@ nonisolated class TLSRecordConnection {
                     if receivedCloseNotify { break }
                 } catch {
                     if case TLSRecordError.tlsAlert = error {
-                        receiveBuffer.removeAll()
+                        buffer.removeAll()
                         consumed = 0
                         hasError = error
                         break
                     }
-                    let pending = Data(receiveBuffer[(base + consumed)...])
-                    receiveBuffer.removeAll()
+                    let pending = Data(buffer[(base + consumed)...])
+                    buffer.removeAll()
                     consumed = 0
                     bytesPendingReplay = pending
                     hasError = error
@@ -365,15 +384,7 @@ nonisolated class TLSRecordConnection {
                 }
             } else if contentType == TLSContentType.alert {
                 if tlsVersion < 0x0304 {
-                    let seqNum: UInt64 = seqLock.withLock { _ in
-                        if direction == .server {
-                            defer { clientSeqNum += 1 }
-                            return clientSeqNum
-                        } else {
-                            defer { serverSeqNum += 1 }
-                            return serverSeqNum
-                        }
-                    }
+                    let seqNum = nextIngressSeqNum()
 
                     consumed += totalLen
                     if let alert = try? decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum),
@@ -398,17 +409,17 @@ nonisolated class TLSRecordConnection {
         }
 
         if consumed > 0 {
-            if consumed >= receiveBuffer.count {
-                receiveBuffer = Data()
+            if consumed >= buffer.count {
+                buffer = Data()
             } else {
-                receiveBuffer = Data(receiveBuffer.suffix(from: receiveBuffer.startIndex + consumed))
+                buffer = Data(buffer.suffix(from: buffer.startIndex + consumed))
             }
         }
 
         if let error = hasError {
             if !batchedData.isEmpty {
                 if let pending = bytesPendingReplay {
-                    receiveBuffer = pending
+                    buffer = pending
                 }
                 return .data(batchedData)
             }

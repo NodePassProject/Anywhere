@@ -64,7 +64,7 @@ nonisolated final class SOCKS5AsyncBuffer {
 
 /// Replays handshake-leftover bytes (e.g. the start of a TLS ServerHello) on the
 /// first `receive` before falling through to the underlying transport.
-nonisolated final class SOCKS5ReplayTransport: AsyncByteTransport, @unchecked Sendable {
+nonisolated final class SOCKS5ReplayTransport: AsyncByteTransport, Sendable {
     private let inner: any AsyncByteTransport
     private let pending: Mutex<Data?>
 
@@ -77,10 +77,6 @@ nonisolated final class SOCKS5ReplayTransport: AsyncByteTransport, @unchecked Se
 
     func send(_ data: Data) async throws {
         try await inner.send(data)
-    }
-
-    func finishSend() async throws {
-        try await inner.finishSend()
     }
 
     func receive() async throws -> TransportChunk {
@@ -344,13 +340,12 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, @unchecked Se
         header.append(UInt8(destinationPort & 0xFF))
         self.udpHeader = header
 
-        super.init()
     }
 
-    override var isConnected: Bool { relay.isConnected }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { relay.isConnected }
+    var deliversDatagrams: Bool { true }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         guard !cancelled.load(ordering: .relaxed) else {
             throw ProxyError.connectionFailed("SOCKS5 UDP not connected")
         }
@@ -360,7 +355,7 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, @unchecked Se
         try await relay.send(packet)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         while true {
             guard !cancelled.load(ordering: .relaxed) else {
                 throw ProxyError.connectionFailed("SOCKS5 UDP not connected")
@@ -375,7 +370,7 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, @unchecked Se
         }
     }
 
-    override func cancel() {
+    func cancel() {
         guard !cancelled.exchange(true, ordering: .relaxed) else { return }
         relay.cancel()
         tcpTransport.cancel()

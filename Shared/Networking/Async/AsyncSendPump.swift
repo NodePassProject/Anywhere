@@ -7,14 +7,14 @@
 
 import Foundation
 
-nonisolated final class AsyncSendPump: @unchecked Sendable {
+nonisolated final class AsyncSendPump: Sendable {
 
-    /// One ordered send job. `@unchecked` because `completion` isn't `Sendable`;
-    /// it only ever runs on the pump task.
-    private struct Job: @unchecked Sendable {
+    /// One ordered send job. `completion` is `@Sendable` because it is yielded across
+    /// the `AsyncStream` to the pump task, where it runs.
+    private struct Job: Sendable {
         let data: Data
         let endOfStream: Bool
-        let completion: ((Error?) -> Void)?
+        let completion: (@Sendable (Error?) -> Void)?
     }
 
     private let continuation: AsyncStream<Job>.Continuation
@@ -49,12 +49,12 @@ nonisolated final class AsyncSendPump: @unchecked Sendable {
     }
 
     /// Enqueues a send; `completion` fires (on the pump task) once it lands or fails.
-    func enqueueSend(_ data: Data, completion: ((Error?) -> Void)?) {
+    func enqueueSend(_ data: Data, completion: (@Sendable (Error?) -> Void)?) {
         continuation.yield(Job(data: data, endOfStream: false, completion: completion))
     }
 
     /// Enqueues a half-close, ordered after every send already enqueued.
-    func enqueueFinish(completion: ((Error?) -> Void)?) {
+    func enqueueFinish(completion: (@Sendable (Error?) -> Void)?) {
         continuation.yield(Job(data: Data(), endOfStream: true, completion: completion))
     }
 

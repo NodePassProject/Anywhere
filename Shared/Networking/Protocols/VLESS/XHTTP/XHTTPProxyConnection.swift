@@ -12,22 +12,21 @@ nonisolated class XHTTPProxyConnection: ProxyConnection {
 
     init(xhttpConnection: XHTTPConnection) {
         self.xhttpConnection = xhttpConnection
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         xhttpConnection.isConnected
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await xhttpConnection.send(data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await xhttpConnection.receive()
     }
 
-    override func cancel() {
+    func cancel() {
         xhttpConnection.cancel()
     }
 }

@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated final class TunneledTransport: AsyncByteTransport, @unchecked Sendable {
+nonisolated final class TunneledTransport: AsyncByteTransport, Sendable {
     private let tunnel: ProxyConnection
 
     init(tunnel: ProxyConnection) {
@@ -18,10 +18,6 @@ nonisolated final class TunneledTransport: AsyncByteTransport, @unchecked Sendab
 
     func send(_ data: Data) async throws {
         try await tunnel.sendRaw(data)
-    }
-
-    func finishSend() async throws {
-        try await tunnel.closeWrite()
     }
 
     func receive() async throws -> TransportChunk {

@@ -56,7 +56,7 @@ extension ProxyClient {
         }
 
         let stream = try await pool.acquireStream()
-        guard own(stream) else {
+        guard !isCancelled else {
             stream.cancel()
             throw ProxyError.connectionFailed("Client released during connect")
         }

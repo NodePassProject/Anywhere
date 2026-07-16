@@ -25,22 +25,21 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
         self.passwordKey = TrojanProtocol.passwordKey(password)
         self.destinationHost = destinationHost
         self.destinationPort = destinationPort
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var deliversDatagrams: Bool { true }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await inner.sendRaw(frame(data))
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await nextPacket()
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 

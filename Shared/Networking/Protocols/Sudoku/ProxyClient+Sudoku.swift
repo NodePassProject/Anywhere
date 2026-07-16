@@ -47,7 +47,6 @@ extension ProxyClient {
             initialTunnel: tunnel,
             directDialHost: directDialHost
         )
-        own(factory)
 
         do {
             let client = try SudokuNativeClient(configuration: configuration, factory: factory)

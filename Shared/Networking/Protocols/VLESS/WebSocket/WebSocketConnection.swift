@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class WebSocketConnection: @unchecked Sendable {
+nonisolated final class WebSocketConnection: Sendable {
 
     // MARK: Transport
 

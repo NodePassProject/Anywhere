@@ -213,26 +213,22 @@ extension TunnelStack {
         ) { [weak self] in
             guard let self, self.running else { return }
             let now = MonotonicClock.now
-            var keysToRemove: [UDPFlowKey] = []
-            for (key, flow) in self.udpFlows {
-                if now > flow.idleDeadline {
-                    flow.close()
-                    keysToRemove.append(key)
-                }
-            }
-            for key in keysToRemove {
-                self.udpFlows.removeValue(forKey: key)
+            let flows = self.udpFlows.withLock { Array($0) }
+            for (key, flow) in flows where now > flow.idleDeadline {
+                Task { await flow.close() }
+                self.udpFlows.withLock { $0.removeValue(forKey: key) }
             }
             // Under kernel flow pressure, shed below the shrunken cap even
             // with no inserts arriving — TCP alone can fill the budget, and
             // eviction-on-insert never runs then. shedUDPFlows batches, so a
             // large excess drains over successive sweeps.
             let cap = self.currentUDPFlowCap()
-            if self.udpFlows.count > cap {
-                self.shedUDPFlows(count: self.udpFlows.count - cap)
+            let liveCount = self.udpFlows.withLock { $0.count }
+            if liveCount > cap {
+                self.shedUDPFlows(count: liveCount - cap)
             }
             // Re-arm the flow-cap warning so a later storm logs its own rising edge.
-            if self.udpFlowCapWarned && self.udpFlows.count < cap {
+            if self.udpFlowCapWarned && liveCount < cap {
                 self.udpFlowCapWarned = false
             }
         }

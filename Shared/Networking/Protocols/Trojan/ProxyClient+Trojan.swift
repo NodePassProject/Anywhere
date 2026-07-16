@@ -21,7 +21,6 @@ extension ProxyClient {
         }
 
         let tlsClient = TLSClient(configuration: tlsConfig)
-        own(tlsClient)
 
         let tlsConnection: TLSRecordConnection
         if let tunnel = self.tunnel {
@@ -29,7 +28,6 @@ extension ProxyClient {
         } else {
             tlsConnection = try await tlsClient.connect(host: directDialHost, port: configuration.serverPort)
         }
-        own(tlsConnection)
 
         let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
         return try await wrapTrojan(

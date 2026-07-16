@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class GRPCConnection: @unchecked Sendable {
+nonisolated final class GRPCConnection: Sendable {
 
     // MARK: Transport
 

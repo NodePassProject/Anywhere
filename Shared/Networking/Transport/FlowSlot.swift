@@ -10,14 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "FlowSlot")
 
-// MARK: - FlowSlot
-
-/// A release-once RAII handle over ``FlowGauge``: one live outbound socket.
-///
-/// Creating a slot increments the gauge; ``release()`` decrements it exactly once.
-/// If a slot is deallocated without a `release()`, `deinit` recovers the count and
-/// logs the regression.
-nonisolated final class FlowSlot: @unchecked Sendable {
+nonisolated final class FlowSlot: Sendable {
 
     enum Kind { case tcp, udp }
 

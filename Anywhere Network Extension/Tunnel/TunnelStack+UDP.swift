@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+UDP")
 
@@ -17,8 +18,10 @@ extension TunnelStack {
     /// stale teardown callback must not orphan a recreated flow for the same
     /// 5-tuple. Must be called on ``udpQueue``.
     func removeUDPFlow(_ flow: UDPFlow) {
-        if udpFlows[flow.flowKey] === flow {
-            udpFlows.removeValue(forKey: flow.flowKey)
+        udpFlows.withLock { flows in
+            if flows[flow.flowKey] === flow {
+                flows.removeValue(forKey: flow.flowKey)
+            }
         }
     }
 
@@ -46,14 +49,15 @@ extension TunnelStack {
     /// Run on ``udpQueue`` before each insert.
     func evictUDPFlowsToAdmit() {
         let cap = currentUDPFlowCap()
-        guard udpFlows.count >= cap else { return }
+        let count = udpFlows.withLock { $0.count }
+        guard count >= cap else { return }
         if !udpFlowCapWarned {
             udpFlowCapWarned = true
             logger.warning("[UDP] Flow table at capacity (\(cap)); evicting flows with least time left to bound memory")
         }
         // Free one slot for the incoming flow — plus, under pressure, whatever
         // it takes to get back under the shrunken cap.
-        shedUDPFlows(count: udpFlows.count - cap + 1)
+        shedUDPFlows(count: count - cap + 1)
     }
 
     /// Closes up to ``TunnelLimits/udpShedBatchLimit`` of the flows with the
@@ -62,16 +66,12 @@ extension TunnelStack {
     func shedUDPFlows(count: Int) {
         let shedCount = min(count, TunnelLimits.udpShedBatchLimit)
         guard shedCount > 0 else { return }
-        if shedCount == 1 {
-            if let victim = udpFlows.values.min(by: { $0.idleDeadline < $1.idleDeadline }) {
-                victim.close()
-                removeUDPFlow(victim)
-            }
-            return
-        }
-        let victims = udpFlows.values.sorted { $0.idleDeadline < $1.idleDeadline }.prefix(shedCount)
+        // Snapshot the flows under the registry lock, then rank by deadline (a nonisolated read)
+        // and close the victims off-lock on their own actors.
+        let flows = udpFlows.withLock { Array($0.values) }
+        let victims = flows.sorted { $0.idleDeadline < $1.idleDeadline }.prefix(shedCount)
         for victim in victims {
-            victim.close()
+            Task { await victim.close() }
             removeUDPFlow(victim)
         }
     }
@@ -127,8 +127,8 @@ extension TunnelStack {
         // domain from creation, so it survives fake-IP pool eviction.
         let flowKey = UDPFlowKey(srcIP: datagram.srcIP, srcPort: datagram.srcPort,
                                  dstIP: datagram.dstIP, dstPort: datagram.dstPort, isIPv6: isIPv6)
-        if let flow = udpFlows[flowKey] {
-            flow.handleReceivedData(payload, payloadLength: payload.count)
+        if let flow = udpFlows.withLock({ $0[flowKey] }) {
+            Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
             return
         }
 
@@ -212,12 +212,11 @@ extension TunnelStack {
             dstIPData: dstIPData,
             isIPv6: isIPv6,
             configuration: flowConfiguration,
-            routeTarget: routeTarget,
-            flowQueue: udpQueue
+            routeTarget: routeTarget
         )
         evictUDPFlowsToAdmit()
-        udpFlows[flowKey] = flow
-        flow.handleReceivedData(payload, payloadLength: payload.count)
+        udpFlows.withLock { $0[flowKey] = flow }
+        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
     }
 
     /// Classifies a STUN message (RFC 5389 §6) by the magic cookie at offset 4

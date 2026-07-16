@@ -8,8 +8,6 @@
 import Foundation
 import JavaScriptCore
 
-/// At most one `.script` and one `.streamScript` fire per message (last match wins): chaining would
-/// collide on rule-set-scoped store keys and the single-valued per-stream state slot.
 enum MITMScriptTransform {
 
     /// Serial queue carrying every script invocation (off the lwIP queue, so a slow process(ctx)
@@ -139,43 +137,43 @@ enum MITMScriptTransform {
     ) async -> HTTPMessage {
         let requestURL = message.url
         var message = message
-        let jsonOps = matchingBodyJSONOps(in: rules, requestURL: requestURL)
-        if !jsonOps.isEmpty {
-            message.body = MITMJSONPatch.applyAll(jsonOps, to: message.body)
+        let jsonOperations = matchingBodyJSONOperations(in: rules, requestURL: requestURL)
+        if !jsonOperations.isEmpty {
+            message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
         }
-        let replaceOps = matchingBodyReplaceOps(in: rules, requestURL: requestURL)
-        if !replaceOps.isEmpty {
-            message.body = await MITMBodyReplace.applyAll(replaceOps, to: message.body)
+        let replaceOperations = matchingBodyReplaceOperations(in: rules, requestURL: requestURL)
+        if !replaceOperations.isEmpty {
+            message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
         }
         return message
     }
 
     /// All matching `.bodyJSON` edits in rule order; unlike `.script`, every match is returned so edits compose.
-    private static func matchingBodyJSONOps(
+    private static func matchingBodyJSONOperations(
         in rules: [CompiledMITMRule],
         requestURL: String?
-    ) -> [MITMJSONPatch.CompiledOp] {
-        var ops: [MITMJSONPatch.CompiledOp] = []
+    ) -> [MITMJSONPatch.CompiledOperation] {
+        var operations: [MITMJSONPatch.CompiledOperation] = []
         for rule in rules {
-            if case .bodyJSON(let op) = rule.operation, rule.matchesURL(requestURL) {
-                ops.append(op)
+            if case .bodyJSON(let operation) = rule.operation, rule.matchesURL(requestURL) {
+                operations.append(operation)
             }
         }
-        return ops
+        return operations
     }
 
     /// All matching `.bodyReplace` edits in rule order; every match composes over the running body text.
-    private static func matchingBodyReplaceOps(
+    private static func matchingBodyReplaceOperations(
         in rules: [CompiledMITMRule],
         requestURL: String?
-    ) -> [MITMBodyReplace.CompiledOp] {
-        var ops: [MITMBodyReplace.CompiledOp] = []
+    ) -> [MITMBodyReplace.CompiledOperation] {
+        var operations: [MITMBodyReplace.CompiledOperation] = []
         for rule in rules {
-            if case .bodyReplace(let op) = rule.operation, rule.matchesURL(requestURL) {
-                ops.append(op)
+            if case .bodyReplace(let operation) = rule.operation, rule.matchesURL(requestURL) {
+                operations.append(operation)
             }
         }
-        return ops
+        return operations
     }
 
     /// Runs native body edits and the matching `.script` rule. The `.script` engine hop confines the

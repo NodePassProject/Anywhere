@@ -7,7 +7,8 @@
 
 import Foundation
 
-enum BridgeContext {
+// IMPORTANT: BridgeContext is allowed to use in *ConcurrencyBridge only
+nonisolated enum BridgeContext {
 
     /// Hands the C side a **retained** pointer to `object` (one owning reference now lives
     /// in the C data structure). Balance it exactly once, later, with either ``consume``

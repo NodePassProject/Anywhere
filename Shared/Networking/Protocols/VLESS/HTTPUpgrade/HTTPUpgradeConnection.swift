@@ -11,7 +11,7 @@ import Synchronization
 // MARK: - HTTPUpgradeConnection
 
 /// Performs an HTTP upgrade handshake, then passes data through as raw bytes (no WebSocket framing).
-nonisolated final class HTTPUpgradeConnection: @unchecked Sendable {
+nonisolated final class HTTPUpgradeConnection: Sendable {
 
     // MARK: Transport
 

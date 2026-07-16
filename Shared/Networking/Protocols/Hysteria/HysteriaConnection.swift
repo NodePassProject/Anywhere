@@ -55,14 +55,13 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         _isReady.load(ordering: .relaxed)
     }
 
-    override var outerTLSVersion: TLSVersion? { .tls13 }
+    var outerTLSVersion: TLSVersion? { .tls13 }
 
     // MARK: - Open (called by ProxyClient after session is ready)
 
@@ -201,14 +200,14 @@ nonisolated final class HysteriaConnection: ProxyConnection {
 
     // MARK: - ProxyConnection overrides
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         guard _isReady.load(ordering: .relaxed) else {
             throw HysteriaError.streamClosed
         }
         try await session.writeStream(streamID, data: data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         let data = try await inbox.next()
         if let data, !data.isEmpty {
             // Return stream flow-control credit only now the app has taken the bytes.
@@ -217,7 +216,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         return data
     }
 
-    override func cancel() {
+    func cancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed

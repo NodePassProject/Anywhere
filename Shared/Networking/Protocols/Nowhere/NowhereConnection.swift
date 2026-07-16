@@ -68,14 +68,13 @@ nonisolated final class NowhereConnection: ProxyConnection {
         self.session = session
         self.destination = destination
         self.flowHeader = flowHeader
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         _isReady.load(ordering: .relaxed)
     }
 
-    override var outerTLSVersion: TLSVersion? { .tls13 }
+    var outerTLSVersion: TLSVersion? { .tls13 }
 
     func open() async throws {
         // Claim the connection on the ngtcp2 queue; `openPromise` resolves later in
@@ -294,14 +293,14 @@ nonisolated final class NowhereConnection: ProxyConnection {
 
     // MARK: - ProxyConnection overrides
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         guard _isReady.load(ordering: .relaxed) else {
             throw NowhereError.streamClosed
         }
         try await session.writeStream(streamID, data: data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         let data = try await inbox.next()
         if let data, !data.isEmpty {
             // Return stream flow-control credit only now the app has taken the bytes.
@@ -310,14 +309,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
         return data
     }
 
-    override func closeWrite() async throws {
-        guard _isReady.load(ordering: .relaxed) else {
-            throw NowhereError.streamClosed
-        }
-        try await session.finishStream(streamID)
-    }
-
-    override func cancel() {
+    func cancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
@@ -350,12 +342,11 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
 
     init(inner: NowhereTCPConnection) {
         self.inner = inner
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var deliversDatagrams: Bool { true }
 
     func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
         let immediate: (((Error?) -> Void), Error?)? = termination.withLock { state in
@@ -391,7 +382,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         handler?(error)
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let frame: Data
         do {
             frame = try NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data)
@@ -440,7 +431,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         }
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         // Pull typed UoT frames from `inner` on demand (backpressure via the app's read rate).
         while true {
             let step = udpState.withLock { nextPacketStep(&$0) }
@@ -470,7 +461,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         }
     }
 
-    override func cancel() {
+    func cancel() {
         let shouldStart = cancelState.withLock { state in
             guard !state.started else { return false }
             state.started = true
@@ -552,14 +543,13 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         self.configuration = configuration
         self.connectHost = connectHost
         self.tunnel = tunnel
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         state.withLock { $0.phase == .ready && $0.inner?.isConnected == true }
     }
 
-    override var outerTLSVersion: TLSVersion? {
+    var outerTLSVersion: TLSVersion? {
         state.withLock { $0.inner?.outerTLSVersion }
     }
 
@@ -1176,7 +1166,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
 
     // MARK: - ProxyConnection overrides
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let connection = state.withLock { state in
             state.phase == .ready && !state.transportWriteClosed ? state.inner : nil
         }
@@ -1190,7 +1180,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     /// fulfils `pendingReceive`; the async surface parks the caller's continuation there, so
     /// the verified state machine is preserved verbatim (the one continuation left here is the
     /// receive park — see MIGRATION.md's residual-continuations note).
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
             let completion: (Data?, Error?) -> Void = { data, error in
                 if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
@@ -1223,31 +1213,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         }
     }
 
-    override func closeWrite() async throws {
-        let connection: TLSProxyConnection? = state.withLock { state in
-            guard state.phase == .ready, !state.transportWriteClosed else { return nil }
-            return state.inner
-        }
-        guard let connection else {
-            let alreadyClosed = state.withLock { $0.phase == .ready && $0.transportWriteClosed }
-            if alreadyClosed { return }
-            throw NowhereError.streamClosed
-        }
-        try await connection.closeWrite()
-        var shouldCancel = false
-        state.withLock { state in
-            guard state.inner === connection, state.phase == .ready else { return }
-            state.transportWriteClosed = true
-            if state.transportReadClosed {
-                state.phase = .closed
-                state.inner = nil
-                shouldCancel = true
-            }
-        }
-        if shouldCancel { connection.cancel() }
-    }
-
-    override func cancel() {
+    func cancel() {
         let resources: (TLSClient?, TLSProxyConnection?, CheckedContinuation<Void, Error>?, ((Data?, Error?) -> Void)?, (() -> Void)?) = state.withLock { state in
             guard state.phase != .closed else { return (nil, nil, nil, nil, nil) }
             let wasPrepared = state.phase == .prepared
@@ -1288,7 +1254,6 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         self.uplink = uplink
         self.downlink = downlink
         self.kind = kind
-        super.init()
         if kind == .udp {
             (uplink as? NowhereTerminationObservable)?.setNowhereTerminationHandler {
                 [weak self] _ in self?.hardFail()
@@ -1301,25 +1266,25 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         !lifecycle.withLock { $0.terminated } && uplink.isConnected && downlink.isConnected
     }
-    override var outerTLSVersion: TLSVersion? { uplink.outerTLSVersion ?? downlink.outerTLSVersion }
-    override var deliversDatagrams: Bool { uplink.deliversDatagrams || downlink.deliversDatagrams }
+    var outerTLSVersion: TLSVersion? { uplink.outerTLSVersion ?? downlink.outerTLSVersion }
+    var deliversDatagrams: Bool { uplink.deliversDatagrams || downlink.deliversDatagrams }
 
     // MARK: - ProxyConnection overrides (directional routing; hardFail on any error)
 
-    override func send(_ data: Data) async throws {
+    func send(_ data: Data) async throws {
         do { try await uplink.send(data) }
         catch { hardFail(); throw error }
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         do { try await uplink.sendRaw(data) }
         catch { hardFail(); throw error }
     }
 
-    override func receive() async throws -> Data? {
+    func receive() async throws -> Data? {
         do {
             let data = try await downlink.receive()
             if kind == .udp, data == nil { hardFail() }
@@ -1330,7 +1295,7 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         do {
             let data = try await downlink.receiveRaw()
             if kind == .udp, data == nil { hardFail() }
@@ -1341,13 +1306,7 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 
-    override func closeWrite() async throws {
-        guard kind == .tcp else { return }
-        do { try await uplink.closeWrite() }
-        catch { hardFail(); throw error }
-    }
-
-    override func cancel() {
+    func cancel() {
         let shouldCancel = lifecycle.withLock { state in
             guard !state.terminated else { return false }
             state.terminated = true

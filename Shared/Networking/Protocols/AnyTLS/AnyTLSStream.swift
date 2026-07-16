@@ -38,18 +38,17 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         self.sid = sid
         self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         !receiveState.withLock { $0.ended } && (multiplexer?.isAlive ?? false)
     }
 
-    override var outerTLSVersion: TLSVersion? { cachedTLSVersion }
+    var outerTLSVersion: TLSVersion? { cachedTLSVersion }
 
     // MARK: - Send
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         guard let multiplexer else {
             throw ProxyError.connectionFailed("AnyTLS multiplexer deallocated")
         }
@@ -58,13 +57,13 @@ nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
 
     // MARK: - Receive
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await inbox.next()
     }
 
     // MARK: - Cancel
 
-    override func cancel() {
+    func cancel() {
         let already = receiveState.withLock { state -> Bool in
             let already = state.locallyCancelled
             state.locallyCancelled = true

@@ -24,7 +24,7 @@ final class JSONBlob {
     }
 }
 
-nonisolated final class JSONBlobStore: @unchecked Sendable {
+nonisolated final class JSONBlobStore: Sendable {
     static let shared = JSONBlobStore()
 
     enum Key: String, CaseIterable {
@@ -35,14 +35,18 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
         case mitm
     }
 
-    private let container: ModelContainer?
     let usesCloudKit: Bool
     
-    /// Serializes `ModelContext` access; a pure critical-section gate keeping the
-    /// synchronous store API.
-    private let gate = Mutex<Void>(())
+    private let context: Mutex<ModelContext?>
+    private let container: ModelContainer?
 
-    nonisolated(unsafe) static var mergeResolver: ((Key, [(data: Data, updatedAt: Date)]) -> Data)?
+    typealias MergeResolver = @Sendable (Key, [(data: Data, updatedAt: Date)]) -> Data
+    
+    private static let mergeResolverBox = Mutex<MergeResolver?>(nil)
+    static var mergeResolver: MergeResolver? {
+        get { mergeResolverBox.withLock { $0 } }
+        set { mergeResolverBox.withLock { $0 = newValue } }
+    }
 
     private init() {
         let wantsCloudKit = AWCore.isHostApp && AWCore.getICloudSyncEnabled()
@@ -53,6 +57,7 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
             container = Self.makeContainer(cloudKit: false)
             usesCloudKit = false
         }
+        context = Mutex(container.map { ModelContext($0) })
     }
 
     private static func makeContainer(cloudKit: Bool) -> ModelContainer? {
@@ -73,9 +78,8 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     // MARK: - Public API
     
     func load(_ key: Key) -> Data? {
-        gate.withLock { _ in
-            guard let container else { return nil }
-            let context = ModelContext(container)
+        context.withLock { context in
+            guard let context else { return nil }
             let raw = key.rawValue
             let predicate = #Predicate<JSONBlob> { $0.key == raw }
             let rows = (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
@@ -90,9 +94,9 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     }
     
     func compactDuplicates() {
-        guard usesCloudKit, let container, let resolver = Self.mergeResolver else { return }
-        gate.withLock { _ in
-            let context = ModelContext(container)
+        guard usesCloudKit, let resolver = Self.mergeResolver else { return }
+        context.withLock { context in
+            guard let context else { return }
             var didChange = false
             for key in Key.allCases {
                 let raw = key.rawValue
@@ -118,9 +122,8 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     }
 
     func save(_ key: Key, data: Data) {
-        gate.withLock { _ in
-            guard let container else { return }
-            let context = ModelContext(container)
+        context.withLock { context in
+            guard let context else { return }
             let raw = key.rawValue
             let predicate = #Predicate<JSONBlob> { $0.key == raw }
             let descriptor = FetchDescriptor<JSONBlob>(

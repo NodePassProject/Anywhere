@@ -22,16 +22,15 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     init(inner: ProxyConnection) {
         self.inner = inner
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var deliversDatagrams: Bool { true }
 
     // MARK: - Send: length-prefix each datagram, then hand off to the TCP-style inner.
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await sendMutex.withLock {
             try await inner.sendRaw(frameUDPPacket(data))
         }
@@ -39,7 +38,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     // MARK: - Receive: pull one framed packet at a time.
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         if let packet = udpState.withLock({ extractUDPPacket(from: &$0) }) {
             return packet
         }
@@ -55,7 +54,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    func cancel() {
         udpState.withLock { clearUDPBuffer(&$0) }
         inner.cancel()
     }

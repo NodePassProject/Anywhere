@@ -22,7 +22,7 @@ enum MITMJSONPatch {
 
     // MARK: - Compiled operation
 
-    enum CompiledOp {
+    enum CompiledOperation {
         case add(path: [PathSegment], value: Any)
         case replace(path: [PathSegment], value: Any)
         case delete(path: [PathSegment])
@@ -35,7 +35,7 @@ enum MITMJSONPatch {
     // MARK: - Compilation
 
     /// Returns nil only for a malformed path; a non-JSON value compiles to a literal string.
-    static func compile(_ operation: MITMJSONOperation) -> CompiledOp? {
+    static func compile(_ operation: MITMJSONOperation) -> CompiledOperation? {
         switch operation {
         case .add(let path, let value):
             guard let segments = parseJSONPath(path) else { return nil }
@@ -85,13 +85,12 @@ enum MITMJSONPatch {
     // MARK: - Application
 
     /// Applies every compiled edit in order; fail-closed on non-JSON, no-op edits, or re-serialization failure.
-    static func applyAll(_ ops: [CompiledOp], to body: Data) -> Data {
-        guard !ops.isEmpty else { return body }
+    static func applyAll(_ operations: [CompiledOperation], to body: Data) -> Data {
+        guard !operations.isEmpty else { return body }
         guard var root = parse(body) else { return body }
-        // Return original bytes when nothing changed: re-serializing could reshape 64-bit IDs / high-precision decimals.
         let before = snapshot(root)
-        for op in ops {
-            apply(op, to: &root)
+        for operation in operations {
+            apply(operation, to: &root)
         }
         guard !documentsEqual(before, root) else { return body }
         guard let out = serialize(root) else { return body }
@@ -99,8 +98,8 @@ enum MITMJSONPatch {
     }
 
     /// Root is `inout` so empty-path add/replace can swap the root wholesale.
-    private static func apply(_ op: CompiledOp, to root: inout Any) {
-        switch op {
+    private static func apply(_ operation: CompiledOperation, to root: inout Any) {
+        switch operation {
         case .add(let path, let value):
             root = applyAtPath(root, segments: path, mode: .add, value: value)
         case .replace(let path, let value):
@@ -252,7 +251,7 @@ enum MITMJSONPatch {
     }
 
     /// Applies add/replace/delete at the path leaf; every miss is a no-op. Inserted values are
-    /// deep-copied — the shared CompiledOp payload must never be mutated through a document.
+    /// deep-copied — the shared CompiledOperation payload must never be mutated through a document.
     static func applyAtPath(_ root: Any, segments: [PathSegment], mode: LeafMode, value: Any?) -> Any {
         if segments.isEmpty {
             switch mode {

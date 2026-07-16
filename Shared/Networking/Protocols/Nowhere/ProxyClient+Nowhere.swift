@@ -257,11 +257,13 @@ extension ProxyClient {
                 connectHost: directDialHost,
                 tunnel: tunnel
             )
-            guard own(connection) else {
+            guard !isCancelled else {
                 tunnel = nil
+                connection.cancel()
                 throw ProxyError.connectionFailed("Client released during connect")
             }
             guard attempt.bind(connection) else {
+                connection.cancel()
                 throw NowhereError.streamClosed
             }
             tunnel = nil
@@ -410,10 +412,12 @@ extension ProxyClient {
                 connectHost: directDialHost,
                 tunnel: nil
             )
-            guard own(connection) else {
+            guard !isCancelled else {
+                connection.cancel()
                 throw ProxyError.connectionFailed("Client released during connect")
             }
             guard attempt.bind(connection) else {
+                connection.cancel()
                 throw NowhereError.streamClosed
             }
             do {

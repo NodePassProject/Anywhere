@@ -46,7 +46,6 @@ extension ProxyClient {
             udpInner = tunnel
         } else {
             let transport = UDPTransport(host: directDialHost, port: configuration.serverPort)
-            self.own(transport)
             try await transport.connect()
             udpInner = DirectUDPProxyConnection(transport: transport)
         }

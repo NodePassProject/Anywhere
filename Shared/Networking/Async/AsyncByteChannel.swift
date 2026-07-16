@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class AsyncByteChannel: @unchecked Sendable {
+nonisolated final class AsyncByteChannel: Sendable {
 
     private enum Item {
         case data(Data)

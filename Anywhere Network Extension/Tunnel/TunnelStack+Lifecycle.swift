@@ -172,10 +172,14 @@ extension TunnelStack {
             udpMultiplexerPool?.closeAll()
             udpMultiplexerPool = rebuiltMultiplexerPool
             purgeShadowsocksUDPSessions()
-            for (_, flow) in udpFlows {
-                flow.close()
+            let flows = udpFlows.withLock { flows -> [UDPFlow] in
+                let all = Array(flows.values)
+                flows.removeAll()
+                return all
             }
-            udpFlows.removeAll()
+            for flow in flows {
+                Task { await flow.close() }
+            }
         }
     }
 

@@ -7,6 +7,7 @@
 
 import Dispatch
 
+// IMPORTANT: BridgeExecutor is allowed to use in *ConcurrencyBridge only
 nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
 
     /// The one queue this executor serializes onto. Exposed so the bridges' C timers and

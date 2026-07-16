@@ -12,7 +12,6 @@ nonisolated private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
 struct CompiledMITMRule {
     let phase: MITMPhase
-    /// Regex over the whole request URL; bounded so a ReDoS pattern can't stall the tunnel.
     let gate: MITMGateRegex
     let operation: CompiledMITMOperation
 }
@@ -106,7 +105,6 @@ enum RedirectTarget {
     case templated(MITMCaptureTemplate)
 }
 
-/// `transparent` drives the request rewrite + deferred dial; the rest synthesize an inner-leg response.
 enum CompiledRewriteAction {
     case transparent(TransparentTarget)
     case redirect302(RedirectTarget)
@@ -127,26 +125,19 @@ enum CompiledMITMOperation {
     case rewrite(CompiledRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
-    /// Overwrites every matching header (case-insensitive); absent headers are left untouched.
     case headerReplace(name: String, value: String)
-    /// JavaScript transform; sourceKey is the compile-cache key. At most one script fires per message.
+    case bodyReplace(MITMBodyReplace.CompiledOperation)
+    case bodyJSON(MITMJSONPatch.CompiledOperation)
     case script(source: String, sourceKey: Int)
-    /// Like `script` but invoked per DATA chunk so streaming bodies flow unbuffered; at most one fires per stream.
     case streamScript(source: String, sourceKey: Int)
-    /// Regex find-and-replace over the text body (import op id `4`); matching rules compose in rule order.
-    case bodyReplace(MITMBodyReplace.CompiledOp)
-    /// JSON body edit (import op id `5`); composes in rule order before any script.
-    case bodyJSON(MITMJSONPatch.CompiledOp)
 }
 
-/// `id` is the source set's, reused as the stable script-store scope key.
 struct CompiledMITMRuleSet {
     let id: UUID
     let domainSuffix: String
     let rules: [CompiledMITMRule]
 }
 
-/// Domain-suffix matching is most-specific-wins via a trie of reversed labels.
 final class MITMRewritePolicy {
     private struct PolicyState {
         var trie = FlatLabelTrie<Int16>()

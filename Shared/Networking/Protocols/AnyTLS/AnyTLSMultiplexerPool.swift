@@ -10,10 +10,13 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
 
-/// Warm pool per `(host, port, password)`. AnyTLS muxes are reused serially — one stream at
-/// a time — so each is reserved before its stream opens and released when it ends.
-nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer> {
-
+nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer, AnyTLSMultiplexerPool.Extra> {
+    
+    struct Extra {
+        var sessionCounter: UInt64 = 0
+        var closed = false
+    }
+    
     typealias DialOut = @Sendable () async throws -> ProxyConnection
 
     /// Single bucket — every mux here shares one endpoint + password.
@@ -21,8 +24,6 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
 
     private let dialOut: DialOut
     private let passwordHash: Data
-    private var sessionCounter: UInt64 = 0
-    private var closed: Bool = false
 
     init(
         password: String,
@@ -33,7 +34,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
     ) {
         self.passwordHash = AnyTLSProtocol.passwordHash(password)
         self.dialOut = dialOut
-        super.init()
+        super.init(extra: Extra())
         startIdleEviction(MultiplexerPolicy(
             idleTimeout: max(30, idleSessionTimeout),
             idleCheckInterval: max(30, idleSessionCheckInterval),
@@ -43,13 +44,13 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
 
     /// The opened stream expects a destination address as its first cmdPSH payload.
     func acquireStream() async throws -> AnyTLSStream {
-        let reused: AnyTLSMultiplexer? = try lock.withLock { _ throws -> AnyTLSMultiplexer? in
-            if closed {
+        let reused: AnyTLSMultiplexer? = try state.withLock { st throws -> AnyTLSMultiplexer? in
+            if st.extra.closed {
                 logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
                 throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
             }
-            if let reused = multiplexers[Self.bucket]?.first(where: { $0.tryReserveStream() }) {
-                lastActivity[ObjectIdentifier(reused)] = MonotonicClock.now
+            if let reused = st.multiplexers[Self.bucket]?.first(where: { $0.tryReserveStream() }) {
+                st.lastActivity[ObjectIdentifier(reused)] = MonotonicClock.now
                 return reused
             }
             return nil
@@ -61,14 +62,14 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
         logger.debug("[AnyTLSMultiplexerPool] acquireStream — no idle multiplexer, dialing fresh TLS multiplexer")
 
         let connection = try await dialOut()
-        let multiplexer: AnyTLSMultiplexer = try lock.withLock { _ throws -> AnyTLSMultiplexer in
-            if closed {
+        let multiplexer: AnyTLSMultiplexer = try state.withLock { st throws -> AnyTLSMultiplexer in
+            if st.extra.closed {
                 connection.cancel()
                 logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
                 throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
             }
-            sessionCounter &+= 1
-            let seq = sessionCounter
+            st.extra.sessionCounter &+= 1
+            let seq = st.extra.sessionCounter
             let multiplexer = AnyTLSMultiplexer(
                 inner: connection,
                 passwordHash: passwordHash,
@@ -81,8 +82,8 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
                 guard let self, let multiplexer else { return }
                 self.removeMultiplexer(multiplexer, key: Self.bucket)
             }
-            multiplexers[Self.bucket, default: []].append(multiplexer)
-            lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            st.multiplexers[Self.bucket, default: []].append(multiplexer)
+            st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return multiplexer
         }
         logger.debug("[AnyTLSMultiplexerPool] new multiplexer seq=\(multiplexer.seq) — running handshake")
@@ -92,7 +93,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
 
     /// Sets `closed` to reject new acquires, then defers to the base.
     override func closeAll() {
-        lock.withLock { _ in closed = true }
+        state.withLock { $0.extra.closed = true }
         super.closeAll()
     }
 
@@ -109,9 +110,9 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
             guard let multiplexer else { return }
             multiplexer.releaseReservation()
             guard let self else { return }
-            self.lock.withLock { _ in
-                if self.lastActivity[ObjectIdentifier(multiplexer)] != nil {
-                    self.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            self.state.withLock { st in
+                if st.lastActivity[ObjectIdentifier(multiplexer)] != nil {
+                    st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
                 }
             }
         }

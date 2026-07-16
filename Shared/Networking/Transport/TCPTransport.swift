@@ -9,7 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
+nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
 
     // MARK: Constants
 
@@ -34,7 +34,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, @unchecked Sendable {
     }
 
     /// State and promises shared with the driver task.
-    private final class Guts: @unchecked Sendable {
+    private final class Guts: Sendable {
         let state = Mutex(State())
         /// Resolved when the dial reaches ready (success) or fails/times out.
         let connectPromise = AsyncPromise<Void>()

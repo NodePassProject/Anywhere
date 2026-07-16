@@ -343,7 +343,6 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
     init(connection: ProxyConnection, userUUID: Data) {
         self.innerConnection = connection
         self.trafficState = Mutex(VisionTrafficState(userUUID: userUUID))
-        super.init()
     }
 
     /// Sends an empty padding frame to camouflage the VLESS header when no initial
@@ -355,7 +354,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         try await innerConnection.send(padded)
     }
     
-    override var isConnected: Bool {
+    var isConnected: Bool {
         return innerConnection.isConnected
     }
 
@@ -364,7 +363,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
     // Async-native Vision framing. `receive()` delegates to `receiveRaw()` because the inner
     // connection already handled response-header/byte accounting.
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let (isDirectCopy, paddedData) = trafficState.withLock { state -> (Bool, Data) in
             (state.writerDirectCopy, processSendData(data, state: state))
         }
@@ -376,7 +375,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         }
     }
 
-    override func receive() async throws -> Data? {
+    func receive() async throws -> Data? {
         try await receiveRaw()
     }
 
@@ -441,7 +440,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         return result
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         while true {
             let isDirectCopy = trafficState.withLock { $0.readerDirectCopy }
 
@@ -492,7 +491,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         return data
     }
 
-    override func cancel() {
+    func cancel() {
         innerConnection.cancel()
     }
 }

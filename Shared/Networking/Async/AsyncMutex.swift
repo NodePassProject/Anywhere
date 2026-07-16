@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class AsyncMutex: @unchecked Sendable {
+nonisolated final class AsyncMutex: Sendable {
 
     private struct State {
         var locked = false

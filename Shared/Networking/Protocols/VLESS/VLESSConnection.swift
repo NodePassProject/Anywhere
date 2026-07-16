@@ -21,11 +21,10 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     init(inner: ProxyConnection) {
         self.inner = inner
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
     // MARK: - Handshake
 
@@ -40,13 +39,13 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     // MARK: - Send (passthrough)
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await inner.sendRaw(data)
     }
 
     // MARK: - Receive (strip VLESS response header on first bytes)
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         while true {
             let received = try await inner.receiveRaw()
             guard let data = received, !data.isEmpty else {
@@ -116,17 +115,17 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     // MARK: - Direct (Vision bypass) passthroughs
 
-    override func receiveDirectRaw() async throws -> Data? {
+    func receiveDirectRaw() async throws -> Data? {
         try await inner.receiveDirectRaw()
     }
 
-    override func sendDirectRaw(_ data: Data) async throws {
+    func sendDirectRaw(_ data: Data) async throws {
         try await inner.sendDirectRaw(data)
     }
 
     // MARK: - Cancel
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 }

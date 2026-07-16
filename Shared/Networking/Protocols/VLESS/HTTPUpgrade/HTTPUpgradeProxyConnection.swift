@@ -12,22 +12,21 @@ nonisolated class HTTPUpgradeProxyConnection: ProxyConnection {
 
     init(huConnection: HTTPUpgradeConnection) {
         self.huConnection = huConnection
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         huConnection.isConnected
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await huConnection.send(data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await huConnection.receive()
     }
 
-    override func cancel() {
+    func cancel() {
         huConnection.cancel()
     }
 }

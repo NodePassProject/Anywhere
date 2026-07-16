@@ -22,21 +22,20 @@ nonisolated final class TrojanConnection: ProxyConnection {
             host: destinationHost,
             port: destinationPort
         ))
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await inner.sendRaw(consumeHeader().map { $0 + data } ?? data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await inner.receiveRaw()
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 

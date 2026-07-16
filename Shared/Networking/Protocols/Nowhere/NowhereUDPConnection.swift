@@ -80,15 +80,14 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         self.destination = destination
         self.flowHeader = flowHeader
         self.expectsResult = flowHeader.role != .open
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         _isReady.load(ordering: .relaxed)
     }
 
-    override var outerTLSVersion: TLSVersion? { .tls13 }
-    override var deliversDatagrams: Bool { true }
+    var outerTLSVersion: TLSVersion? { .tls13 }
+    var deliversDatagrams: Bool { true }
 
     func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
         let immediate: (((Error?) -> Void), Error?)? = termination.withLock { state in
@@ -305,7 +304,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         inbox.yield(payload)
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         guard _isReady.load(ordering: .relaxed) else {
             throw NowhereError.streamClosed
         }
@@ -379,7 +378,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         }
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         let data = try await inbox.next()
         if let data {
             consumeReservation(bytes: data.count)
@@ -398,7 +397,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         if session.isOnQueue { body() } else { session.queue.async(execute: body) }
     }
 
-    override func cancel() {
+    func cancel() {
         session.queue.async { [weak self] in
             self?.closeNormally(sendAdvisory: true)
         }

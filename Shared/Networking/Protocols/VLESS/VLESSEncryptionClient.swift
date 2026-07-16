@@ -797,15 +797,14 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             pendingServerPaddingLength: pendingServerPaddingLength
         ))
         self.zeroRTTState = zeroRTTState
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var isConnected: Bool { inner.isConnected }
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
     // MARK: - Send
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         guard !data.isEmpty else { return }
         let frames = try buildOutboundFrames(plaintext: data)
         try await inner.sendRaw(frames)
@@ -845,7 +844,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
 
     // MARK: - Receive
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         // 0-RTT: readAEAD is unknown until the server random arrives.
         if recvState.withLock({ $0.readAEAD == nil }) {
             try await establishReadAEAD()
@@ -975,11 +974,11 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     // Vision direct copy peels only our AEAD layer (unwrapping to the raw conn);
     // delegating to `inner` keeps random-mode XOR masking and outer TLS intact.
 
-    override func sendDirectRaw(_ data: Data) async throws {
+    func sendDirectRaw(_ data: Data) async throws {
         try await inner.sendRaw(data)
     }
 
-    override func receiveDirectRaw() async throws -> Data? {
+    func receiveDirectRaw() async throws -> Data? {
         // Flush bytes over-read past the last AEAD record; `inner.receiveRaw` would not replay them.
         let leftover: Data? = recvState.withLock { state in
             guard !state.inboundBuffer.isEmpty else { return nil }
@@ -993,7 +992,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         return try await inner.receiveRaw()
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 }

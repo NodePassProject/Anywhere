@@ -22,7 +22,7 @@ protocol QUICDatagramTransport: AnyObject {
     func cancel()
 }
 
-final class ProxyConnectionDatagramTransport: QUICDatagramTransport, @unchecked Sendable {
+final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
     private let connection: ProxyConnection
 
     /// Guards `errorHandler` so it fires at most once across send- and receive-side failures.

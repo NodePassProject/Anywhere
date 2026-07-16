@@ -92,7 +92,6 @@ extension ProxyClient {
             configuration: naiveConfig,
             destination: destination
         )
-        own(stream)
         do {
             try await stream.openTunnel()
         } catch {
@@ -127,7 +126,6 @@ extension ProxyClient {
     }
 
     private func openTunnelAndWrap(_ tunnel: NaiveTunnelAdapter) async throws -> ProxyConnection {
-        own(tunnel)
         do {
             try await tunnel.openTunnel()
         } catch {

@@ -15,15 +15,7 @@ extension TLSRecordConnection {
     // MARK: - TLS 1.3 Record Crypto
 
     func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        let seqNum: UInt64 = seqLock.withLock { _ in
-            if direction == .server {
-                defer { serverSeqNum += 1 }
-                return serverSeqNum
-            } else {
-                defer { clientSeqNum += 1 }
-                return clientSeqNum
-            }
-        }
+        let seqNum = nextEgressSeqNum()
 
         let innerLen = plaintext.count + 1
         let encryptedLen = innerLen + 16
@@ -102,7 +94,7 @@ extension TLSRecordConnection {
 
     // MARK: - TLS 1.3 KeyUpdate (RFC 8446 §7.2)
 
-    /// Runs on the receive path with `receiveLock` held (and never `seqLock`).
+    /// Runs on the receive path with the `receiveBuffer` lock held.
     private func handlePostHandshakeTLS13(_ messages: Data) {
         var i = messages.startIndex
         let end = messages.endIndex
@@ -129,44 +121,40 @@ extension TLSRecordConnection {
     /// Ingress is the server keys for a client and the client keys for a server. No-op when the
     /// traffic secret is unavailable (e.g. TLS 1.2).
     private func rekeyIngress() {
+        // The ingress key material is only read on the receive path (which holds the `receiveBuffer` lock
+        // while this runs), so the epoch swap needs no extra lock; only the shared seq counter
+        // is mutex-guarded.
         let keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
         if direction == .server {
             guard let current = clientAppSecret else { return }
             let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
-            seqLock.withLock { _ in
-                clientAppSecret = next.secret
-                clientKey = next.key
-                clientIV = next.iv
-                clientSymmetricKey = SymmetricKey(data: next.key)
-                clientSeqNum = 0
-            }
+            clientAppSecret = next.secret
+            clientKey = next.key
+            clientIV = next.iv
+            clientSymmetricKey = SymmetricKey(data: next.key)
         } else {
             guard let current = serverAppSecret else { return }
             let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
-            seqLock.withLock { _ in
-                serverAppSecret = next.secret
-                serverKey = next.key
-                serverIV = next.iv
-                serverSymmetricKey = SymmetricKey(data: next.key)
-                serverSeqNum = 0
-            }
+            serverAppSecret = next.secret
+            serverKey = next.key
+            serverIV = next.iv
+            serverSymmetricKey = SymmetricKey(data: next.key)
         }
+        resetIngressSeqNum()
     }
 
-    /// Sends our KeyUpdate using the *current* write keys, then advances egress. Held under
-    /// `sendLock` so the key switch is atomic with respect to application sends; called only after
-    /// `receiveLock` has been released.
+    /// Sends our KeyUpdate using the *current* write keys, then advances egress. The whole
+    /// method runs under ``sendMutex`` so the build → send → key-switch sequence is atomic with
+    /// respect to application sends; called only after `receiveBuffer`'s lock has been released.
     func sendKeyUpdateResponseAndRekeyEgress() async {
         await sendMutex.withLock {
             // Build the KeyUpdate with the CURRENT egress keys, put it on the wire, then advance
             // egress — all under `sendMutex` so no application send interleaves the key switch.
             let record: Data
             do {
-                record = try sendLock.withLock { _ throws -> Data in
-                    // KeyUpdate: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).
-                    let keyUpdate = Data([TLSHandshakeType.keyUpdate, 0x00, 0x00, 0x01, 0x00])
-                    return try encryptTLS13Record(plaintext: keyUpdate, contentType: TLSContentType.handshake)
-                }
+                // KeyUpdate: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).
+                let keyUpdate = Data([TLSHandshakeType.keyUpdate, 0x00, 0x00, 0x01, 0x00])
+                record = try encryptTLS13Record(plaintext: keyUpdate, contentType: TLSContentType.handshake)
             } catch {
                 return
             }
@@ -176,29 +164,22 @@ extension TLSRecordConnection {
             }
 
             let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
-            sendLock.withLock { _ in
-                if direction == .server {
-                    guard let current = serverAppSecret else { return }
-                    let next = kd.nextApplicationGeneration(trafficSecret: current)
-                    seqLock.withLock { _ in
-                        serverAppSecret = next.secret
-                        serverKey = next.key
-                        serverIV = next.iv
-                        serverSymmetricKey = SymmetricKey(data: next.key)
-                        serverSeqNum = 0
-                    }
-                } else {
-                    guard let current = clientAppSecret else { return }
-                    let next = kd.nextApplicationGeneration(trafficSecret: current)
-                    seqLock.withLock { _ in
-                        clientAppSecret = next.secret
-                        clientKey = next.key
-                        clientIV = next.iv
-                        clientSymmetricKey = SymmetricKey(data: next.key)
-                        clientSeqNum = 0
-                    }
-                }
+            if direction == .server {
+                guard let current = serverAppSecret else { return }
+                let next = kd.nextApplicationGeneration(trafficSecret: current)
+                serverAppSecret = next.secret
+                serverKey = next.key
+                serverIV = next.iv
+                serverSymmetricKey = SymmetricKey(data: next.key)
+            } else {
+                guard let current = clientAppSecret else { return }
+                let next = kd.nextApplicationGeneration(trafficSecret: current)
+                clientAppSecret = next.secret
+                clientKey = next.key
+                clientIV = next.iv
+                clientSymmetricKey = SymmetricKey(data: next.key)
             }
+            resetEgressSeqNum()
         }
     }
 }

@@ -515,7 +515,8 @@ class VPNViewModel {
         pendingReconnect = false
         if manager.isOnDemandEnabled {
             manager.isOnDemandEnabled = false
-            manager.saveToPreferences { _ in
+            Task {
+                try? await manager.saveToPreferences()
                 manager.connection.stopVPNTunnel()
             }
         } else {
@@ -530,7 +531,8 @@ class VPNViewModel {
         // Disable on-demand first to prevent system auto-restart during reconnection
         if manager.isOnDemandEnabled {
             manager.isOnDemandEnabled = false
-            manager.saveToPreferences { _ in
+            Task {
+                try? await manager.saveToPreferences()
                 manager.connection.stopVPNTunnel()
             }
         } else {

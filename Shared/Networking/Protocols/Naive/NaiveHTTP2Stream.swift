@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Stream")
 
-nonisolated class NaiveHTTP2Stream: HTTPTunnel, @unchecked Sendable {
+nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     // MARK: - Phase
 

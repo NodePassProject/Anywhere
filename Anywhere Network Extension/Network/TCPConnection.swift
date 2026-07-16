@@ -14,14 +14,6 @@ private struct HandshakeTimeoutError: LocalizedError {
     var errorDescription: String? { "Handshake timed out during \(phase)" }
 }
 
-private struct LWIPWriteFatalError: LocalizedError {
-    let pending: Int
-    let sndbuf: Int
-    let queuelen: Int
-    var errorDescription: String? {
-        "tcp_write fatal (pending=\(pending), sndbuf=\(sndbuf), queuelen=\(queuelen))"
-    }
-}
 
 actor TCPConnection {
 
@@ -52,6 +44,10 @@ actor TCPConnection {
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
+    /// The in-flight proxy dial. Teardown cancels it so a still-connecting handshake unwinds
+    /// (its `CancellationError` runs the connect path's cleanup) instead of lingering until the
+    /// handshake timeout — `client.cancel()` alone only tears down an already-delivered connection.
+    private var proxyDialTask: Task<Void, Never>?
 
     /// Committed routing identity for traffic accounting and the dial path; an SNI re-match can change it.
     private var routeTarget: RouteTarget
@@ -90,50 +86,21 @@ actor TCPConnection {
     /// Non-nil during the cleartext HTTP sniff phase; resolves the authority that gates plain-HTTP interception.
     private var httpSniffer: HTTPRequestSniffer?
 
-    // MARK: Backpressure State
-
-    /// Downlink backlog awaiting lwIP's send buffer. `[0, pendingWriteOffset)` is already
-    /// written; compaction is deferred until the dead prefix outgrows the live suffix.
-    private var pendingWrite = Data()
-    private var pendingWriteOffset = 0
-
-    /// Bytes still waiting to be handed to lwIP.
-    private var pendingWriteCount: Int {
-        pendingWrite.count - pendingWriteOffset
-    }
-
-    // MARK: Relay Drivers
+    // MARK: Relay
     //
-    // The upload and download copy loops run as two long-lived, actor-isolated `Task`s over
-    // the proxy connection's async surface: `await send` / `await receive` are the ordering
-    // and the single-flight, so there is no manual pump, pending-completion FIFO, or
-    // in-flight bookkeeping. Because the drivers are actor-isolated, the code between awaits
-    // runs on the lwIP executor with no hop; two `AsyncStream` wakeups nudge each driver
-    // when upload work appears (new bytes / the app's FIN) or download capacity opens
-    // (backlog drained below the low-water mark).
-    private let uploadWake: AsyncStream<Void>
-    private let uploadWakeContinuation: AsyncStream<Void>.Continuation
-    private let downloadWake: AsyncStream<Void>
-    private let downloadWakeContinuation: AsyncStream<Void>.Continuation
+    // The upload and download copy loops run inside one structured task group (``relayTask``)
+    // over the proxy connection's async surface and the per-connection
+    // ``TCPStreamConcurrencyBridge``, which owns all coalescing/backlog buffering, backpressure,
+    // wake continuations, and `tcp_*` window/write calls. Teardown is `stream.terminate()` +
+    // `relayTask.cancel()` — no `withTaskCancellationHandler`, no manual pump.
 
-    /// True only while the upload driver is awaiting a `send`; gates the graceful deferred
-    /// close so it can't truncate an in-flight chunk.
-    private var uploadSending = false
+    /// The per-connection byte-relay bridge, created at establishment (both the non-MITM relay
+    /// and the MITM downlink ride it); `nil` before the dial resolves.
+    private var stream: TCPStreamConcurrencyBridge?
 
-    // MARK: Upload Buffer
-    //
-    // Coalesces a synchronous burst of lwIP callbacks so the driver ships one large send;
-    // `tcp_recved` stays deferred until the proxy accepts a chunk, so TCP_WND caps how far
-    // ahead the buffer can run.
-    private struct UploadPipeline {
-        var buffer = Data()
-        var bufferOffset = 0
-    }
-    private var uploadPipeline = UploadPipeline()
-
-    private var uploadBufferCount: Int {
-        uploadPipeline.buffer.count - uploadPipeline.bufferOffset
-    }
+    /// The connection-lifetime relay task (the structured upload+download group); cancelled by
+    /// ``releaseProxy(abortive:)``.
+    private var relayTask: Task<Void, Never>?
 
     // MARK: Actor-isolated idle timer (replaces ActivityTimer)
     //
@@ -159,10 +126,6 @@ actor TCPConnection {
     private var uplinkDone = false
     private var downlinkDone = false
     private var closePending = false
-
-    private enum UplinkCloseState { case open, closing, closed }
-    private var uplinkCloseState: UplinkCloseState = .open
-    private var downlinkShutdownSent = false
 
     /// Logs this connection's terminal failure at most once.
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
@@ -193,13 +156,6 @@ actor TCPConnection {
         self.acceptedViaDefault = viaDefault
         self.ruleSetName = ruleSetName
         self.hostIsResolvedDomain = hostIsResolvedDomain
-
-        let (uploadStream, uploadContinuation) = AsyncStream<Void>.makeStream()
-        self.uploadWake = uploadStream
-        self.uploadWakeContinuation = uploadContinuation
-        let (downloadStream, downloadContinuation) = AsyncStream<Void>.makeStream()
-        self.downloadWake = downloadStream
-        self.downloadWakeContinuation = downloadContinuation
 
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
@@ -366,170 +322,87 @@ actor TCPConnection {
             return
         }
 
-        guard proxyConnection != nil else {
+        guard let stream else {
             guard appendPendingData(bytes: bytePtr, count: count) else { return }
             beginConnecting()
             return
         }
 
-        uploadPipeline.buffer.append(bytePtr, count: count)
-        uploadWakeContinuation.yield(())
+        stream.assumeIsolated { $0.deliverUpload(bytes: ptr, count: count) }
     }
 
-    // MARK: - Relay Drivers
-    
-    private func startRelayDrivers(_ connection: ProxyConnection) {
-        Task { [weak self] in await self?.runUploadDriver(connection) }
-        Task { [weak self] in await self?.runDownloadDriver(connection) }
-        uploadWakeContinuation.yield(())
-    }
+    // MARK: - Relay
 
-    private enum UploadStep {
-        case send(Data)
-        case finish
-        case idle
-        case stop
-    }
-
-    /// Computes the next upload action against the coalescing buffer and close state; runs
-    /// synchronously on the actor between the driver's `await`s.
-    private func nextUploadStep() -> UploadStep {
-        if closed { return .stop }
-        if uploadBufferCount > 0 {
-            let take = min(uploadBufferCount, TunnelConstants.uploadChunkSize)
-            uploadSending = true
-            return .send(sliceUploadBuffer(take))
-        }
-        // Buffer drained: forward the app's FIN as an ordered half-close.
-        if uplinkDone, uplinkCloseState == .open {
-            uplinkCloseState = .closing
-            return .finish
-        }
-        return .idle
-    }
-
-    /// Uplink copy loop: drains the coalescing buffer to the proxy leg one `await send` at
-    /// a time (natural single-flight), then forwards the app's FIN as an ordered half-close.
-    /// `tcp_recved` is deferred to each send's completion, so the app is throttled to TCP_WND.
-    private func runUploadDriver(_ connection: ProxyConnection) async {
-        for await _ in uploadWake {
-            drain: while true {
-                switch nextUploadStep() {
-                case .stop:
-                    return
-                case .idle:
-                    break drain  // park until the next wakeup
-                case .send(let chunk):
-                    do {
-                        try await connection.send(chunk)
-                    } catch {
-                        uploadSending = false
-                        if !closed {
-                            reportFailure("Send", error: error)
-                            abort()
-                        }
-                        return
-                    }
-                    uploadSending = false
-                    if !closed {
-                        // Count proxy-side accepts as uplink activity; a long backpressured
-                        // upload would otherwise look idle and close mid-stream.
-                        markActivity()
-                        acknowledgeReceivedBytes(chunk.count)
-                        attemptDeferredClose()
-                    }
-                case .finish:
-                    do {
-                        try await connection.closeWrite()
-                    } catch {
-                        if !closed {
-                            uplinkCloseState = .closed
-                            reportFailure("Close write", error: error)
-                            abort()
-                        }
-                        return
-                    }
-                    if !closed {
-                        uplinkCloseState = .closed
-                        attemptDeferredClose()
-                    }
-                }
+    /// Creates the byte-relay bridge, seeds any bytes buffered during sniff/dial, and starts the
+    /// structured upload+download group. Both legs run to their own EOF — half-close is removed,
+    /// so no directional FIN is sent; the connection full-closes once both directions have ended.
+    private func startRelay(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) {
+        if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
+        if uplinkDone { stream.assumeIsolated { $0.deliverUploadEOF() } }
+        relayTask = Task { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self?.runUploadRelay(connection, stream) }
+                group.addTask { await self?.runDownloadRelay(connection, stream) }
             }
+            await self?.relayFinished()
         }
     }
 
-    private enum DownloadStep {
-        case receive
-        case waitDrain
-        case stop
-    }
-
-    /// Computes the next download action against the backlog and close state; runs
-    /// synchronously on the actor between the driver's `await`s.
-    private func nextDownloadStep() -> DownloadStep {
-        if closed || downlinkDone { return .stop }
-        if pendingWriteCount >= TunnelConstants.drainLowWaterMark { return .waitDrain }
-        return .receive
-    }
-
-    /// Handles one received chunk (or EOF) on the actor; returns `true` to stop the driver.
-    private func handleDownloaded(_ data: Data?) -> Bool {
-        guard !closed else { return true }
-        // nil and empty both mean EOF; transports never deliver zero-byte data.
-        guard let data, !data.isEmpty else {
-            downlinkDone = true
-            if uplinkDone {
-                closeWhenDrained()
-            } else {
-                setIdleTimeout(TunnelConstants.uplinkOnlyTimeout)
-                propagateDownlinkCloseIfReady()
-            }
-            return true
-        }
-        markActivity()
-        writeToLWIP(data)
-        return false
-    }
-
-    /// Downlink copy loop: pulls from the proxy leg and hands each chunk to lwIP,
-    /// prefetching only while the downlink backlog is below the low-water mark so the peer
-    /// is throttled to what the app drains. Stops for good once the downlink EOF'd.
-    private func runDownloadDriver(_ connection: ProxyConnection) async {
-        var drainSignals = downloadWake.makeAsyncIterator()
-        while true {
-            switch nextDownloadStep() {
-            case .stop:
+    /// Uplink copy loop: coalesced app bytes → proxy leg, one `await send` at a time, acking each
+    /// chunk back to lwIP only after the upstream accepts it (throttle to the upstream's rate).
+    /// Returns at the app's FIN.
+    private func runUploadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge) async {
+        while let chunk = await stream.receiveUpload() {
+            do {
+                try await connection.send(chunk)
+            } catch {
+                if !closed { reportFailure("Send", error: error); abort() }
                 return
-            case .waitDrain:
-                // Suspend until a drain frees capacity (or teardown finishes the stream).
-                if await drainSignals.next() == nil { return }
-            case .receive:
-                let data: Data?
-                do {
-                    data = try await connection.receive()
-                } catch {
-                    if !closed {
-                        reportFailure("Receive", error: error)
-                        abort()
-                    }
-                    return
-                }
-                if handleDownloaded(data) { return }
             }
+            if closed { return }
+            markActivity()
+            stack?.addBytesOut(Int64(chunk.count), target: routeTarget)
+            await stream.ackUpload(chunk.count)
         }
     }
 
-    /// Forwards the remote's EOF to the app as a FIN once the downlink backlog
-    /// has drained, leaving the app's uplink open (half-close) so read-until-close
-    /// protocols finish promptly; the full-close path supersedes this.
-    private func propagateDownlinkCloseIfReady() {
-        guard downlinkDone,
-              !downlinkShutdownSent,
-              !closed,
-              !closePending,
-              pendingWriteCount == 0 else { return }
-        downlinkShutdownSent = true
-        bridge.tcpShutdownTx(pcb)
+    /// Downlink copy loop: proxy leg → lwIP via the bridge's backpressured send. At the upstream
+    /// EOF it waits for the backlog to drain (so the full close doesn't truncate the tail), then
+    /// returns — no `tcp_shutdown_tx` is sent.
+    private func runDownloadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge) async {
+        while true {
+            let data: Data?
+            do {
+                data = try await connection.receive()
+            } catch {
+                if !closed { reportFailure("Receive", error: error); abort() }
+                return
+            }
+            // nil and empty both mean EOF; transports never deliver zero-byte data.
+            guard let data, !data.isEmpty else { break }
+            if closed { return }
+            markActivity()
+            stack?.addBytesIn(Int64(data.count), target: routeTarget)
+            do {
+                try await stream.sendDownload(data)
+            } catch {
+                if !closed, case TCPStreamConcurrencyBridge.StreamError.writeFailed = error {
+                    reportFailure("Write", error: error)
+                    abort()
+                }
+                return
+            }
+        }
+        if closed { return }
+        downlinkDone = true
+        if !uplinkDone { setIdleTimeout(TunnelConstants.uplinkOnlyTimeout) }
+        await stream.awaitDownloadDrained()
+    }
+
+    /// Both relay directions ended (EOF'd + drained): full-close the connection.
+    private func relayFinished() {
+        guard !closed else { return }
+        close()
     }
 
     /// Acks local-app bytes to lwIP once the proxy leg accepted them, then
@@ -548,36 +421,10 @@ actor TCPConnection {
         bridge.tcpOutput(pcb)
     }
 
-    /// Removes and returns the `take`-byte head slice; whole-buffer consumption hands
-    /// off the storage so the in-flight chunk's backing isn't mutated under it.
-    private func sliceUploadBuffer(_ take: Int) -> Data {
-        if take == uploadBufferCount {
-            let chunk: Data
-            if uploadPipeline.bufferOffset == 0 {
-                chunk = uploadPipeline.buffer
-            } else {
-                chunk = uploadPipeline.buffer.subdata(in: uploadPipeline.bufferOffset..<uploadPipeline.buffer.count)
-            }
-            uploadPipeline.buffer = Data()
-            uploadPipeline.bufferOffset = 0
-            return chunk
-        }
-
-        let start = uploadPipeline.bufferOffset
-        let end = start + take
-        let chunk = uploadPipeline.buffer.subdata(in: start..<end)
-        uploadPipeline.bufferOffset = end
-        if uploadPipeline.bufferOffset > uploadPipeline.buffer.count - uploadPipeline.bufferOffset {
-            uploadPipeline.buffer.removeSubrange(0..<uploadPipeline.bufferOffset)
-            uploadPipeline.bufferOffset = 0
-        }
-        return chunk
-    }
-
-    /// Client ACK freed lwIP send-buffer space; drain more downlink backlog.
+    /// Client ACK freed lwIP send-buffer space: feed the download backpressure/drain in the bridge.
     func handleSent(len: UInt16) {
         guard !closed else { return }
-        drainPendingWrite()
+        stream?.assumeIsolated { $0.deliverSendCredit() }
     }
 
     func handleRemoteClose() {
@@ -600,11 +447,13 @@ actor TCPConnection {
         mitmSession?.clientDidClose()
 
         uplinkDone = true
-        // Wake the upload driver so it drains the buffer, then forwards the FIN.
-        uploadWakeContinuation.yield(())
-        if downlinkDone {
-            closeWhenDrained()
-        } else {
+        if let stream {
+            // Non-MITM: signal the app's FIN; the upload relay drains and returns. The connection
+            // full-closes once the download direction also ends (half-close removed).
+            stream.assumeIsolated { $0.deliverUploadEOF() }
+            if !downlinkDone { setIdleTimeout(TunnelConstants.downlinkOnlyTimeout) }
+        } else if !downlinkDone {
+            // MITM / pre-relay: tighten the idle window while awaiting the downlink.
             setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
@@ -799,14 +648,15 @@ actor TCPConnection {
         handshakeTimeoutTask = nil
         startIdleTimer()
 
-        if let initialData {
-            uploadPipeline.buffer.append(initialData)
-        }
+        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
+        self.stream = stream
+        var seed = Data()
+        if let initialData { seed.append(initialData) }
         if !pendingData.isEmpty {
-            uploadPipeline.buffer.append(pendingData)
+            seed.append(pendingData)
             pendingData.removeAll(keepingCapacity: true)
         }
-        startRelayDrivers(connection)
+        startRelay(connection, stream: stream, seed: seed)
     }
 
     // MARK: - Proxy Connection
@@ -836,7 +686,7 @@ actor TCPConnection {
 
         let host = dstHost
         let port = dstPort
-        Task { [weak self] in
+        proxyDialTask = Task { [weak self] in
             let result: Result<ProxyConnection, Error>
             do {
                 result = .success(try await client.connect(to: host, port: port, initialData: initialData))
@@ -855,6 +705,7 @@ actor TCPConnection {
     /// or reports the failure. Cancels a late connection if teardown already closed us.
     private func finishProxyConnect(result: Result<ProxyConnection, Error>, initialData: Data?) {
         proxyConnecting = false
+        proxyDialTask = nil
         guard !closed else {
             if case .success(let connection) = result { connection.cancel() }
             return
@@ -867,15 +718,18 @@ actor TCPConnection {
             handshakeTimeoutTask = nil
             startIdleTimer()
 
+            let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
+            self.stream = stream
             if let initialData {
                 // Connect success implies handshake-carried initialData was accepted.
                 acknowledgeReceivedBytes(initialData.count)
             }
+            var seed = Data()
             if !pendingData.isEmpty {
-                uploadPipeline.buffer.append(pendingData)
+                seed.append(pendingData)
                 pendingData.removeAll(keepingCapacity: true)
             }
-            startRelayDrivers(proxyConnection)
+            startRelay(proxyConnection, stream: stream, seed: seed)
 
         case .failure(let error):
             handleConnectFailure(error, bufferedClientData: initialData)
@@ -989,14 +843,17 @@ actor TCPConnection {
             lwipQueue: lwipQueue,
             isPlaintext: mitmPlaintext
         )
-        // Inner-leg downlink: inner-leg output (TLS records or cleartext) goes straight to lwIP.
+        // Downlink bridge: inner-leg output (TLS records or cleartext) rides the per-connection
+        // relay bridge — the backlog, backpressure, and `tcp_*` writes are confined there.
+        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
+        self.stream = stream
         session.onSendToClient = { [weak self] data in
             guard let self else { return }
             self.lwipQueue.async {
                 self.assumeIsolated { me in
-                    guard !me.closed else { return }
+                    guard !me.closed, let stream = me.stream else { return }
                     me.markActivity()
-                    me.writeToLWIP(data)
+                    stream.assumeIsolated { $0.deliverDownload(data) }
                 }
             }
         }
@@ -1162,167 +1019,53 @@ actor TCPConnection {
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
+        // Run the dial as a task the flow owns: teardown and the handshake-deadline race cancel it so a
+        // still-connecting handshake unwinds now (its `CancellationError` runs the connect path's cleanup)
+        // rather than lingering — `client.cancel()` alone only tears down an already-delivered connection.
+        // `client.cancel()` still runs alongside so a dial that completes in the race self-destructs via deliver().
+        let dialTask = Task { try await client.connect(to: host, port: port, initialData: nil) }
         let dial = InFlightDial()
-        dial.cancel = { client.cancel() }
+        dial.cancel = { dialTask.cancel(); client.cancel() }
         inFlightDials.append(dial)
         defer { forgetDial(dial) }
         do {
-            let connection = try await raceHandshakeDeadline(cancelOnTimeout: { client.cancel() }) {
-                try await client.connect(to: host, port: port, initialData: nil)
+            let connection = try await raceHandshakeDeadline(cancelOnTimeout: { dialTask.cancel() }) {
+                try await dialTask.value
             }
             return MITMDialResult(connection: connection, proxyClient: client)
         } catch {
-            // onTeardown reports the failure; don't double-report. The client owns any half-open
-            // socket from a raced success; cancel it.
+            // onTeardown reports the failure; don't double-report. Cancel the dial task and mark the
+            // client so any half-open socket from a raced success is torn down.
+            dialTask.cancel()
             await client.cancel()
             throw error
         }
     }
 
-    // MARK: - lwIP Write Helper
-
-    /// Writes as much as lwIP's send buffer accepts; returns bytes written, or -1 on a
-    /// fatal tcp_write error. `retryOnEmpty` flushes a full buffer once so ACKs free snd_buf.
-    private func feedLWIP(_ base: UnsafeRawPointer, count: Int, retryOnEmpty: Bool = false) -> Int {
-        var offset = 0
-        while offset < count {
-            var sndbuf = bridge.tcpSendBuffer(pcb)
-            if sndbuf <= 0 {
-                if retryOnEmpty {
-                    bridge.tcpOutput(pcb)
-                    sndbuf = bridge.tcpSendBuffer(pcb)
-                }
-                guard sndbuf > 0 else { break }
-            }
-            let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
-            let error = bridge.tcpWrite(pcb, base + offset, UInt16(chunkSize))
-            if error != 0 {
-                if error == -1 { break }  // ERR_MEM: transient
-                return -1               // fatal error
-            }
-            offset += chunkSize
-        }
-        return offset
-    }
-
-    /// Appends proxy data to the downlink backlog and drains what lwIP accepts;
-    /// ordering lives in `pendingWrite`, so a prefetched receive can't race the drain.
-    private func writeToLWIP(_ data: Data) {
-        guard !closed, !data.isEmpty else { return }
-        stack?.addBytesIn(Int64(data.count), target: routeTarget)
-        pendingWrite.append(data)
-        drainPendingWrite()
-    }
-
-    /// Drains `pendingWrite` into lwIP and re-arms the proxy receive on progress;
-    /// driven by client ACKs, with a fallback retry timer when nothing was placed.
-    private func drainPendingWrite() {
-        guard !closed else { return }
-
-        let live = pendingWriteCount
-        if live > 0 {
-            let head = pendingWriteOffset
-            let written = pendingWrite.withUnsafeBytes { buffer -> Int in
-                guard let base = buffer.baseAddress else { return 0 }
-                let n = feedLWIP(base + head, count: live, retryOnEmpty: true)
-                if n == -1 {
-                    let sndbuf = bridge.tcpSendBuffer(self.pcb)
-                    let queuelen = bridge.tcpSendQueueLength(self.pcb)
-                    self.reportFailure(
-                        "Write",
-                        error: LWIPWriteFatalError(pending: live, sndbuf: sndbuf, queuelen: queuelen)
-                    )
-                    self.abort()
-                    return 0
-                }
-                return n
-            }
-
-            guard !closed else { return }
-
-            if written > 0 {
-                // Drain progress is activity; the tightened post-FIN timeout must not fire mid-backlog.
-                markActivity()
-                pendingWriteOffset += written
-                if pendingWriteOffset >= pendingWrite.count {
-                    pendingWrite.removeAll(keepingCapacity: true)
-                    pendingWriteOffset = 0
-                } else if pendingWriteOffset > pendingWrite.count - pendingWriteOffset {
-                    // Compact once the dead prefix outgrows the live suffix (~2× cap).
-                    pendingWrite.removeSubrange(0..<pendingWriteOffset)
-                    pendingWriteOffset = 0
-                }
-                bridge.tcpOutput(pcb)
-            } else {
-                // Nothing drained (ERR_MEM / zero window) — retry after a delay;
-                // don't rearm the receive while stalled. `drainPendingWrite` re-checks `closed`.
-                Task { [weak self] in
-                    try? await Task.sleep(for: .milliseconds(TunnelConstants.drainRetryDelayMs))
-                    guard !Task.isCancelled else { return }
-                    await self?.drainPendingWrite()
-                }
-                return
-            }
-        }
-
-        attemptDeferredClose()
-        guard !closed else { return }
-        propagateDownlinkCloseIfReady()
-
-        // Capacity opened up; let the download driver prefetch the next chunk.
-        if pendingWriteCount < TunnelConstants.drainLowWaterMark {
-            downloadWakeContinuation.yield(())
-        }
-    }
-
     // MARK: - Close / Abort
 
-    /// Best-effort flush before close so drained bytes precede the FIN.
-    private func flushPendingToLWIP() {
-        let live = pendingWriteCount
-        guard live > 0 else { return }
-
-        let head = pendingWriteOffset
-        let written = pendingWrite.withUnsafeBytes { buffer -> Int in
-            guard let base = buffer.baseAddress else { return 0 }
-            return max(feedLWIP(base + head, count: live), 0)  // treat fatal as 0 (best-effort)
-        }
-
-        if written > 0 {
-            bridge.tcpOutput(pcb)
-        }
-    }
-
-    /// Defers `close()` until both relay buffers drain — the downlink backlog owed
-    /// to lwIP and upload bytes the proxy leg hasn't accepted — since an immediate
-    /// close truncates both. Drain/pump tails finish via `attemptDeferredClose()`;
-    /// the activity timer bounds a stalled peer.
+    /// Graceful MITM teardown: waits for the downlink bridge's backlog to drain (so the response
+    /// tail isn't truncated), then full-closes. The idle timer bounds a stalled peer.
     private func closeWhenDrained() {
         guard !closed else { return }
+        guard let stream else { close(); return }
         closePending = true
         setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
-        attemptDeferredClose()
+        Task { [weak self] in
+            await stream.awaitDownloadDrained()
+            await self?.completeDeferredClose()
+        }
     }
 
-    /// Gates the deferred close so `releaseProxy`'s cancel can't race the
-    /// forwarded FIN off the wire.
-    private var uplinkCloseSettled: Bool {
-        proxyConnection == nil || !uplinkDone || uplinkCloseState == .closed
-    }
-
-    private func attemptDeferredClose() {
-        guard closePending, !closed,
-              pendingWriteCount == 0,
-              uploadBufferCount == 0,
-              !uploadSending,
-              uplinkCloseSettled else { return }
+    private func completeDeferredClose() {
+        guard closePending, !closed else { return }
         close()
     }
 
     func close() {
         guard !closed else { return }
         closed = true
-        flushPendingToLWIP()
+        stream?.assumeIsolated { $0.flushBestEffort() }
         bridge.tcpClose(pcb)
         releaseProxy(abortive: false)
         bridge.discard(self)
@@ -1348,11 +1091,7 @@ actor TCPConnection {
         // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
         // length=2, level=2 (fatal), description=49 (access_denied)
         let alert: [UInt8] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31]
-        alert.withUnsafeBufferPointer { buffer in
-            guard let base = buffer.baseAddress else { return }
-            _ = feedLWIP(UnsafeRawPointer(base), count: alert.count, retryOnEmpty: true)
-            bridge.tcpOutput(pcb)
-        }
+        bridge.tcpWriteImmediate(pcb, Data(alert))
         rejectGracefully()
     }
 
@@ -1381,18 +1120,26 @@ actor TCPConnection {
         cancelIdleTimer()
         let connection = proxyConnection
         let client = proxyClient
+        let dial = proxyDialTask
         let session = mitmSession
+        let stream = self.stream
+        let relay = self.relayTask
         proxyConnection = nil
         proxyClient = nil
+        proxyDialTask = nil
         proxyConnecting = false
+        self.stream = nil
+        self.relayTask = nil
         pendingData = Data()
-        pendingWrite = Data()
-        pendingWriteOffset = 0
-        uploadPipeline = UploadPipeline()
-        uploadWakeContinuation.finish()
-        downloadWakeContinuation.finish()
         mitmSession = nil
         session?.cancel(error: nil)
+        // Stop the relay loops (their stream awaits return) and cancel the group, then tear the
+        // proxy leg down so any in-flight send/receive unwinds.
+        stream?.assumeIsolated { $0.terminate() }
+        relay?.cancel()
+        // Cancel a still-connecting dial so its handshake unwinds now; `client.cancel()` then marks
+        // the client so a dial that completes in the race tears its own connection down via deliver().
+        dial?.cancel()
         if abortive {
             connection?.abort()
         } else {

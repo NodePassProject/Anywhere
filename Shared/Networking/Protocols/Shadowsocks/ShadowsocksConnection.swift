@@ -24,12 +24,11 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
         self.writer = ShadowsocksAEADWriter(cipher: cipher, masterKey: masterKey)
         self.reader = ShadowsocksAEADReader(cipher: cipher, masterKey: masterKey)
         self.addressHeader = Mutex(addressHeader)
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
+    var isConnected: Bool { inner.isConnected }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         var plaintext = Data()
         addressHeader.withLock { header in
             if let h = header {
@@ -43,7 +42,7 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
         try await inner.sendRaw(encrypted)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         while true {
             guard let data = try await inner.receiveRaw(), !data.isEmpty else {
                 return nil
@@ -56,7 +55,7 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
         }
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 }
@@ -76,20 +75,19 @@ nonisolated class ShadowsocksUDPConnection: ProxyConnection {
         self.masterKey = masterKey
         self.dstHost = dstHost
         self.dstPort = dstPort
-        super.init()
     }
 
-    override var isConnected: Bool { inner.isConnected }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { inner.isConnected }
+    var deliversDatagrams: Bool { true }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         let packet = ShadowsocksProtocol.encodeUDPPacket(host: dstHost, port: dstPort, payload: data)
         let encrypted = try ShadowsocksUDPCrypto.encrypt(cipher: cipher, masterKey: masterKey, payload: packet)
         // `inner.send` so any UoT framing wraps each encrypted datagram.
         try await inner.send(encrypted)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         guard let data = try await inner.receive(), !data.isEmpty else {
             return nil
         }
@@ -100,7 +98,7 @@ nonisolated class ShadowsocksUDPConnection: ProxyConnection {
         return parsed.payload
     }
 
-    override func cancel() {
+    func cancel() {
         inner.cancel()
     }
 }

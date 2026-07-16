@@ -19,10 +19,6 @@ protocol AsyncByteTransport: AnyObject, Sendable {
 
     nonisolated func send(_ data: Data) async throws
 
-    /// Half-closes the send direction (TCP FIN / end-of-stream), ordered after
-    /// every prior send; receive stays open. No sends may follow.
-    nonisolated func finishSend() async throws
-
     /// One read: `.bytes` with data, `.end` at EOF. Reads are issued serially.
     nonisolated func receive() async throws -> TransportChunk
 
@@ -41,7 +37,7 @@ protocol AsyncDatagramTransport: AnyObject, Sendable {
     nonisolated func cancel()
 }
 
-nonisolated final class AsyncPromise<Value: Sendable>: @unchecked Sendable {
+nonisolated final class AsyncPromise<Value: Sendable>: Sendable {
     private enum Storage {
         case pending
         case waiting(CheckedContinuation<Value, Error>)
@@ -90,7 +86,7 @@ nonisolated final class AsyncPromise<Value: Sendable>: @unchecked Sendable {
 /// waiter continuations live here in the async infra rather than in the callback-driven
 /// (ngtcp2 / lwIP / JSC) layers that fulfil them. The first `signal` wins; later waiters
 /// get the cached result immediately.
-nonisolated final class AsyncReadinessGate: @unchecked Sendable {
+nonisolated final class AsyncReadinessGate: Sendable {
     private enum Storage {
         case pending([CheckedContinuation<Void, Error>])
         case resolved(Result<Void, Error>)

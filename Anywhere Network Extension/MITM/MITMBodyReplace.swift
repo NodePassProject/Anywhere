@@ -10,31 +10,22 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
-/// A body decodable as neither UTF-8 nor latin-1 is returned unchanged.
 enum MITMBodyReplace {
-
-    /// Pre-compiled so the per-message hot path skips pattern + template parsing.
-    struct CompiledOp {
+    
+    struct CompiledOperation {
         let search: Regex<AnyRegexOutput>
         let template: MITMCaptureTemplate
-        /// Non-nil when the replacement references no captures — lets the hot path use the
-        /// verbatim `String.replacing(_:with:)` overload.
         let staticReplacement: String?
     }
-
-    /// Returns nil on an uncompilable pattern; the replacement template never fails to parse.
-    static func compile(search: String, replacement: String) -> CompiledOp? {
+    
+    static func compile(search: String, replacement: String) -> CompiledOperation? {
         guard let regex = try? Regex(search) else { return nil }
         let template = MITMCaptureTemplate(replacement)
-        return CompiledOp(search: regex, template: template, staticReplacement: template.staticReplacement)
+        return CompiledOperation(search: regex, template: template, staticReplacement: template.staticReplacement)
     }
-
-    /// Applies every compiled edit in order; fail-closed on an undecodable body or blown budget.
-    /// Decodes UTF-8, else latin-1 (round-trips any bytes losslessly, so single-byte charsets are
-    /// edited in place) and re-encodes in that charset — an unrepresentable edit is abandoned.
-    /// Multi-byte charsets (UTF-16, GBK, …) pass through unedited.
-    static func applyAll(_ ops: [CompiledOp], to body: Data) async -> Data {
-        guard !ops.isEmpty else { return body }
+    
+    static func applyAll(_ operations: [CompiledOperation], to body: Data) async -> Data {
+        guard !operations.isEmpty else { return body }
         let encoding: String.Encoding
         let text: String
         if let utf8 = String(data: body, encoding: .utf8) {
@@ -47,9 +38,8 @@ enum MITMBodyReplace {
             return body
         }
         var current = text
-        for op in ops {
-            guard let replaced = await boundedReplace(current, op: op) else {
-                // Fail closed rather than emit a half-applied chain.
+        for operation in operations {
+            guard let replaced = await boundedReplace(current, operation: operation) else {
                 return body
             }
             current = replaced
@@ -57,34 +47,25 @@ enum MITMBodyReplace {
         guard let out = current.data(using: encoding) else { return body }
         return out
     }
-
-    /// Soft budget per substitution (seconds); Swift Regex has no execution limit, so a runaway
-    /// pattern is abandoned to avoid head-of-line blocking. Generous for the 4 MiB body cap.
+    
     private static let substitutionTimeLimitSeconds = 1
-
-    /// Hard crash deadline after the soft budget: a Regex match is uninterruptible and the
-    /// stuck in-flight flag leaves bodyReplace disabled process-wide, so crash for a clean relaunch.
-    static let hardCapSeconds = 30
+    private static let hardCapSeconds = 30
 
     private static let substitutionInFlight = Atomic<Bool>(false)
-
-    /// Runs one substitution under the soft budget; nil on timeout or while a prior runaway is still burning.
-    private static func boundedReplace(_ text: String, op: CompiledOp) async -> String? {
+    
+    private static func boundedReplace(_ text: String, operation: CompiledOperation) async -> String? {
         guard substitutionInFlight.compareExchange(
             expected: false, desired: true, ordering: .sequentiallyConsistent
         ).exchanged else { return nil }
 
         let box = SubstitutionBox()
-        // The uninterruptible regex runs fully detached — a Regex match ignores task cancellation — so
-        // the soft-deadline race below can abandon it without the structured group blocking on it.
-        // `substitutionInFlight` bounds a runaway to one busy core with no backlog.
         Task.detached(priority: .userInitiated) {
             let out: String
-            if let literal = op.staticReplacement {
-                out = text.replacing(op.search, with: literal)
+            if let literal = operation.staticReplacement {
+                out = text.replacing(operation.search, with: literal)
             } else {
-                out = text.replacing(op.search) { match in
-                    op.template.expand(output: match.output)
+                out = text.replacing(operation.search) { match in
+                    operation.template.expand(output: match.output)
                 }
             }
             box.finish(out)
@@ -122,10 +103,8 @@ enum MITMBodyReplace {
             fatalError("bodyReplace regex substitution did not return \(hardCapSeconds)s after blowing its soft budget over a \(byteCount) B body — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed, leaving bodyReplace disabled process-wide. Crashing the Network Extension so the system relaunches it clean.")
         }
     }
-
-    /// Carries the (possibly runaway) substitution's result and a cancellation-aware completion gate.
-    /// State is guarded by a `Mutex`, so `@unchecked Sendable` is safe.
-    private final class SubstitutionBox: @unchecked Sendable {
+    
+    private final class SubstitutionBox: Sendable {
         private struct State {
             var value: String?
             var done = false

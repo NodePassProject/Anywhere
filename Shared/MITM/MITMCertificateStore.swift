@@ -18,15 +18,12 @@ enum MITMCertificateStoreError: Error {
     case missingCAComponents
 }
 
-/// Thread-safe helper around the App Group keychain entries used for MITM.
 final class MITMCertificateStore {
 
     // MARK: - Configuration
-
-    /// Keychain access group shared by the app target and the Network Extension.
-    private let accessGroup: String
-
-    /// Scopes all MITM keychain items so delete/regenerate touches nothing else.
+    
+    private static let accessGroup = AWCore.Identifier.appGroupSuite
+    
     private static let service = "com.argsment.Anywhere.MITM"
 
     private static let privateKeyTag = "\(service).caPrivateKey".data(using: .utf8)!
@@ -36,58 +33,48 @@ final class MITMCertificateStore {
     private static let caSubjectCN = "Anywhere Root Certificate"
     private static let caOrganization = "Anywhere"
     
-    /// Serializes the multi-step keychain load/generate/delete sequences and guards
-    /// `cachedCA`; a critical-section gate keeping the synchronous, throwing API.
-    /// Intra-process only — the App Group keychain is shared with the extension.
-    private let gate = Mutex<Void>(())
-
-    private var cachedCA: (privateKey: SecKey, certificateDER: Data)?
-
-    // MARK: - Init
-
-    init(accessGroup: String = "\(AWCore.Identifier.appGroupSuite)") {
-        self.accessGroup = accessGroup
-    }
+    typealias CA = (privateKey: SecKey, certificateDER: Data)
+    
+    private let cachedCA = Mutex<CA?>(nil)
 
     // MARK: - CA Lifecycle
 
-    func loadOrCreateCA() throws -> (privateKey: SecKey, certificateDER: Data) {
-        try gate.withLock { _ in
-            if let existing = try? loadCACachedUnlocked() {
+    func loadOrCreateCA() throws -> CA {
+        try cachedCA.withLock { cache in
+            if let existing = try? loadCACachedUnlocked(&cache) {
                 return existing
             }
             do {
-                return try generateCAUnlocked()
+                return try generateCAUnlocked(&cache)
             } catch {
-                // The App Group keychain is shared with the extension (the gate is
+                // The App Group keychain is shared with the extension (the lock is
                 // intra-process): either the other process won the race (re-read), or
                 // an orphaned key from a failed cert write hit errSecDuplicateItem (drop it).
-                if let existing = try? loadCACachedUnlocked() {
+                if let existing = try? loadCACachedUnlocked(&cache) {
                     return existing
                 }
                 // Non-duplicate failures leave no key, so surface the real error.
                 guard (try? readPrivateKeyUnlocked()) != nil else { throw error }
                 deletePrivateKey()
-                return try generateCAUnlocked()
+                return try generateCAUnlocked(&cache)
             }
         }
     }
 
-    func loadCA() -> (privateKey: SecKey, certificateDER: Data)? {
-        gate.withLock { _ in try? loadCACachedUnlocked() }
+    func loadCA() -> CA? {
+        cachedCA.withLock { cache in try? loadCACachedUnlocked(&cache) }
     }
-
-    /// Wipes the persisted CA and generates a fresh one, invalidating any installed root profile.
+    
     @discardableResult
-    func regenerate() throws -> (privateKey: SecKey, certificateDER: Data) {
-        try gate.withLock { _ in
-            deleteUnlocked()
-            return try generateCAUnlocked()
+    func regenerate() throws -> CA {
+        try cachedCA.withLock { cache in
+            deleteUnlocked(&cache)
+            return try generateCAUnlocked(&cache)
         }
     }
 
     func delete() {
-        gate.withLock { _ in deleteUnlocked() }
+        cachedCA.withLock { cache in deleteUnlocked(&cache) }
     }
 
     // MARK: - Trust State
@@ -223,22 +210,21 @@ final class MITMCertificateStore {
     }
 
     // MARK: - Private — CA load / generate / delete
-
-    /// Returns the cached CA, populating it from the keychain on first use. Caller holds `lock`.
-    private func loadCACachedUnlocked() throws -> (privateKey: SecKey, certificateDER: Data) {
-        if let cachedCA { return cachedCA }
+    
+    private func loadCACachedUnlocked(_ cache: inout CA?) throws -> CA {
+        if let cache { return cache }
         let loaded = try loadCAUnlocked()
-        cachedCA = loaded
+        cache = loaded
         return loaded
     }
 
-    private func loadCAUnlocked() throws -> (privateKey: SecKey, certificateDER: Data) {
+    private func loadCAUnlocked() throws -> CA {
         let cert = try readCertificateUnlocked()
         let key = try readPrivateKeyUnlocked()
         return (key, cert)
     }
 
-    private func generateCAUnlocked() throws -> (privateKey: SecKey, certificateDER: Data) {
+    private func generateCAUnlocked(_ cache: inout CA?) throws -> CA {
         let privateKey = try generatePrivateKey()
         let now = Date()
         let notAfter = Calendar(identifier: .gregorian).date(byAdding: .year, value: 10, to: now) ?? now.addingTimeInterval(60 * 60 * 24 * 365 * 10)
@@ -254,8 +240,8 @@ final class MITMCertificateStore {
                 notAfter: notAfter
             )
             try writeCertificateUnlocked(certDER)
-            let ca = (privateKey: privateKey, certificateDER: certDER)
-            cachedCA = ca
+            let ca: CA = (privateKey: privateKey, certificateDER: certDER)
+            cache = ca
             return ca
         } catch {
             // The key was already persisted (kSecAttrIsPermanent); delete it or
@@ -265,8 +251,8 @@ final class MITMCertificateStore {
         }
     }
 
-    private func deleteUnlocked() {
-        cachedCA = nil
+    private func deleteUnlocked(_ cache: inout CA?) {
+        cache = nil
         deletePrivateKey()
         deleteCertificate()
         deleteSerial()
@@ -299,7 +285,7 @@ final class MITMCertificateStore {
                 kSecAttrIsPermanent as String: true,
                 kSecAttrAccessControl as String: access,
                 kSecAttrApplicationTag as String: Self.privateKeyTag,
-                kSecAttrAccessGroup as String: accessGroup,
+                kSecAttrAccessGroup as String: Self.accessGroup,
             ]
         ]
         var err: Unmanaged<CFError>?
@@ -318,7 +304,7 @@ final class MITMCertificateStore {
                 kSecAttrIsExtractable as String: false,
                 kSecAttrSynchronizable as String: false,
                 kSecAttrApplicationTag as String: Self.privateKeyTag,
-                kSecAttrAccessGroup as String: accessGroup,
+                kSecAttrAccessGroup as String: Self.accessGroup,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             ]
         ]
@@ -336,7 +322,7 @@ final class MITMCertificateStore {
             kSecAttrApplicationTag as String: Self.privateKeyTag,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecReturnRef as String: true,
-            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -350,7 +336,7 @@ final class MITMCertificateStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: Self.privateKeyTag,
-            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         SecItemDelete(query as CFDictionary)
     }
@@ -365,7 +351,7 @@ final class MITMCertificateStore {
             kSecAttrAccount as String: Self.certAccount,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else {
@@ -379,7 +365,7 @@ final class MITMCertificateStore {
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: Self.certAccount,
             kSecReturnData as String: true,
-            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -394,7 +380,7 @@ final class MITMCertificateStore {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: Self.certAccount,
-            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         SecItemDelete(query as CFDictionary)
     }
@@ -407,7 +393,7 @@ final class MITMCertificateStore {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: Self.serialAccount,
-            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessGroup as String: Self.accessGroup,
         ]
         SecItemDelete(query as CFDictionary)
     }

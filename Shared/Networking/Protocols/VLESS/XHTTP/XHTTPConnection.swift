@@ -1414,8 +1414,6 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
                 self.state.withLock { $0.outstanding += 1 }
                 try await self.transport.send(data)
             },
-            // The internal drain owns the socket; the session doesn't read upload responses.
-            finishSend: {},
             receive: { .end },
             cancel: { [weak self] in self?.releaseToPool() }
         )

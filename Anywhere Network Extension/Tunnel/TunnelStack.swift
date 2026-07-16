@@ -51,7 +51,8 @@ class TunnelStack {
     /// Serial queue for all lwIP operations, vended by ``lwipBridge``'s custom executor.
     var lwipQueue: DispatchQueue { lwipBridge.queue }
 
-    /// Serial queue owning the UDP data plane.
+    /// Serial queue for TunnelStack's TUN-side UDP intake (parse/route/registry insert). The
+    /// per-flow data plane runs off this queue in the independent ``UDPFlow`` actors.
     let udpQueue = DispatchQueue(label: AWCore.Identifier.udpQueue,
                                  qos: .userInitiated,
                                  autoreleaseFrequency: .workItem)
@@ -190,9 +191,13 @@ class TunnelStack {
         }
     }
 
-    /// Mux manager for multiplexing UDP flows (created when Vision flow is
-    /// active). Owned by ``udpQueue``.
-    var udpMultiplexerPool: VLESSVisionUDPMultiplexerPool?
+    /// Mux manager for multiplexing UDP flows (created when Vision flow is active). Read by the
+    /// independent ``UDPFlow`` actors, so it is `Mutex`-guarded.
+    private let _udpMultiplexerPool = Mutex<VLESSVisionUDPMultiplexerPool?>(nil)
+    var udpMultiplexerPool: VLESSVisionUDPMultiplexerPool? {
+        get { _udpMultiplexerPool.withLock { $0 } }
+        set { _udpMultiplexerPool.withLock { $0 = newValue } }
+    }
 
     // MARK: - UDP Config Snapshot
     //
@@ -290,8 +295,9 @@ class TunnelStack {
         }
     }
 
-    /// Active UDP flows keyed by 5-tuple. Owned by ``udpQueue``.
-    var udpFlows: [UDPFlowKey: UDPFlow] = [:]
+    /// Active UDP flows keyed by 5-tuple. `Mutex`-guarded so the independent ``UDPFlow`` actors
+    /// can deregister themselves off ``udpQueue``.
+    let udpFlows = Mutex<[UDPFlowKey: UDPFlow]>([:])
 
     /// Rising-edge latch so a sustained flow storm logs once, not per evicted
     /// flow. Owned by ``udpQueue``.
@@ -314,9 +320,9 @@ class TunnelStack {
     /// Owned by ``udpQueue``.
     var udpPressureShedding = false
 
-    /// Shared Shadowsocks UDP sessions keyed by configuration id: one session
-    /// serves every flow for that configuration. Owned by ``udpQueue``.
-    var ssUDPSessions: [UUID: ShadowsocksUDPSession] = [:]
+    /// Shared Shadowsocks UDP sessions keyed by configuration id: one session serves every flow
+    /// for that configuration. `Mutex`-guarded (resolved by the independent ``UDPFlow`` actors).
+    let ssUDPSessions = Mutex<[UUID: ShadowsocksUDPSession]>([:])
 
     /// Domain-based DNS routing (loaded from App Group routing.json).
     let domainRouter: DomainRouter
@@ -349,48 +355,52 @@ class TunnelStack {
     /// replacing terminal ones; sharing one sessionID + socket across flows
     /// restores full-cone NAT. Must be called on `udpQueue`.
     func shadowsocksUDPSession(for configuration: ProxyConfiguration) -> Result<ShadowsocksUDPSession, Error> {
-        if let existing = ssUDPSessions[configuration.id], existing.isUsable {
-            return .success(existing)
-        }
-        ssUDPSessions.removeValue(forKey: configuration.id)
-
-        guard case .shadowsocks(let password, let method) = configuration.outbound else {
-            return .failure(ProxyError.protocolError("Shadowsocks password not set"))
-        }
-        guard let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(ShadowsocksError.invalidMethod(method))
-        }
-
-        let mode: ShadowsocksUDPSession.Mode
-        if cipher.isSS2022 {
-            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
-                return .failure(ShadowsocksError.invalidPSK)
+        ssUDPSessions.withLock { sessions in
+            if let existing = sessions[configuration.id], existing.isUsable {
+                return .success(existing)
             }
-            if cipher == .blake3chacha20poly1305 {
-                mode = .ss2022ChaCha(psk: pskList.last!)
+            sessions.removeValue(forKey: configuration.id)
+
+            guard case .shadowsocks(let password, let method) = configuration.outbound else {
+                return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+            }
+            guard let cipher = ShadowsocksCipher(method: method) else {
+                return .failure(ShadowsocksError.invalidMethod(method))
+            }
+
+            let mode: ShadowsocksUDPSession.Mode
+            if cipher.isSS2022 {
+                guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
+                    return .failure(ShadowsocksError.invalidPSK)
+                }
+                if cipher == .blake3chacha20poly1305 {
+                    mode = .ss2022ChaCha(psk: pskList.last!)
+                } else {
+                    mode = .ss2022AES(cipher: cipher, pskList: pskList)
+                }
             } else {
-                mode = .ss2022AES(cipher: cipher, pskList: pskList)
+                let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
+                mode = .legacy(cipher: cipher, masterKey: masterKey)
             }
-        } else {
-            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
-            mode = .legacy(cipher: cipher, masterKey: masterKey)
-        }
 
-        let session = ShadowsocksUDPSession(
-            mode: mode,
-            serverHost: configuration.serverAddress,
-            serverPort: configuration.serverPort
-        )
-        ssUDPSessions[configuration.id] = session
-        return .success(session)
+            let session = ShadowsocksUDPSession(
+                mode: mode,
+                serverHost: configuration.serverAddress,
+                serverPort: configuration.serverPort
+            )
+            sessions[configuration.id] = session
+            return .success(session)
+        }
     }
 
-    /// Cancels and forgets every SS UDP session. Must be called on `udpQueue`.
+    /// Cancels and forgets every SS UDP session.
     func purgeShadowsocksUDPSessions() {
-        for (_, session) in ssUDPSessions {
-            session.cancel()
+        let sessions = ssUDPSessions.withLock { sessions -> [ShadowsocksUDPSession] in
+            let all = Array(sessions.values)
+            sessions.removeAll()
+            return all
         }
-        ssUDPSessions.removeAll()
+        for session in sessions { session.cancel() }
     }
 
     // MARK: - Runtime Configuration

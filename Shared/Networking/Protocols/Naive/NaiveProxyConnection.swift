@@ -33,18 +33,17 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
     init(tunnel: NaiveTunnel, paddingType: NaivePaddingNegotiator.PaddingType) {
         self.tunnel = tunnel
         self.paddingType = paddingType
-        super.init()
     }
 
-    override var isConnected: Bool { tunnel.isConnected }
-    override var outerTLSVersion: TLSVersion? { .tls13 }
+    var isConnected: Bool { tunnel.isConnected }
+    var outerTLSVersion: TLSVersion? { .tls13 }
 
     // MARK: - Send
 
     /// Maximum payload that fits in one padding frame (2-byte length field).
     private static let maxPaddingPayload = 65535
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         var data = data
         while true {
             if paddingFramer.isWritePaddingActive && paddingType == .variant1 {
@@ -91,7 +90,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
 
     // MARK: - Receive
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         while true {
             guard let data = try await tunnel.receiveData(), !data.isEmpty else {
                 return nil
@@ -112,7 +111,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
 
     // MARK: - Cancel
 
-    override func cancel() {
+    func cancel() {
         tunnel.close()
     }
 

@@ -84,7 +84,7 @@ extension SudokuMultiplexerRegistry: TransportPool {
 /// Warm pool per `(server, port, direct-dial host, outbound settings)`. One Sudoku session
 /// carries any number of streams, so the pool holds at most one live session and coalesces
 /// cold-start bursts behind a single KIP handshake.
-nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> {
+nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, Bool> {
 
     /// Single bucket — every session here shares one endpoint + outbound settings.
     private static let bucket = "sudoku"
@@ -103,13 +103,12 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     /// Guards `dialing`; burst callers coalesce behind one handshake.
     private let dialing = Mutex(false)
 
-    /// Guarded by ``lock``.
-    private var closed = false
+    // The base `Extra` is a `Bool` `closed` flag, guarded by ``state``.
 
     init(configuration: ProxyConfiguration, directDialHost: String) {
         self.configuration = configuration
         self.directDialHost = directDialHost
-        super.init()
+        super.init(extra: false)
         startIdleEviction(Self.poolPolicy)
     }
 
@@ -132,9 +131,9 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     /// Restarts the idle clock at stream end, so a freed session is kept warm for the full
     /// idle timeout (not evicted right after a long transfer).
     func noteStreamEnded(_ multiplexer: SudokuMuxClient) {
-        lock.withLock { _ in
-            if lastActivity[ObjectIdentifier(multiplexer)] != nil {
-                lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+        state.withLock { st in
+            if st.lastActivity[ObjectIdentifier(multiplexer)] != nil {
+                st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             }
         }
     }
@@ -143,7 +142,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
 
     /// Sets `closed` to reject new acquires, then defers to the base.
     override func closeAll() {
-        lock.withLock { _ in closed = true }
+        state.withLock { $0.extra = true }
         super.closeAll()
     }
 
@@ -174,15 +173,15 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     /// Returns the pooled session, pruning corpses that closed before `onClose` was armed
     /// (age-based idle eviction is the base's sweep).
     private func reusableMultiplexer() throws -> SudokuMuxClient? {
-        try lock.withLock { _ in
-            if closed { throw SudokuNativeError.closed }
-            multiplexers[Self.bucket]?.removeAll { multiplexer in
+        try state.withLock { st in
+            if st.extra { throw SudokuNativeError.closed }
+            st.multiplexers[Self.bucket]?.removeAll { multiplexer in
                 guard multiplexer.isClosed else { return false }
-                lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
                 return true
             }
-            guard let existing = multiplexers[Self.bucket]?.first else { return nil }
-            lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+            guard let existing = st.multiplexers[Self.bucket]?.first else { return nil }
+            st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
             return existing
         }
     }
@@ -208,10 +207,10 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
             self.removeMultiplexer(multiplexer, key: Self.bucket)
         }
         // close() re-enters removeMultiplexer via onClose, so it must run off-lock.
-        let wasClosed: Bool = lock.withLock { _ in
-            if closed { return true }
-            multiplexers[Self.bucket, default: []].append(multiplexer)
-            lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+        let wasClosed: Bool = state.withLock { st in
+            if st.extra { return true }
+            st.multiplexers[Self.bucket, default: []].append(multiplexer)
+            st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return false
         }
         if wasClosed {

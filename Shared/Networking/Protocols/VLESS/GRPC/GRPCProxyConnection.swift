@@ -12,22 +12,21 @@ nonisolated class GRPCProxyConnection: ProxyConnection {
 
     init(grpcConnection: GRPCConnection) {
         self.grpcConnection = grpcConnection
-        super.init()
     }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         grpcConnection.isConnected
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await grpcConnection.send(data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await grpcConnection.receive()
     }
 
-    override func cancel() {
+    func cancel() {
         grpcConnection.cancel()
     }
 }

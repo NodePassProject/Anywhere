@@ -67,16 +67,15 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
-        super.init()
     }
 
     /// Atomic readiness mirror; callable from any queue.
-    override var isConnected: Bool {
+    var isConnected: Bool {
         _isReady.load(ordering: .relaxed)
     }
 
-    override var outerTLSVersion: TLSVersion? { .tls13 }
-    override var deliversDatagrams: Bool { true }
+    var outerTLSVersion: TLSVersion? { .tls13 }
+    var deliversDatagrams: Bool { true }
 
     // MARK: - Open
 
@@ -171,7 +170,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     // MARK: - ProxyConnection overrides
 
     /// Wraps `data` in a Hysteria UDP datagram, fragmenting at the QUIC DATAGRAM MTU.
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         // The wire format requires ≥1 data byte after the address; the
         // server silently discards zero-byte payloads.
         guard !data.isEmpty else { return }
@@ -227,11 +226,11 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         }
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         try await inbox.next()
     }
 
-    override func cancel() {
+    func cancel() {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed

@@ -150,7 +150,7 @@ extension XHTTPConnection {
     /// cancel — the download transport's own cancel already tears it down, avoiding a double cancel.
     func performUploadOnlyHTTP11Setup() async throws {
         let upload = AsyncTransportClosures(
-            send: download.send, finishSend: download.finishSend, receive: download.receive, cancel: {}
+            send: download.send, receive: download.receive, cancel: {}
         )
         state.withLock { $0.uploadTransport = upload }
 

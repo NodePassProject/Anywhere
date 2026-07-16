@@ -8,30 +8,23 @@
 import Foundation
 import Synchronization
 
-final class StatsRecorder: @unchecked Sendable {
+final class StatsRecorder: Sendable {
     struct RawValues {
         let byteCounts: TrafficByteCounts
         let tcpConnectionCount: Int
         let udpConnectionCount: Int
         let memoryBytes: UInt64
     }
-
-    /// All timing state lives behind one mutex: `start` runs on the tunnel-start
-    /// task, `noteSleep`/`noteWake` on the provider's sleep/wake overrides, and
-    /// `snapshot` on the app-message handler — three distinct isolation contexts.
+    
     private struct State {
         var source: (() -> RawValues)?
         var startedAt: TimeInterval?
         var sleepSecondsAccumulated: TimeInterval = 0
-        /// Non-nil while the device is asleep (between `noteSleep` and `noteWake`).
         var sleepBeganAt: TimeInterval?
     }
 
     private let state = Mutex(State())
-
-    /// Called once at tunnel start. The `source` closure is stored and later invoked
-    /// under the mutex-guarded ``snapshot()``; `StatsRecorder`'s `@unchecked Sendable`
-    /// covers holding this non-`Sendable` closure behind the lock.
+    
     func start(source: @escaping () -> RawValues) {
         state.withLock { state in
             state.source = source
@@ -40,8 +33,7 @@ final class StatsRecorder: @unchecked Sendable {
             state.sleepBeganAt = nil
         }
     }
-
-    /// Clears live connection timings so the next session starts blank.
+    
     func stop() {
         state.withLock { state in
             state.source = nil
@@ -51,16 +43,14 @@ final class StatsRecorder: @unchecked Sendable {
         }
         ConnectionMetrics.shared.reset()
     }
-
-    /// Marks the start of a device-sleep interval (`NEProvider.sleep`).
+    
     func noteSleep() {
         state.withLock { state in
             guard state.sleepBeganAt == nil else { return }
             state.sleepBeganAt = MonotonicClock.now
         }
     }
-
-    /// Closes the current device-sleep interval (`NEProvider.wake`).
+    
     func noteWake() {
         state.withLock { state in
             guard let sleepBeganAt = state.sleepBeganAt else { return }
@@ -70,9 +60,6 @@ final class StatsRecorder: @unchecked Sendable {
     }
 
     func snapshot() -> StatsResponse {
-        // Snapshot the timing state and the source closure under the lock, then
-        // invoke `source` and build the response outside it (the closure reaches
-        // into the tunnel stack and must not run under our mutex).
         let (source, startedAt, sleepSecondsAccumulated, sleepBeganAt) = state.withLock { state in
             (state.source, state.startedAt, state.sleepSecondsAccumulated, state.sleepBeganAt)
         }

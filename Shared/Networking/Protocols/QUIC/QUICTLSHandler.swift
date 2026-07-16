@@ -569,9 +569,6 @@ nonisolated class QUICTLSHandler {
     // MARK: - Key Installation
 
     private func installHandshakeKeys(conn: OpaquePointer, keys: TLS13HandshakeKeys) {
-        let aead = ngtcp2_crypto_aead()
-        let messageDigest = ngtcp2_crypto_md()
-
         var context = ngtcp2_crypto_ctx()
         ngtcp2_crypto_ctx_tls(&context, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
         ngtcp2_conn_set_crypto_ctx(conn, &context)
@@ -602,28 +599,27 @@ nonisolated class QUICTLSHandler {
         var rxHPCtx = ngtcp2_crypto_cipher_ctx()
         var txHPCtx = ngtcp2_crypto_cipher_ctx()
 
-        serverKey.withUnsafeBytes { keyBuf in
+        _ = serverKey.withUnsafeBytes { keyBuf in
             ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
-        clientKey.withUnsafeBytes { keyBuf in
+        _ = clientKey.withUnsafeBytes { keyBuf in
             ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
-        serverHP.withUnsafeBytes { keyBuf in
+        _ = serverHP.withUnsafeBytes { keyBuf in
             ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
-        clientHP.withUnsafeBytes { keyBuf in
+        _ = clientHP.withUnsafeBytes { keyBuf in
             ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
                 keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
-
-        serverIV.withUnsafeBytes { ivBuf in
+        _ = serverIV.withUnsafeBytes { ivBuf in
             ngtcp2_conn_install_rx_handshake_key(conn, &rxAeadCtx,
                 ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &rxHPCtx)
         }
-        clientIV.withUnsafeBytes { ivBuf in
+        _ = clientIV.withUnsafeBytes { ivBuf in
             ngtcp2_conn_install_tx_handshake_key(conn, &txAeadCtx,
                 ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &txHPCtx)
         }
@@ -656,24 +652,24 @@ nonisolated class QUICTLSHandler {
         var txAeadCtx = ngtcp2_crypto_aead_ctx()
         var txHPCtx = ngtcp2_crypto_cipher_ctx()
 
-        rxKey.withUnsafeBytes { buffer in
+        _ = rxKey.withUnsafeBytes { buffer in
             ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &context.aead,
                 buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
-        rxHP.withUnsafeBytes { buffer in
+        _ = rxHP.withUnsafeBytes { buffer in
             ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &context.hp,
                 buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
-        txKey.withUnsafeBytes { buffer in
+        _ = txKey.withUnsafeBytes { buffer in
             ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &context.aead,
                 buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
         }
-        txHP.withUnsafeBytes { buffer in
+        _ = txHP.withUnsafeBytes { buffer in
             ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &context.hp,
                 buffer.baseAddress!.assumingMemoryBound(to: UInt8.self))
         }
 
-        serverATS.withUnsafeBytes { secretBuf in
+        _ = serverATS.withUnsafeBytes { secretBuf in
             rxIV.withUnsafeBytes { ivBuf in
                 ngtcp2_conn_install_rx_key(conn,
                     secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
@@ -683,7 +679,7 @@ nonisolated class QUICTLSHandler {
             }
         }
 
-        clientATS.withUnsafeBytes { secretBuf in
+        _ = clientATS.withUnsafeBytes { secretBuf in
             txIV.withUnsafeBytes { ivBuf in
                 ngtcp2_conn_install_tx_key(conn,
                     secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,

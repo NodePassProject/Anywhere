@@ -238,6 +238,24 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         lwip_bridge_tcp_abort(pcb)
     }
 
+    /// One-shot best-effort write of `data` (e.g. a pre-establishment reject alert), flushing
+    /// output after. Bounded by the send buffer; a short write or `ERR_MEM` just stops early.
+    func tcpWriteImmediate(_ pcb: UnsafeMutableRawPointer, _ data: Data) {
+        guard !data.isEmpty else { return }
+        var written = 0
+        data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            while written < data.count {
+                let sndbuf = tcpSendBuffer(pcb)
+                guard sndbuf > 0 else { break }
+                let chunk = min(min(sndbuf, data.count - written), TunnelConstants.tcpMaxWriteSize)
+                guard tcpWrite(pcb, base + written, UInt16(chunk)) == 0 else { break }
+                written += chunk
+            }
+        }
+        if written > 0 { tcpOutput(pcb) }
+    }
+
     // MARK: - Per-PCB token teardown
     //
     // A new pcb stores a *retained* `TCPConnection` as its `tcp_arg` (vended in the accept

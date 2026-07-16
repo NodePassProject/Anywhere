@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP3MultiplexerPool")
 
-nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiplexer> {
+nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiplexer, Void> {
 
     static let shared = NaiveHTTP3MultiplexerPool()
 
@@ -21,8 +21,8 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         hardCapPerKey: 16
     )
 
-    private override init() {
-        super.init()
+    private init() {
+        super.init(extra: ())
         startIdleEviction(Self.poolPolicy)
     }
 
@@ -41,26 +41,26 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         // removeMultiplexer via onClose), so that path splits into two lock holds;
         // every other path stays in a single hold, matching the original.
         enum Plan { case ready(HTTP3Multiplexer); case closeVictimThenCreate(HTTP3Multiplexer) }
-        let plan: Plan = lock.withLock { _ in
+        let plan: Plan = state.withLock { st in
             // Prune dead/stream-blocked muxes here; age-based idle eviction is the base's sweep.
-            pruneDead(key: key)
+            pruneDead(key: key, &st)
 
-            if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-                lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+            if let existing = st.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+                st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
                 return .ready(existing)
             }
-            if let overflow = overflowSession(key: key) {
-                lastActivity[ObjectIdentifier(overflow)] = MonotonicClock.now
+            if let overflow = overflowSession(key: key, &st) {
+                st.lastActivity[ObjectIdentifier(overflow)] = MonotonicClock.now
                 return .ready(overflow)
             }
             // Never close a multiplexer with live streams; evict an idle one if possible, else grow up to the hard cap.
-            let currentCount = multiplexers[key]?.count ?? 0
-            let softCap = policy?.softCapPerKey ?? 0
+            let currentCount = st.multiplexers[key]?.count ?? 0
+            let softCap = st.policy?.softCapPerKey ?? 0
             if softCap > 0, currentCount >= softCap,
-               let victim = multiplexers[key]?.first(where: { !$0.hasActiveStreams }) {
+               let victim = st.multiplexers[key]?.first(where: { !$0.hasActiveStreams }) {
                 return .closeVictimThenCreate(victim)
             }
-            return .ready(makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni))
+            return .ready(makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni, &st))
         }
 
         let multiplexer: HTTP3Multiplexer
@@ -69,10 +69,10 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
             multiplexer = ready
         case .closeVictimThenCreate(let victim):
             victim.close()
-            multiplexer = lock.withLock { _ in
-                multiplexers[key]?.removeAll { $0 === victim }
-                lastActivity.removeValue(forKey: ObjectIdentifier(victim))
-                return makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni)
+            multiplexer = state.withLock { st in
+                st.multiplexers[key]?.removeAll { $0 === victim }
+                st.lastActivity.removeValue(forKey: ObjectIdentifier(victim))
+                return makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni, &st)
             }
         }
 
@@ -83,51 +83,51 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         }
     }
 
-    /// Builds a fresh multiplexer, wires its self-eviction, and registers it. Must hold ``lock``.
-    private func makeAndRegisterMultiplexer(key: String, host: String, port: UInt16, sni: String) -> HTTP3Multiplexer {
+    /// Builds a fresh multiplexer, wires its self-eviction, and registers it. Must hold ``state``.
+    private func makeAndRegisterMultiplexer(key: String, host: String, port: UInt16, sni: String, _ st: inout PoolState) -> HTTP3Multiplexer {
         let new = HTTP3Multiplexer(host: host, port: port, serverName: sni)
         new.onClose = { [weak self, weak new] in
             guard let self, let new else { return }
             self.removeMultiplexer(new, key: key)
         }
-        multiplexers[key, default: []].append(new)
-        lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
+        st.multiplexers[key, default: []].append(new)
+        st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
         return new
     }
 
     /// Returns the least-loaded multiplexer when the pool is at its hard cap.
-    /// Must be called with `lock` held.
-    private func overflowSession(key: String) -> HTTP3Multiplexer? {
-        let hardCap = policy?.hardCapPerKey ?? 0
-        guard hardCap > 0, let pool = multiplexers[key], pool.count >= hardCap else {
+    /// Must be called with ``state`` held.
+    private func overflowSession(key: String, _ st: inout PoolState) -> HTTP3Multiplexer? {
+        let hardCap = st.policy?.hardCapPerKey ?? 0
+        guard hardCap > 0, let pool = st.multiplexers[key], pool.count >= hardCap else {
             return nil
         }
         let candidate = pool
             .filter { !$0.isClosed && !$0.poolIsStreamBlocked }
             .min(by: { $0.activeStreamCount < $1.activeStreamCount })
         guard let candidate, candidate.forceReserveStream() else { return nil }
-        logger.warning("[HTTP3Pool] Pool hit hard cap (\(policy?.hardCapPerKey ?? 0)) for \(key); overflowing onto existing multiplexer")
+        logger.warning("[HTTP3Pool] Pool hit hard cap (\(hardCap)) for \(key); overflowing onto existing multiplexer")
         return candidate
     }
 
     // MARK: - Eviction
 
-    /// Removes closed/stream-blocked muxes (age-based eviction is the base's). Must hold ``lock``.
-    private func pruneDead(key: String) {
-        multiplexers[key]?.removeAll { multiplexer in
+    /// Removes closed/stream-blocked muxes (age-based eviction is the base's). Must hold ``state``.
+    private func pruneDead(key: String, _ st: inout PoolState) {
+        st.multiplexers[key]?.removeAll { multiplexer in
             if multiplexer.isClosed {
-                lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
                 return true
             }
             if multiplexer.poolIsStreamBlocked && !multiplexer.hasActiveStreams {
-                lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
                 multiplexer.close()
                 return true
             }
             return false
         }
-        if multiplexers[key]?.isEmpty == true {
-            multiplexers.removeValue(forKey: key)
+        if st.multiplexers[key]?.isEmpty == true {
+            st.multiplexers.removeValue(forKey: key)
         }
     }
 }

@@ -15,15 +15,7 @@ extension TLSRecordConnection {
     // MARK: - TLS 1.2 Record Crypto
 
     func encryptTLS12Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        let seqNum: UInt64 = seqLock.withLock { _ in
-            if direction == .server {
-                defer { serverSeqNum += 1 }
-                return serverSeqNum
-            } else {
-                defer { clientSeqNum += 1 }
-                return clientSeqNum
-            }
-        }
+        let seqNum = nextEgressSeqNum()
 
         let version = tlsVersion
 

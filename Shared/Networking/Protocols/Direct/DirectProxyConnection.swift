@@ -13,27 +13,22 @@ nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Senda
 
     init(transport: any AsyncByteTransport) {
         self.transport = transport
-        super.init()
     }
 
-    override var isConnected: Bool { transport.isReady }
+    var isConnected: Bool { transport.isReady }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await transport.send(data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         switch try await transport.receive() {
         case .bytes(let data): return data
         case .end: return nil
         }
     }
 
-    override func closeWrite() async throws {
-        try await transport.finishSend()
-    }
-
-    override func cancel() {
+    func cancel() {
         transport.cancel()
     }
 }

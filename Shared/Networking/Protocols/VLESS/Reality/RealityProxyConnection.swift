@@ -12,21 +12,20 @@ nonisolated class RealityProxyConnection: ProxyConnection {
 
     init(realityConnection: TLSRecordConnection) {
         self.realityConnection = realityConnection
-        super.init()
     }
 
     /// Reality always negotiates TLS 1.3.
-    override var outerTLSVersion: TLSVersion? { .tls13 }
+    var outerTLSVersion: TLSVersion? { .tls13 }
 
-    override var isConnected: Bool {
+    var isConnected: Bool {
         realityConnection.connection?.isReady ?? false
     }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await realityConnection.send(data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         do {
             return try await realityConnection.receive()
         } catch TLSRecordError.recordAuthenticationFailed {
@@ -37,17 +36,17 @@ nonisolated class RealityProxyConnection: ProxyConnection {
         }
     }
 
-    override func cancel() {
+    func cancel() {
         realityConnection.cancel()
     }
 
     // MARK: - Vision direct (unencrypted) passthroughs
 
-    override func receiveDirectRaw() async throws -> Data? {
+    func receiveDirectRaw() async throws -> Data? {
         try await realityConnection.receiveRaw()
     }
 
-    override func sendDirectRaw(_ data: Data) async throws {
+    func sendDirectRaw(_ data: Data) async throws {
         try await realityConnection.sendRaw(data)
     }
 }

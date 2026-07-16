@@ -9,7 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendable {
+nonisolated final class UDPTransport: AsyncDatagramTransport, Sendable {
 
     // MARK: Constants
 
@@ -28,7 +28,7 @@ nonisolated final class UDPTransport: AsyncDatagramTransport, @unchecked Sendabl
     }
 
     /// State and promises shared with the driver task.
-    private final class Guts: @unchecked Sendable {
+    private final class Guts: Sendable {
         let state = Mutex(State())
         /// Resolved when the connection reaches ready (success) or fails/times out.
         let connectPromise = AsyncPromise<Void>()

@@ -16,23 +16,22 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
     init(transport: any AsyncDatagramTransport) {
         self.transport = transport
-        super.init()
     }
 
-    override var isConnected: Bool { transport.isReady }
-    override var deliversDatagrams: Bool { true }
+    var isConnected: Bool { transport.isReady }
+    var deliversDatagrams: Bool { true }
 
-    override func sendRaw(_ data: Data) async throws {
+    func sendRaw(_ data: Data) async throws {
         try await transport.send(data)
     }
 
-    override func receiveRaw() async throws -> Data? {
+    func receiveRaw() async throws -> Data? {
         // The datagram transport throws on terminal failure and never signals a clean
         // EOF, so this only returns data (or propagates the throw).
         try await transport.receive()
     }
 
-    override func cancel() {
+    func cancel() {
         transport.cancel()
     }
 }

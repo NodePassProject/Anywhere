@@ -10,7 +10,7 @@ import Synchronization
 
 /// Default outbound proxy only. Handshake subtraction is global, so timings are
 /// approximate under concurrent dials; clamped at zero.
-nonisolated final class ConnectionMetrics: @unchecked Sendable {
+nonisolated final class ConnectionMetrics: Sendable {
     static let shared = ConnectionMetrics()
 
     enum Metric {

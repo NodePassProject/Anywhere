@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+DNS")
 
@@ -129,8 +130,8 @@ extension TunnelStack {
         // intercepted destinations re-enter here, never the fast path.
         let flowKey = UDPFlowKey(srcIP: datagram.srcIP, srcPort: datagram.srcPort,
                                  dstIP: datagram.dstIP, dstPort: datagram.dstPort, isIPv6: datagram.isIPv6)
-        if let existing = udpFlows[flowKey] {
-            existing.handleReceivedData(payload, payloadLength: payload.count)
+        if let existing = udpFlows.withLock({ $0[flowKey] }) {
+            Task { await existing.handleReceivedData(payload, payloadLength: payload.count) }
             return true
         }
 
@@ -145,13 +146,12 @@ extension TunnelStack {
             dstIPData: datagram.dstIPData,      // reply source → the Anywhere resolver address
             isIPv6: datagram.isIPv6,
             configuration: configuration,
-            routeTarget: udpConfig.defaultRouteTarget,   // proxied via the default outbound
-            flowQueue: udpQueue
+            routeTarget: udpConfig.defaultRouteTarget   // proxied via the default outbound
         )
         evictUDPFlowsToAdmit()
-        udpFlows[flowKey] = flow
+        udpFlows.withLock { $0[flowKey] = flow }
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(datagram.dstPort) via \(configuration.name)")
-        flow.handleReceivedData(payload, payloadLength: payload.count)
+        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
         return true
     }
 
