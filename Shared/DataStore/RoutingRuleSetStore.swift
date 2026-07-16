@@ -310,6 +310,15 @@ class RoutingRuleSetStore {
                 resolvedTargets[assignedId] = composite
             }
         }
+        
+        var resolvedIPsByAddress: [String: String] = [:]
+        for configuration in resolvedTargets.values {
+            let address = configuration.serverAddress
+            guard resolvedIPsByAddress[address] == nil else { continue }
+            if let ip = await VPNViewModel.resolveServerAddress(address) {
+                resolvedIPsByAddress[address] = ip
+            }
+        }
 
         await Task.detached {
             var entries: [RoutingBinaryWriter.Entry] = []
@@ -338,7 +347,7 @@ class RoutingRuleSetStore {
                     action = .proxy
                     configId = id
                     configurationsById[assignedId] = configuration.withResolvedIP(
-                        VPNViewModel.resolveServerAddress(configuration.serverAddress)
+                        resolvedIPsByAddress[configuration.serverAddress]
                     )
                 } else {
                     continue

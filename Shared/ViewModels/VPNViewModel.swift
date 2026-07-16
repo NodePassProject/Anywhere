@@ -338,13 +338,21 @@ class VPNViewModel {
         }
     }
 
-    /// Returns `configuration` with `resolvedIP` set, preferring an existing value, then `fallback`, then a DNS lookup.
+    /// Returns `configuration` with `resolvedIP` set, preferring an existing value, then `fallback`,
+    /// then a DNS lookup via the shared `DNSResolver` — on its blocking-resolve worker, so callers
+    /// on the main actor or the cooperative pool never block on `getaddrinfo`.
     nonisolated static func withResolvedIP(
         _ configuration: ProxyConfiguration,
         fallback: String? = nil
-    ) -> ProxyConfiguration {
+    ) async -> ProxyConfiguration {
         if configuration.resolvedIP != nil { return configuration }
-        guard let resolved = fallback ?? resolveServerAddress(configuration.serverAddress) else {
+        let resolvedIP: String?
+        if let fallback {
+            resolvedIP = fallback
+        } else {
+            resolvedIP = await resolveServerAddress(configuration.serverAddress)
+        }
+        guard let resolved = resolvedIP else {
             return configuration
         }
         return ProxyConfiguration(
@@ -452,9 +460,9 @@ class VPNViewModel {
               let configuration = selectedConfiguration else { return }
 
         Task { [self] in
-            let resolvedIP = await Task.detached {
-                VPNViewModel.resolveServerAddress(configuration.serverAddress)
-            }.value
+            // Resolves on DNSResolver's worker queue, off both the main actor and
+            // the cooperative pool.
+            let resolvedIP = await VPNViewModel.resolveServerAddress(configuration.serverAddress)
 
             let tunnelProtocol = NETunnelProviderProtocol()
             tunnelProtocol.providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
@@ -481,33 +489,22 @@ class VPNViewModel {
                 manager.onDemandRules = nil
             }
 
-            manager.saveToPreferences { [weak self] error in
-                guard let self else { return }
-                if let error {
-                    Task { @MainActor in self.startError = error.localizedDescription }
-                    return
+            do {
+                try await manager.saveToPreferences()
+                // Reload so the connection reference is valid after the save round-trip.
+                try await manager.loadFromPreferences()
+
+                let resolved = await Self.withResolvedIP(configuration, fallback: resolvedIP)
+
+                // Persist to App Group so the NE can read it when started from Settings or On Demand, where options is nil.
+                if let configData = try? JSONEncoder().encode(resolved) {
+                    AWCore.setLastConfigurationData(configData)
                 }
 
-                manager.loadFromPreferences { error in
-                    if let error {
-                        Task { @MainActor in self.startError = error.localizedDescription }
-                        return
-                    }
-
-                    let resolved = Self.withResolvedIP(configuration, fallback: resolvedIP)
-
-                    // Persist to App Group so the NE can read it when started from Settings or On Demand, where options is nil.
-                    if let configData = try? JSONEncoder().encode(resolved) {
-                        AWCore.setLastConfigurationData(configData)
-                    }
-
-                    do {
-                        let messageData = try JSONEncoder().encode(TunnelMessage.setConfiguration(resolved))
-                        try manager.connection.startVPNTunnel(options: [TunnelMessage.optionKey: messageData as NSObject])
-                    } catch {
-                        Task { @MainActor in self.startError = error.localizedDescription }
-                    }
-                }
+                let messageData = try JSONEncoder().encode(TunnelMessage.setConfiguration(resolved))
+                try manager.connection.startVPNTunnel(options: [TunnelMessage.optionKey: messageData as NSObject])
+            } catch {
+                self.startError = error.localizedDescription
             }
         }
     }
@@ -547,7 +544,7 @@ class VPNViewModel {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
 
         Task.detached {
-            let resolved = Self.withResolvedIP(configuration)
+            let resolved = await Self.withResolvedIP(configuration)
 
             // Keep App Group in sync so On Demand restarts use the latest selection.
             if let configData = try? JSONEncoder().encode(resolved) {
@@ -566,9 +563,10 @@ class VPNViewModel {
     // MARK: - DNS Resolution
 
     /// Resolves a server address to an IP string (IP literals pass through) via the
-    /// shared `DNSResolver`, so proxy lookups share the transport layers' cache.
-    nonisolated static func resolveServerAddress(_ address: String) -> String? {
-        DNSResolver.shared.resolveHost(address)
+    /// shared `DNSResolver`, so proxy lookups share the transport layers' cache. The
+    /// blocking lookup runs on the resolver's worker queue, not the caller's thread.
+    nonisolated static func resolveServerAddress(_ address: String) async -> String? {
+        await DNSResolver.shared.resolveHost(address)
     }
 
 }

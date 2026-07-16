@@ -55,7 +55,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
                 self.lock.withLock { _ in self.dedicatedMultiplexers.removeValue(forKey: multiplexerID) }
                 logger.debug("[NaiveHTTP2Pool] Evicted dedicated multiplexer")
             }
-            return await openStream(on: multiplexer, destination: destination)
+            return openStream(on: multiplexer, destination: destination)
         }
 
         let key = Self.makeKey(host: host, port: port, sni: sni)
@@ -93,9 +93,10 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
         return await openStream(on: multiplexer, destination: destination)
     }
 
-    /// Opens a stream on the multiplexer queue (off the pool gate) and returns it.
-    private func openStream(on multiplexer: NaiveHTTP2Multiplexer, destination: String) async -> NaiveHTTP2Stream {
-        await multiplexer.run { multiplexer.openStream(destination: destination) }
+    /// Creates a stream on the multiplexer (off the pool gate) and returns it. `openStream` now
+    /// locks internally, so there is no queue hop to await.
+    private func openStream(on multiplexer: NaiveHTTP2Multiplexer, destination: String) -> NaiveHTTP2Stream {
+        multiplexer.openStream(destination: destination)
     }
 
     // MARK: - Eviction

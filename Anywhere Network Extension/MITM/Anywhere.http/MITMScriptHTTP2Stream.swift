@@ -6,15 +6,14 @@
 //
 
 import Foundation
+import Synchronization
 
-/// One HTTP/2 request/response exchange on a single stream of a `MITMScriptHTTP2Connection`.
-/// All state is confined to the owning connection's `queue`.
 nonisolated final class MITMScriptHTTP2Stream {
 
     /// Advertised per-stream receive window; must match the connection's SETTINGS_INITIAL_WINDOW_SIZE.
     private static let recvWindow = 4 * 1024 * 1024
 
-    // MARK: Inputs
+    // MARK: Inputs (immutable)
 
     let streamID: UInt32
     private weak var connection: MITMScriptHTTP2Connection?
@@ -26,31 +25,29 @@ nonisolated final class MITMScriptHTTP2Stream {
     /// Resumed exactly once in `finish`; the async bridge over the connection's read loop.
     private let continuation: CheckedContinuation<MITMScriptHTTPClient.Response, Error>
 
-    // MARK: State (touched only on the connection's queue)
+    // MARK: State (behind `lock`)
 
-    /// Send-side flow-control window; seeded from the peer's INITIAL_WINDOW_SIZE in `start`.
-    private(set) var sendWindow = 65_535
-    private var streamRecvConsumed = 0
+    private struct State {
+        var haveFinalHead = false
+        var status = 0
+        var headers: [(name: String, value: String)] = []
+        var body = Data()
+        var reservedBytes = 0
+        var endStreamReceived = false
+        var streamRecvConsumed = 0
 
-    private var haveFinalHead = false
-    private var status = 0
-    private var headers: [(name: String, value: String)] = []
-    private var body = Data()
-    private var reservedBytes = 0
-    private var endStreamReceived = false
+        var finished = false
 
-    private var finished = false
-
-    /// Wall-clock resource cap. Fires once; never rearmed.
-    private var deadlineTask: Task<Void, Never>?
-    /// Inactivity backstop, rearmed on every response progress. A generation counter drops a stale
-    /// task that already fired just as a rearm superseded it.
-    private var idleTask: Task<Void, Never>?
-    private var idleGeneration = 0
-    /// Fire-and-forget request send (HEADERS + optional DATA); cancelled in `finish`.
-    private var sendTask: Task<Void, Never>?
-
-    var isFinished: Bool { finished }
+        /// Wall-clock resource cap. Fires once; never rearmed.
+        var deadlineTask: Task<Void, Never>?
+        /// Inactivity backstop, rearmed on every response progress. A generation counter drops a stale
+        /// task that already fired just as a rearm superseded it.
+        var idleTask: Task<Void, Never>?
+        var idleGeneration = 0
+        /// Fire-and-forget request send (HEADERS + optional DATA); cancelled in `finish`.
+        var sendTask: Task<Void, Never>?
+    }
+    private let lock = Mutex(State())
 
     // MARK: Init
 
@@ -72,42 +69,53 @@ nonisolated final class MITMScriptHTTP2Stream {
         self.continuation = continuation
     }
 
-    // MARK: - Lifecycle (on the connection's queue)
+    // MARK: - Lifecycle
 
+    /// Called once by the connection right after creating the stream (send window already seeded on
+    /// the connection). Arms the timers and fires the request send.
     func start() {
-        guard let connection else { fail(MITMScriptHTTP2Error.notReady); return }
-        sendWindow = connection.peerInitialWindowSize
         armTimers()
-        sendTask = Task { [weak self] in await self?.sendRequest() }
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.sendRequest()
+        }
+        let stale = lock.withLock { state -> Bool in
+            guard !state.finished else { return true }
+            state.sendTask = task
+            return false
+        }
+        if stale { task.cancel() }
     }
 
+    /// Arms the one-shot wall-clock deadline, then the inactivity backstop. `fail` is idempotent, so
+    /// an expiry that races completion is harmless.
     private func armTimers() {
-        guard let queue = connection?.queue else { return }
         let timeout = resourceTimeout
-        deadlineTask = Task {
-            try? await Task.sleep(for: .seconds(timeout))
-            queue.async { [weak self] in
-                guard let self, !self.finished else { return }
-                self.fail(TransportError.connectionFailed("request exceeded \(Int(timeout))s deadline"))
+        lock.withLock { state in
+            guard !state.finished else { return }
+            state.deadlineTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                self?.fail(TransportError.connectionFailed("request exceeded \(Int(timeout))s deadline"))
             }
         }
         rearmIdleTimer()
     }
 
-    /// Inactivity backstop; reset whenever the response makes progress. Runs on the connection's queue.
+    /// Inactivity backstop; reset whenever the response makes progress. The generation guard drops a
+    /// task superseded by a later rearm.
     private func rearmIdleTimer() {
-        guard let queue = connection?.queue else { return }
         let interval = request.timeoutInterval
         guard interval > 0 else { return }
-        idleGeneration += 1
-        let generation = idleGeneration
-        idleTask?.cancel()
-        idleTask = Task {
-            try? await Task.sleep(for: .seconds(interval))
-            queue.async { [weak self] in
-                // The generation guard drops a task superseded by a later rearm.
-                guard let self, !self.finished, self.idleGeneration == generation else { return }
-                self.fail(TransportError.connectionFailed("request idle for \(Int(interval))s"))
+        lock.withLock { state in
+            guard !state.finished else { return }
+            state.idleGeneration += 1
+            let generation = state.idleGeneration
+            state.idleTask?.cancel()
+            state.idleTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(interval))
+                guard let self else { return }
+                let expired = self.lock.withLock { !$0.finished && $0.idleGeneration == generation }
+                if expired { self.fail(TransportError.connectionFailed("request idle for \(Int(interval))s")) }
             }
         }
     }
@@ -117,9 +125,9 @@ nonisolated final class MITMScriptHTTP2Stream {
     /// Sends HEADERS then (if present) the body. The response arrives separately via
     /// `handleHeaders`/`handleData`; here we only surface a send-side failure.
     private func sendRequest() async {
-        guard let connection else { failOnQueue(MITMScriptHTTP2Error.notReady); return }
+        guard let connection else { fail(MITMScriptHTTP2Error.notReady); return }
         guard let headerBlock = buildHeaderBlock() else {
-            failOnQueue(MITMScriptHTTP2Error.protocolError("could not serialize request"))
+            fail(MITMScriptHTTP2Error.protocolError("could not serialize request"))
             return
         }
         let requestBody = request.httpBody ?? Data()
@@ -131,16 +139,7 @@ nonisolated final class MITMScriptHTTP2Stream {
             }
             // Success: the full request is sent; the response arrives via handleHeaders/handleData.
         } catch {
-            failOnQueue(error)
-        }
-    }
-
-    /// Hops to the connection's queue to fail (no-op if the exchange already finished).
-    private func failOnQueue(_ error: Error) {
-        guard let connection else { return }
-        connection.queue.async { [weak self] in
-            guard let self, !self.finished else { return }
-            self.fail(error)
+            fail(error)
         }
     }
 
@@ -182,59 +181,97 @@ nonisolated final class MITMScriptHTTP2Stream {
         return HPACKEncoder.encodeHeaderBlock(fields)
     }
 
-    // MARK: - Response (called by the connection on its queue)
+    // MARK: - Response (called by the connection with no connection lock held)
 
     func handleHeaders(fields: [(name: String, value: String)], endStream: Bool) {
-        guard !finished else { return }
         rearmIdleTimer()
 
-        if !haveFinalHead {
-            // Only the response head carries `:status`; require it before we have a final head.
-            guard let statusValue = HTTPHeader.firstValue(in: fields, named: ":status"),
-                  let code = HTTPHeader.parseStatusCode(statusValue) else {
-                fail(MITMScriptHTTP2Error.protocolError("missing or invalid :status"))
-                return
-            }
-            // Skip 1xx interim responses; keep waiting for the final head.
-            if (100..<200).contains(code) { return }
-            haveFinalHead = true
-            status = code
-            headers = fields.filter { !$0.name.hasPrefix(":") }
-        }
-        // A second header block after the final head is trailers (RFC 9113 §8.1); drop the fields.
+        enum Outcome { case ignore; case failStatus; case finishOK }
+        let outcome: Outcome = lock.withLock { state in
+            guard !state.finished else { return .ignore }
 
-        if endStream {
-            endStreamReceived = true
+            if !state.haveFinalHead {
+                // Only the response head carries `:status`; require it before we have a final head.
+                guard let statusValue = HTTPHeader.firstValue(in: fields, named: ":status"),
+                      let code = HTTPHeader.parseStatusCode(statusValue) else {
+                    return .failStatus
+                }
+                // Skip 1xx interim responses; keep waiting for the final head.
+                if (100..<200).contains(code) { return .ignore }
+                state.haveFinalHead = true
+                state.status = code
+                state.headers = fields.filter { !$0.name.hasPrefix(":") }
+            }
+            // A second header block after the final head is trailers (RFC 9113 §8.1); drop the fields.
+
+            if endStream {
+                state.endStreamReceived = true
+                return .finishOK
+            }
+            return .ignore
+        }
+        switch outcome {
+        case .ignore:
+            break
+        case .failStatus:
+            fail(MITMScriptHTTP2Error.protocolError("missing or invalid :status"))
+        case .finishOK:
             finishSuccess()
         }
     }
 
     func handleData(_ body: Data, fullPayloadCount: Int, endStream: Bool) {
-        guard !finished else { return }
         rearmIdleTimer()
-        guard haveFinalHead else {
+
+        enum Outcome {
+            case ignore
+            case failNoHead
+            case fail(Error)
+            case ok(windowUpdate: NaiveHTTP2Frame?, finish: Bool)
+        }
+        let outcome: Outcome = lock.withLock { state in
+            guard !state.finished else { return .ignore }
+            guard state.haveFinalHead else { return .failNoHead }
+
+            // Enforce the per-response and global byte caps before buffering.
+            if !body.isEmpty {
+                if state.body.count + body.count > maxBytes {
+                    return .fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
+                }
+                guard MITMScriptHTTPClient.reserveInFlight(body.count) else {
+                    return .fail(MITMScriptHTTPClient.ClientError.globalBudgetExceeded(MITMScriptHTTPClient.maxGlobalInFlightBytes))
+                }
+                state.reservedBytes += body.count
+                state.body.append(body)
+            }
+
+            // Replenish the stream receive window (full payload, incl. padding); pointless on
+            // END_STREAM — the stream is closing.
+            var windowUpdate: NaiveHTTP2Frame?
+            state.streamRecvConsumed += fullPayloadCount
+            if !endStream, state.streamRecvConsumed >= Self.recvWindow / 2 {
+                let increment = UInt32(state.streamRecvConsumed)
+                state.streamRecvConsumed = 0
+                windowUpdate = NaiveHTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
+            }
+
+            if endStream { state.endStreamReceived = true }
+            return .ok(windowUpdate: windowUpdate, finish: endStream)
+        }
+        switch outcome {
+        case .ignore:
+            break
+        case .failNoHead:
             fail(MITMScriptHTTP2Error.protocolError("DATA before response head"))
-            return
-        }
-        if !appendBody(body) { return }
-
-        // Replenish the stream receive window (full payload, incl. padding); pointless on
-        // END_STREAM — the stream is closing.
-        streamRecvConsumed += fullPayloadCount
-        if !endStream, streamRecvConsumed >= Self.recvWindow / 2 {
-            let increment = UInt32(streamRecvConsumed)
-            streamRecvConsumed = 0
-            connection?.sendControlFrame(NaiveHTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment))
-        }
-
-        if endStream {
-            endStreamReceived = true
-            finishSuccess()
+        case .fail(let error):
+            fail(error)
+        case .ok(let windowUpdate, let finish):
+            if let windowUpdate { connection?.sendControlFrame(windowUpdate) }
+            if finish { finishSuccess() }
         }
     }
 
     func handleReset(errorCode: UInt32) {
-        guard !finished else { return }
         // The connection has already removed us from its stream table.
         finish(.failure(MITMScriptHTTP2Error.streamReset(streamID)), removeFromConnection: false, sendRST: false)
     }
@@ -244,29 +281,6 @@ nonisolated final class MITMScriptHTTP2Stream {
         finish(.failure(error), removeFromConnection: false, sendRST: false)
     }
 
-    // MARK: - Body accounting
-
-    /// Returns false (and fails the exchange) when the per-response or global byte cap is hit.
-    private func appendBody(_ data: Data) -> Bool {
-        guard !data.isEmpty else { return true }
-        if body.count + data.count > maxBytes {
-            fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
-            return false
-        }
-        guard MITMScriptHTTPClient.reserveInFlight(data.count) else {
-            fail(MITMScriptHTTPClient.ClientError.globalBudgetExceeded(MITMScriptHTTPClient.maxGlobalInFlightBytes))
-            return false
-        }
-        reservedBytes += data.count
-        body.append(data)
-        return true
-    }
-
-    // MARK: - Flow control (called by the connection on its queue)
-
-    func consumeSendWindow(_ bytes: Int) { sendWindow -= bytes }
-    func adjustSendWindow(delta: Int) { sendWindow += delta }
-
     // MARK: - Completion
 
     private func fail(_ error: Error) {
@@ -274,14 +288,20 @@ nonisolated final class MITMScriptHTTP2Stream {
     }
 
     private func finishSuccess() {
-        var responseBody = body
+        let snapshot: (body: Data, headers: [(name: String, value: String)], status: Int)? = lock.withLock { state in
+            guard !state.finished else { return nil }
+            return (state.body, state.headers, state.status)
+        }
+        guard let snapshot else { return }
+
+        var responseBody = snapshot.body
         var dropHeaders: Set<String> = ["transfer-encoding"]
 
         // Decode the origin's Content-Encoding so the script sees plaintext, dropping the stale
         // encoding/length headers. An unsupported/failed coding is left as-is for the script.
-        let plan = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: headers, named: "content-encoding"))
+        let plan = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: snapshot.headers, named: "content-encoding"))
         if plan.requiresDecompression,
-           let decoded = MITMBodyCodec.decompress(body, plan: plan, host: request.url?.host ?? "") {
+           let decoded = MITMBodyCodec.decompress(snapshot.body, plan: plan, host: request.url?.host ?? "") {
             if decoded.count > maxBytes {
                 fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
                 return
@@ -291,10 +311,10 @@ nonisolated final class MITMScriptHTTP2Stream {
             dropHeaders.insert("content-length")
         }
 
-        let responseHeaders = headers.filter { !dropHeaders.contains($0.name.lowercased()) }
+        let responseHeaders = snapshot.headers.filter { !dropHeaders.contains($0.name.lowercased()) }
 
         finish(.success(MITMScriptHTTPClient.Response(
-            status: status,
+            status: snapshot.status,
             headers: responseHeaders,
             body: responseBody,
             finalURL: request.url?.absoluteString
@@ -306,15 +326,27 @@ nonisolated final class MITMScriptHTTP2Stream {
         removeFromConnection: Bool,
         sendRST: Bool
     ) {
-        guard !finished else { return }
-        finished = true
-        deadlineTask?.cancel(); deadlineTask = nil
-        idleTask?.cancel(); idleTask = nil
-        sendTask?.cancel(); sendTask = nil
-        MITMScriptHTTPClient.releaseInFlight(reservedBytes)
-        reservedBytes = 0
+        struct Captured { let deadline: Task<Void, Never>?; let idle: Task<Void, Never>?; let send: Task<Void, Never>?
+                          let reservedBytes: Int; let endStreamReceived: Bool }
+        let captured: Captured? = lock.withLock { state in
+            guard !state.finished else { return nil }
+            state.finished = true
+            let c = Captured(deadline: state.deadlineTask, idle: state.idleTask, send: state.sendTask,
+                             reservedBytes: state.reservedBytes, endStreamReceived: state.endStreamReceived)
+            state.deadlineTask = nil
+            state.idleTask = nil
+            state.sendTask = nil
+            state.reservedBytes = 0
+            return c
+        }
+        guard let captured else { return }
+
+        captured.deadline?.cancel()
+        captured.idle?.cancel()
+        captured.send?.cancel()
+        MITMScriptHTTPClient.releaseInFlight(captured.reservedBytes)
         if removeFromConnection {
-            connection?.removeStream(self, sendRST: sendRST && !endStreamReceived)
+            connection?.removeStream(self, sendRST: sendRST && !captured.endStreamReceived)
         }
         // Unblock a request send parked on this stream's flow window so its task unwinds.
         connection?.wakeFlowParks()

@@ -47,7 +47,10 @@ extension TunnelStack {
 
     func stop() {
         stopObservingSettings()
-        lwipQueue.sync { [self] in
+        // Runs on the provider's `stopTunnel` thread, off the lwIP queue. `runSyncOffQueue`
+        // precondition-guards that (a call already on the queue would deadlock) — the sanctioned
+        // primitive for "teardown that must finish before returning," in place of a raw `.sync`.
+        lwipBridge.runSyncOffQueue { [self] in
             running = false
             deferredRestartTask?.cancel()
             deferredRestartTask = nil
@@ -162,6 +165,9 @@ extension TunnelStack {
             rebuiltMultiplexerPool = nil
         }
 
+        // Called on lwipQueue; blocks it until udpQueue drains this teardown. Safe because the
+        // dependency is strictly one-way — udpQueue work never synchronously waits on lwipQueue,
+        // so the two serial queues can't deadlock on each other.
         udpQueue.sync {
             udpMultiplexerPool?.closeAll()
             udpMultiplexerPool = rebuiltMultiplexerPool

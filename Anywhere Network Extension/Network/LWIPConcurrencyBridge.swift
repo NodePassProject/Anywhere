@@ -56,6 +56,13 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         }
     }
 
+    /// Runs `body` synchronously on the lwIP queue from an off-queue caller (e.g. the provider's
+    /// `stop()` thread), completing before returning. Delegates to the executor's guarded
+    /// primitive, which precondition-checks it isn't already on the queue (that would deadlock).
+    func runSyncOffQueue<T>(_ body: () -> T) -> T {
+        executor.runSyncOffQueue(body)
+    }
+
     // MARK: - Lifecycle (start / end point)
 
     /// Publishes `host` as the bridge's host context and installs the C callbacks that route

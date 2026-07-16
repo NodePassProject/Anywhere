@@ -33,7 +33,7 @@ nonisolated enum LatencyTester {
         ConnectionMetrics.shared.suspendRecording()
         defer { ConnectionMetrics.shared.resumeRecording() }
 
-        let testConfiguration = resolvedConfiguration(configuration)
+        let testConfiguration = await resolvedConfiguration(configuration)
 
         do {
             let latencyMilliseconds = try await withThrowingTaskGroup(of: Int.self) { group in
@@ -68,14 +68,23 @@ nonisolated enum LatencyTester {
     /// Re-resolves each hop with NE-process `getaddrinfo` and discards any
     /// main-app `resolvedIP`: while the tunnel is up, main-app DNS returns lwIP
     /// fake IPs (198.18.0.0/15) unroutable from the NE's kernel-bypassed sockets.
-    private static func resolvedConfiguration(_ configuration: ProxyConfiguration) -> ProxyConfiguration {
-        let resolvedChain = configuration.chain?.map(resolvedConfiguration)
+    /// Async so the blocking lookups run on the resolver's worker, not this task's thread.
+    private static func resolvedConfiguration(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
+        var resolvedChain: [ProxyConfiguration]?
+        if let chain = configuration.chain {
+            var hops: [ProxyConfiguration] = []
+            hops.reserveCapacity(chain.count)
+            for hop in chain {
+                hops.append(await resolvedConfiguration(hop))
+            }
+            resolvedChain = hops
+        }
         return ProxyConfiguration(
             id: configuration.id,
             name: configuration.name,
             serverAddress: configuration.serverAddress,
             serverPort: configuration.serverPort,
-            resolvedIP: DNSResolver.shared.resolveHost(configuration.serverAddress, forceFresh: true),
+            resolvedIP: await DNSResolver.shared.resolveHost(configuration.serverAddress, forceFresh: true),
             subscriptionId: configuration.subscriptionId,
             outbound: configuration.outbound,
             chain: resolvedChain
@@ -84,10 +93,10 @@ nonisolated enum LatencyTester {
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
         // forceFresh: tests must measure against a fresh address, never a stale one.
-        DNSResolver.shared.prewarm(configuration.serverAddress, forceFresh: true)
+        await DNSResolver.shared.prewarm(configuration.serverAddress, forceFresh: true)
         if let chain = configuration.chain {
             for proxy in chain {
-                DNSResolver.shared.prewarm(proxy.serverAddress, forceFresh: true)
+                await DNSResolver.shared.prewarm(proxy.serverAddress, forceFresh: true)
             }
         }
 

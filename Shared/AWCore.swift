@@ -21,6 +21,7 @@ nonisolated final class AWCore {
         static let mitmScriptQueue = "\(bundle).mitm-script"
         static let mitmCertMintQueue = "\(bundle).mitm-cert-mint"
         static let outputQueue = "\(bundle).output"
+        static let dnsResolveQueue = "\(bundle).dns-resolve"
         static let pathMonitorQueue = "\(bundle).path-monitor"
         static let quicQueue = "\(bundle).quic"
         static let udpQueue = "\(bundle).udp"

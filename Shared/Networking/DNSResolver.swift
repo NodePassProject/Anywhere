@@ -59,13 +59,50 @@ nonisolated final class DNSResolver {
 
     private let state = Mutex(State())
 
+    /// The resolver's concurrency boundary: every blocking resolver syscall
+    /// (`getaddrinfo`, the `dns_sd` poll loop) runs on this queue, never on the
+    /// width-limited cooperative pool — `Task.detached` does NOT leave that pool.
+    /// Concurrent so parallel lookups don't serialize behind one slow resolver call;
+    /// each block is independent (all shared state lives behind ``state``).
+    private static let blockingResolveQueue = DispatchQueue(
+        label: AWCore.Identifier.dnsResolveQueue,
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+
     private init() {}
 
     // MARK: - Public API
 
+    /// Async counterpart of ``resolveAll(_:forceFresh:)``: the potentially blocking
+    /// lookup runs on the resolver's worker queue and resumes the caller with the result.
+    func resolveAll(_ host: String, forceFresh: Bool = false) async -> [String] {
+        await withCheckedContinuation { continuation in
+            Self.blockingResolveQueue.async {
+                continuation.resume(returning: self.resolveAll(host, forceFresh: forceFresh))
+            }
+        }
+    }
+
+    /// Async counterpart of ``resolveHost(_:forceFresh:)``.
+    func resolveHost(_ host: String, forceFresh: Bool = false) async -> String? {
+        await resolveAll(host, forceFresh: forceFresh).first
+    }
+
+    /// Async counterpart of ``prewarm(_:forceFresh:)``.
+    func prewarm(_ host: String, forceFresh: Bool = false) async {
+        _ = await resolveAll(host, forceFresh: forceFresh)
+    }
+
+    // MARK: - Public API (synchronous — blocking-tolerant callers only)
+
     /// Resolves a hostname to IP strings. A fresh hit returns immediately; a
     /// stale hit returns the old IPs and refreshes in the background unless
     /// `forceFresh` forces a synchronous lookup. Returns empty on failure.
+    ///
+    /// Blocking: a cache miss runs `getaddrinfo` on the calling thread. Callable
+    /// only from contexts that may block (GCD queues); async contexts pick the
+    /// async overload, which hops to ``blockingResolveQueue``.
     func resolveAll(_ host: String, forceFresh: Bool = false) -> [String] {
         let bare = Self.stripBrackets(host)
 
@@ -145,7 +182,7 @@ nonisolated final class DNSResolver {
             return (true, state.generation)
         }
         guard shouldFire else { return }
-        Task.detached(priority: .utility) { [self] in
+        Self.blockingResolveQueue.async { [self] in
             let ips = Self.resolveViaGetaddrinfo(host)
             state.withLock { state in
                 // Flushed mid-lookup; flush already cleared this key, so leave the set be.
@@ -291,12 +328,15 @@ nonisolated final class DNSResolver {
         }
     }
 
-    /// Runs the blocking HTTPS-record query off the cooperative pool, caches the
-    /// result under the generation guard, and clears the in-flight slot.
+    /// Runs the blocking HTTPS-record query on ``blockingResolveQueue`` (a detached
+    /// task would still occupy a cooperative-pool thread), caches the result under
+    /// the generation guard, and clears the in-flight slot.
     private func lookupECH(bare: String, key: String, scheduledGeneration: UInt64) async -> Data? {
-        let result = await Task.detached(priority: .userInitiated) {
-            Self.queryHTTPSRecordECH(host: bare)
-        }.value
+        let result = await withCheckedContinuation { (continuation: CheckedContinuation<(config: Data, ttl: UInt32)?, Never>) in
+            Self.blockingResolveQueue.async {
+                continuation.resume(returning: Self.queryHTTPSRecordECH(host: bare))
+            }
+        }
 
         return state.withLock { state in
             state.echInFlight[key] = nil

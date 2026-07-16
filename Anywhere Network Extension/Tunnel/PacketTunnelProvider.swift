@@ -7,6 +7,7 @@
 
 import NetworkExtension
 import Network
+import Synchronization
 #if os(iOS)
 import WidgetKit
 #endif
@@ -17,13 +18,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()
     private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
-    private var pathMonitor: NWPathMonitor?
-    /// Last observed path status; nil before the first update.
-    private var lastPathStatus: Network.NWPath.Status?
 
-    /// True while `suspendOutbound` has released transports for the current outage;
-    /// drives the symmetric `resumeOutbound` on the up edge.
-    private var outboundSuspended = false
+    /// Path-monitor state shared between the monitor's callbacks (on ``pathMonitorQueue``)
+    /// and start/stop (on the tunnel lifecycle contexts). Behind a mutex because
+    /// `NWPathMonitor.cancel()` does not fence an in-flight `pathUpdateHandler`.
+    private struct PathMonitorState {
+        var monitor: NWPathMonitor?
+        /// Last observed path status; nil before the first update.
+        var lastStatus: Network.NWPath.Status?
+        /// True while `suspendOutbound` has released transports for the current outage;
+        /// drives the symmetric `resumeOutbound` on the up edge.
+        var outboundSuspended = false
+    }
+    private let pathMonitorState = Mutex(PathMonitorState())
 
     // MARK: - Tunnel Lifecycle
     
@@ -50,29 +57,30 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         
         let settings = buildTunnelSettings()
-        
-        Task {
-            do {
-                try await setTunnelNetworkSettings(settings)
-                
+
+        // Await directly (not a detached Task): the OS must observe the real outcome
+        // of `startTunnel`. A settings failure has to propagate so the tunnel is
+        // reported as failed rather than falsely started.
+        do {
+            try await setTunnelNetworkSettings(settings)
+        } catch {
+            logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription)")
+            throw error
+        }
+
 #if os(iOS)
-                ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+        ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
-                
-                self.tunnelStack.start(packetFlow: self.packetFlow,
-                                       configuration: configuration)
-                self.startMonitoringPath()
-                self.statsRecorder.start { [weak self] in
-                    return StatsRecorder.RawValues(
-                        byteCounts: self?.tunnelStack.byteCounts ?? TrafficByteCounts(),
-                        tcpConnectionCount: FlowGauge.liveTCP,
-                        udpConnectionCount: FlowGauge.liveUDP,
-                        memoryBytes: Self.memoryFootprint()
-                    )
-                }
-            } catch {
-                logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription)")
-            }
+
+        tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
+        startMonitoringPath()
+        statsRecorder.start { [weak self] in
+            return StatsRecorder.RawValues(
+                byteCounts: self?.tunnelStack.byteCounts ?? TrafficByteCounts(),
+                tcpConnectionCount: FlowGauge.liveTCP,
+                udpConnectionCount: FlowGauge.liveUDP,
+                memoryBytes: Self.memoryFootprint()
+            )
         }
     }
 
@@ -216,35 +224,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - App Messages
 
-    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+    override func handleAppMessage(_ messageData: Data) async -> Data? {
         guard let message = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) else {
-            completionHandler?(nil)
-            return
+            return nil
         }
 
         switch message {
         case .setConfiguration(let configuration):
             tunnelStack.switchConfiguration(configuration)
-            completionHandler?(nil)
+            return nil
 
         case .testLatency(let configuration):
-            Task {
-                let result = await LatencyTester.test(configuration)
-                let response = LatencyTestResponse(result)
-                completionHandler?(try? JSONEncoder().encode(response))
-            }
+            let response = LatencyTestResponse(await LatencyTester.test(configuration))
+            return try? JSONEncoder().encode(response)
 
         case .fetchStats:
-            let response = statsRecorder.snapshot()
-            completionHandler?(try? JSONEncoder().encode(response))
+            return try? JSONEncoder().encode(statsRecorder.snapshot())
 
         case .fetchLogs:
-            let response = LogsResponse(logs: tunnelStack.fetchLogs())
-            completionHandler?(try? JSONEncoder().encode(response))
+            return try? JSONEncoder().encode(LogsResponse(logs: tunnelStack.fetchLogs()))
 
         case .fetchRequests:
-            let response = RequestsResponse(requests: tunnelStack.requestLog.snapshot())
-            completionHandler?(try? JSONEncoder().encode(response))
+            return try? JSONEncoder().encode(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
         }
     }
 
@@ -276,21 +277,29 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Path Monitoring
 
     private func startMonitoringPath() {
-        guard pathMonitor == nil else { return }
-
         let monitor = NWPathMonitor()
+        let installed = pathMonitorState.withLock { state -> Bool in
+            guard state.monitor == nil else { return false }
+            state.monitor = monitor
+            return true
+        }
+        guard installed else { return }
+
         monitor.pathUpdateHandler = { [weak self] path in
             self?.handlePathUpdate(path)
         }
         monitor.start(queue: pathMonitorQueue)
-        pathMonitor = monitor
     }
 
     private func stopMonitoringPath() {
-        pathMonitor?.cancel()
-        pathMonitor = nil
-        lastPathStatus = nil
-        outboundSuspended = false
+        let monitor = pathMonitorState.withLock { state -> NWPathMonitor? in
+            let monitor = state.monitor
+            state.monitor = nil
+            state.lastStatus = nil
+            state.outboundSuspended = false
+            return monitor
+        }
+        monitor?.cancel()
     }
 
     /// Hands the egress identity (incl. Wi-Fi SSID on iOS) to the stack for the
@@ -316,23 +325,49 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// path is down, and rebuilds them (flushing stale DNS) when it returns. Per-leg
     /// recovery is left to the NW transports' viability handlers.
     private func handlePathUpdate(_ path: Network.NWPath) {
-        let previousStatus = lastPathStatus
-        lastPathStatus = path.status
+        // What the transition demands, decided atomically so a concurrent
+        // `stopMonitoringPath` can't interleave between the read and the write of
+        // `lastStatus`/`outboundSuspended`.
+        enum Transition { case restored, ready, waiting, unavailable, none }
+        let transition: Transition = pathMonitorState.withLock { state in
+            let previousStatus = state.lastStatus
+            state.lastStatus = path.status
+            switch path.status {
+            case .satisfied:
+                if state.outboundSuspended {
+                    state.outboundSuspended = false
+                    return .restored
+                } else if previousStatus == nil {
+                    return .ready
+                }
+                return .none
+            case .requiresConnection:
+                return previousStatus != .requiresConnection ? .waiting : .none
+            case .unsatisfied:
+                guard !state.outboundSuspended else { return .none }
+                state.outboundSuspended = true
+                return .unavailable
+            @unknown default:
+                return .none
+            }
+        }
 
         switch path.status {
         case .satisfied:
             resolveAndUpdateNetworkContext(path)
 
-            if outboundSuspended {
+            switch transition {
+            case .restored:
                 // Up edge: rebuild the transports suspendOutbound released; flush stale DNS.
-                outboundSuspended = false
                 logger.info("[VPN] Network path restored: \(Self.pathSummary(path))")
                 tunnelStack.resumeOutbound()
-            } else if previousStatus == nil {
+            case .ready:
                 logger.info("[VPN] Network path ready: \(Self.pathSummary(path))")
+            default:
+                // satisfied→satisfied (e.g. an egress move): per-connection
+                // viability retires any stranded leg, so there's no global teardown.
+                break
             }
-            // Otherwise satisfied→satisfied (e.g. an egress move): per-connection
-            // viability retires any stranded leg, so there's no global teardown.
 
             if reasserting {
                 reasserting = false
@@ -340,14 +375,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         case .requiresConnection:
             // Dedupe repeated callbacks in the same state; nothing to recover onto yet.
-            guard previousStatus != .requiresConnection else { return }
+            guard transition == .waiting else { return }
             logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path))")
             reasserting = true
 
         case .unsatisfied:
             // Idempotent on repeated unsatisfied callbacks.
-            guard !outboundSuspended else { return }
-            outboundSuspended = true
+            guard transition == .unavailable else { return }
             logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path))")
             reasserting = true
             // Down edge: release dead upstream transports; rebuilt on the up edge.
