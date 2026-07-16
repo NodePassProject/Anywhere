@@ -19,7 +19,7 @@ final class MITMProfileServer {
     
     private static let lifetime: TimeInterval = 120
 
-    private var shutdownWork: DispatchWorkItem?
+    private var shutdownTask: Task<Void, Never>?
 
     private init() {}
     
@@ -70,13 +70,11 @@ final class MITMProfileServer {
         }
         self.port = resolvedPort
 
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                self?.stop()
-            }
+        shutdownTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.lifetime))
+            guard !Task.isCancelled else { return }
+            self?.stop()
         }
-        shutdownWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.lifetime, execute: work)
 
         let portValue = resolvedPort.rawValue
         guard let url = URL(string: "http://127.0.0.1:\(portValue)/AnywhereMITMRoot.mobileconfig") else {
@@ -87,8 +85,8 @@ final class MITMProfileServer {
     }
 
     func stop() {
-        shutdownWork?.cancel()
-        shutdownWork = nil
+        shutdownTask?.cancel()
+        shutdownTask = nil
         listener?.cancel()
         listener = nil
         port = nil

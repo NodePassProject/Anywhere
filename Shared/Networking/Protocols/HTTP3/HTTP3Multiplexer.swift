@@ -199,18 +199,18 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             guard let self else { return }
             self.failSession(error)
         }
-
-        quic.connect { [weak self] error in
+        
+        Task { [weak self] in
             guard let self else { return }
-            self.queue.async { [self] in
-                if let error {
-                    self.failSession(error)
-                    return
-                }
-
+            do {
+                try await quic.connect()
+            } catch {
+                await quic.run { self.failSession(error) }
+                return
+            }
+            await quic.run { [self] in
                 self.openControlStreams()
-
-                // Called on quic.queue (= our queue), so no re-dispatch needed (~1-2μs saved/packet).
+                
                 self.quic.streamDataHandler = { [weak self] streamID, data, fin in
                     self?.handleStreamData(streamID: streamID, data: data, fin: fin)
                 }
@@ -227,14 +227,14 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             var payload = Data()
             payload.append(0x00)
             payload.append(HTTP3Framer.clientSettingsFrame())
-            quic.writeStream(sid, data: payload) { _ in }
+            quic.writeStreamOnQueue(sid, data: payload)
         }
         // QPACK encoder (type 0x02) and decoder (type 0x03)
         if let sid = quic.openUniStream() {
-            quic.writeStream(sid, data: Data([0x02])) { _ in }
+            quic.writeStreamOnQueue(sid, data: Data([0x02]))
         }
         if let sid = quic.openUniStream() {
-            quic.writeStream(sid, data: Data([0x03])) { _ in }
+            quic.writeStreamOnQueue(sid, data: Data([0x03]))
         }
     }
 

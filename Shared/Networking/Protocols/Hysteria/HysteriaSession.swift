@@ -161,22 +161,20 @@ nonisolated final class HysteriaSession {
         quic.connectionClosedHandler = { [weak self] error in
             self?.failSession(error)
         }
-
-        quic.connect { [weak self] error in
+        
+        Task { [weak self] in
             guard let self else { return }
-            self.queue.async { [self] in
-                if let error {
-                    self.failSession(error)
-                    return
-                }
-
+            do {
+                try await quic.connect()
+            } catch {
+                await quic.run { self.failSession(error) }
+                return
+            }
+            await quic.run { [self] in
                 self.quic.streamDataHandler = { [weak self] sid, data, fin in
-                    // Synchronous on quic.queue inside ngtcp2's read_pkt;
-                    // `data` is a zero-copy view that must be detached before returning.
                     self?.handleStreamData(sid: sid, data: data, fin: fin)
                 }
                 self.quic.streamTerminationHandler = { [weak self] sid, error in
-                    // Fired for both RESET_STREAM and stream_close — must be idempotent.
                     self?.handleStreamTermination(sid: sid, error: error)
                 }
                 self.quic.datagramHandler = { [weak self] data in
@@ -197,15 +195,15 @@ nonisolated final class HysteriaSession {
             var payload = Data()
             payload.append(0x00) // stream type = control
             payload.append(Self.clientSettingsFrame())
-            quic.writeStream(sid, data: payload) { _ in }
+            quic.writeStreamOnQueue(sid, data: payload)
         }
         // QPACK encoder (0x02) / decoder (0x03) uni streams; dynamic table
         // is 0, so they carry only the type byte.
         if let encoderStreamID = quic.openUniStream() {
-            quic.writeStream(encoderStreamID, data: Data([0x02])) { _ in }
+            quic.writeStreamOnQueue(encoderStreamID, data: Data([0x02]))
         }
         if let decoderStreamID = quic.openUniStream() {
-            quic.writeStream(decoderStreamID, data: Data([0x03])) { _ in }
+            quic.writeStreamOnQueue(decoderStreamID, data: Data([0x03]))
         }
     }
 
@@ -250,13 +248,8 @@ nonisolated final class HysteriaSession {
         let frame = HysteriaHTTP3Codec.encodeAuthRequestFrame(
             authority: "hysteria", path: "/auth", extraHeaders: extraHeaders
         )
-
-        quic.writeStream(sid, data: frame) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.queue.async { self.failSession(error) }
-            }
-        }
+        
+        quic.writeStreamOnQueue(sid, data: frame)
     }
 
     // MARK: - Stream dispatch

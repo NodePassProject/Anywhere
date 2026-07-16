@@ -224,8 +224,9 @@ fileprivate struct DIQRScannerView: View {
         }
         
         if !status {
-            DispatchQueue.global(qos: .background).async {
-                camera.session.stopRunning()
+            let session = camera.session
+            Task.detached(priority: .background) {
+                session.stopRunning()
             }
         }
     }
@@ -329,7 +330,7 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                 }
                 device.unlockForConfiguration()
                 /// Session must be started on a background thread.
-                DispatchQueue.global(qos: .background).async {
+                Task.detached(priority: .background) {
                     session.startRunning()
                 }
             } catch {

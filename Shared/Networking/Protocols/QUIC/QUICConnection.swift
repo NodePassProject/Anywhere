@@ -254,12 +254,8 @@ actor QUICConnection {
     }
 
     // MARK: Connect
-
-    // The consumer-facing API is `nonisolated`: the sessions call it from their own
-    // (queue-shared) contexts. Scheduling methods hop via `queue.async` then reach isolated
-    // state through `assumeIsolated`; synchronous readers `assumeIsolated` directly (the
-    // callers are already on ``queue``, matching the previous on-queue contract).
-    nonisolated func connect(completion: @escaping (Error?) -> Void) {
+    
+    private nonisolated func connect(completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
             guard let self else { completion(QUICError.connectionFailed("Invalid state")); return }
             self.assumeIsolated { me in
@@ -353,8 +349,8 @@ actor QUICConnection {
         }
     }
 
-    nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
-                                 completion: @escaping (Error?) -> Void) {
+    private nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
+                                         completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
@@ -379,23 +375,18 @@ actor QUICConnection {
         }
     }
 
-    // MARK: Datagrams
-
-    /// Queues a QUIC DATAGRAM frame; `completion` errs only on fatal conditions (closed, MTU exceeded).
-    nonisolated func writeDatagram(_ data: Data, completion: @escaping (Error?) -> Void) {
-        queue.async { [weak self] in
-            // Split guards so the completion fires even when `self` is gone.
-            guard let self else { completion(QUICError.closed); return }
-            self.assumeIsolated { me in
-                guard me.connectionOpaquePointer != nil, me.state == .connected else {
-                    completion(QUICError.closed)
-                    return
-                }
-                me.enqueueDatagrams([PendingDatagram(data: data, completion: completion)])
-                me.writeToUDP()
-            }
+    /// Fire-and-forget stream write for callers already on ``queue`` (asserted by
+    /// `assumeIsolated`): enqueues the frame synchronously in the current queue turn and
+    /// drops the result. For connection-setup writes (HTTP/3 control/QPACK streams) whose
+    /// failure surfaces through `connectionClosedHandler` anyway — no completion, no self-hop.
+    nonisolated func writeStreamOnQueue(_ streamId: Int64, data: Data, fin: Bool = false) {
+        assumeIsolated { me in
+            guard let conn = me.connectionOpaquePointer, me.state == .connected else { return }
+            me.writeStreamImpl(conn: conn, streamId: streamId, data: data, fin: fin, completion: { _ in })
         }
     }
+
+    // MARK: Datagrams
 
     /// Async DATAGRAM batch write (localized ngtcp2-boundary continuation; the callback
     /// fires exactly once after every frame reaches a terminal state).
@@ -409,7 +400,7 @@ actor QUICConnection {
 
     /// Queues multiple DATAGRAM frames; `completion` fires once all reach a terminal
     /// state, with the first error or `nil`.
-    nonisolated func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
+    private nonisolated func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
@@ -450,7 +441,7 @@ actor QUICConnection {
 
     /// Queues one logical packet's DATAGRAM fragments as an indivisible batch.
     /// Capacity pressure rejects the new batch and never evicts existing frames.
-    nonisolated func writeDatagramsAtomically(
+    private nonisolated func writeDatagramsAtomically(
         _ datagrams: [Data],
         completion: @escaping (Error?) -> Void
     ) {

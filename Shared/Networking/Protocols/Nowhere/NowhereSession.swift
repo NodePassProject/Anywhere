@@ -135,14 +135,16 @@ nonisolated final class NowhereSession {
         quic.datagramHandler = { [weak self] data in
             self?.handleDatagram(data)
         }
-
-        quic.connect { [weak self] error in
+        
+        Task { [weak self] in
             guard let self else { return }
-            self.queue.async {
-                if let error {
-                    self.failSession(error)
-                    return
-                }
+            do {
+                try await quic.connect()
+            } catch {
+                await quic.run { self.failSession(error) }
+                return
+            }
+            await quic.run { [self] in
                 self.state = .authenticating
                 self.sendAuthFrame()
             }
@@ -168,13 +170,15 @@ nonisolated final class NowhereSession {
             return
         }
 
-        quic.writeStream(sid, data: frame, fin: true) { [weak self] error in
+        Task { [weak self] in
             guard let self else { return }
-            self.queue.async {
-                if let error {
-                    self.failSession(error)
-                    return
-                }
+            do {
+                try await quic.writeStream(sid, data: frame, fin: true)
+            } catch {
+                await quic.run { self.failSession(error) }
+                return
+            }
+            await quic.run { [self] in
                 guard self.state == .authenticating else { return }
                 self.authFrameWritten = true
                 self.finishAuthenticationIfReady()
