@@ -8,9 +8,6 @@
 import Foundation
 import Synchronization
 
-// MARK: - WebSocketConnection
-
-/// WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
 nonisolated final class WebSocketConnection: @unchecked Sendable {
 
     // MARK: Transport
@@ -25,7 +22,7 @@ nonisolated final class WebSocketConnection: @unchecked Sendable {
         var isConnected = false
         var upgraded = false
         var receiveBuffer = Data()
-        var heartbeatTimer: DispatchSourceTimer?
+        var heartbeatTask: Task<Void, Never>?
     }
 
     private let state: Mutex<ConnectionState>
@@ -212,15 +209,15 @@ nonisolated final class WebSocketConnection: @unchecked Sendable {
         state.withLock {
             $0.isConnected = false
             $0.receiveBuffer.removeAll()
-            $0.heartbeatTimer?.cancel()
-            $0.heartbeatTimer = nil
+            $0.heartbeatTask?.cancel()
+            $0.heartbeatTask = nil
         }
         transport.cancel()
     }
 
     deinit {
-        // Reclaim the heartbeat timer if dropped without cancel(); DispatchSource.cancel() is thread-safe.
-        state.withLock { $0.heartbeatTimer?.cancel() }
+        // Reclaim the heartbeat loop if dropped without cancel(); Task.cancel() is thread-safe.
+        state.withLock { $0.heartbeatTask?.cancel() }
     }
 
     // MARK: - Heartbeat (Ping Sender)
@@ -230,33 +227,19 @@ nonisolated final class WebSocketConnection: @unchecked Sendable {
         let period = configuration.heartbeatPeriod
         guard period > 0 else { return }
 
-        let timer = DispatchSource.makeTimerSource(queue: .global())
-        timer.schedule(deadline: .now() + .seconds(Int(period)),
-                       repeating: .seconds(Int(period)))
-        timer.setEventHandler { [weak self] in
-            guard let self, self.isConnected else {
-                self?.state.withLock {
-                    $0.heartbeatTimer?.cancel()
-                    $0.heartbeatTimer = nil
-                }
-                return
-            }
-            let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
-            Task { [weak self] in
-                guard let self else { return }
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(period))
+                guard !Task.isCancelled, let self, self.isConnected else { return }
+                let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
                 do {
                     try await self.transport.send(pingFrame)
                 } catch {
-                    self.state.withLock {
-                        $0.heartbeatTimer?.cancel()
-                        $0.heartbeatTimer = nil
-                    }
+                    return   // stop the heartbeat on send failure
                 }
             }
         }
-
-        state.withLock { $0.heartbeatTimer = timer }
-        timer.resume()
+        state.withLock { $0.heartbeatTask = task }
     }
 
     // MARK: - Frame Building (Client → Server, MUST be masked)

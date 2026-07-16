@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import Security
+import Synchronization
 
 enum MITMCertificateStoreError: Error {
     case keyGenerationFailed(String)
@@ -35,8 +36,11 @@ final class MITMCertificateStore {
     private static let caSubjectCN = "Anywhere Root Certificate"
     private static let caOrganization = "Anywhere"
     
-    private let lock = NSLock()
-    
+    /// Serializes the multi-step keychain load/generate/delete sequences and guards
+    /// `cachedCA`; a critical-section gate keeping the synchronous, throwing API.
+    /// Intra-process only — the App Group keychain is shared with the extension.
+    private let gate = Mutex<Void>(())
+
     private var cachedCA: (privateKey: SecKey, certificateDER: Data)?
 
     // MARK: - Init
@@ -48,47 +52,42 @@ final class MITMCertificateStore {
     // MARK: - CA Lifecycle
 
     func loadOrCreateCA() throws -> (privateKey: SecKey, certificateDER: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if let existing = try? loadCACachedUnlocked() {
-            return existing
-        }
-        do {
-            return try generateCAUnlocked()
-        } catch {
-            // The App Group keychain is shared with the extension (NSLock is
-            // intra-process): either the other process won the race (re-read), or
-            // an orphaned key from a failed cert write hit errSecDuplicateItem (drop it).
+        try gate.withLock { _ in
             if let existing = try? loadCACachedUnlocked() {
                 return existing
             }
-            // Non-duplicate failures leave no key, so surface the real error.
-            guard (try? readPrivateKeyUnlocked()) != nil else { throw error }
-            deletePrivateKey()
-            return try generateCAUnlocked()
+            do {
+                return try generateCAUnlocked()
+            } catch {
+                // The App Group keychain is shared with the extension (the gate is
+                // intra-process): either the other process won the race (re-read), or
+                // an orphaned key from a failed cert write hit errSecDuplicateItem (drop it).
+                if let existing = try? loadCACachedUnlocked() {
+                    return existing
+                }
+                // Non-duplicate failures leave no key, so surface the real error.
+                guard (try? readPrivateKeyUnlocked()) != nil else { throw error }
+                deletePrivateKey()
+                return try generateCAUnlocked()
+            }
         }
     }
 
     func loadCA() -> (privateKey: SecKey, certificateDER: Data)? {
-        lock.lock()
-        defer { lock.unlock() }
-        return try? loadCACachedUnlocked()
+        gate.withLock { _ in try? loadCACachedUnlocked() }
     }
 
     /// Wipes the persisted CA and generates a fresh one, invalidating any installed root profile.
     @discardableResult
     func regenerate() throws -> (privateKey: SecKey, certificateDER: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-        deleteUnlocked()
-        return try generateCAUnlocked()
+        try gate.withLock { _ in
+            deleteUnlocked()
+            return try generateCAUnlocked()
+        }
     }
 
     func delete() {
-        lock.lock()
-        defer { lock.unlock() }
-        deleteUnlocked()
+        gate.withLock { _ in deleteUnlocked() }
     }
 
     // MARK: - Trust State

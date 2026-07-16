@@ -8,9 +8,7 @@
 import Foundation
 import Synchronization
 
-// MARK: - ProxyClient
-
-nonisolated class ProxyClient {
+nonisolated class ProxyClient: @unchecked Sendable {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
     
@@ -414,36 +412,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    private func sendProtocolHandshake(
-        over connection: ProxyConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        supportsVision: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        if isShadowsocks {
-            sendShadowsocksProtocolHandshake(
-                over: connection,
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                completion: completion
-            )
-        } else {
-            sendVLESSProtocolHandshake(
-                over: connection,
-                command: command,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                initialData: initialData,
-                supportsVision: supportsVision,
-                completion: completion
-            )
-        }
-    }
-
     // MARK: - Connection Routing
 
     private func connectWithCommand(
@@ -737,20 +705,6 @@ nonisolated class ProxyClient {
         )
     }
 
-    private func connectWithXHTTP(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?
-    ) async throws -> ProxyConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-            self.connectWithXHTTP(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData
-            ) { continuation.resume(with: $0) }
-        }
-    }
-
     // MARK: - Direct Connection
 
     private func connectDirect(
@@ -875,12 +829,10 @@ nonisolated class ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
         guard case .xhttp(let xhttpConfig) = configuration.xrayTransportLayer else {
-            completion(.failure(ProxyError.connectionFailed("XHTTP transport specified but no XHTTP configuration")))
-            return
+            throw ProxyError.connectionFailed("XHTTP transport specified but no XHTTP configuration")
         }
 
         let httpVersion = decideXHTTPHTTPVersion()
@@ -901,21 +853,20 @@ nonisolated class ProxyClient {
         if let downloadSettings = xhttpConfig.downloadSettings {
             if resolvedMode == .streamOne { resolvedMode = .streamUp }
             let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.xraySecurityLayer)
-            connectXHTTPDetached(
+            return try await connectXHTTPDetached(
                 xhttpConfig: xhttpConfig, downloadSettings: downloadSettings,
                 mode: resolvedMode, sessionId: xhttpConfig.generateSessionID(),
                 mainHTTPVersion: httpVersion, downloadHTTPVersion: downloadHTTPVersion,
                 command: command, destinationHost: destinationHost, destinationPort: destinationPort,
-                initialData: initialData, completion: completion
+                initialData: initialData
             )
-            return
         }
 
         let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? xhttpConfig.generateSessionID() : ""
-        connectXHTTPCombined(
+        return try await connectXHTTPCombined(
             xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion,
             command: command, destinationHost: destinationHost, destinationPort: destinationPort,
-            initialData: initialData, completion: completion
+            initialData: initialData
         )
     }
 
@@ -931,35 +882,23 @@ nonisolated class ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
         let route = consumeMainXHTTPRoute()
         let needsUploadFactory = httpVersion == .http11 && (mode == .packetUp || mode == .streamUp)
         let uploadFactory = needsUploadFactory
             ? makeXHTTPUploadFactory(security: configuration.xraySecurityLayer, httpVersion: httpVersion,
                                      mode: mode, xmux: xhttpConfig.effectiveXMUX)
             : nil
-        dialXHTTPLeg(
+        let xhttpConnection = try await dialXHTTPLeg(
             endpoint: mainXHTTPEndpoint(), httpVersion: httpVersion, route: route,
             xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .combined, uploadFactory: uploadFactory
-        ) { [weak self] result in
-            guard let self else {
-                if case .success(let xhttpConnection) = result { xhttpConnection.cancel() }
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let xhttpConnection):
-                self.own(xhttpConnection)
-                self.performXHTTPSetup(
-                    xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData, completion: completion
-                )
-            }
-        }
+        )
+        self.own(xhttpConnection)
+        return try await performXHTTPSetup(
+            xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData
+        )
     }
 
     private func performXHTTPSetup(
@@ -967,27 +906,15 @@ nonisolated class ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        Task { [weak self] in
-            do {
-                try await xhttpConnection.performSetup()
-            } catch {
-                completion(.failure(error))
-                return
-            }
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            let xhttpProxyConnection = XHTTPProxyConnection(xhttpConnection: xhttpConnection)
-            self.sendProtocolHandshake(
-                over: xhttpProxyConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData,
-                supportsVision: self.transportSupportsVision, completion: completion
-            )
-        }
+        initialData: Data?
+    ) async throws -> ProxyConnection {
+        try await xhttpConnection.performSetup()
+        let xhttpProxyConnection = XHTTPProxyConnection(xhttpConnection: xhttpConnection)
+        return try await sendProtocolHandshake(
+            over: xhttpProxyConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData,
+            supportsVision: self.transportSupportsVision
+        )
     }
 
     // MARK: XHTTP up/download detach
@@ -1004,55 +931,37 @@ nonisolated class ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        initialData: Data?
+    ) async throws -> ProxyConnection {
         let uploadRoute = consumeMainXHTTPRoute()
-        dialXHTTPLeg(
+        let uploadLeg = try await dialXHTTPLeg(
             endpoint: mainXHTTPEndpoint(), httpVersion: mainHTTPVersion, route: uploadRoute,
             xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .uploadOnly, uploadFactory: nil
-        ) { [weak self] uploadResult in
-            guard let self else {
-                if case .success(let uploadLeg) = uploadResult { uploadLeg.cancel() }
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch uploadResult {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let uploadLeg):
-                // The download leg later re-owns this as coordinator (`uploadChannel`);
-                // the double-cancel is idempotent.
-                self.own(uploadLeg)
-                self.dialXHTTPLeg(
-                    endpoint: self.downloadXHTTPEndpoint(downloadSettings), httpVersion: downloadHTTPVersion,
-                    route: .direct, xhttp: downloadSettings.xhttp, mode: mode, sessionId: sessionId,
-                    role: .downloadOnly, uploadFactory: nil
-                ) { [weak self] downloadResult in
-                    guard let self else {
-                        // Deallocation never fires the registry, so dispose both legs by hand.
-                        uploadLeg.cancel()
-                        if case .success(let downloadLeg) = downloadResult { downloadLeg.cancel() }
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    switch downloadResult {
-                    case .failure(let error):
-                        uploadLeg.cancel()
-                        completion(.failure(error))
-                    case .success(let downloadLeg):
-                        // Download leg is the coordinator; it owns the upload leg.
-                        downloadLeg.uploadChannel = uploadLeg
-                        self.own(downloadLeg)
-                        self.performXHTTPSetup(
-                            xhttpConnection: downloadLeg, command: command,
-                            destinationHost: destinationHost, destinationPort: destinationPort,
-                            initialData: initialData, completion: completion
-                        )
-                    }
-                }
-            }
+        )
+        // The download leg later re-owns this as coordinator (`uploadChannel`);
+        // the double-cancel is idempotent.
+        self.own(uploadLeg)
+
+        let downloadLeg: XHTTPConnection
+        do {
+            downloadLeg = try await dialXHTTPLeg(
+                endpoint: self.downloadXHTTPEndpoint(downloadSettings), httpVersion: downloadHTTPVersion,
+                route: .direct, xhttp: downloadSettings.xhttp, mode: mode, sessionId: sessionId,
+                role: .downloadOnly, uploadFactory: nil
+            )
+        } catch {
+            uploadLeg.cancel()
+            throw error
         }
+
+        // Download leg is the coordinator; it owns the upload leg.
+        downloadLeg.uploadChannel = uploadLeg
+        self.own(downloadLeg)
+        return try await performXHTTPSetup(
+            xhttpConnection: downloadLeg, command: command,
+            destinationHost: destinationHost, destinationPort: destinationPort,
+            initialData: initialData
+        )
     }
 
     // MARK: XHTTP leg factory (shared by combined & detach)
@@ -1120,49 +1029,40 @@ nonisolated class ProxyClient {
         mode: XHTTPMode,
         sessionId: String,
         role: XHTTPChannelRole,
-        uploadFactory: (() async throws -> AsyncTransportClosures)?,
-        completion: @escaping (Result<XHTTPConnection, Error>) -> Void
-    ) {
+        uploadFactory: (() async throws -> AsyncTransportClosures)?
+    ) async throws -> XHTTPConnection {
         // xmux: pool/multiplex direct-route XHTTP connections. XHTTP always pools — serial-reuse
         // defaults apply when xmux is omitted (see `effectiveXMUX`). Tunneled/chained routes
         // can't pool (single-use tunnel), so they fall through to a fresh dial below.
         if httpVersion == .http3, case .direct = route {
-            acquirePooledH3(
+            return try await acquirePooledH3(
                 endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
-                mode: mode, sessionId: sessionId, role: role, completion: completion
+                mode: mode, sessionId: sessionId, role: role
             )
-            return
         }
 
         if httpVersion == .http2, case .direct = route {
-            acquirePooledH2(
+            return try await acquirePooledH2(
                 endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
-                mode: mode, sessionId: sessionId, role: role, completion: completion
+                mode: mode, sessionId: sessionId, role: role
             )
-            return
         }
 
-        dialXHTTPTransport(endpoint: endpoint, httpVersion: httpVersion, route: route) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let transport):
-                let connection: XHTTPConnection
-                switch transport {
-                case .byteStream(let closures):
-                    connection = XHTTPConnection(
-                        download: closures, configuration: xhttp, mode: mode, sessionId: sessionId,
-                        useHTTP2: httpVersion == .http2, uploadConnectionFactory: uploadFactory
-                    )
-                case .http3(let session):
-                    connection = XHTTPConnection(
-                        h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
-                    )
-                }
-                connection.role = role
-                completion(.success(connection))
-            }
+        let transport = try await dialXHTTPTransport(endpoint: endpoint, httpVersion: httpVersion, route: route)
+        let connection: XHTTPConnection
+        switch transport {
+        case .byteStream(let closures):
+            connection = XHTTPConnection(
+                download: closures, configuration: xhttp, mode: mode, sessionId: sessionId,
+                useHTTP2: httpVersion == .http2, uploadConnectionFactory: uploadFactory
+            )
+        case .http3(let session):
+            connection = XHTTPConnection(
+                h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
+            )
         }
+        connection.role = role
+        return connection
     }
 
     /// Acquires a shared, xmux-pooled HTTP/3 session for a direct-route XHTTP leg; the
@@ -1173,31 +1073,27 @@ nonisolated class ProxyClient {
         xhttp: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
-        role: XHTTPChannelRole,
-        completion: @escaping (Result<XHTTPConnection, Error>) -> Void
-    ) {
+        role: XHTTPChannelRole
+    ) async throws -> XHTTPConnection {
         let host = endpoint.directHost
         let port = endpoint.port
         let serverName = endpoint.serverName
         let key = "h3|\(host)|\(port)|\(serverName)"
         let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: xmux) {
-            { connectionCompletion in
+            { () async -> XHTTPXMUXMultiplexerPoolable? in
                 // QUIC connects lazily, so a fresh session never fails at creation.
-                connectionCompletion(HTTP3Multiplexer(host: host, port: port, serverName: serverName))
+                HTTP3Multiplexer(host: host, port: port, serverName: serverName)
             }
         }
-        manager.acquire { lease in
-            guard let lease, let session = lease.connection as? HTTP3Multiplexer else {
-                completion(.failure(ProxyError.connectionFailed("xmux H3 session acquisition failed")))
-                return
-            }
-            let connection = XHTTPConnection(
-                h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
-            )
-            connection.role = role
-            connection.xmuxLease = lease
-            completion(.success(connection))
+        guard let lease = await manager.acquire(), let session = lease.connection as? HTTP3Multiplexer else {
+            throw ProxyError.connectionFailed("xmux H3 session acquisition failed")
         }
+        let connection = XHTTPConnection(
+            h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
+        )
+        connection.role = role
+        connection.xmuxLease = lease
+        return connection
     }
 
     /// Acquires a shared, xmux-pooled HTTP/2 connection for a direct-route XHTTP leg; the
@@ -1208,34 +1104,25 @@ nonisolated class ProxyClient {
         xhttp: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
-        role: XHTTPChannelRole,
-        completion: @escaping (Result<XHTTPConnection, Error>) -> Void
-    ) {
+        role: XHTTPChannelRole
+    ) async throws -> XHTTPConnection {
         let host = endpoint.directHost
         let port = endpoint.port
         let security = endpoint.security
         let serverName = endpoint.serverName
         let key = "h2|\(host)|\(port)|\(serverName)"
         let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: xmux) {
-            { connectionCompletion in
-                ProxyClient.dialSharedH2(host: host, port: port, security: security) { result in
-                    switch result {
-                    case .success(let shared): connectionCompletion(shared)
-                    case .failure: connectionCompletion(nil)
-                    }
-                }
+            { () async -> XHTTPXMUXMultiplexerPoolable? in
+                try? await ProxyClient.dialSharedH2(host: host, port: port, security: security)
             }
         }
-        manager.acquire { lease in
-            guard let lease, let shared = lease.connection as? XHTTPH2Multiplexer else {
-                completion(.failure(ProxyError.connectionFailed("xmux H2 connection acquisition failed")))
-                return
-            }
-            let connection = XHTTPConnection(sharedH2: shared, configuration: xhttp, mode: mode, sessionId: sessionId)
-            connection.role = role
-            connection.xmuxLease = lease
-            completion(.success(connection))
+        guard let lease = await manager.acquire(), let shared = lease.connection as? XHTTPH2Multiplexer else {
+            throw ProxyError.connectionFailed("xmux H2 connection acquisition failed")
         }
+        let connection = XHTTPConnection(sharedH2: shared, configuration: xhttp, mode: mode, sessionId: sessionId)
+        connection.role = role
+        connection.xmuxLease = lease
+        return connection
     }
 
     /// Dials a byte stream and brings up a shared multiplexing H2 connection on it (xmux).
@@ -1244,33 +1131,19 @@ nonisolated class ProxyClient {
     private static func dialSharedH2(
         host: String,
         port: UInt16,
-        security: XraySecurityLayer,
-        completion: @escaping (Result<XHTTPH2Multiplexer, Error>) -> Void
-    ) {
-        func bringUp(_ transport: AsyncTransportClosures, retaining object: AnyObject?) {
+        security: XraySecurityLayer
+    ) async throws -> XHTTPH2Multiplexer {
+        func bringUp(_ transport: AsyncTransportClosures, retaining object: AnyObject?) async throws -> XHTTPH2Multiplexer {
             let shared = XHTTPH2Multiplexer(transport: transport)
             if let object { shared.retain(object) }
-            Task {
-                do {
-                    try await shared.connect()
-                    completion(.success(shared))
-                } catch {
-                    completion(.failure(error))
-                }
-            }
+            try await shared.connect()
+            return shared
         }
         switch security {
         case .none:
             let transport = TCPTransport(host: host, port: port)
-            Task {
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                bringUp(AsyncTransportClosures(transport), retaining: transport)
-            }
+            try await transport.connect()
+            return try await bringUp(AsyncTransportClosures(transport), retaining: transport)
         case .tls(let tlsConfig):
             // XHTTP rides h2; advertise it (fall back to http/1.1) regardless of the configured ALPN.
             let h2TLS = TLSConfiguration(
@@ -1278,20 +1151,12 @@ nonisolated class ProxyClient {
                 echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
             )
             let client = TLSClient(configuration: h2TLS)
-            client.connect(host: host, port: port) { result in
-                switch result {
-                case .success(let connection): bringUp(AsyncTransportClosures(tls: connection), retaining: client)
-                case .failure(let error): completion(.failure(error))
-                }
-            }
+            let connection = try await client.connect(host: host, port: port)
+            return try await bringUp(AsyncTransportClosures(tls: connection), retaining: client)
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
-            client.connect(host: host, port: port) { result in
-                switch result {
-                case .success(let connection): bringUp(AsyncTransportClosures(tls: connection), retaining: client)
-                case .failure(let error): completion(.failure(error))
-                }
-            }
+            let connection = try await client.connect(host: host, port: port)
+            return try await bringUp(AsyncTransportClosures(tls: connection), retaining: client)
         }
     }
 
@@ -1300,36 +1165,24 @@ nonisolated class ProxyClient {
     private func dialXHTTPTransport(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
-        route: XHTTPLegRoute,
-        completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
-    ) {
+        route: XHTTPLegRoute
+    ) async throws -> XHTTPDialedTransport {
         if httpVersion == .http3 {
-            dialXHTTPHTTP3Session(endpoint: endpoint, route: route, completion: completion)
-            return
+            return try await dialXHTTPHTTP3Session(endpoint: endpoint, route: route)
         }
         switch route {
         case .direct:
-            dialXHTTPByteStream(host: endpoint.directHost, port: endpoint.port, security: endpoint.security,
-                                httpVersion: httpVersion, overTunnel: nil, completion: completion)
+            return try await dialXHTTPByteStream(host: endpoint.directHost, port: endpoint.port, security: endpoint.security,
+                                httpVersion: httpVersion, overTunnel: nil)
         case .overTunnel(let tunnel):
-            dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
-                                httpVersion: httpVersion, overTunnel: tunnel, completion: completion)
+            return try await dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
+                                httpVersion: httpVersion, overTunnel: tunnel)
         case .buildChain(let chain):
             // XHTTP requires a TCP stream end-to-end.
             let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
-            Task { [weak self] in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                do {
-                    let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
-                    self.dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
-                                             httpVersion: httpVersion, overTunnel: tunnel, completion: completion)
-                } catch {
-                    completion(.failure(error))
-                }
-            }
+            let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
+            return try await dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
+                                     httpVersion: httpVersion, overTunnel: tunnel)
         }
     }
 
@@ -1338,48 +1191,38 @@ nonisolated class ProxyClient {
         port: UInt16,
         security: XraySecurityLayer,
         httpVersion: XHTTPHTTPVersion,
-        overTunnel: ProxyConnection?,
-        completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
-    ) {
+        overTunnel: ProxyConnection?
+    ) async throws -> XHTTPDialedTransport {
         switch security {
         case .none:
             if let tunnel = overTunnel {
-                completion(.success(.byteStream(AsyncTransportClosures(proxyConnection: tunnel))))
+                return .byteStream(AsyncTransportClosures(proxyConnection: tunnel))
             } else {
                 let transport = TCPTransport(host: host, port: port)
                 own(transport)
-                Task {
-                    do {
-                        try await transport.connect()
-                    } catch {
-                        completion(.failure(error))
-                        return
-                    }
-                    completion(.success(.byteStream(AsyncTransportClosures(transport))))
-                }
+                try await transport.connect()
+                return .byteStream(AsyncTransportClosures(transport))
             }
         case .tls(let tlsConfig):
             let client = TLSClient(configuration: sanitizedXHTTPTLSConfiguration(from: tlsConfig, httpVersion: httpVersion))
             own(client)
-            let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
-                completion(result.map { .byteStream(AsyncTransportClosures(tls: $0)) })
-            }
+            let connection: TLSRecordConnection
             if let tunnel = overTunnel {
-                client.connect(overTunnel: tunnel, completion: handle)
+                connection = try await client.connect(overTunnel: tunnel)
             } else {
-                client.connect(host: host, port: port, completion: handle)
+                connection = try await client.connect(host: host, port: port)
             }
+            return .byteStream(AsyncTransportClosures(tls: connection))
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
             own(client)
-            let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
-                completion(result.map { .byteStream(AsyncTransportClosures(tls: $0)) })
-            }
+            let connection: TLSRecordConnection
             if let tunnel = overTunnel {
-                client.connect(overTunnel: tunnel, completion: handle)
+                connection = try await client.connect(overTunnel: tunnel)
             } else {
-                client.connect(host: host, port: port, completion: handle)
+                connection = try await client.connect(host: host, port: port)
             }
+            return .byteStream(AsyncTransportClosures(tls: connection))
         }
     }
 
@@ -1387,38 +1230,20 @@ nonisolated class ProxyClient {
     /// transport instead of a TLS/Reality client.
     private func dialXHTTPHTTP3Session(
         endpoint: XHTTPEndpoint,
-        route: XHTTPLegRoute,
-        completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
-    ) {
+        route: XHTTPLegRoute
+    ) async throws -> XHTTPDialedTransport {
         let makeSession: (String, QUICDatagramTransport?) -> XHTTPDialedTransport = { host, transport in
             .http3(HTTP3Multiplexer(host: host, port: endpoint.port, serverName: endpoint.serverName, transport: transport))
         }
         switch route {
         case .direct:
-            completion(.success(makeSession(endpoint.directHost, nil)))
+            return makeSession(endpoint.directHost, nil)
         case .overTunnel(let tunnel):
-            completion(.success(makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))))
+            return makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))
         case .buildChain(let chain):
-            let hopCommands: [ProxyCommand]
-            switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
-            case .success(let cmds):
-                hopCommands = cmds
-            case .failure(let error):
-                completion(.failure(error))
-                return
-            }
-            Task { [weak self] in
-                guard let self else {
-                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                do {
-                    let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
-                    completion(.success(makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))))
-                } catch {
-                    completion(.failure(error))
-                }
-            }
+            let hopCommands = try Self.computeChainHopCommands(chain: chain, lastDeliver: .udp).get()
+            let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
+            return makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))
         }
     }
 
@@ -1445,23 +1270,16 @@ nonisolated class ProxyClient {
             uploadXMUX.maxConcurrency = XHTTPXMUXMultiplexerRange(from: 1, to: 1)
             let key = "h1up|\(host)|\(port)|\(serverName)"
             let manager = XHTTPXMUXMultiplexerRegistry.shared.manager(key: key, config: uploadXMUX) {
-                { connectionCompletion in
-                    ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec) { connection in
-                        connectionCompletion(connection)
-                    }
+                { () async -> XHTTPXMUXMultiplexerPoolable? in
+                    await ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec)
                 }
             }
             return {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AsyncTransportClosures, Error>) in
-                    manager.acquire { lease in
-                        guard let lease, let connection = lease.connection as? XHTTPH1Multiplexer else {
-                            continuation.resume(throwing: ProxyError.connectionFailed("xmux H1 upload acquisition failed"))
-                            return
-                        }
-                        connection.lease = lease
-                        continuation.resume(returning: connection.sessionClosures)
-                    }
+                guard let lease = await manager.acquire(), let connection = lease.connection as? XHTTPH1Multiplexer else {
+                    throw ProxyError.connectionFailed("xmux H1 upload acquisition failed")
                 }
+                connection.lease = lease
+                return connection.sessionClosures
             }
         }
 
@@ -1475,17 +1293,12 @@ nonisolated class ProxyClient {
             } else {
                 route = .direct
             }
-            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AsyncTransportClosures, Error>) in
-                self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route) { result in
-                    switch result {
-                    case .success(.byteStream(let closures)):
-                        continuation.resume(returning: closures)
-                    case .success(.http3):
-                        continuation.resume(throwing: ProxyError.connectionFailed("HTTP/3 has no separate upload connection"))
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
+            let transport = try await self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route)
+            switch transport {
+            case .byteStream(let closures):
+                return closures
+            case .http3:
+                throw ProxyError.connectionFailed("HTTP/3 has no separate upload connection")
             }
         }
     }
@@ -1495,46 +1308,34 @@ nonisolated class ProxyClient {
     private static func dialH1UploadConnection(
         host: String,
         port: UInt16,
-        security: XraySecurityLayer,
-        completion: @escaping (XHTTPH1Multiplexer?) -> Void
-    ) {
-        func wrap(_ transport: AsyncTransportClosures, retaining object: AnyObject?) {
+        security: XraySecurityLayer
+    ) async -> XHTTPH1Multiplexer? {
+        func wrap(_ transport: AsyncTransportClosures, retaining object: AnyObject?) -> XHTTPH1Multiplexer {
             let connection = XHTTPH1Multiplexer(transport: transport)
             if let object { connection.retain(object) }
-            completion(connection)
+            return connection
         }
         switch security {
         case .none:
             let transport = TCPTransport(host: host, port: port)
-            Task {
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(nil)
-                    return
-                }
-                wrap(AsyncTransportClosures(transport), retaining: transport)
+            do {
+                try await transport.connect()
+            } catch {
+                return nil
             }
+            return wrap(AsyncTransportClosures(transport), retaining: transport)
         case .tls(let tlsConfig):
             let h1TLS = TLSConfiguration(
                 serverName: tlsConfig.serverName, alpn: ["http/1.1"],
                 echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
             )
             let client = TLSClient(configuration: h1TLS)
-            client.connect(host: host, port: port) { result in
-                switch result {
-                case .success(let connection): wrap(AsyncTransportClosures(tls: connection), retaining: client)
-                case .failure: completion(nil)
-                }
-            }
+            guard let connection = try? await client.connect(host: host, port: port) else { return nil }
+            return wrap(AsyncTransportClosures(tls: connection), retaining: client)
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
-            client.connect(host: host, port: port) { result in
-                switch result {
-                case .success(let connection): wrap(AsyncTransportClosures(tls: connection), retaining: client)
-                case .failure: completion(nil)
-                }
-            }
+            guard let connection = try? await client.connect(host: host, port: port) else { return nil }
+            return wrap(AsyncTransportClosures(tls: connection), retaining: client)
         }
     }
 

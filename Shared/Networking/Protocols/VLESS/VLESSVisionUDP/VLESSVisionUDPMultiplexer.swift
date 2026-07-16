@@ -6,86 +6,92 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPMultiplexer")
 
-nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
+nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
 
     // MARK: - Properties
 
     let configuration: ProxyConfiguration
-    let flowQueue: DispatchQueue
 
-    /// Marks flowQueue so callers can detect they're already on it.
-    private static let queueKey = DispatchSpecificKey<Bool>()
+    /// Fields guarded by `lock`.
+    private struct State {
+        var proxyClient: ProxyClient?
+        var proxyConnection: ProxyConnection?
+        var streams: [UInt16: VLESSVisionUDPStream] = [:]
+        var nextSessionID: UInt16 = 1
+        var connecting = false
+        var connected = false
+        var closed = false
+        var isXUDP = false
 
-    private var proxyClient: ProxyClient?
-    private var proxyConnection: ProxyConnection?
-    private var streams: [UInt16: VLESSVisionUDPStream] = [:]
-    private var nextSessionID: UInt16 = 1
-    private var connecting = false
-    private var connected = false
-    private(set) var closed = false
+        /// Coalesced connect waiters (parked while dialing); resumed on connect / failed on close.
+        var connectContinuations: [CheckedContinuation<Void, Error>] = []
 
-    /// Pending connect completions (queued while connecting).
-    private var connectCompletions: [(Error?) -> Void] = []
+        var frameParser = VLESSVisionUDPFrameParser()
 
-    /// Write serialization (frames must not interleave).
-    private var writeQueue: [(Data, (Error?) -> Void)] = []
-    private var isWriting = false
-    /// The single in-flight write's completion, carried on `flowQueue` so the async send
-    /// `Task` need not capture the (non-Sendable) completion closure.
-    private var inFlightWriteCompletion: ((Error?) -> Void)?
+        /// Idle-close timer as a cancellable `Task` (re-armed whenever the stream set empties).
+        var idleTask: Task<Void, Never>?
+    }
 
-    private var frameParser = VLESSVisionUDPFrameParser()
+    private let lock = Mutex(State())
 
-    private var idleTimer: DispatchSourceTimer?
+    /// Serializes framed wire writes so frames never interleave on the shared connection.
+    private let sendMutex = AsyncMutex()
+
     private static let idleTimeout: TimeInterval = 16
 
-    private var isXUDP = false
-
     /// Called once when the mux becomes permanently unusable (idle timeout, transport failure,
-    /// or explicit close) so the pool can evict it. Fired on `flowQueue`.
+    /// or explicit close) so the pool can evict it. Set once by the pool right after creation.
     var onClose: (() -> Void)?
 
     // MARK: - Init
 
-    init(configuration: ProxyConfiguration, flowQueue: DispatchQueue) {
+    init(configuration: ProxyConfiguration) {
         self.configuration = configuration
-        self.flowQueue = flowQueue
-        flowQueue.setSpecific(key: Self.queueKey, value: true)
     }
 
     // MARK: - Capacity
 
-    var activeStreamCount: Int { streams.count }
-    var isClosed: Bool { closed }
-    var isFull: Bool { closed || isXUDP }
+    var activeStreamCount: Int { lock.withLock { $0.streams.count } }
+    var isClosed: Bool { lock.withLock { $0.closed } }
+    var isFull: Bool { lock.withLock { $0.closed || $0.isXUDP } }
 
     // MARK: - Lifecycle
 
-    private func ensureReady(completion: @escaping (Error?) -> Void) {
-        if connected {
-            completion(nil)
-            return
+    /// Parks the caller until the underlying proxy connection is ready, lazily dialing on
+    /// first use. Multiple callers coalesce onto one dial.
+    private func ensureReady() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            // Decide + park under one lock section so a concurrent `finishConnect` can't
+            // resume the waiter set before this continuation is enqueued.
+            var clientToStart: ProxyClient?
+            let immediate: Result<Void, Error>? = lock.withLock { state in
+                if state.connected { return .success(()) }
+                if state.closed { return .failure(ProxyError.connectionFailed("Mux client closed")) }
+                if !state.connecting {
+                    state.connecting = true
+                    let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
+                    state.proxyClient = client
+                    clientToStart = client
+                }
+                state.connectContinuations.append(continuation)
+                return nil
+            }
+            switch immediate {
+            case .success:
+                continuation.resume()
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            case nil:
+                if let clientToStart { startConnect(client: clientToStart) }
+            }
         }
+    }
 
-        if closed {
-            completion(ProxyError.connectionFailed("Mux client closed"))
-            return
-        }
-
-        if connecting {
-            connectCompletions.append(completion)
-            return
-        }
-
-        connecting = true
-        connectCompletions.append(completion)
-
-        let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
-        self.proxyClient = client
-
+    private func startConnect(client: ProxyClient) {
         Task { [weak self] in
             let result: Result<ProxyConnection, Error>
             do {
@@ -93,191 +99,168 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
             } catch {
                 result = .failure(error)
             }
-            guard let self else { return }
+            self?.finishConnect(result)
+        }
+    }
 
-            self.flowQueue.async { [weak self] in
-                guard let self else { return }
-
-                self.connecting = false
-                let completions = self.connectCompletions
-                self.connectCompletions.removeAll()
-
-                switch result {
-                case .success(let connection):
-                    self.proxyConnection = connection
-                    self.connected = true
-                    self.startReadLoop(connection)
-                    self.resetIdleTimer()
-                    for callback in completions { callback(nil) }
-
-                case .failure(let error):
-                    self.close(error: error)
-                    for callback in completions { callback(error) }
-                }
+    private func finishConnect(_ result: Result<ProxyConnection, Error>) {
+        switch result {
+        case .success(let connection):
+            let waiters: [CheckedContinuation<Void, Error>]? = lock.withLock { state in
+                guard !state.closed else { return nil }
+                state.connecting = false
+                state.connected = true
+                state.proxyConnection = connection
+                let waiters = state.connectContinuations
+                state.connectContinuations.removeAll()
+                return waiters
             }
+            guard let waiters else {
+                // Closed mid-dial: `close()` already failed the waiters; just drop the connection.
+                connection.cancel()
+                return
+            }
+            startReadLoop(connection)
+            resetIdleTimer()
+            for continuation in waiters { continuation.resume() }
+
+        case .failure(let error):
+            let waiters: [CheckedContinuation<Void, Error>] = lock.withLock { state in
+                state.connecting = false
+                let waiters = state.connectContinuations
+                state.connectContinuations.removeAll()
+                return waiters
+            }
+            for continuation in waiters { continuation.resume(throwing: error) }
+            close(error: error)
         }
     }
 
     private func resetIdleTimer() {
-        idleTimer?.cancel()
-        idleTimer = nil
-
-        guard !closed, streams.isEmpty else { return }
-
-        let timer = DispatchSource.makeTimerSource(queue: flowQueue)
-        timer.schedule(deadline: .now() + Self.idleTimeout)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            if self.streams.isEmpty {
-                self.close()
+        lock.withLock { state in
+            state.idleTask?.cancel()
+            state.idleTask = nil
+            guard !state.closed, state.streams.isEmpty else { return }
+            state.idleTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(Self.idleTimeout * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.idleTimerFired()
             }
         }
-        timer.resume()
-        idleTimer = timer
+    }
+
+    private func idleTimerFired() {
+        let shouldClose = lock.withLock { state in !state.closed && state.streams.isEmpty }
+        if shouldClose { close(error: nil) }
     }
 
     // MARK: - Streams
 
-    /// Lazily connects the underlying proxy connection on first use.
+    /// Lazily connects the underlying proxy connection on first use, then opens a stream.
     func openStream(
         network: VLESSVisionUDPNetwork,
         host: String,
         port: UInt16,
-        globalID: Data?,
-        completion: @escaping (Result<VLESSVisionUDPStream, Error>) -> Void
-    ) {
-        guard !closed else {
-            completion(.failure(ProxyError.connectionFailed("Mux client closed")))
-            return
-        }
-
+        globalID: Data?
+    ) async throws -> VLESSVisionUDPStream {
+        let stream: VLESSVisionUDPStream
         let sessionID: UInt16
-        if globalID != nil {
-            // VLESSVisionUDPGlobalID: one flow per mux connection, always stream ID 0
-            sessionID = 0
-            isXUDP = true
-        } else {
-            sessionID = nextSessionID
-            nextSessionID &+= 1
-            // Skip 0 (reserved)
-            if nextSessionID == 0 { nextSessionID = 1 }
-        }
-
-        let stream = VLESSVisionUDPStream(
-            sessionID: sessionID,
-            network: network,
-            targetHost: host,
-            targetPort: port,
-            globalID: globalID,
-            multiplexer: self
-        )
-        streams[sessionID] = stream
-
-        resetIdleTimer()
-
-        let finishCreation = { [weak self] (error: Error?) in
-            guard let self else { return }
-            if let error {
-                self.streams.removeValue(forKey: sessionID)
-                completion(.failure(error))
-                return
+        let isXUDP: Bool
+        (stream, sessionID, isXUDP) = try lock.withLock { state in
+            guard !state.closed else {
+                throw ProxyError.connectionFailed("Mux client closed")
             }
-
-            // For VLESSVisionUDPGlobalID, the first UDP payload must be sent on the New frame so the
-            // server parses GlobalID from a data-bearing packet.
+            let sessionID: UInt16
+            let xudp: Bool
             if globalID != nil {
-                completion(.success(stream))
-                return
+                // VLESSVisionUDPGlobalID: one flow per mux connection, always stream ID 0
+                sessionID = 0
+                state.isXUDP = true
+                xudp = true
+            } else {
+                sessionID = state.nextSessionID
+                state.nextSessionID &+= 1
+                // Skip 0 (reserved)
+                if state.nextSessionID == 0 { state.nextSessionID = 1 }
+                xudp = false
             }
-
-            let metadata = VLESSVisionUDPFrameMetadata(
+            let stream = VLESSVisionUDPStream(
                 sessionID: sessionID,
-                status: .new,
-                option: [],
                 network: network,
                 targetHost: host,
                 targetPort: port,
-                globalID: globalID
+                globalID: globalID,
+                multiplexer: self
             )
-
-            let frame = VLESSVisionUDPFrame.encode(metadata: metadata, payload: nil)
-            self.writeFrame(frame) { [weak self] writeError in
-                if let writeError {
-                    self?.streams.removeValue(forKey: sessionID)
-                    completion(.failure(writeError))
-                } else {
-                    completion(.success(stream))
-                }
-            }
+            state.streams[sessionID] = stream
+            return (stream, sessionID, xudp)
         }
 
-        if connected {
-            finishCreation(nil)
-        } else {
-            ensureReady { error in
-                finishCreation(error)
-            }
+        resetIdleTimer()
+
+        do {
+            try await ensureReady()
+        } catch {
+            removeStreamEntry(sessionID)
+            throw error
         }
+
+        // For VLESSVisionUDPGlobalID, the first UDP payload must be sent on the New frame so the
+        // server parses GlobalID from a data-bearing packet.
+        if isXUDP {
+            return stream
+        }
+
+        let metadata = VLESSVisionUDPFrameMetadata(
+            sessionID: sessionID,
+            status: .new,
+            option: [],
+            network: network,
+            targetHost: host,
+            targetPort: port,
+            globalID: globalID
+        )
+        let frame = VLESSVisionUDPFrame.encode(metadata: metadata, payload: nil)
+        do {
+            try await writeFrame(frame)
+        } catch {
+            removeStreamEntry(sessionID)
+            throw error
+        }
+        return stream
     }
 
-    /// Safe to call from any thread — dispatches to flowQueue if needed.
+    /// Drops a stream after a failed open — cleanup only, no idle re-arm.
+    private func removeStreamEntry(_ sessionID: UInt16) {
+        lock.withLock { _ = $0.streams.removeValue(forKey: sessionID) }
+    }
+
+    /// Removes a stream that closed itself; re-arms the idle timer if the mux went idle.
     func removeStream(_ sessionID: UInt16) {
-        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            streams.removeValue(forKey: sessionID)
-            if streams.isEmpty {
-                resetIdleTimer()
-            }
-        } else {
-            flowQueue.async { [weak self] in
-                guard let self else { return }
-                self.streams.removeValue(forKey: sessionID)
-                if self.streams.isEmpty {
-                    self.resetIdleTimer()
-                }
-            }
+        let becameIdle: Bool = lock.withLock { state in
+            state.streams.removeValue(forKey: sessionID)
+            return state.streams.isEmpty
         }
+        if becameIdle { resetIdleTimer() }
     }
 
     // MARK: - Send
 
-    func writeFrame(_ data: Data, completion: @escaping (Error?) -> Void) {
-        flowQueue.async { [weak self] in
-            guard let self, !self.closed else {
-                completion(ProxyError.connectionFailed("Mux client closed"))
-                return
+    /// Serializes framed writes through `sendMutex`; a failed write tears the mux down.
+    func writeFrame(_ data: Data) async throws {
+        let connection: ProxyConnection = try lock.withLock { state in
+            guard !state.closed, let connection = state.proxyConnection else {
+                throw ProxyError.connectionFailed("Mux client closed")
             }
-            self.writeQueue.append((data, completion))
-            self.drainWriteQueue()
+            return connection
         }
-    }
-
-    private func drainWriteQueue() {
-        guard !isWriting, !writeQueue.isEmpty, let connection = proxyConnection else { return }
-
-        isWriting = true
-        let (data, completion) = writeQueue.removeFirst()
-        inFlightWriteCompletion = completion
-
-        Task { [weak self] in
-            var sendError: Error?
-            do {
+        do {
+            try await sendMutex.withLock {
                 try await connection.sendRaw(data)
-            } catch {
-                sendError = error
             }
-            self?.flowQueue.async { [weak self] in
-                guard let self else { return }
-                self.isWriting = false
-                let completion = self.inFlightWriteCompletion
-                self.inFlightWriteCompletion = nil
-                completion?(sendError)
-
-                if let sendError {
-                    self.close(error: sendError)
-                } else {
-                    self.drainWriteQueue()
-                }
-            }
+        } catch {
+            close(error: error)
+            throw error
         }
     }
 
@@ -288,50 +271,60 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
             do {
                 while true {
                     guard let data = try await connection.receive(), !data.isEmpty else {
-                        self?.flowQueue.async { [weak self] in
-                            guard let self, !self.closed else { return }
-                            self.close(error: nil)   // clean EOF
-                        }
+                        self?.handleReadEnd(error: nil)   // clean EOF
                         return
                     }
-                    self?.flowQueue.async { [weak self] in
-                        self?.handleInbound(data)
-                    }
+                    self?.handleInbound(data)
                 }
             } catch {
-                self?.flowQueue.async { [weak self] in
-                    guard let self, !self.closed else { return }
-                    self.close(error: error)
-                }
+                self?.handleReadEnd(error: error)
             }
         }
+    }
+
+    private func handleReadEnd(error: Error?) {
+        guard !isClosed else { return }
+        close(error: error)
     }
 
     // MARK: - Demux
 
     private func handleInbound(_ data: Data) {
-        let frames = frameParser.feed(data)
+        enum Deliver { case data(Data); case close }
+        // Parse + resolve stream targets under the lock; deliver outside it so the
+        // per-stream channel writes never run while `lock` is held.
+        let actions: [(stream: VLESSVisionUDPStream, deliver: Deliver)] = lock.withLock { state in
+            let frames = state.frameParser.feed(data)
+            var out: [(VLESSVisionUDPStream, Deliver)] = []
+            for (metadata, payload) in frames {
+                switch metadata.status {
+                case .new:
+                    // Server-initiated streams — not expected for outbound mux, ignore
+                    break
 
-        for (metadata, payload) in frames {
-            switch metadata.status {
-            case .new:
-                // Server-initiated streams — not expected for outbound mux, ignore
-                break
+                case .keep:
+                    if let stream = state.streams[metadata.sessionID], let payload, !payload.isEmpty {
+                        out.append((stream, .data(payload)))
+                    }
 
-            case .keep:
-                if let stream = streams[metadata.sessionID], let payload, !payload.isEmpty {
-                    stream.deliverData(payload)
+                case .end:
+                    if let stream = state.streams[metadata.sessionID] {
+                        state.streams.removeValue(forKey: metadata.sessionID)
+                        out.append((stream, .close))
+                    }
+
+                case .keepAlive:
+                    // Ping from server — no action needed
+                    break
                 }
+            }
+            return out
+        }
 
-            case .end:
-                if let stream = streams[metadata.sessionID] {
-                    streams.removeValue(forKey: metadata.sessionID)
-                    stream.deliverClose()
-                }
-
-            case .keepAlive:
-                // Ping from server — no action needed
-                break
+        for (stream, deliver) in actions {
+            switch deliver {
+            case .data(let payload): stream.deliverData(payload)
+            case .close:            stream.deliverClose(error: nil)
             }
         }
     }
@@ -339,51 +332,58 @@ nonisolated class VLESSVisionUDPMultiplexer: Multiplexer {
     // MARK: - Close
 
     /// `error` is non-nil when the mux connection died with a transport failure;
-    /// pass `nil` for normal teardown (idle close, deliberate cancel).
+    /// pass `nil` for normal teardown (idle close, deliberate cancel). Idempotent.
     func close(error: Error? = nil) {
-        guard !closed else { return }
-        closed = true
+        struct Teardown {
+            var streams: [VLESSVisionUDPStream]
+            var connection: ProxyConnection?
+            var client: ProxyClient?
+            var idleTask: Task<Void, Never>?
+            var connectContinuations: [CheckedContinuation<Void, Error>]
+        }
+
+        let teardown: Teardown? = lock.withLock { state in
+            guard !state.closed else { return nil }
+            state.closed = true
+
+            let snapshot = Teardown(
+                streams: Array(state.streams.values),
+                connection: state.proxyConnection,
+                client: state.proxyClient,
+                idleTask: state.idleTask,
+                connectContinuations: state.connectContinuations
+            )
+            state.streams.removeAll()
+            state.proxyConnection = nil
+            state.proxyClient = nil
+            state.idleTask = nil
+            state.connectContinuations.removeAll()
+            state.connecting = false
+            state.frameParser.reset()
+            return snapshot
+        }
+        guard let teardown else { return }
 
         // Captured before teardown; fired last so the pool evicts exactly once (the
-        // `closed` guard above makes close() idempotent).
+        // `closed` guard above makes close() idempotent). Set once by the pool at creation.
         let notifyClose = onClose
         onClose = nil
 
-        idleTimer?.cancel()
-        idleTimer = nil
+        teardown.idleTask?.cancel()
 
-        let allStreams = streams.values
-        streams.removeAll()
-
-        for stream in allStreams {
+        for stream in teardown.streams {
             stream.deliverClose(error: error)
         }
 
-        proxyConnection?.cancel()
-        proxyClient?.cancel()
-        proxyConnection = nil
-        proxyClient = nil
+        teardown.connection?.cancel()
+        teardown.client?.cancel()
 
-        frameParser.reset()
-
-        // Fail every pending write so its async caller unblocks (rather than leaking a
-        // suspended continuation): the in-flight send plus anything still queued.
+        // Fail every parked connect waiter so its async caller unblocks rather than leaking a
+        // suspended continuation. In-flight/queued sends fail fast on their own because the
+        // connection above is now cancelled.
         let closeError = error ?? ProxyError.connectionFailed("Mux client closed")
-        let pendingWrites = writeQueue
-        writeQueue.removeAll()
-        let inFlight = inFlightWriteCompletion
-        inFlightWriteCompletion = nil
-        isWriting = false
-        inFlight?(closeError)
-        for (_, completion) in pendingWrites {
-            completion(closeError)
-        }
-
-        let pendingCompletions = connectCompletions
-        connectCompletions.removeAll()
-        connecting = false
-        for callback in pendingCompletions {
-            callback(ProxyError.connectionFailed("Mux client closed"))
+        for continuation in teardown.connectContinuations {
+            continuation.resume(throwing: closeError)
         }
 
         notifyClose?()

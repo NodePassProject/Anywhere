@@ -48,7 +48,9 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     private var receiveBuffer = Data()
     private var responseParsed = false
 
-    private var openCompletion: ((Error?) -> Void)?
+    /// Resolves when the Hysteria TCP response header is demuxed (or the open fails). The waiter
+    /// continuation lives in the promise (async infra), bridging the session's ngtcp2 demux loop.
+    private let openPromise = AsyncPromise<Void>()
 
     init(session: HysteriaSession, destination: String) {
         self.session = session
@@ -64,37 +66,37 @@ nonisolated final class HysteriaConnection: ProxyConnection {
 
     // MARK: - Open (called by ProxyClient after session is ready)
 
-    func open(completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(HysteriaError.streamClosed); return }
-            guard self.state == .idle else { completion(HysteriaError.notReady); return }
-            self.openCompletion = completion
-            self.state = .openingStream
+    func open() async throws {
+        // Claim the connection on the ngtcp2 queue; `openPromise` resolves later in
+        // `tryParseResponse` (response header) or `fail` (error).
+        let started: Bool = await session.run { [self] in
+            guard state == .idle else { return false }
+            state = .openingStream
+            return true
+        }
+        guard started else { throw HysteriaError.notReady }
 
-            self.session.openTCPStream(for: self) { [weak self] streamID, error in
-                guard let self else { return }
-                self.session.queue.async {
-                    if let error {
-                        self.fail(error)
-                        return
-                    }
-                    guard let streamID else {
-                        self.fail(HysteriaError.connectionFailed("No stream"))
-                        return
-                    }
-                    self.streamID = streamID
-                    self.sendTCPRequest()
-                }
+        // Reserve the stream, then send the request.
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let streamID = try await self.session.openTCPStream(for: self)
+                await self.session.run { self.streamID = streamID; self.sendTCPRequest() }
+            } catch {
+                await self.session.run { self.fail(error) }
             }
         }
+        try await openPromise.value()
     }
 
     private func sendTCPRequest() {
         state = .handshaking
         let frame = HysteriaProtocol.encodeTCPRequest(address: destination)
-        session.writeStream(streamID, data: frame) { [weak self] error in
+        Task { [weak self] in
             guard let self else { return }
-            if let error {
+            do {
+                try await self.session.writeStream(self.streamID, data: frame)
+            } catch {
                 self.session.queue.async { self.fail(error) }
             }
         }
@@ -151,10 +153,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         }
 
         state = .ready
-        if let callback = openCompletion {
-            openCompletion = nil
-            callback(nil)
-        }
+        openPromise.resolve(.success(()))
     }
 
     /// Hands any buffered post-header bytes to the inbox. Runs on `session.queue`.
@@ -196,10 +195,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         guard state != .closed else { return }
         state = .closed
 
-        if let callback = openCompletion {
-            openCompletion = nil
-            callback(error)
-        }
+        openPromise.resolve(.failure(error))
         inbox.fail(error)
     }
 
@@ -225,10 +221,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
-            if let callback = self.openCompletion {
-                self.openCompletion = nil
-                callback(HysteriaError.streamClosed)
-            }
+            self.openPromise.resolve(.failure(HysteriaError.streamClosed))
             if self.streamID >= 0 {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)

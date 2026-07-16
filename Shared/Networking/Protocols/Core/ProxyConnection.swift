@@ -8,15 +8,7 @@
 import Foundation
 import Synchronization
 
-// MARK: - ProxyConnection
-
-/// Async-native base for every proxy connection wrapper. Subclasses implement the raw
-/// send/receive contract (`sendRaw`/`receiveRaw`, plus `closeWrite`/`cancel` where they
-/// apply); the base tracks traffic stats and supplies the direct-copy and half-close
-/// defaults. Formerly split into a callback `ProxyConnection` plus an async `AsyncProxyConnection`
-/// bridge — the callback surface and the callback→async send pump were removed in the base
-/// collapse, so the async raw methods are now the sole abstract contract.
-nonisolated class ProxyConnection {
+nonisolated class ProxyConnection: @unchecked Sendable {
 
     /// The negotiated TLS version of the outer transport; `nil` for non-TLS transports.
     var outerTLSVersion: TLSVersion? { nil }

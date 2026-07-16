@@ -76,13 +76,8 @@ enum OutboundConnector {
 
     // MARK: - Dial
 
-    /// `completion` always runs on `queue`.
-    static func dial(
-        host: String,
-        port: UInt16,
-        queue: DispatchQueue,
-        completion: @escaping (Result<Dialed, Error>) -> Void
-    ) {
+    /// Resolves the route and dials it (direct or via proxy), returning the live connection.
+    static func dial(host: String, port: UInt16) async throws -> Dialed {
         let (route, viaDefault, ruleSetName) = resolveRoute(host: host)
         // The only place script `Anywhere.http` fetches reach the Requests log — they're the
         // extension's own outbound, not captured device traffic. A pooled HTTP/2 connection
@@ -90,18 +85,17 @@ enum OutboundConnector {
         routingContext()?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
         switch route {
         case .reject:
-            queue.async { completion(.failure(ConnectError.rejected(host))) }
+            throw ConnectError.rejected(host)
         case .direct:
-            dialDirect(host: host, port: port, queue: queue, completion: completion)
+            return try await dialDirect(host: host, port: port)
         case .proxy:
             guard let context = routingContext(),
                   let configuration = resolveConfiguration(for: route, context: context) else {
                 // An unresolvable proxy configuration dials direct rather than failing outright.
                 logger.warning("[OutboundConnector] No configuration resolved for \(host); dialing direct")
-                dialDirect(host: host, port: port, queue: queue, completion: completion)
-                return
+                return try await dialDirect(host: host, port: port)
             }
-            dialProxy(configuration: configuration, host: host, port: port, queue: queue, completion: completion)
+            return try await dialProxy(configuration: configuration, host: host, port: port)
         }
     }
 
@@ -112,50 +106,33 @@ enum OutboundConnector {
         return nil
     }
 
-    private static func dialDirect(
-        host: String, port: UInt16,
-        queue: DispatchQueue, completion: @escaping (Result<Dialed, Error>) -> Void
-    ) {
+    private static func dialDirect(host: String, port: UInt16) async throws -> Dialed {
         // Direct dial — not a proxied connection. TCPTransport has no dial timer,
         // so it stays out of the Dial metric automatically.
         let transport = TCPTransport(host: host, port: port)
         let connection = DirectProxyConnection(transport: transport)
-        Task {
-            do {
-                try await transport.connect()
-            } catch {
-                queue.async {
-                    connection.cancel()
-                    completion(.failure(error))
-                }
-                return
-            }
-            queue.async {
-                completion(.success(Dialed(connection: connection, proxyClient: nil)))
-            }
+        do {
+            try await transport.connect()
+        } catch {
+            connection.cancel()
+            throw error
         }
+        return Dialed(connection: connection, proxyClient: nil)
     }
 
     private static func dialProxy(
-        configuration: ProxyConfiguration, host: String, port: UInt16,
-        queue: DispatchQueue, completion: @escaping (Result<Dialed, Error>) -> Void
-    ) {
+        configuration: ProxyConfiguration, host: String, port: UInt16
+    ) async throws -> Dialed {
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: routingContext()?.isDefaultConfiguration(configuration.id) ?? false
         )
-        Task {
-            do {
-                let connection = try await client.connect(to: host, port: port, initialData: nil)
-                queue.async {
-                    completion(.success(Dialed(connection: connection, proxyClient: client)))
-                }
-            } catch {
-                queue.async {
-                    client.cancel()
-                    completion(.failure(error))
-                }
-            }
+        do {
+            let connection = try await client.connect(to: host, port: port, initialData: nil)
+            return Dialed(connection: connection, proxyClient: client)
+        } catch {
+            await client.cancel()
+            throw error
         }
     }
 

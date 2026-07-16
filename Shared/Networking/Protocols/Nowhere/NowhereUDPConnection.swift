@@ -37,7 +37,9 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     private var controlStreamID: Int64 = -1
     private var controlBuffer = Data()
     private var controlReadClosed = false
-    private var openCompletion: ((Error?) -> Void)?
+    /// Resolves when the UDP flow result is demuxed (or the open fails). The waiter
+    /// continuation lives in the promise (async infra), bridging the control-stream handshake.
+    private let openPromise = AsyncPromise<Void>()
 
     /// Reassembled inbound datagrams / EOF / error, pushed on `session.queue` (inside ngtcp2's
     /// recv_datagram) and pulled by `receiveRaw`. The session's byte budget (`reserveUDPBuffer`)
@@ -65,7 +67,8 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     }
     private var defragSlots: [UInt32: DefragSlot] = [:]
     private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    private var defragCleanup: DispatchWorkItem?
+    /// Pending TTL sweep of `defragSlots`, confined to `session.queue`.
+    private var defragCleanup: Task<Void, Never>?
     private var nextPacketID: UInt32 = 1
 
     init(
@@ -99,70 +102,92 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         immediate?.0(immediate?.1)
     }
 
-    func open(completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(NowhereError.streamClosed); return }
-            guard self.state == .idle else { completion(NowhereError.notReady); return }
-            self.openCompletion = completion
-            self.state = .openingControl
-            self.session.registerUDPSession(
-                self,
-                requestedFlowID: self.flowHeader.flowID
-            ) { [weak self] result in
-                guard let self else { return }
-                switch result {
-                case .failure(let error):
-                    self.fail(error)
-                case .success:
-                    self.openControlStream()
-                }
+    func open() async throws {
+        // Claim the flow on the ngtcp2 queue; `openPromise` resolves later in
+        // `finishOpen` (result) or `fail` (error).
+        let started: Bool = await session.run { [self] in
+            guard state == .idle else { return false }
+            state = .openingControl
+            return true
+        }
+        guard started else { throw NowhereError.notReady }
+
+        // Register the flow, then open the control stream.
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.session.registerUDPSession(
+                    self,
+                    requestedFlowID: self.flowHeader.flowID
+                )
+                self.openControlStream()
+            } catch {
+                await self.session.run { self.fail(error) }
             }
         }
+        try await openPromise.value()
     }
 
     private func openControlStream() {
-        session.openUDPControlStream(for: self) { [weak self] sid, error in
+        Task { [weak self] in
             guard let self else { return }
-            if let error {
-                self.fail(error)
-                return
-            }
-            guard let sid else {
-                self.fail(NowhereError.connectionFailed("No UDP control stream"))
-                return
-            }
-            self.controlStreamID = sid
-
-            let request: Data
+            let sid: Int64
             do {
-                request = try NowhereProtocol.encodeFlowRequest(
-                    header: self.flowHeader,
-                    target: self.destination,
-                    protocolSpec: self.session.protocolSpec
-                )
+                sid = try await self.session.openUDPControlStream(for: self)
             } catch {
-                self.fail(error)
+                self.session.queue.async { self.fail(error) }
                 return
             }
+            self.session.queue.async {
+                // Adopt the stream id on the session queue before sending the request, so
+                // interleaved control data / termination race against a valid id. If we
+                // already terminated during the open hop, reset and release the freshly opened
+                // stream (teardown ran before the id was adopted, so it couldn't).
+                guard self.state == .openingControl else {
+                    self.session.shutdownStream(sid)
+                    self.session.releaseUDPControlStream(sid)
+                    return
+                }
+                self.controlStreamID = sid
 
-            self.session.writeStream(sid, data: request, fin: true) { [weak self] error in
-                guard let self else { return }
-                self.session.queue.async {
-                    // Peer data/FIN can beat this local write callback. A complete
-                    // buffered F2 is authoritative and must be consumed first.
-                    self.processControlResultIfAvailable()
-                    guard self.state == .openingControl else { return }
-                    if let error {
-                        self.fail(error)
-                        return
+                let request: Data
+                do {
+                    request = try NowhereProtocol.encodeFlowRequest(
+                        header: self.flowHeader,
+                        target: self.destination,
+                        protocolSpec: self.session.protocolSpec
+                    )
+                } catch {
+                    self.fail(error)
+                    return
+                }
+
+                Task { [weak self] in
+                    guard let self else { return }
+                    let writeError: Error?
+                    do {
+                        try await self.session.writeStream(sid, data: request, fin: true)
+                        writeError = nil
+                    } catch {
+                        writeError = error
                     }
-                    guard self.state == .openingControl else { return }
-                    if self.expectsResult {
-                        self.state = .waitingResult
+                    self.session.queue.async {
+                        // Peer data/FIN can beat this local write callback. A complete
+                        // buffered F2 is authoritative and must be consumed first.
                         self.processControlResultIfAvailable()
-                    } else {
-                        self.releaseControlStream(reset: false)
-                        self.finishOpen()
+                        guard self.state == .openingControl else { return }
+                        if let writeError {
+                            self.fail(writeError)
+                            return
+                        }
+                        guard self.state == .openingControl else { return }
+                        if self.expectsResult {
+                            self.state = .waitingResult
+                            self.processControlResultIfAvailable()
+                        } else {
+                            self.releaseControlStream(reset: false)
+                            self.finishOpen()
+                        }
                     }
                 }
             }
@@ -251,9 +276,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     private func finishOpen() {
         guard state != .closed else { return }
         state = .ready
-        let callback = openCompletion
-        openCompletion = nil
-        callback?(nil)
+        openPromise.resolve(.success(()))
     }
 
     func handleFlowClose() {
@@ -389,19 +412,20 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         releaseControlStream(reset: !wasReady)
         session.releaseUDPSession(flowHeader.flowID)
         releaseAllBufferedData()
-        let open = openCompletion
-        openCompletion = nil
-        open?(NowhereError.streamClosed)
+        openPromise.resolve(.failure(NowhereError.streamClosed))
         inbox.cancel()
         notifyTermination(error: nil)
     }
 
     private func sendCloseFrame() {
-        let frame = try? NowhereProtocol.encodeUDPControl(
+        guard let frame = try? NowhereProtocol.encodeUDPControl(
             type: .close,
             flowID: flowHeader.flowID
-        )
-        if let frame { session.writeDatagram(frame) { _ in } }
+        ) else { return }
+        // Best-effort advisory close, over the QUIC ngtcp2-boundary continuation.
+        Task { [weak self] in
+            try? await self?.session.writeDatagrams([frame])
+        }
     }
 
     private func releaseControlStream(reset: Bool) {
@@ -432,9 +456,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         releaseControlStream(reset: true)
         session.releaseUDPSession(flowHeader.flowID)
         releaseAllBufferedData()
-        let open = openCompletion
-        openCompletion = nil
-        open?(error)
+        openPromise.resolve(.failure(error))
         // Ordered after every datagram already queued in the inbox; the error surfaces
         // on the next (or a parked) receive, replacing the old `closureError` stash.
         inbox.fail(error)
@@ -546,14 +568,19 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         defragCleanup?.cancel()
         defragCleanup = nil
         guard let earliest = defragSlots.values.map(\.createdAt.uptimeNanoseconds).min() else { return }
-        let deadline = DispatchTime(uptimeNanoseconds: earliest + Self.defragSlotTTLNanos)
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.cleanupExpiredDefragSlots()
-            self.scheduleDefragCleanup()
+        let deadlineNanos = earliest + Self.defragSlotTTLNanos
+        let nowNanos = DispatchTime.now().uptimeNanoseconds
+        let delayNanos = deadlineNanos > nowNanos ? deadlineNanos - nowNanos : 0
+        // Fires on `session.queue` (hopped back on) so the sweep and reschedule stay
+        // serialized with the defrag state.
+        defragCleanup = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanos)
+            guard !Task.isCancelled, let self else { return }
+            self.session.queue.async {
+                self.cleanupExpiredDefragSlots()
+                self.scheduleDefragCleanup()
+            }
         }
-        defragCleanup = work
-        session.queue.asyncAfter(deadline: deadline, execute: work)
     }
 
     private func releaseAllBufferedData() {

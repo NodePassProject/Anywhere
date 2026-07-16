@@ -68,24 +68,22 @@ final class MITMScriptHTTPClient {
         }
     }
 
-    /// Calls `completion` exactly once; response-size caps are enforced as the body streams.
+    /// Runs the request through the tunnel; response-size caps are enforced as the body streams.
     func send(
         _ request: URLRequest,
         followRedirects: Bool,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
         // Dialed through the tunnel's routing (direct / reject / proxy), with TLS layered on for
         // https. The engine already guarantees an absolute http(s) URL with a host.
         guard let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https",
               request.url?.host?.isEmpty == false else {
-            completion(.failure(ClientError.notHTTP))
-            return
+            throw ClientError.notHTTP
         }
-        sendViaTunnel(request: request, followRedirects: followRedirects, insecure: insecure,
-                      maxBytes: maxBytes, resourceTimeout: resourceTimeout, completion: completion)
+        return try await sendViaTunnel(request: request, followRedirects: followRedirects, insecure: insecure,
+                                       maxBytes: maxBytes, resourceTimeout: resourceTimeout)
     }
 
     private func sendViaTunnel(
@@ -93,34 +91,33 @@ final class MITMScriptHTTPClient {
         followRedirects: Bool,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
-        routedRequest(request, redirectsRemaining: followRedirects ? Self.maxRedirects : 0,
-                      insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout,
-                      completion: completion)
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
+        try await routedRequest(request, redirectsRemaining: followRedirects ? Self.maxRedirects : 0,
+                                insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout)
     }
 
-    /// Runs one request; on a followable 3xx, recurses on the `Location` target (re-routed per hop).
+    /// Runs one request; on a followable 3xx, loops on the `Location` target (re-routed per hop).
     private func routedRequest(
         _ request: URLRequest,
         redirectsRemaining: Int,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
-        performRoutedRequest(request, insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout) { result in
-            guard case .success(let response) = result else { completion(result); return }
-            guard redirectsRemaining > 0, Self.isRedirect(response.status),
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
+        var current = request
+        var remaining = redirectsRemaining
+        while true {
+            let response = try await performRoutedRequest(current, insecure: insecure, maxBytes: maxBytes,
+                                                           resourceTimeout: resourceTimeout)
+            guard remaining > 0, Self.isRedirect(response.status),
                   let location = Self.firstHeaderValue(response.headers, name: "Location"),
-                  let next = Self.makeRedirectRequest(from: request, location: location, status: response.status)
+                  let next = Self.makeRedirectRequest(from: current, location: location, status: response.status)
             else {
-                completion(result)
-                return
+                return response
             }
-            self.routedRequest(next, redirectsRemaining: redirectsRemaining - 1, insecure: insecure,
-                               maxBytes: maxBytes, resourceTimeout: resourceTimeout, completion: completion)
+            current = next
+            remaining -= 1
         }
     }
 
@@ -130,12 +127,10 @@ final class MITMScriptHTTPClient {
         _ request: URLRequest,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
         guard let scheme = request.url?.scheme?.lowercased(), let host = request.url?.host, !host.isEmpty else {
-            completion(.failure(ClientError.notHTTP))
-            return
+            throw ClientError.notHTTP
         }
         let isTLS = scheme == "https"
         let defaultPort: UInt16 = isTLS ? 443 : 80
@@ -143,27 +138,22 @@ final class MITMScriptHTTPClient {
         let hostHeader = Self.hostHeader(host: host, port: port, defaultPort: defaultPort)
 
         guard isTLS else {
-            performHTTP1Request(request, host: host, port: port, hostHeader: hostHeader, isTLS: false,
-                                insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout,
-                                completion: completion)
-            return
+            return try await performHTTP1Request(request, host: host, port: port, hostHeader: hostHeader,
+                                                 isTLS: false, insecure: insecure, maxBytes: maxBytes,
+                                                 resourceTimeout: resourceTimeout)
         }
 
-        MITMScriptHTTP2Pool.shared.perform(
+        let outcome = try await MITMScriptHTTP2Pool.shared.perform(
             request: request, host: host, port: port, hostHeader: hostHeader, insecure: insecure,
             maxBytes: maxBytes, resourceTimeout: resourceTimeout
-        ) { [weak self] outcome in
-            switch outcome {
-            case .response(let response):
-                completion(.success(response))
-            case .failure(let error):
-                completion(.failure(error))
-            case .fallbackToHTTP1:
-                guard let self else { completion(.failure(ClientError.notHTTP)); return }
-                self.performHTTP1Request(request, host: host, port: port, hostHeader: hostHeader, isTLS: true,
-                                         insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout,
-                                         completion: completion)
-            }
+        )
+        switch outcome {
+        case .response(let response):
+            return response
+        case .fallbackToHTTP1:
+            return try await performHTTP1Request(request, host: host, port: port, hostHeader: hostHeader,
+                                                 isTLS: true, insecure: insecure, maxBytes: maxBytes,
+                                                 resourceTimeout: resourceTimeout)
         }
     }
 
@@ -176,30 +166,23 @@ final class MITMScriptHTTPClient {
         isTLS: Bool,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
-        let queue = DispatchQueue(label: "com.anywhere.ne.tunneled-http")
-        OutboundConnector.dial(host: host, port: port, queue: queue) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let dialed):
-                if isTLS {
-                    self.runTLSExchange(dialed: dialed, request: request, host: host, hostHeader: hostHeader,
-                                        insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout,
-                                        queue: queue, completion: completion)
-                } else {
-                    let exchange = TunneledHTTP1Exchange(
-                        connection: dialed.connection, request: request, hostHeader: hostHeader,
-                        maxBytes: maxBytes, resourceTimeout: resourceTimeout, queue: queue,
-                        teardown: { dialed.connection.cancel(); dialed.proxyClient?.cancel() },
-                        completion: completion
-                    )
-                    exchange.start()
-                }
-            }
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
+        let dialed = try await OutboundConnector.dial(host: host, port: port)
+        if isTLS {
+            return try await runTLSExchange(dialed: dialed, request: request, host: host, hostHeader: hostHeader,
+                                            insecure: insecure, maxBytes: maxBytes, resourceTimeout: resourceTimeout)
         }
+        // The exchange owns no teardown; cancel the dialed transport on every path.
+        defer {
+            dialed.connection.cancel()
+            dialed.proxyClient?.cancel()
+        }
+        let exchange = TunneledHTTP1Exchange(
+            connection: dialed.connection, request: request, hostHeader: hostHeader,
+            maxBytes: maxBytes, resourceTimeout: resourceTimeout
+        )
+        return try await exchange.run()
     }
 
     private func runTLSExchange(
@@ -209,37 +192,31 @@ final class MITMScriptHTTPClient {
         hostHeader: String,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        queue: DispatchQueue,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
+        resourceTimeout: TimeInterval
+    ) async throws -> Response {
         // ALPN pinned to http/1.1 (the exchange speaks only 1.1). `insecure` skips cert checks for
         // this connection alone.
         let tlsConfiguration = TLSConfiguration(serverName: host, alpn: ["http/1.1"], insecureSkipVerify: insecure)
         let tlsClient = TLSClient(configuration: tlsConfiguration)
-        tlsClient.connect(overTunnel: dialed.connection) { result in
-            queue.async {
-                switch result {
-                case .failure(let error):
-                    dialed.connection.cancel()
-                    dialed.proxyClient?.cancel()
-                    completion(.failure(error))
-                case .success(let tlsConnection):
-                    let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
-                    let exchange = TunneledHTTP1Exchange(
-                        connection: tlsProxyConnection, request: request, hostHeader: hostHeader,
-                        maxBytes: maxBytes, resourceTimeout: resourceTimeout, queue: queue,
-                        teardown: {
-                            tlsProxyConnection.cancel()
-                            tlsClient.cancel()
-                            dialed.proxyClient?.cancel()
-                        },
-                        completion: completion
-                    )
-                    exchange.start()
-                }
-            }
+        let tlsConnection: TLSRecordConnection
+        do {
+            tlsConnection = try await tlsClient.connect(overTunnel: dialed.connection)
+        } catch {
+            dialed.connection.cancel()
+            await dialed.proxyClient?.cancel()
+            throw error
         }
+        let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
+        defer {
+            tlsProxyConnection.cancel()
+            tlsClient.cancel()
+            dialed.proxyClient?.cancel()
+        }
+        let exchange = TunneledHTTP1Exchange(
+            connection: tlsProxyConnection, request: request, hostHeader: hostHeader,
+            maxBytes: maxBytes, resourceTimeout: resourceTimeout
+        )
+        return try await exchange.run()
     }
 
     private static func hostHeader(host: String, port: UInt16, defaultPort: UInt16) -> String {

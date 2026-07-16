@@ -7,6 +7,7 @@
 
 import Foundation
 import SwiftData
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "JSONBlobStore")
 
@@ -37,7 +38,9 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     private let container: ModelContainer?
     let usesCloudKit: Bool
     
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.jsonblobstore")
+    /// Serializes `ModelContext` access; a pure critical-section gate keeping the
+    /// synchronous store API.
+    private let gate = Mutex<Void>(())
 
     nonisolated(unsafe) static var mergeResolver: ((Key, [(data: Data, updatedAt: Date)]) -> Data)?
 
@@ -70,7 +73,7 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     // MARK: - Public API
     
     func load(_ key: Key) -> Data? {
-        queue.sync {
+        gate.withLock { _ in
             guard let container else { return nil }
             let context = ModelContext(container)
             let raw = key.rawValue
@@ -88,7 +91,7 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     
     func compactDuplicates() {
         guard usesCloudKit, let container, let resolver = Self.mergeResolver else { return }
-        queue.sync {
+        gate.withLock { _ in
             let context = ModelContext(container)
             var didChange = false
             for key in Key.allCases {
@@ -115,7 +118,7 @@ nonisolated final class JSONBlobStore: @unchecked Sendable {
     }
 
     func save(_ key: Key, data: Data) {
-        queue.sync {
+        gate.withLock { _ in
             guard let container else { return }
             let context = ModelContext(container)
             let raw = key.rawValue

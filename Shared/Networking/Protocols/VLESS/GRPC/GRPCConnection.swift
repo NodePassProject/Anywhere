@@ -6,8 +6,7 @@
 //
 
 import Foundation
-
-// MARK: - GRPCConnection
+import Synchronization
 
 nonisolated final class GRPCConnection: @unchecked Sendable {
 
@@ -22,44 +21,48 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
 
     // MARK: State
 
-    private let lock = UnfairLock()
-    private var _isConnected = false
+    /// Fields guarded by `state`.
+    nonisolated private struct State {
+        var _isConnected = false
+
+        /// Raw HTTP/2 byte buffer (accumulates transport reads until a full frame is parseable).
+        var h2ReadBuffer = Data()
+        /// Reassembles HTTP/2 DATA payloads into length-prefixed gRPC frames.
+        var grpcFrameBuffer = Data()
+        /// Decoded app-layer bytes awaiting delivery to the caller.
+        var decodedBuffer = Data()
+
+        /// Whether the gRPC response HEADERS (status 200) have been validated.
+        var h2ResponseReceived = false
+        /// Whether the server has closed its side of the stream (END_STREAM flag on HEADERS or DATA).
+        var h2StreamClosed = false
+
+        /// Peer's flow-control windows (bytes we can still send without another WINDOW_UPDATE).
+        var h2PeerConnectionWindow: Int = 65535
+        var h2PeerStreamSendWindow: Int = 65535
+        var h2PeerInitialWindowSize: Int = 65535
+
+        /// Local window size, advertised at setup and used as the WINDOW_UPDATE threshold.
+        var h2LocalWindowSize: Int = 4_194_304 // 4 MB
+
+        /// Maximum HTTP/2 frame payload size (SETTINGS_MAX_FRAME_SIZE default, updated by peer).
+        var h2MaxFrameSize: Int = 16384
+
+        /// Bytes received but not yet acknowledged via WINDOW_UPDATE.
+        var h2ConnectionReceiveConsumed: Int = 0
+        var h2StreamReceiveConsumed: Int = 0
+
+        /// Send-side continuations waiting for a WINDOW_UPDATE that re-opens flow control.
+        var h2FlowResumptions: [CheckedContinuation<Void, Never>] = []
+
+        /// Keepalive ping timer (nil when idleTimeout == 0).
+        var keepaliveTask: Task<Void, Never>?
+    }
+
+    private let state: Mutex<State>
 
     /// First client-initiated stream ID (odd per RFC 7540 §5.1.1).
     private static let streamId: UInt32 = 1
-
-    /// Raw HTTP/2 byte buffer (accumulates transport reads until a full frame is parseable).
-    private var h2ReadBuffer = Data()
-    /// Reassembles HTTP/2 DATA payloads into length-prefixed gRPC frames.
-    private var grpcFrameBuffer = Data()
-    /// Decoded app-layer bytes awaiting delivery to the caller.
-    private var decodedBuffer = Data()
-
-    /// Whether the gRPC response HEADERS (status 200) have been validated.
-    private var h2ResponseReceived = false
-    /// Whether the server has closed its side of the stream (END_STREAM flag on HEADERS or DATA).
-    private var h2StreamClosed = false
-
-    /// Peer's flow-control windows (bytes we can still send without another WINDOW_UPDATE).
-    private var h2PeerConnectionWindow: Int = 65535
-    private var h2PeerStreamSendWindow: Int = 65535
-    private var h2PeerInitialWindowSize: Int = 65535
-
-    /// Local window size, advertised at setup and used as the WINDOW_UPDATE threshold.
-    private var h2LocalWindowSize: Int = 4_194_304 // 4 MB
-
-    /// Maximum HTTP/2 frame payload size (SETTINGS_MAX_FRAME_SIZE default, updated by peer).
-    private var h2MaxFrameSize: Int = 16384
-
-    /// Bytes received but not yet acknowledged via WINDOW_UPDATE.
-    private var h2ConnectionReceiveConsumed: Int = 0
-    private var h2StreamReceiveConsumed: Int = 0
-
-    /// Send-side continuations waiting for a WINDOW_UPDATE that re-opens flow control.
-    private var h2FlowResumptions: [CheckedContinuation<Void, Never>] = []
-
-    /// Keepalive ping timer (nil when idleTimeout == 0).
-    private var keepaliveTimer: DispatchSourceTimer?
 
     /// Safety cap on the raw H2 buffer so a misbehaving peer can't grow memory without bound.
     private static let maxH2ReadBufferSize = 2_097_152 // 2 MB
@@ -67,7 +70,7 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
     private static let maxGRPCFrameBufferSize = 16_777_216 // 16 MB
 
     var isConnected: Bool {
-        lock.withLock { _isConnected }
+        state.withLock { $0._isConnected }
     }
 
     // MARK: - Initializers
@@ -76,11 +79,13 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
         self.configuration = configuration
         self.authority = authority
         self.transport = transport
-        self._isConnected = true
 
+        var initialState = State()
+        initialState._isConnected = true
         if configuration.initialWindowsSize > 0 {
-            self.h2LocalWindowSize = configuration.initialWindowsSize
+            initialState.h2LocalWindowSize = configuration.initialWindowsSize
         }
+        self.state = Mutex(initialState)
     }
 
     convenience init(transport: any AsyncByteTransport, configuration: GRPCConfiguration, authority: String) {
@@ -108,7 +113,7 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
         // Client SETTINGS: ENABLE_PUSH=0, INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE=10MB.
         var settingsPayload = Data()
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
-        let windowSize = UInt32(h2LocalWindowSize)
+        let windowSize = UInt32(state.withLock { $0.h2LocalWindowSize })
         settingsPayload.append(contentsOf: [
             0x00, 0x04,
             UInt8((windowSize >> 24) & 0xFF), UInt8((windowSize >> 16) & 0xFF),
@@ -178,7 +183,7 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
                             throw GRPCError.setupFailed(grpcError.localizedDescription)
                         }
                     }
-                    lock.withLock { h2ResponseReceived = true }
+                    state.withLock { $0.h2ResponseReceived = true }
                 }
                 startKeepaliveIfNeeded()
                 return
@@ -223,13 +228,13 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
     /// Delivers the next decoded payload, or `nil` on EOF; buffered leftovers are returned first.
     func receive() async throws -> Data? {
         enum Ready { case data(Data); case eof; case read }
-        let ready: Ready = lock.withLock {
-            if !decodedBuffer.isEmpty {
-                let out = decodedBuffer
-                decodedBuffer.removeAll(keepingCapacity: true)
+        let ready: Ready = state.withLock { state in
+            if !state.decodedBuffer.isEmpty {
+                let out = state.decodedBuffer
+                state.decodedBuffer.removeAll(keepingCapacity: true)
                 return .data(out)
             }
-            if h2StreamClosed { return .eof }
+            if state.h2StreamClosed { return .eof }
             return .read
         }
         switch ready {
@@ -242,16 +247,16 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
     // MARK: - Cancel
 
     func cancel() {
-        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
-            _isConnected = false
-            h2StreamClosed = true
-            h2ReadBuffer.removeAll()
-            grpcFrameBuffer.removeAll()
-            decodedBuffer.removeAll()
-            keepaliveTimer?.cancel()
-            keepaliveTimer = nil
-            let waiters = h2FlowResumptions
-            h2FlowResumptions.removeAll()
+        let waiters: [CheckedContinuation<Void, Never>] = state.withLock { state in
+            state._isConnected = false
+            state.h2StreamClosed = true
+            state.h2ReadBuffer.removeAll()
+            state.grpcFrameBuffer.removeAll()
+            state.decodedBuffer.removeAll()
+            state.keepaliveTask?.cancel()
+            state.keepaliveTask = nil
+            let waiters = state.h2FlowResumptions
+            state.h2FlowResumptions.removeAll()
             return waiters
         }
         for waiter in waiters { waiter.resume() }
@@ -259,7 +264,7 @@ nonisolated final class GRPCConnection: @unchecked Sendable {
     }
 
     deinit {
-        keepaliveTimer?.cancel()
+        state.withLock { $0.keepaliveTask?.cancel() }
     }
 }
 
@@ -309,11 +314,11 @@ extension GRPCConnection {
         return frame
     }
 
-    /// Parses one complete frame from `h2ReadBuffer`, or nil if incomplete. Caller must hold `lock`.
-    private func parseH2FrameLocked() -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)? {
-        guard h2ReadBuffer.count >= Self.h2FrameHeaderSize else { return nil }
+    /// Parses one complete frame from `state.h2ReadBuffer`, or nil if incomplete. Caller must hold `state`.
+    private func parseH2Frame(_ state: inout State) -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)? {
+        guard state.h2ReadBuffer.count >= Self.h2FrameHeaderSize else { return nil }
 
-        let buffer = h2ReadBuffer
+        let buffer = state.h2ReadBuffer
         let length = (UInt32(buffer[buffer.startIndex]) << 16)
             | (UInt32(buffer[buffer.startIndex + 1]) << 8)
             | UInt32(buffer[buffer.startIndex + 2])
@@ -326,16 +331,16 @@ extension GRPCConnection {
         let sid = streamId & 0x7FFFFFFF
 
         let totalSize = Self.h2FrameHeaderSize + Int(length)
-        guard h2ReadBuffer.count >= totalSize else { return nil }
+        guard state.h2ReadBuffer.count >= totalSize else { return nil }
 
-        let payload = h2ReadBuffer.subdata(
-            in: h2ReadBuffer.startIndex + Self.h2FrameHeaderSize ..< h2ReadBuffer.startIndex + totalSize
+        let payload = state.h2ReadBuffer.subdata(
+            in: state.h2ReadBuffer.startIndex + Self.h2FrameHeaderSize ..< state.h2ReadBuffer.startIndex + totalSize
         )
-        h2ReadBuffer.removeFirst(totalSize)
-        if h2ReadBuffer.isEmpty {
-            h2ReadBuffer = Data()
+        state.h2ReadBuffer.removeFirst(totalSize)
+        if state.h2ReadBuffer.isEmpty {
+            state.h2ReadBuffer = Data()
         } else {
-            h2ReadBuffer = Data(h2ReadBuffer)
+            state.h2ReadBuffer = Data(state.h2ReadBuffer)
         }
 
         return (type, flags, sid, payload)
@@ -346,7 +351,7 @@ extension GRPCConnection {
     /// trampoline is unnecessary.
     fileprivate func readH2Frame() async throws -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) {
         while true {
-            if let frame = lock.withLock({ parseH2FrameLocked() }) {
+            if let frame = state.withLock({ parseH2Frame(&$0) }) {
                 return frame
             }
 
@@ -356,10 +361,10 @@ extension GRPCConnection {
                 throw GRPCError.streamEnded
             }
 
-            let overflow: Bool = lock.withLock {
-                h2ReadBuffer.append(data)
-                if h2ReadBuffer.count > Self.maxH2ReadBufferSize {
-                    h2ReadBuffer.removeAll()
+            let overflow: Bool = state.withLock { state in
+                state.h2ReadBuffer.append(data)
+                if state.h2ReadBuffer.count > Self.maxH2ReadBufferSize {
+                    state.h2ReadBuffer.removeAll()
                     return true
                 }
                 return false
@@ -383,15 +388,13 @@ extension GRPCConnection {
 
             switch id {
             case 0x04: // INITIAL_WINDOW_SIZE — adjusts only stream windows (RFC 7540 §6.9.2).
-                lock.lock()
-                let delta = Int(value) - h2PeerInitialWindowSize
-                h2PeerInitialWindowSize = Int(value)
-                h2PeerStreamSendWindow += delta
-                lock.unlock()
+                state.withLock { state in
+                    let delta = Int(value) - state.h2PeerInitialWindowSize
+                    state.h2PeerInitialWindowSize = Int(value)
+                    state.h2PeerStreamSendWindow += delta
+                }
             case 0x05: // MAX_FRAME_SIZE
-                lock.lock()
-                h2MaxFrameSize = Int(value)
-                lock.unlock()
+                state.withLock { $0.h2MaxFrameSize = Int(value) }
             default:
                 break
             }
@@ -400,19 +403,20 @@ extension GRPCConnection {
 
     /// Applies a WINDOW_UPDATE to the send windows and wakes blocked sends.
     fileprivate func handleWindowUpdate(frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
-        lock.lock()
-        if frame.payload.count >= 4 {
-            let raw = frame.payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            let increment = Int(raw & 0x7FFFFFFF)
-            if frame.streamId == 0 {
-                h2PeerConnectionWindow += increment
-            } else if frame.streamId == Self.streamId {
-                h2PeerStreamSendWindow += increment
+        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+            if frame.payload.count >= 4 {
+                let raw = frame.payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                let increment = Int(raw & 0x7FFFFFFF)
+                if frame.streamId == 0 {
+                    state.h2PeerConnectionWindow += increment
+                } else if frame.streamId == Self.streamId {
+                    state.h2PeerStreamSendWindow += increment
+                }
             }
+            let resumptions = state.h2FlowResumptions
+            state.h2FlowResumptions.removeAll()
+            return resumptions
         }
-        let resumptions = h2FlowResumptions
-        h2FlowResumptions.removeAll()
-        lock.unlock()
         for r in resumptions { r.resume() }
     }
 }
@@ -723,10 +727,10 @@ extension GRPCConnection {
 
         var offset = 0
         while offset < data.count {
-            let step: BuildStep = lock.withLock {
-                if h2StreamClosed { return .closed }
-                let maxSize = h2MaxFrameSize
-                let window = min(h2PeerConnectionWindow, h2PeerStreamSendWindow)
+            let step: BuildStep = state.withLock { state in
+                if state.h2StreamClosed { return .closed }
+                let maxSize = state.h2MaxFrameSize
+                let window = min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow)
                 guard window > 0 else { return .park }
 
                 var frames = Data()
@@ -743,8 +747,8 @@ extension GRPCConnection {
                     windowRemaining -= chunkSize
                 }
                 let totalSent = window - windowRemaining
-                h2PeerConnectionWindow -= totalSent
-                h2PeerStreamSendWindow -= totalSent
+                state.h2PeerConnectionWindow -= totalSent
+                state.h2PeerStreamSendWindow -= totalSent
                 return .built(frames: frames, nextOffset: currentOffset)
             }
 
@@ -769,10 +773,10 @@ extension GRPCConnection {
     /// under the lock before parking so a window re-open racing the caller's check isn't missed.
     private func parkForFlowWindow() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let resumeNow: Bool = lock.withLock {
-                if h2StreamClosed { return true }
-                if min(h2PeerConnectionWindow, h2PeerStreamSendWindow) > 0 { return true }
-                h2FlowResumptions.append(continuation)
+            let resumeNow: Bool = state.withLock { state in
+                if state.h2StreamClosed { return true }
+                if min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow) > 0 { return true }
+                state.h2FlowResumptions.append(continuation)
                 return false
             }
             if resumeNow { continuation.resume() }
@@ -780,14 +784,14 @@ extension GRPCConnection {
     }
 
     private func markClosed() {
-        lock.withLock { h2StreamClosed = true }
+        state.withLock { $0.h2StreamClosed = true }
         drainFlowResumptions()
     }
-    
+
     private func drainFlowResumptions() {
-        let resumptions: [CheckedContinuation<Void, Never>] = lock.withLock {
-            let resumptions = h2FlowResumptions
-            h2FlowResumptions.removeAll()
+        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+            let resumptions = state.h2FlowResumptions
+            state.h2FlowResumptions.removeAll()
             return resumptions
         }
         for continuation in resumptions { continuation.resume() }
@@ -813,10 +817,10 @@ extension GRPCConnection {
             } catch {
                 if let grpcError = error as? GRPCError, case .streamEnded = grpcError {
                     // Graceful end of stream → flush any buffered payload, then EOF.
-                    let leftover: Data = lock.withLock {
-                        h2StreamClosed = true
-                        let leftover = decodedBuffer
-                        decodedBuffer.removeAll(keepingCapacity: true)
+                    let leftover: Data = state.withLock { state in
+                        state.h2StreamClosed = true
+                        let leftover = state.decodedBuffer
+                        state.decodedBuffer.removeAll(keepingCapacity: true)
                         return leftover
                     }
                     drainFlowResumptions()
@@ -840,10 +844,10 @@ extension GRPCConnection {
                     if endOfStream {
                         // Trailer HEADERS end the stream; non-zero grpc-status surfaces as an error, not silent EOF.
                         let grpcError = Self.parseGRPCTrailer(frame.payload)
-                        let leftover: Data = lock.withLock {
-                            h2StreamClosed = true
-                            let leftover = decodedBuffer
-                            decodedBuffer.removeAll(keepingCapacity: true)
+                        let leftover: Data = state.withLock { state in
+                            state.h2StreamClosed = true
+                            let leftover = state.decodedBuffer
+                            state.decodedBuffer.removeAll(keepingCapacity: true)
                             return leftover
                         }
                         drainFlowResumptions()
@@ -876,10 +880,10 @@ extension GRPCConnection {
                 outcome = .keepReading
 
             case Self.h2FrameGoaway:
-                let leftover: Data = lock.withLock {
-                    h2StreamClosed = true
-                    let leftover = decodedBuffer
-                    decodedBuffer.removeAll(keepingCapacity: true)
+                let leftover: Data = state.withLock { state in
+                    state.h2StreamClosed = true
+                    let leftover = state.decodedBuffer
+                    state.decodedBuffer.removeAll(keepingCapacity: true)
                     return leftover
                 }
                 drainFlowResumptions()
@@ -887,10 +891,10 @@ extension GRPCConnection {
 
             case Self.h2FrameRstStream:
                 if isOurStream {
-                    let leftover: Data = lock.withLock {
-                        h2StreamClosed = true
-                        let leftover = decodedBuffer
-                        decodedBuffer.removeAll(keepingCapacity: true)
+                    let leftover: Data = state.withLock { state in
+                        state.h2StreamClosed = true
+                        let leftover = state.decodedBuffer
+                        state.decodedBuffer.removeAll(keepingCapacity: true)
                         return leftover
                     }
                     drainFlowResumptions()
@@ -912,13 +916,13 @@ extension GRPCConnection {
 
     /// Validates the first HEADERS on our stream; throws if the gRPC response was rejected.
     private func markResponseReceivedIfNeeded(_ payload: Data) throws {
-        if lock.withLock({ h2ResponseReceived }) { return }
+        if state.withLock({ $0.h2ResponseReceived }) { return }
 
         if let rejection = checkH2ResponseStatus(payload) {
             markClosed()
             throw GRPCError.invalidResponse("gRPC response rejected: \(rejection)")
         }
-        lock.withLock { h2ResponseReceived = true }
+        state.withLock { $0.h2ResponseReceived = true }
     }
 
     /// Buffers a DATA payload, decodes all complete gRPC messages, and reports the outcome.
@@ -938,11 +942,11 @@ extension GRPCConnection {
             case parsed(decoded: Data, streamClosed: Bool, decodeError: Error?)
         }
 
-        let result: DecodeResult = lock.withLock {
+        let result: DecodeResult = state.withLock { state in
             if !frame.payload.isEmpty {
-                grpcFrameBuffer.append(frame.payload)
-                if grpcFrameBuffer.count > Self.maxGRPCFrameBufferSize {
-                    grpcFrameBuffer.removeAll()
+                state.grpcFrameBuffer.append(frame.payload)
+                if state.grpcFrameBuffer.count > Self.maxGRPCFrameBufferSize {
+                    state.grpcFrameBuffer.removeAll()
                     return .overflow
                 }
             }
@@ -950,23 +954,23 @@ extension GRPCConnection {
             var decoded = Data()
             var decodeError: Error?
 
-            while grpcFrameBuffer.count >= 5 {
-                let compressed = grpcFrameBuffer[grpcFrameBuffer.startIndex]
-                let length = (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 1]) << 24)
-                    | (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 2]) << 16)
-                    | (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 3]) << 8)
-                    | UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 4])
+            while state.grpcFrameBuffer.count >= 5 {
+                let compressed = state.grpcFrameBuffer[state.grpcFrameBuffer.startIndex]
+                let length = (UInt32(state.grpcFrameBuffer[state.grpcFrameBuffer.startIndex + 1]) << 24)
+                    | (UInt32(state.grpcFrameBuffer[state.grpcFrameBuffer.startIndex + 2]) << 16)
+                    | (UInt32(state.grpcFrameBuffer[state.grpcFrameBuffer.startIndex + 3]) << 8)
+                    | UInt32(state.grpcFrameBuffer[state.grpcFrameBuffer.startIndex + 4])
                 let total = 5 + Int(length)
-                guard grpcFrameBuffer.count >= total else { break }
+                guard state.grpcFrameBuffer.count >= total else { break }
 
-                let messageData = grpcFrameBuffer.subdata(
-                    in: grpcFrameBuffer.startIndex + 5 ..< grpcFrameBuffer.startIndex + total
+                let messageData = state.grpcFrameBuffer.subdata(
+                    in: state.grpcFrameBuffer.startIndex + 5 ..< state.grpcFrameBuffer.startIndex + total
                 )
-                grpcFrameBuffer.removeFirst(total)
-                if grpcFrameBuffer.isEmpty {
-                    grpcFrameBuffer = Data()
+                state.grpcFrameBuffer.removeFirst(total)
+                if state.grpcFrameBuffer.isEmpty {
+                    state.grpcFrameBuffer = Data()
                 } else {
-                    grpcFrameBuffer = Data(grpcFrameBuffer)
+                    state.grpcFrameBuffer = Data(state.grpcFrameBuffer)
                 }
 
                 if compressed != 0 {
@@ -986,7 +990,7 @@ extension GRPCConnection {
 
             var streamClosed = false
             if endOfStream {
-                h2StreamClosed = true
+                state.h2StreamClosed = true
                 streamClosed = true
             }
             return .parsed(decoded: decoded, streamClosed: streamClosed, decodeError: decodeError)
@@ -1009,17 +1013,17 @@ extension GRPCConnection {
     private func emitWindowUpdatesIfNeeded(receivedBytes: Int, onOurStream: Bool) async {
         guard receivedBytes > 0 else { return }
 
-        let updates: Data? = lock.withLock {
-            h2ConnectionReceiveConsumed += receivedBytes
+        let updates: Data? = state.withLock { state in
+            state.h2ConnectionReceiveConsumed += receivedBytes
             if onOurStream {
-                h2StreamReceiveConsumed += receivedBytes
+                state.h2StreamReceiveConsumed += receivedBytes
             }
-            let windowSize = h2LocalWindowSize
+            let windowSize = state.h2LocalWindowSize
             let threshold = windowSize / 2
-            let connConsumed = h2ConnectionReceiveConsumed
-            let streamConsumed = h2StreamReceiveConsumed
-            if connConsumed >= threshold { h2ConnectionReceiveConsumed = 0 }
-            if onOurStream, streamConsumed >= threshold { h2StreamReceiveConsumed = 0 }
+            let connConsumed = state.h2ConnectionReceiveConsumed
+            let streamConsumed = state.h2StreamReceiveConsumed
+            if connConsumed >= threshold { state.h2ConnectionReceiveConsumed = 0 }
+            if onOurStream, streamConsumed >= threshold { state.h2StreamReceiveConsumed = 0 }
 
             var updates = Data()
             if connConsumed >= threshold {
@@ -1049,28 +1053,25 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Starts a periodic keepalive PING timer when `idleTimeout` is non-zero.
+    /// Starts a periodic keepalive PING loop when `idleTimeout` is non-zero.
     fileprivate func startKeepaliveIfNeeded() {
         let interval = configuration.idleTimeout
         guard interval > 0 else { return }
 
-        // Handler state is lock-guarded and the async send is thread-safe, so the global queue suffices.
-        let timer: DispatchSourceTimer? = lock.withLock {
-            if keepaliveTimer != nil { return nil }
-            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-            timer.schedule(deadline: .now() + .seconds(interval), repeating: .seconds(interval))
-            timer.setEventHandler { [weak self] in
-                guard let self else { return }
-                Task { await self.sendKeepalivePing() }
+        state.withLock { state in
+            guard state.keepaliveTask == nil else { return }
+            state.keepaliveTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(interval))
+                    guard !Task.isCancelled, let self else { return }
+                    await self.sendKeepalivePing()
+                }
             }
-            keepaliveTimer = timer
-            return timer
         }
-        timer?.resume()
     }
 
     private func sendKeepalivePing() async {
-        if lock.withLock({ h2StreamClosed }) { return }
+        if state.withLock({ $0.h2StreamClosed }) { return }
         // 8-byte opaque PING payload (RFC 7540 §6.7).
         let payload = Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         let ping = buildH2Frame(type: Self.h2FramePing, flags: 0, streamId: 0, payload: payload)

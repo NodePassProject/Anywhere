@@ -6,8 +6,7 @@
 //
 
 import Foundation
-
-// MARK: - HTTP/2 Support (RFC 7540) — Frame Layer & HPACK
+import Synchronization
 
 extension XHTTPConnection {
 
@@ -446,15 +445,15 @@ extension XHTTPConnection {
 
             switch id {
             case 0x04: // INITIAL_WINDOW_SIZE (RFC 7540 §6.9.2: affects stream windows only)
-                lock.lock()
-                let delta = Int(value) - h2PeerInitialWindowSize
-                h2PeerInitialWindowSize = Int(value)
-                h2PeerStreamSendWindow += delta
-                lock.unlock()
+                state.withLock { state in
+                    let delta = Int(value) - state.h2PeerInitialWindowSize
+                    state.h2PeerInitialWindowSize = Int(value)
+                    state.h2PeerStreamSendWindow += delta
+                }
             case 0x05: // MAX_FRAME_SIZE
-                lock.lock()
-                h2MaxFrameSize = Int(value)
-                lock.unlock()
+                state.withLock { state in
+                    state.h2MaxFrameSize = Int(value)
+                }
             default:
                 break
             }

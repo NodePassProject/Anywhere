@@ -131,7 +131,8 @@ class TunnelStack {
     var lastRestartTime: CFAbsoluteTime = 0
 
     /// Pending deferred restart when throttled. Cancelled and replaced on each new request.
-    var deferredRestart: DispatchWorkItem?
+    /// Fires its body on ``lwipQueue`` (hopped back on).
+    var deferredRestartTask: Task<Void, Never>?
 
     /// Recurring stack-lifetime tasks. Centralizes their lifecycle and reconciles them
     /// on device wake.
@@ -378,8 +379,7 @@ class TunnelStack {
         let session = ShadowsocksUDPSession(
             mode: mode,
             serverHost: configuration.serverAddress,
-            serverPort: configuration.serverPort,
-            delegateQueue: udpQueue
+            serverPort: configuration.serverPort
         )
         ssUDPSessions[configuration.id] = session
         return .success(session)

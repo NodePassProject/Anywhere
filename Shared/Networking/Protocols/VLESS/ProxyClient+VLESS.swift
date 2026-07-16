@@ -33,23 +33,6 @@ extension ProxyClient {
     }
 
     // MARK: - VLESS protocol handshake
-    
-    func sendVLESSProtocolHandshake(
-        over connection: ProxyConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        supportsVision: Bool
-    ) async throws -> ProxyConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-            self.sendVLESSProtocolHandshake(
-                over: connection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData,
-                supportsVision: supportsVision
-            ) { continuation.resume(with: $0) }
-        }
-    }
 
     /// VLESS protocol handshake on top of an established transport; runs the
     /// `mlkem768x25519plus` handshake first when encryption is configured.
@@ -59,9 +42,8 @@ extension ProxyClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        supportsVision: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        supportsVision: Bool
+    ) async throws -> ProxyConnection {
         // A nil config means "none"/empty → plaintext VLESS. On iOS < 26 the encrypted
         // scheme must refuse, not silently downgrade and expose the plaintext UUID.
         let vlessEncryption: String
@@ -74,58 +56,39 @@ extension ProxyClient {
         do {
             encryptionConfig = try VLESSEncryptionConfig.parse(vlessEncryption)
         } catch {
-            completion(.failure(ProxyError.protocolError(
+            throw ProxyError.protocolError(
                 "Invalid VLESS encryption: \(error.localizedDescription)"
-            )))
-            return
+            )
         }
         if let encryptionConfig {
             guard #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) else {
-                completion(.failure(ProxyError.protocolError(
+                throw ProxyError.protocolError(
                     "VLESS encryption requires iOS 26 / macOS 26 / tvOS 26 or later"
-                )))
-                return
-            }
-            do {
-                let client = try VLESSEncryptionClient(
-                    config: encryptionConfig,
-                    host: configuration.serverAddress,
-                    port: configuration.serverPort
                 )
-                client.handshake(over: connection) { [weak self] result in
-                    guard let self else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    switch result {
-                    case .failure(let error):
-                        completion(.failure(error))
-                    case .success(let encryptedConnection):
-                        self.continueVLESSHandshake(
-                            over: encryptedConnection,
-                            command: command,
-                            destinationHost: destinationHost,
-                            destinationPort: destinationPort,
-                            initialData: initialData,
-                            supportsVision: supportsVision,
-                            completion: completion
-                        )
-                    }
-                }
-            } catch {
-                completion(.failure(error))
             }
-            return
+            let client = try VLESSEncryptionClient(
+                config: encryptionConfig,
+                host: configuration.serverAddress,
+                port: configuration.serverPort
+            )
+            let encryptedConnection = try await client.handshake(over: connection)
+            return try await continueVLESSHandshake(
+                over: encryptedConnection,
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData,
+                supportsVision: supportsVision
+            )
         }
 
-        continueVLESSHandshake(
+        return try await continueVLESSHandshake(
             over: connection,
             command: command,
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: initialData,
-            supportsVision: supportsVision,
-            completion: completion
+            supportsVision: supportsVision
         )
     }
 
@@ -135,9 +98,8 @@ extension ProxyClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        supportsVision: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        supportsVision: Bool
+    ) async throws -> ProxyConnection {
         let vlessUUID: UUID
         if case .vless(let uuid, _, _, _, _) = configuration.outbound {
             vlessUUID = uuid
@@ -157,43 +119,35 @@ extension ProxyClient {
         let vless = VLESSConnection(inner: connection)
         // For Vision flow, initial data needs separate padding — don't append to the header.
         let handshakeInitialData = isVision ? nil : initialData
-        Task { [weak self] in
+        do {
+            try await vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData)
+        } catch {
+            throw ProxyError.connectionFailed(error.localizedDescription)
+        }
+
+        let proxyConnection: ProxyConnection = (command == .udp)
+            ? VLESSUDPConnection(inner: vless)
+            : vless
+
+        if isVision {
+            if let tlsError = validateOuterTLSForVision(proxyConnection) {
+                throw tlsError
+            }
+            let vision = wrapWithVision(proxyConnection)
+            // Await the Vision-padded intro before returning; a racing first send
+            // could otherwise precede it and corrupt the byte stream.
             do {
-                try await vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData)
+                if let initialData {
+                    try await vision.sendRaw(initialData)
+                } else {
+                    try await vision.sendEmptyPadding()
+                }
+                return vision
             } catch {
-                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
-                return
+                throw ProxyError.connectionFailed(error.localizedDescription)
             }
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-
-            let proxyConnection: ProxyConnection = (command == .udp)
-                ? VLESSUDPConnection(inner: vless)
-                : vless
-
-            if isVision {
-                if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
-                    completion(.failure(tlsError))
-                    return
-                }
-                let vision = self.wrapWithVision(proxyConnection)
-                // Await the Vision-padded intro before signalling success; a racing
-                // first send could otherwise precede it and corrupt the byte stream.
-                do {
-                    if let initialData {
-                        try await vision.sendRaw(initialData)
-                    } else {
-                        try await vision.sendEmptyPadding()
-                    }
-                    completion(.success(vision))
-                } catch {
-                    completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
-                }
-            } else {
-                completion(.success(proxyConnection))
-            }
+        } else {
+            return proxyConnection
         }
     }
 

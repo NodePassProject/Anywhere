@@ -6,25 +6,22 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TrojanConnection")
 
-// MARK: - TrojanConnection
-
-/// Prepends the Trojan TCP request header to the first outbound payload inside the same TLS record; server replies are unframed pass-through.
 nonisolated final class TrojanConnection: ProxyConnection {
-    private let lock = UnfairLock()
     private let inner: ProxyConnection
-    private var pendingHeader: Data?
+    private let pendingHeader: Mutex<Data?>
 
     init(inner: ProxyConnection, password: String, destinationHost: String, destinationPort: UInt16) {
         self.inner = inner
-        self.pendingHeader = TrojanProtocol.buildRequestHeader(
+        self.pendingHeader = Mutex(TrojanProtocol.buildRequestHeader(
             passwordKey: TrojanProtocol.passwordKey(password),
             command: TrojanProtocol.commandTCP,
             host: destinationHost,
             port: destinationPort
-        )
+        ))
         super.init()
     }
 
@@ -45,10 +42,9 @@ nonisolated final class TrojanConnection: ProxyConnection {
 
     /// Returns the header on the first call and `nil` thereafter.
     private func consumeHeader() -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
-        let header = pendingHeader
-        pendingHeader = nil
-        return header
+        pendingHeader.withLock { header in
+            defer { header = nil }
+            return header
+        }
     }
 }

@@ -6,22 +6,25 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "RuleResolver")
 
 nonisolated final class RuleResolver {
     static let shared = RuleResolver()
-    
+
     static let maxEntries = 1024
 
-    /// Lowercased domain → IPv4 string.
-    private var cache: [String: String] = [:]
-    /// Insertion order of cached keys, for cheap FIFO eviction at the cap.
-    private var order: [String] = []
-    /// Domains with a background resolve in flight; coalesces duplicate lookups.
-    private var inFlight: Set<String> = []
+    private struct State {
+        /// Lowercased domain → IPv4 string.
+        var cache: [String: String] = [:]
+        /// Insertion order of cached keys, for cheap FIFO eviction at the cap.
+        var order: [String] = []
+        /// Domains with a background resolve in flight; coalesces duplicate lookups.
+        var inFlight: Set<String> = []
+    }
 
-    private let lock = ReadWriteLock()
+    private let state = Mutex(State())
 
     private init() {}
 
@@ -30,26 +33,26 @@ nonisolated final class RuleResolver {
     /// Cached IPv4 for `domain`, or `nil` if not yet resolved. Never blocks.
     func cachedIPv4(for domain: String) -> String? {
         let key = Self.key(for: domain)
-        return lock.withReadLock { cache[key] }
+        return state.withLock { $0.cache[key] }
     }
 
     /// Ensures `domain` is (being) resolved so a later ``cachedIPv4(for:)`` can
     /// hit. No-op when already cached or already in flight. Never blocks.
     func warm(_ domain: String) {
         let key = Self.key(for: domain)
-        let shouldResolve: Bool = lock.withWriteLock {
-            if cache[key] != nil || inFlight.contains(key) { return false }
-            inFlight.insert(key)
+        let shouldResolve: Bool = state.withLock { state in
+            if state.cache[key] != nil || state.inFlight.contains(key) { return false }
+            state.inFlight.insert(key)
             return true
         }
         guard shouldResolve else { return }
 
-        DispatchQueue.global(qos: .utility).async { [self] in
+        Task.detached(priority: .utility) { [self] in
             let ip = Self.resolveIPv4(key)
-            lock.withWriteLock {
-                inFlight.remove(key)
+            state.withLock { state in
+                state.inFlight.remove(key)
                 guard let ip else { return }
-                store(key: key, ip: ip)
+                Self.store(&state, key: key, ip: ip)
             }
             if let ip {
                 logger.debug("[RuleResolver] Resolved \(key) → \(ip) for IP-rule matching")
@@ -59,15 +62,14 @@ nonisolated final class RuleResolver {
 
     // MARK: - Internal
 
-    /// Inserts `key`, then evicts oldest entries past the cap. Caller must hold
-    /// the write lock.
-    private func store(key: String, ip: String) {
-        if cache[key] == nil { order.append(key) }
-        cache[key] = ip
+    /// Inserts `key`, then evicts oldest entries past the cap.
+    private static func store(_ state: inout State, key: String, ip: String) {
+        if state.cache[key] == nil { state.order.append(key) }
+        state.cache[key] = ip
 
-        while cache.count > Self.maxEntries, !order.isEmpty {
-            let oldest = order.removeFirst()
-            cache.removeValue(forKey: oldest)
+        while state.cache.count > Self.maxEntries, !state.order.isEmpty {
+            let oldest = state.order.removeFirst()
+            state.cache.removeValue(forKey: oldest)
         }
     }
 

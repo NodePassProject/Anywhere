@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Pool")
 
@@ -40,84 +41,77 @@ nonisolated final class NaiveHTTP2MultiplexerPool: MultiplexerPool<NaiveHTTP2Mul
         sni: String,
         tunnel: ProxyConnection?,
         connectHeaders: @escaping () -> [(name: String, value: String)],
-        destination: String,
-        completion: @escaping (NaiveHTTP2Stream) -> Void
-    ) {
+        destination: String
+    ) async throws -> NaiveHTTP2Stream {
         if tunnel != nil {
             let multiplexer = NaiveHTTP2Multiplexer(
                 host: host, port: port, sni: sni,
                 tunnel: tunnel, connectHeaders: connectHeaders
             )
             let multiplexerID = ObjectIdentifier(multiplexer)
-            lock.lock()
-            dedicatedMultiplexers[multiplexerID] = multiplexer
-            lock.unlock()
+            lock.withLock { _ in dedicatedMultiplexers[multiplexerID] = multiplexer }
             multiplexer.onClose = { [weak self] in
                 guard let self else { return }
-                self.lock.lock()
-                self.dedicatedMultiplexers.removeValue(forKey: multiplexerID)
-                self.lock.unlock()
+                self.lock.withLock { _ in self.dedicatedMultiplexers.removeValue(forKey: multiplexerID) }
                 logger.debug("[NaiveHTTP2Pool] Evicted dedicated multiplexer")
             }
-            multiplexer.queue.async {
-                let stream = multiplexer.openStream(destination: destination)
-                completion(stream)
-            }
-            return
+            return await openStream(on: multiplexer, destination: destination)
         }
 
         let key = Self.makeKey(host: host, port: port, sni: sni)
-        let multiplexer: NaiveHTTP2Multiplexer
 
-        lock.lock()
-        // Park GOAWAY multiplexers in dedicatedMultiplexers to drain, then evict them from the active bucket.
-        if let array = multiplexers[key] {
-            for s in array where s.poolIsGoingAway {
-                dedicatedMultiplexers[ObjectIdentifier(s)] = s
+        // Reserve the multiplexer under the gate; the async open runs after the gate is released
+        // (never hold `lock` across an `await`).
+        let multiplexer: NaiveHTTP2Multiplexer = lock.withLock { _ in
+            // Park GOAWAY multiplexers in dedicatedMultiplexers to drain, then evict them from the active bucket.
+            if let array = multiplexers[key] {
+                for s in array where s.poolIsGoingAway {
+                    dedicatedMultiplexers[ObjectIdentifier(s)] = s
+                }
+            }
+            multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
+
+            if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+                lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+                return existing
+            } else {
+                let new = NaiveHTTP2Multiplexer(
+                    host: host, port: port, sni: sni,
+                    tunnel: nil, connectHeaders: connectHeaders
+                )
+                let capturedKey = key
+                new.onClose = { [weak self, weak new] in
+                    guard let self, let new else { return }
+                    self.removeMultiplexer(new, key: capturedKey)
+                }
+                multiplexers[key, default: []].append(new)
+                lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
+                return new
             }
         }
-        multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
 
-        if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-            lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
-            multiplexer = existing
-        } else {
-            let new = NaiveHTTP2Multiplexer(
-                host: host, port: port, sni: sni,
-                tunnel: nil, connectHeaders: connectHeaders
-            )
-            let capturedKey = key
-            new.onClose = { [weak self, weak new] in
-                guard let self, let new else { return }
-                self.removeMultiplexer(new, key: capturedKey)
-            }
-            multiplexers[key, default: []].append(new)
-            lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
-            multiplexer = new
-        }
-        lock.unlock()
+        return await openStream(on: multiplexer, destination: destination)
+    }
 
-        multiplexer.queue.async {
-            let stream = multiplexer.openStream(destination: destination)
-            completion(stream)
-        }
+    /// Opens a stream on the multiplexer queue (off the pool gate) and returns it.
+    private func openStream(on multiplexer: NaiveHTTP2Multiplexer, destination: String) async -> NaiveHTTP2Stream {
+        await multiplexer.run { multiplexer.openStream(destination: destination) }
     }
 
     // MARK: - Eviction
 
     override func removeMultiplexer(_ multiplexer: NaiveHTTP2Multiplexer, key: String) {
         super.removeMultiplexer(multiplexer, key: key)
-        lock.lock()
-        dedicatedMultiplexers.removeValue(forKey: ObjectIdentifier(multiplexer))
-        lock.unlock()
+        lock.withLock { _ in dedicatedMultiplexers.removeValue(forKey: ObjectIdentifier(multiplexer)) }
         logger.debug("[NaiveHTTP2Pool] Evicted multiplexer for \(key)")
     }
 
     override func closeAll() {
-        lock.lock()
-        let dedicated = Array(dedicatedMultiplexers.values)
-        dedicatedMultiplexers.removeAll()
-        lock.unlock()
+        let dedicated: [NaiveHTTP2Multiplexer] = lock.withLock { _ in
+            let dedicated = Array(dedicatedMultiplexers.values)
+            dedicatedMultiplexers.removeAll()
+            return dedicated
+        }
 
         super.closeAll()
 

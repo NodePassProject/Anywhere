@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-final class TunneledHTTP1Exchange {
+nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
 
     // MARK: Active-exchange registry (keeps the exchange alive across async I/O)
 
@@ -17,15 +17,12 @@ final class TunneledHTTP1Exchange {
     // MARK: Inputs
 
     private let connection: ProxyConnection
-    private let teardown: () -> Void
     private let request: URLRequest
     private let hostHeader: String
     private let maxBytes: Int
     private let resourceTimeout: TimeInterval
-    private let queue: DispatchQueue
-    private let completion: (Result<MITMScriptHTTPClient.Response, Error>) -> Void
 
-    // MARK: State (touched only on `queue`)
+    // MARK: State (touched only inside the single `runExchange` task)
 
     private var inbound = Data()
     private var headParsed = false
@@ -35,10 +32,9 @@ final class TunneledHTTP1Exchange {
     private var reservedBytes = 0
     private var bodyMode: BodyMode = .undetermined
     private var chunked = ChunkedDecoder()
-    private var finished = false
 
-    private var deadlineTimer: DispatchSourceTimer?
-    private var idleTimer: DispatchSourceTimer?
+    /// The inactivity deadline, refreshed as inbound bytes arrive; read by the idle-watchdog task.
+    private let idleDeadline = Mutex<ContinuousClock.Instant>(ContinuousClock().now)
 
     /// The response head cannot exceed this; guards against an unbounded header stream.
     private static let maxHeadBytes = 64 * 1024
@@ -55,76 +51,165 @@ final class TunneledHTTP1Exchange {
         request: URLRequest,
         hostHeader: String,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        queue: DispatchQueue,
-        teardown: @escaping () -> Void,
-        completion: @escaping (Result<MITMScriptHTTPClient.Response, Error>) -> Void
+        resourceTimeout: TimeInterval
     ) {
         self.connection = connection
-        self.teardown = teardown
         self.request = request
         self.hostHeader = hostHeader
         self.maxBytes = maxBytes
         self.resourceTimeout = resourceTimeout
-        self.queue = queue
-        self.completion = completion
     }
 
     // MARK: - Lifecycle
 
-    func start() {
-        queue.async { [self] in
-            Self.active.withLock { $0[ObjectIdentifier(self)] = self }
-            armTimers()
-            sendRequest()
+    /// Runs the whole request/response exchange, racing it against the resource deadline and an
+    /// inactivity idle timeout. Transport teardown is the caller's responsibility (see the callers
+    /// in `MITMScriptHTTPClient`); on a deadline/idle expiry we cancel the connection to unblock
+    /// the pending I/O so the exchange task unwinds promptly.
+    func run() async throws -> MITMScriptHTTPClient.Response {
+        Self.active.withLock { $0[ObjectIdentifier(self)] = self }
+        defer {
+            Self.active.withLock { $0[ObjectIdentifier(self)] = nil }
+            MITMScriptHTTPClient.releaseInFlight(reservedBytes)
+            reservedBytes = 0
         }
-    }
 
-    private func armTimers() {
+        resetIdle()
         let timeout = resourceTimeout
-        let deadline = DispatchSource.makeTimerSource(queue: queue)
-        deadline.schedule(deadline: .now() + timeout)
-        deadline.setEventHandler { [weak self] in
-            self?.fail(TransportError.connectionFailed("request exceeded \(Int(timeout))s deadline"))
-        }
-        deadline.resume()
-        deadlineTimer = deadline
-        rearmIdleTimer()
-    }
 
-    /// Inactivity backstop; reset whenever inbound bytes arrive.
-    private func rearmIdleTimer() {
-        let interval = request.timeoutInterval
-        guard interval > 0 else { return }
-        idleTimer?.cancel()
-        let idle = DispatchSource.makeTimerSource(queue: queue)
-        idle.schedule(deadline: .now() + interval)
-        idle.setEventHandler { [weak self] in
-            self?.fail(TransportError.connectionFailed("request idle for \(Int(interval))s"))
-        }
-        idle.resume()
-        idleTimer = idle
-    }
-
-    // MARK: - Request
-
-    private func sendRequest() {
-        guard let head = serializeRequest() else {
-            fail(TransportError.connectionFailed("could not serialize request"))
-            return
-        }
-        let connection = self.connection
-        Task { [weak self] in
-            let sendError: Error?
-            do { try await connection.send(head); sendError = nil }
-            catch { sendError = error }
-            self?.queue.async {
-                guard let self, !self.finished else { return }
-                if let sendError { self.fail(sendError); return }
-                self.receiveMore()
+        return try await withThrowingTaskGroup(of: MITMScriptHTTPClient.Response.self) { group in
+            group.addTask { try await self.runExchange() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeout))
+                throw TransportError.connectionFailed("request exceeded \(Int(timeout))s deadline")
+            }
+            if request.timeoutInterval > 0 {
+                group.addTask { try await self.idleWatchdog() }
+            }
+            defer { group.cancelAll() }
+            do {
+                guard let result = try await group.next() else {
+                    throw TransportError.connectionFailed("request produced no result")
+                }
+                return result
+            } catch {
+                // Unblock the exchange task's pending send/receive so the group can drain.
+                connection.cancel()
+                throw error
             }
         }
     }
+
+    /// Refreshes the inactivity deadline; called before the exchange starts and on every inbound chunk.
+    private func resetIdle() {
+        let interval = request.timeoutInterval
+        guard interval > 0 else { return }
+        idleDeadline.withLock { $0 = ContinuousClock().now.advanced(by: .seconds(interval)) }
+    }
+
+    /// Fails the exchange after `request.timeoutInterval` of no inbound progress. Never returns
+    /// normally — it either throws on idle expiry or is cancelled when the exchange finishes.
+    private func idleWatchdog() async throws -> MITMScriptHTTPClient.Response {
+        let interval = request.timeoutInterval
+        while true {
+            let deadline = idleDeadline.withLock { $0 }
+            if ContinuousClock().now >= deadline {
+                throw TransportError.connectionFailed("request idle for \(Int(interval))s")
+            }
+            try await Task.sleep(until: deadline, clock: .continuous)
+        }
+    }
+
+    // MARK: - Exchange
+
+    private func runExchange() async throws -> MITMScriptHTTPClient.Response {
+        guard let head = serializeRequest() else {
+            throw TransportError.connectionFailed("could not serialize request")
+        }
+        try await connection.send(head)
+
+        // Phase 1: read until the final response head is parsed.
+        while !headParsed {
+            guard let chunk = try await receiveChunk() else {
+                throw TransportError.connectionFailed("connection closed before response head")
+            }
+            inbound.append(chunk)
+            if try parseHeadIfReady() { break }
+            if inbound.count > Self.maxHeadBytes {
+                throw TransportError.connectionFailed("response head exceeds \(Self.maxHeadBytes) bytes")
+            }
+        }
+
+        // Phase 2: body.
+        return try await readBody()
+    }
+
+    /// One inbound read; `nil` on EOF. Refreshes the idle deadline whenever bytes arrive.
+    private func receiveChunk() async throws -> Data? {
+        let data = try await connection.receive()
+        guard let data, !data.isEmpty else { return nil }
+        resetIdle()
+        return data
+    }
+
+    private func readBody() async throws -> MITMScriptHTTPClient.Response {
+        guard !responseHasNoBody else { return try finishSuccess() }
+
+        switch bodyMode {
+        case .undetermined:
+            return try finishSuccess()
+
+        case .contentLength(let total):
+            if total == 0 { return try finishSuccess() }
+            while true {
+                if !inbound.isEmpty {
+                    let take = min(total - body.count, inbound.count)
+                    if take > 0 {
+                        let slice = inbound.subdata(in: inbound.startIndex..<(inbound.startIndex + take))
+                        inbound = inbound.subdata(in: (inbound.startIndex + take)..<inbound.endIndex)
+                        try appendBody(slice)
+                    }
+                }
+                if body.count >= total { return try finishSuccess() }
+                guard let chunk = try await receiveChunk() else {
+                    throw TransportError.connectionFailed("connection closed; body truncated (\(body.count)/\(total))")
+                }
+                inbound.append(chunk)
+            }
+
+        case .chunked:
+            while true {
+                var decoded = Data()
+                switch chunked.feed(&inbound, into: &decoded) {
+                case .needMore:
+                    try appendBody(decoded)
+                    guard let chunk = try await receiveChunk() else {
+                        throw TransportError.connectionFailed("connection closed before final chunk")
+                    }
+                    inbound.append(chunk)
+                case .done:
+                    try appendBody(decoded)
+                    return try finishSuccess()
+                case .error(let message):
+                    throw TransportError.connectionFailed("chunked decode failed: \(message)")
+                }
+            }
+
+        case .untilClose:
+            while true {
+                if !inbound.isEmpty {
+                    let slice = inbound
+                    inbound = Data()
+                    try appendBody(slice)
+                }
+                // The body runs until the server closes the connection.
+                guard let chunk = try await receiveChunk() else { return try finishSuccess() }
+                inbound.append(chunk)
+            }
+        }
+    }
+
+    // MARK: - Request serialization
 
     private func serializeRequest() -> Data? {
         guard let url = request.url,
@@ -170,63 +255,28 @@ final class TunneledHTTP1Exchange {
         return data
     }
 
-    // MARK: - Receive
-
-    private func receiveMore() {
-        let connection = self.connection
-        Task { [weak self] in
-            let data: Data?
-            let error: Error?
-            do { data = try await connection.receive(); error = nil }
-            catch let e { data = nil; error = e }
-            self?.queue.async {
-                guard let self, !self.finished else { return }
-                if let error { self.fail(error); return }
-                guard let data, !data.isEmpty else { self.handleEOF(); return }
-                self.rearmIdleTimer()
-                self.inbound.append(data)
-                self.process()
-            }
-        }
-    }
-
-    private func process() {
-        guard !finished else { return }
-        if !headParsed {
-            let ready = parseHeadIfReady()
-            guard !finished else { return }
-            if !ready {
-                if inbound.count > Self.maxHeadBytes {
-                    fail(TransportError.connectionFailed("response head exceeds \(Self.maxHeadBytes) bytes"))
-                } else {
-                    receiveMore()
-                }
-                return
-            }
-        }
-        processBody()
-    }
+    // MARK: - Head parsing
 
     /// Skips 1xx interim heads; on the final head, records status/headers and body framing.
-    private func parseHeadIfReady() -> Bool {
+    /// Returns `true` once the final head is parsed, `false` when more bytes are needed.
+    private func parseHeadIfReady() throws -> Bool {
         let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
         while true {
             guard let range = inbound.range(of: terminator) else { return false }
             guard let (code, hdrs) = Self.parseHead(inbound.subdata(in: inbound.startIndex..<range.lowerBound)) else {
-                fail(TransportError.connectionFailed("malformed response head"))
-                return false
+                throw TransportError.connectionFailed("malformed response head")
             }
             inbound = inbound.subdata(in: range.upperBound..<inbound.endIndex)
             if (100..<200).contains(code) { continue }   // interim response: keep reading for the final head
             status = code
             headers = hdrs
             headParsed = true
-            determineBodyMode()
+            try determineBodyMode()
             return true
         }
     }
 
-    private func determineBodyMode() {
+    private func determineBodyMode() throws {
         if let te = header("Transfer-Encoding"), te.lowercased().contains("chunked") {
             bodyMode = .chunked
             return
@@ -234,8 +284,7 @@ final class TunneledHTTP1Exchange {
         if let clString = header("Content-Length"),
            let contentLength = Int(clString.trimmingCharacters(in: .whitespaces)), contentLength >= 0 {
             if contentLength > maxBytes {
-                fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
-                return
+                throw MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes)
             }
             bodyMode = .contentLength(contentLength)
             return
@@ -244,87 +293,24 @@ final class TunneledHTTP1Exchange {
         bodyMode = .untilClose
     }
 
-    private func processBody() {
-        guard !finished else { return }
-        if responseHasNoBody { finishSuccess(); return }
-
-        switch bodyMode {
-        case .undetermined:
-            finishSuccess()
-
-        case .contentLength(let total):
-            if total == 0 { finishSuccess(); return }
-            if !inbound.isEmpty {
-                let take = min(total - body.count, inbound.count)
-                if take > 0 {
-                    let slice = inbound.subdata(in: inbound.startIndex..<(inbound.startIndex + take))
-                    inbound = inbound.subdata(in: (inbound.startIndex + take)..<inbound.endIndex)
-                    if !appendBody(slice) { return }
-                }
-            }
-            if body.count >= total { finishSuccess() } else { receiveMore() }
-
-        case .chunked:
-            var decoded = Data()
-            switch chunked.feed(&inbound, into: &decoded) {
-            case .needMore:
-                if !appendBody(decoded) { return }
-                receiveMore()
-            case .done:
-                if !appendBody(decoded) { return }
-                finishSuccess()
-            case .error(let message):
-                fail(TransportError.connectionFailed("chunked decode failed: \(message)"))
-            }
-
-        case .untilClose:
-            if !inbound.isEmpty {
-                let slice = inbound
-                inbound = Data()
-                if !appendBody(slice) { return }
-            }
-            receiveMore()
-        }
-    }
-
-    private func handleEOF() {
-        guard !finished else { return }
-        guard headParsed else {
-            fail(TransportError.connectionFailed("connection closed before response head"))
-            return
-        }
-        switch bodyMode {
-        case .untilClose, .undetermined:
-            finishSuccess()
-        case .contentLength(let total):
-            if body.count >= total { finishSuccess() }
-            else { fail(TransportError.connectionFailed("connection closed; body truncated (\(body.count)/\(total))")) }
-        case .chunked:
-            fail(TransportError.connectionFailed("connection closed before final chunk"))
-        }
-    }
-
     // MARK: - Body accounting
 
-    /// Returns false (and fails the exchange) when the per-response or global byte cap is hit.
-    private func appendBody(_ data: Data) -> Bool {
-        guard !data.isEmpty else { return true }
+    /// Throws when the per-response or global byte cap is hit.
+    private func appendBody(_ data: Data) throws {
+        guard !data.isEmpty else { return }
         if body.count + data.count > maxBytes {
-            fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
-            return false
+            throw MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes)
         }
         guard MITMScriptHTTPClient.reserveInFlight(data.count) else {
-            fail(MITMScriptHTTPClient.ClientError.globalBudgetExceeded(MITMScriptHTTPClient.maxGlobalInFlightBytes))
-            return false
+            throw MITMScriptHTTPClient.ClientError.globalBudgetExceeded(MITMScriptHTTPClient.maxGlobalInFlightBytes)
         }
         reservedBytes += data.count
         body.append(data)
-        return true
     }
 
     // MARK: - Completion
 
-    private func finishSuccess() {
+    private func finishSuccess() throws -> MITMScriptHTTPClient.Response {
         var responseBody = body
         // Drop `Transfer-Encoding`: the body is fully buffered and de-chunked (and it's hop-by-hop anyway).
         var dropHeaders: Set<String> = ["transfer-encoding"]
@@ -335,8 +321,7 @@ final class TunneledHTTP1Exchange {
         if plan.requiresDecompression,
            let decoded = MITMBodyCodec.decompress(body, plan: plan, host: request.url?.host ?? "") {
             if decoded.count > maxBytes {
-                fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
-                return
+                throw MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes)
             }
             responseBody = decoded
             dropHeaders.insert("content-encoding")
@@ -345,28 +330,12 @@ final class TunneledHTTP1Exchange {
 
         let responseHeaders = headers.filter { !dropHeaders.contains($0.name.lowercased()) }
 
-        finish(.success(MITMScriptHTTPClient.Response(
+        return MITMScriptHTTPClient.Response(
             status: status,
             headers: responseHeaders,
             body: responseBody,
             finalURL: request.url?.absoluteString
-        )))
-    }
-
-    private func fail(_ error: Error) {
-        finish(.failure(error))
-    }
-
-    private func finish(_ result: Result<MITMScriptHTTPClient.Response, Error>) {
-        guard !finished else { return }
-        finished = true
-        deadlineTimer?.cancel(); deadlineTimer = nil
-        idleTimer?.cancel(); idleTimer = nil
-        MITMScriptHTTPClient.releaseInFlight(reservedBytes)
-        reservedBytes = 0
-        teardown()
-        Self.active.withLock { $0[ObjectIdentifier(self)] = nil }
-        completion(result)
+        )
     }
 
     // MARK: - Helpers

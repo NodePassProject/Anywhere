@@ -377,14 +377,12 @@
 				Networking/Transport/TransportError.swift,
 				Networking/Transport/UDPTransport.swift,
 				Networking/TunnelLimits.swift,
-				Utilities/ActivityTimer.swift,
 				Utilities/AnywhereLogger.swift,
 				"Utilities/Data+appendCompacting.swift",
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
 				Utilities/MonotonicClock.swift,
 				Utilities/SubscriptionDomainHelper.swift,
-				Utilities/UnfairLock.swift,
 				"Utilities/UUID+VLESSString.swift",
 				Utilities/VPNStatus.swift,
 			);
@@ -406,7 +404,6 @@
 				Models/ProxyMode.swift,
 				Models/QUICPolicy.swift,
 				Utilities/AnywhereLogger.swift,
-				Utilities/UnfairLock.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};

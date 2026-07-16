@@ -155,29 +155,6 @@ nonisolated class TLSClient {
         }
     }
 
-    // MARK: Callback bridges (for consumers not yet migrated to the async surface)
-
-    func connect(
-        host: String,
-        port: UInt16,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        Task {
-            do { completion(.success(try await connect(host: host, port: port))) }
-            catch { completion(.failure(error)) }
-        }
-    }
-
-    func connect(
-        overTunnel tunnel: ProxyConnection,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        Task {
-            do { completion(.success(try await connect(overTunnel: tunnel))) }
-            catch { completion(.failure(error)) }
-        }
-    }
-
     func cancel() {
         clearHandshakeState()
         connection?.cancel()
@@ -197,11 +174,7 @@ nonisolated class TLSClient {
     private func prepareECH() async throws {
         guard configuration.echIsOpportunistic else { return }
         let serverName = configuration.serverName
-        let config: Data? = await withCheckedContinuation { continuation in
-            DNSResolver.shared.resolveECHConfigList(for: serverName) { config in
-                continuation.resume(returning: config)
-            }
-        }
+        let config: Data? = await DNSResolver.shared.resolveECHConfigList(for: serverName)
         guard let config else {
             throw TLSError.handshakeFailed(
                 "Opportunistic ECH: no ECH config published in DNS for \(serverName)")

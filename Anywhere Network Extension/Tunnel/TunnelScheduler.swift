@@ -14,21 +14,21 @@ final class TunnelScheduler {
         let queue: DispatchQueue
         let interval: TimeInterval
         let handler: () -> Void
-        let timer: DispatchSourceTimer
+        /// The repeating-sleep loop; fires ``fire()`` on ``queue`` each interval.
+        var task: Task<Void, Never>?
         var lastRun: TimeInterval
 
         init(label: String, queue: DispatchQueue, interval: TimeInterval,
-             timer: DispatchSourceTimer, handler: @escaping () -> Void) {
+             handler: @escaping () -> Void) {
             self.label = label
             self.queue = queue
             self.interval = interval
-            self.timer = timer
             self.handler = handler
             self.lastRun = MonotonicClock.now
         }
-        
+
         deinit {
-            timer.cancel()
+            task?.cancel()
         }
 
         /// Must run on ``queue``.
@@ -45,26 +45,25 @@ final class TunnelScheduler {
             }
         }
     }
-    
+
     private let tasks = Mutex<[ScheduledTask]>([])
-    
+
     func schedule(
         label: String, on queue: DispatchQueue,
         every interval: TimeInterval,
         leeway: TimeInterval,
         _ handler: @escaping () -> Void
     ) {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(
-            deadline: .now() + interval,
-            repeating: interval,
-            leeway: .milliseconds(Int(leeway * 1000))
-        )
-        let task = ScheduledTask(label: label, queue: queue, interval: interval,
-                                 timer: timer, handler: handler)
-        timer.setEventHandler { [weak task] in task?.fire() }
+        let task = ScheduledTask(label: label, queue: queue, interval: interval, handler: handler)
+        // Sleep off-queue, then hop onto `queue` so `fire()` keeps the on-queue contract.
+        task.task = Task { [weak task] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let task else { return }
+                task.queue.async { task.fire() }
+            }
+        }
         tasks.withLock { $0.append(task) }
-        timer.resume()
     }
 
     /// Catch-up pass for tasks that fell due while the device was frozen.
@@ -83,7 +82,7 @@ final class TunnelScheduler {
             return current
         }
         for task in removed {
-            task.timer.cancel()
+            task.task?.cancel()
         }
     }
 }

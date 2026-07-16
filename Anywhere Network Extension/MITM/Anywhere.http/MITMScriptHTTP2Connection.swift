@@ -105,7 +105,14 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// In-progress header block: the initiating HEADERS' flags + accumulated fragment (RFC 7540 §6.10).
     private var pendingHeaders: (streamID: UInt32, flags: UInt8, block: Data)?
 
-    private var readyCallbacks: [(Result<Void, Error>) -> Void] = []
+    /// Readiness awaiters coalesced behind one handshake; each resumes exactly once at `.ready`
+    /// or on fail/close. Queue-confined.
+    private var readyContinuations: [CheckedContinuation<Void, Error>] = []
+
+    /// Send-side parks waiting on a WINDOW_UPDATE that re-opens flow control (or on a stream/session
+    /// end). Queue-confined; replaces the old 50 ms flow-control retry poll (mirrors
+    /// NaiveHTTP2Multiplexer.parkForFlow / GRPCConnection.parkForFlowWindow).
+    private var flowResumptions: [CheckedContinuation<Void, Never>] = []
 
     private(set) var negotiatedHTTP1 = false
 
@@ -171,40 +178,46 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     // MARK: - Request entry point
 
     /// Runs one request/response on a new stream. A reservation must already have been made by the
-    /// pool (see `tryReserveStream`); this releases it exactly once. `completion` fires once.
+    /// pool (see `tryReserveStream`); this releases it exactly once.
     func perform(
         request: URLRequest,
         hostHeader: String,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (Result<MITMScriptHTTPClient.Response, Error>) -> Void
-    ) {
-        queue.async { [self] in
-            ensureReady { [weak self] result in
-                guard let self else {
-                    completion(.failure(MITMScriptHTTP2Error.notReady))
+        resourceTimeout: TimeInterval
+    ) async throws -> MITMScriptHTTPClient.Response {
+        do {
+            try await ensureReady()
+        } catch {
+            // Hand the reserved slot back on the queue where the snapshot is maintained.
+            queue.async { [self] in
+                releaseReservation()
+                updatePoolSnapshot()
+            }
+            throw error
+        }
+
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<MITMScriptHTTPClient.Response, Error>) in
+            queue.async { [self] in
+                guard state != .closed else {
+                    releaseReservation()
+                    updatePoolSnapshot()
+                    continuation.resume(throwing: negotiatedHTTP1 ? MITMScriptHTTP2Error.needsHTTP1Fallback
+                                                                  : MITMScriptHTTP2Error.connectionClosed("connection closed"))
                     return
                 }
-                switch result {
-                case .failure(let error):
-                    self.releaseReservation()
-                    self.updatePoolSnapshot()
-                    completion(.failure(error))
-                case .success:
-                    let stream = MITMScriptHTTP2Stream(
-                        streamID: self.allocateStreamID(),
-                        connection: self,
-                        request: request,
-                        hostHeader: hostHeader,
-                        maxBytes: maxBytes,
-                        resourceTimeout: resourceTimeout,
-                        completion: completion
-                    )
-                    self.streams[stream.streamID] = stream
-                    self.releaseReservation()
-                    self.updatePoolSnapshot()
-                    stream.start()
-                }
+                let stream = MITMScriptHTTP2Stream(
+                    streamID: allocateStreamID(),
+                    connection: self,
+                    request: request,
+                    hostHeader: hostHeader,
+                    maxBytes: maxBytes,
+                    resourceTimeout: resourceTimeout,
+                    continuation: continuation
+                )
+                streams[stream.streamID] = stream
+                releaseReservation()
+                updatePoolSnapshot()
+                stream.start()
             }
         }
     }
@@ -217,34 +230,46 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
 
     // MARK: - Setup
 
-    /// Must be called on `queue`. Completion always fires on `queue`.
-    private func ensureReady(_ completion: @escaping (Result<Void, Error>) -> Void) {
-        switch state {
-        case .ready:
-            completion(.success(()))
-        case .idle:
-            readyCallbacks.append(completion)
-            beginSetup()
-        case .connecting, .prefaceSent:
-            readyCallbacks.append(completion)
-        case .goingAway, .closed:
-            completion(.failure(negotiatedHTTP1 ? MITMScriptHTTP2Error.needsHTTP1Fallback
-                                                : MITMScriptHTTP2Error.connectionClosed("connection closed")))
+    /// Coalesces awaiters behind one handshake; resolves at `.ready` or on fail/close. Hops to
+    /// `queue` so it's callable from any async context.
+    private func ensureReady() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                switch state {
+                case .ready:
+                    continuation.resume()
+                case .idle:
+                    readyContinuations.append(continuation)
+                    beginSetup()
+                case .connecting, .prefaceSent:
+                    readyContinuations.append(continuation)
+                case .goingAway, .closed:
+                    continuation.resume(throwing: negotiatedHTTP1 ? MITMScriptHTTP2Error.needsHTTP1Fallback
+                                                                  : MITMScriptHTTP2Error.connectionClosed("connection closed"))
+                }
+            }
         }
     }
 
     private func beginSetup() {
         state = .connecting
         updatePoolSnapshot()
-        // `OutboundConnector.dial` completes on the queue we pass.
-        OutboundConnector.dial(host: host, port: port, queue: queue) { [weak self] result in
+        Task { [weak self] in
             guard let self else { return }
-            switch result {
-            case .failure(let error):
-                self.failSetup(error)
-            case .success(let dialed):
-                self.dialed = dialed
-                self.startTLS(dialed: dialed)
+            do {
+                let dialed = try await OutboundConnector.dial(host: self.host, port: self.port)
+                self.queue.async {
+                    guard self.state == .connecting else {
+                        // Closed mid-dial: drop the orphaned transport instead of leaking the socket.
+                        dialed.connection.cancel()
+                        dialed.proxyClient?.cancel()
+                        return
+                    }
+                    self.dialed = dialed
+                    self.startTLS(dialed: dialed)
+                }
+            } catch {
+                self.queue.async { self.failSetup(error) }
             }
         }
     }
@@ -253,14 +278,12 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         let configuration = TLSConfiguration(serverName: host, alpn: ["h2", "http/1.1"], insecureSkipVerify: insecure)
         let client = TLSClient(configuration: configuration)
         tlsClient = client
-        client.connect(overTunnel: dialed.connection) { [weak self] result in
+        Task { [weak self] in
             guard let self else { return }
-            self.queue.async {
-                guard self.state == .connecting else { return }
-                switch result {
-                case .failure(let error):
-                    self.failSetup(error)
-                case .success(let tlsConnection):
+            do {
+                let tlsConnection = try await client.connect(overTunnel: dialed.connection)
+                self.queue.async {
+                    guard self.state == .connecting else { return }
                     guard client.negotiatedALPN == "h2" else {
                         // HTTP/1.1-only origin: cache it and fail waiters over to the HTTP/1.1 path —
                         // one live connection can't serve N concurrent HTTP/1.1 exchanges.
@@ -268,13 +291,18 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
                         self.onNegotiatedHTTP1?()
                         self.state = .closed
                         self.teardownTransport()
-                        self.completeReadyCallbacks(.failure(MITMScriptHTTP2Error.needsHTTP1Fallback))
+                        self.completeReadyContinuations(MITMScriptHTTP2Error.needsHTTP1Fallback)
                         self.updatePoolSnapshot()
                         self.onClose?()
                         return
                     }
                     self.connection = TLSProxyConnection(tlsConnection: tlsConnection)
                     self.sendConnectionPreface()
+                }
+            } catch {
+                self.queue.async {
+                    guard self.state == .connecting else { return }
+                    self.failSetup(error)
                 }
             }
         }
@@ -316,19 +344,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     private func startReadLoop() {
         handleInbound()
         guard state != .closed else { return }
-        readFromTransport { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.handleSessionError(error)
-                return
-            }
-            self.startReadLoop()
-        }
-    }
-
-    /// Completion fires on `queue`.
-    private func readFromTransport(_ completion: @escaping (Error?) -> Void) {
-        guard let connection else { completion(MITMScriptHTTP2Error.notReady); return }
+        guard let connection else { handleSessionError(MITMScriptHTTP2Error.notReady); return }
         Task { [weak self] in
             let data: Data?
             let error: Error?
@@ -336,18 +352,19 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
             catch let e { data = nil; error = e }
             guard let self else { return }
             self.queue.async {
-                if let error { completion(error); return }
+                guard self.state != .closed else { return }
+                if let error { self.handleSessionError(error); return }
                 guard let data, !data.isEmpty else {
-                    completion(MITMScriptHTTP2Error.connectionClosed("connection closed by peer"))
+                    self.handleSessionError(MITMScriptHTTP2Error.connectionClosed("connection closed by peer"))
                     return
                 }
                 self.receiveBuffer.append(data)
                 if self.receiveBuffer.count > Self.maxReceiveBufferSize {
                     // The loop drains fully each pass, so this only trips if a single frame is absurd.
-                    completion(MITMScriptHTTP2Error.protocolError("receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    self.handleSessionError(MITMScriptHTTP2Error.protocolError("receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
                     return
                 }
-                completion(nil)
+                self.startReadLoop()
             }
         }
     }
@@ -514,7 +531,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
 
         if state == .prefaceSent {
             state = .ready
-            completeReadyCallbacks(.success(()))
+            completeReadyContinuations(nil)
         }
         updatePoolSnapshot()
     }
@@ -534,7 +551,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
             updatePoolSnapshot()
         }
         if previous == .connecting || previous == .prefaceSent {
-            completeReadyCallbacks(.failure(MITMScriptHTTP2Error.goaway))
+            completeReadyContinuations(MITMScriptHTTP2Error.goaway)
         }
         if streams.isEmpty { close(error: MITMScriptHTTP2Error.goaway) }
     }
@@ -548,58 +565,95 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         } else if let stream = streams[frame.streamID] {
             stream.adjustSendWindow(delta: Int(increment))
         }
+        // A re-opened window (connection- or stream-level) wakes parked sends; each re-checks its
+        // own min(connection, stream) window before building more frames.
+        resumeFlowParks()
     }
 
-    // MARK: - Sending (called by streams, on `queue`)
+    /// Wakes every parked send so it re-evaluates flow control / stream liveness. Queue-confined.
+    private func resumeFlowParks() {
+        guard !flowResumptions.isEmpty else { return }
+        let resumptions = flowResumptions
+        flowResumptions.removeAll()
+        for continuation in resumptions { continuation.resume() }
+    }
+
+    /// Called by a finishing stream (on `queue`) so a send parked on its flow window unblocks and
+    /// observes the stream is finished.
+    func wakeFlowParks() {
+        resumeFlowParks()
+    }
+
+    // MARK: - Sending (called by streams via async, off `queue`)
 
     /// The header block must fit one frame; we don't emit CONTINUATION on the send side.
-    func sendHeaders(streamID: UInt32, headerBlock: Data, endStream: Bool, completion: @escaping (Error?) -> Void) {
+    func sendHeaders(streamID: UInt32, headerBlock: Data, endStream: Bool) async throws {
         guard headerBlock.count <= Int(Self.maxFrameSize) else {
-            completion(MITMScriptHTTP2Error.requestHeadersTooLarge)
-            return
+            throw MITMScriptHTTP2Error.requestHeadersTooLarge
         }
         let frame = NaiveHTTP2Framer.headersFrame(streamID: streamID, headerBlock: headerBlock, endStream: endStream)
-        sendRaw(frame.serialized, completion: completion)
+        try await sendRaw(frame.serialized)
+    }
+
+    /// One outcome of a flow-control-bounded frame-build pass, decided on `queue`.
+    private enum DataSendStep {
+        case notReady
+        case streamGone(UInt32)
+        case done
+        case park
+        case send(frame: Data, nextOffset: Int, isLast: Bool, transport: ProxyConnection)
     }
 
     /// Sends `data` as DATA frames, respecting connection + stream send windows and MAX_FRAME_SIZE.
-    /// `completion` fires once when the whole body is sent or on error.
-    func sendData(
-        _ data: Data,
-        on stream: MITMScriptHTTP2Stream,
-        offset: Int = 0,
-        endStream: Bool,
-        completion: @escaping (Error?) -> Void
-    ) {
-        guard state == .ready || state == .goingAway else {
-            completion(MITMScriptHTTP2Error.notReady); return
+    /// When the window is exhausted it parks on a continuation resumed by the next WINDOW_UPDATE
+    /// (or a stream/session end), instead of the old 50 ms poll.
+    func sendData(_ data: Data, on stream: MITMScriptHTTP2Stream, endStream: Bool) async throws {
+        var offset = 0
+        while true {
+            let step = await nextDataStep(data, on: stream, offset: offset, endStream: endStream)
+            switch step {
+            case .notReady:
+                throw MITMScriptHTTP2Error.notReady
+            case .streamGone(let sid):
+                throw MITMScriptHTTP2Error.streamReset(sid)
+            case .done:
+                return
+            case .park:
+                await parkForFlow(stream: stream)
+            case .send(let frame, let nextOffset, let isLast, let transport):
+                try await transport.send(frame)
+                if isLast { return }
+                offset = nextOffset
+            }
         }
-        guard !stream.isFinished else {
-            completion(MITMScriptHTTP2Error.streamReset(stream.streamID)); return
+    }
+
+    /// Hops to `queue`, debits the flow windows, and builds the next DATA frame (or decides to park).
+    private func nextDataStep(_ data: Data, on stream: MITMScriptHTTP2Stream, offset: Int, endStream: Bool) async -> DataSendStep {
+        await withCheckedContinuation { (continuation: CheckedContinuation<DataSendStep, Never>) in
+            queue.async { [self] in
+                continuation.resume(returning: buildDataStep(data, on: stream, offset: offset, endStream: endStream))
+            }
         }
+    }
+
+    /// Builds one DATA frame under the current flow window, debiting the windows. Runs on `queue`.
+    private func buildDataStep(_ data: Data, on stream: MITMScriptHTTP2Stream, offset: Int, endStream: Bool) -> DataSendStep {
+        guard state == .ready || state == .goingAway else { return .notReady }
+        guard !stream.isFinished else { return .streamGone(stream.streamID) }
+        guard let connection else { return .notReady }
 
         if offset >= data.count {
             if endStream {
                 let frame = NaiveHTTP2Framer.dataFrame(streamID: stream.streamID, payload: Data(), endStream: true)
-                sendRaw(frame.serialized, completion: completion)
-            } else {
-                completion(nil)
+                return .send(frame: frame.serialized, nextOffset: offset, isLast: true, transport: connection)
             }
-            return
+            return .done
         }
 
         let maxByFlow = min(connectionSendWindow, stream.sendWindow)
         let chunkSize = min(data.count - offset, min(NaiveHTTP2Framer.maxDataPayload, maxByFlow))
-        guard chunkSize > 0 else {
-            // Window exhausted — wait for WINDOW_UPDATE and retry, bailing if the stream dies.
-            queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self, weak stream] in
-                guard let self, let stream, !stream.isFinished else {
-                    completion(MITMScriptHTTP2Error.streamReset(stream?.streamID ?? 0)); return
-                }
-                self.sendData(data, on: stream, offset: offset, endStream: endStream, completion: completion)
-            }
-            return
-        }
+        guard chunkSize > 0 else { return .park }
 
         connectionSendWindow -= chunkSize
         stream.consumeSendWindow(chunkSize)
@@ -607,18 +661,23 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         let chunk = data.subdata(in: start..<(start + chunkSize))
         let isLast = offset + chunkSize >= data.count
         let frame = NaiveHTTP2Framer.dataFrame(streamID: stream.streamID, payload: chunk, endStream: endStream && isLast)
-        sendRaw(frame.serialized) { [weak self, weak stream] error in
-            guard let self else { return }
-            self.queue.async {
-                if let error { completion(error); return }
-                guard let stream else { completion(MITMScriptHTTP2Error.notReady); return }
-                if isLast { completion(nil) }
-                else { self.sendData(data, on: stream, offset: offset + chunkSize, endStream: endStream, completion: completion) }
+        return .send(frame: frame.serialized, nextOffset: offset + chunkSize, isLast: isLast, transport: connection)
+    }
+
+    /// Suspends until a WINDOW_UPDATE re-opens the send window, or the stream/session ends. Re-checks
+    /// under `queue` before parking so a window re-open racing the caller isn't missed.
+    private func parkForFlow(stream: MITMScriptHTTP2Stream) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [self] in
+                if state == .closed { continuation.resume(); return }
+                if stream.isFinished { continuation.resume(); return }
+                if min(connectionSendWindow, stream.sendWindow) > 0 { continuation.resume(); return }
+                flowResumptions.append(continuation)
             }
         }
     }
 
-    /// Fire-and-forget control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE, RST_STREAM).
+    /// Fire-and-forget control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE, RST_STREAM). Called on `queue`.
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
         guard let connection else { return }
         let serialized = frame.serialized
@@ -628,11 +687,18 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         }
     }
 
-    private func sendRaw(_ data: Data, completion: @escaping (Error?) -> Void) {
-        guard let connection else { completion(MITMScriptHTTP2Error.notReady); return }
-        Task {
-            do { try await connection.send(data); completion(nil) }
-            catch { completion(error) }
+    /// Snapshots the live transport on `queue` (it's queue-confined), then sends off-queue.
+    private func sendRaw(_ data: Data) async throws {
+        let transport = try await currentTransport()
+        try await transport.send(data)
+    }
+
+    private func currentTransport() async throws -> ProxyConnection {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
+            queue.async { [self] in
+                if let connection { continuation.resume(returning: connection) }
+                else { continuation.resume(throwing: MITMScriptHTTP2Error.notReady) }
+            }
         }
     }
 
@@ -662,7 +728,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         guard state != .closed else { return }
         state = .closed
         teardownTransport()
-        completeReadyCallbacks(.failure(error))
+        completeReadyContinuations(error)
+        resumeFlowParks()
         let victims = streams
         streams.removeAll()
         pendingHeaders = nil
@@ -675,15 +742,18 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         guard state != .closed else { return }
         state = .closed
         teardownTransport()
-        completeReadyCallbacks(.failure(error))
+        completeReadyContinuations(error)
+        resumeFlowParks()
         updatePoolSnapshot()
         onClose?()
     }
 
-    private func completeReadyCallbacks(_ result: Result<Void, Error>) {
-        let callbacks = readyCallbacks
-        readyCallbacks.removeAll()
-        for callback in callbacks { callback(result) }
+    private func completeReadyContinuations(_ error: Error?) {
+        let continuations = readyContinuations
+        readyContinuations.removeAll()
+        for continuation in continuations {
+            if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        }
     }
 
     /// The TLS wrapper, TLS client, and dialed proxy transport are separate objects —
@@ -709,7 +779,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
             let reason = error ?? MITMScriptHTTP2Error.connectionClosed("connection closed")
             state = .closed
             teardownTransport()
-            completeReadyCallbacks(.failure(reason))
+            completeReadyContinuations(reason)
+            resumeFlowParks()
             let victims = streams
             streams.removeAll()
             pendingHeaders = nil

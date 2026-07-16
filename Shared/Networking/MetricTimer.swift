@@ -27,17 +27,4 @@ nonisolated struct MetricTimer {
         guard enabled, let startedAt else { return }
         ConnectionMetrics.shared.record(metric, ContinuousClock().now - startedAt)
     }
-
-    /// Records elapsed time only on `.success` before forwarding the result.
-    static func timing<Value, Failure: Error>(
-        _ metric: ConnectionMetrics.Metric,
-        _ completion: @escaping (Result<Value, Failure>) -> Void
-    ) -> (Result<Value, Failure>) -> Void {
-        var timer = MetricTimer(metric)
-        timer.start()
-        return { [timer] result in
-            if case .success = result { timer.stop() }
-            completion(result)
-        }
-    }
 }

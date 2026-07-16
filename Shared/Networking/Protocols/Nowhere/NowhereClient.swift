@@ -13,7 +13,7 @@ nonisolated final class NowhereFlowOpenAttempt {
         var connections: [ObjectIdentifier: ProxyConnection] = [:]
         var cancelled = false
         var resolved = false
-        var deadline: DispatchWorkItem?
+        var deadline: Task<Void, Never>?
     }
     private let state = Mutex(State())
 
@@ -31,28 +31,32 @@ nonisolated final class NowhereFlowOpenAttempt {
 
     var isCancelled: Bool { state.withLock { $0.cancelled } }
 
-    func armDeadline(at deadline: DispatchTime, handler: @escaping () -> Void) {
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.claimResult() else { return }
+    func armDeadline(at deadline: DispatchTime, handler: @escaping @Sendable () -> Void) {
+        // A Task starts on creation, so only spin one up if we might still arm.
+        let shouldArm = state.withLock { state -> Bool in !state.resolved }
+        guard shouldArm else { return }
+
+        let task = Task { [weak self] in
+            let nowNanos = DispatchTime.now().uptimeNanoseconds
+            let deadlineNanos = deadline.uptimeNanoseconds
+            let delayNanos = deadlineNanos > nowNanos ? deadlineNanos - nowNanos : 0
+            try? await Task.sleep(nanoseconds: delayNanos)
+            guard !Task.isCancelled, let self, self.claimResult() else { return }
             self.cancel()
             handler()
         }
-        let shouldArm = state.withLock { state in
+
+        let armed = state.withLock { state -> Bool in
             guard !state.resolved else { return false }
             state.deadline?.cancel()
-            state.deadline = work
+            state.deadline = task
             return true
         }
-        if shouldArm {
-            NowhereFlowOpenAttempt.deadlineQueue.asyncAfter(
-                deadline: deadline,
-                execute: work
-            )
-        }
+        if !armed { task.cancel() }
     }
 
     func claimResult() -> Bool {
-        let (accepted, deadline): (Bool, DispatchWorkItem?) = state.withLock { state in
+        let (accepted, deadline): (Bool, Task<Void, Never>?) = state.withLock { state in
             guard !state.resolved else { return (false, nil) }
             state.resolved = true
             let deadline = state.deadline
@@ -73,11 +77,6 @@ nonisolated final class NowhereFlowOpenAttempt {
         }
         for connection in connections { connection.cancel() }
     }
-
-    private static let deadlineQueue = DispatchQueue(
-        label: "com.argsment.Anywhere.NowhereLogicalFlowDeadline",
-        qos: .utility
-    )
 }
 
 nonisolated final class NowhereClient {
@@ -98,7 +97,7 @@ nonisolated final class NowhereClient {
     private struct RegistryState {
         var entries: [Key: NowhereClient] = [:]
         /// Coalesces concurrent first-time builds for the same key.
-        var pending: [Key: [(Result<NowhereClient, Error>) -> Void]] = [:]
+        var pending: [Key: [CheckedContinuation<NowhereClient, Error>]] = [:]
         var epoch: UInt64 = 0
     }
     private static let registry = Mutex(RegistryState())
@@ -144,9 +143,8 @@ nonisolated final class NowhereClient {
     static func acquireChained(
         configuration: NowhereConfiguration,
         chainSignature: String,
-        builder: @escaping (@escaping (Result<(QUICDatagramTransport, [ProxyClient]), Error>) -> Void) -> Void,
-        completion: @escaping (Result<NowhereClient, Error>) -> Void
-    ) {
+        builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
+    ) async throws -> NowhereClient {
         let key = Key(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
@@ -160,63 +158,62 @@ nonisolated final class NowhereClient {
             sessionID: configuration.sessionID
         )
 
-        // Fast paths resolve under the lock; the completion itself fires outside.
-        var existing: NowhereClient?
-        var shouldBuild = false
-        var buildEpoch: UInt64 = 0
-        registry.withLock { state in
-            if let client = state.entries[key] {
-                existing = client
-                return
+        enum Decision { case existing(NowhereClient); case joined; case build(UInt64) }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NowhereClient, Error>) in
+            let decision: Decision = registry.withLock { state in
+                if let client = state.entries[key] { return .existing(client) }
+                if state.pending[key] != nil {
+                    state.pending[key]?.append(continuation)
+                    return .joined
+                }
+                state.pending[key] = [continuation]      // our own continuation leads; drained below
+                return .build(state.epoch)
             }
-            if state.pending[key] != nil {
-                state.pending[key]?.append(completion)
-                return
-            }
-            state.pending[key] = [completion]
-            buildEpoch = state.epoch
-            shouldBuild = true
-        }
-        if let existing {
-            completion(.success(existing))
-            return
-        }
-        guard shouldBuild else { return }
-
-        builder { builderResult in
-            // Registry insert and waiter drain happen atomically; the coalesced
-            // completions fire after the lock is released.
-            let (queued, outcome, discarded): (
-                [(Result<NowhereClient, Error>) -> Void],
-                Result<NowhereClient, Error>,
-                [ProxyClient]
-            ) = Self.registry.withLock { state in
-                let queued = state.pending.removeValue(forKey: key) ?? []
-                guard state.epoch == buildEpoch else {
-                    let discarded: [ProxyClient]
-                    if case .success((_, let holders)) = builderResult {
-                        discarded = holders
-                    } else {
-                        discarded = []
+            switch decision {
+            case .existing(let client):
+                continuation.resume(returning: client)
+            case .joined:
+                break                                     // resumed by the build leader's drain
+            case .build(let buildEpoch):
+                Task {
+                    let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
+                    do { builderResult = .success(try await builder()) }
+                    catch { builderResult = .failure(error) }
+                    // Registry insert and waiter drain happen atomically; the coalesced
+                    // continuations resume after the lock is released.
+                    let (queued, outcome, discarded): (
+                        [CheckedContinuation<NowhereClient, Error>],
+                        Result<NowhereClient, Error>,
+                        [ProxyClient]
+                    ) = Self.registry.withLock { state in
+                        let queued = state.pending.removeValue(forKey: key) ?? []
+                        guard state.epoch == buildEpoch else {
+                            let discarded: [ProxyClient]
+                            if case .success((_, let holders)) = builderResult {
+                                discarded = holders
+                            } else {
+                                discarded = []
+                            }
+                            return (queued, .failure(NowhereError.streamClosed), discarded)
+                        }
+                        switch builderResult {
+                        case .success(let (transport, holders)):
+                            let client = NowhereClient(
+                                configuration: configuration,
+                                transport: transport,
+                                chainHolders: holders,
+                                poolKey: key
+                            )
+                            state.entries[key] = client
+                            return (queued, .success(client), [])
+                        case .failure(let error):
+                            return (queued, .failure(error), [])
+                        }
                     }
-                    return (queued, .failure(NowhereError.streamClosed), discarded)
-                }
-                switch builderResult {
-                case .success(let (transport, holders)):
-                    let client = NowhereClient(
-                        configuration: configuration,
-                        transport: transport,
-                        chainHolders: holders,
-                        poolKey: key
-                    )
-                    state.entries[key] = client
-                    return (queued, .success(client), [])
-                case .failure(let error):
-                    return (queued, .failure(error), [])
+                    for client in discarded { await client.cancel() }
+                    for waiter in queued { waiter.resume(with: outcome) }
                 }
             }
-            for client in discarded { client.cancel() }
-            for callback in queued { callback(outcome) }
         }
     }
 
@@ -243,7 +240,7 @@ nonisolated final class NowhereClient {
         self.poolKey = poolKey
     }
 
-    private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<NowhereSession, Error>) -> Void) {
+    private func acquireSession(isDefaultProxy: Bool) async throws -> NowhereSession {
         enum Acquired {
             case reuse(NowhereSession)
             case transportSpent
@@ -271,40 +268,25 @@ nonisolated final class NowhereClient {
             return .fresh(newSession)
         }
 
-        let newSession: NowhereSession
         switch acquired {
         case .reuse(let existing):
-            existing.ensureReady { error in
-                if let error { completion(.failure(error)) }
-                else { completion(.success(existing)) }
-            }
-            return
+            try await existing.ensureReady()
+            return existing
         case .transportSpent:
-            completion(.failure(NowhereError.streamClosed))
-            return
-        case .fresh(let fresh):
-            newSession = fresh
-        }
-
-        newSession.onClose = { [weak self, weak newSession] in
-            guard let self, let newSession else { return }
-            self.handleSessionClose(newSession)
-        }
-        
-        var handshakeTimer = MetricTimer(.handshakeNoDial)
-        handshakeTimer.enabled = isDefaultProxy
-        handshakeTimer.start()
-
-        newSession.ensureReady { [weak newSession, handshakeTimer] error in
-            guard let newSession else {
-                completion(.failure(NowhereError.connectionFailed("Session deallocated")))
-                return
+            throw NowhereError.streamClosed
+        case .fresh(let newSession):
+            newSession.onClose = { [weak self, weak newSession] in
+                guard let self, let newSession else { return }
+                self.handleSessionClose(newSession)
             }
-            if let error { completion(.failure(error)) }
-            else {
-                handshakeTimer.stop()
-                completion(.success(newSession))
-            }
+
+            var handshakeTimer = MetricTimer(.handshakeNoDial)
+            handshakeTimer.enabled = isDefaultProxy
+            handshakeTimer.start()
+
+            try await newSession.ensureReady()
+            handshakeTimer.stop()
+            return newSession
         }
     }
 
@@ -334,36 +316,32 @@ nonisolated final class NowhereClient {
         destination: String,
         header: NowhereProtocol.FlowHeader,
         attempt: NowhereFlowOpenAttempt? = nil,
-        isDefaultProxy: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
-            switch result {
-            case .failure(let error):
-                if Self.isStaleSessionError(error) { self?.invalidateSession() }
-                completion(.failure(error))
-            case .success(let session):
-                let connection = NowhereConnection(
-                    session: session,
-                    destination: destination,
-                    flowHeader: header
-                )
-                guard attempt?.bind(connection) != false else {
-                    completion(.failure(NowhereError.streamClosed))
-                    return
-                }
-                connection.open { error in
-                    if let error {
-                        connection.cancel()
-                        if Self.isStaleSessionError(error) {
-                            self?.invalidateSession(ifCurrent: session)
-                        }
-                        completion(.failure(error))
-                    } else {
-                        completion(.success(connection))
-                    }
-                }
+        isDefaultProxy: Bool
+    ) async throws -> ProxyConnection {
+        let session: NowhereSession
+        do {
+            session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+        } catch {
+            if Self.isStaleSessionError(error) { invalidateSession() }
+            throw error
+        }
+        let connection = NowhereConnection(
+            session: session,
+            destination: destination,
+            flowHeader: header
+        )
+        guard attempt?.bind(connection) != false else {
+            throw NowhereError.streamClosed
+        }
+        do {
+            try await connection.open()
+            return connection
+        } catch {
+            connection.cancel()
+            if Self.isStaleSessionError(error) {
+                invalidateSession(ifCurrent: session)
             }
+            throw error
         }
     }
 
@@ -371,36 +349,32 @@ nonisolated final class NowhereClient {
         destination: String,
         header: NowhereProtocol.FlowHeader,
         attempt: NowhereFlowOpenAttempt? = nil,
-        isDefaultProxy: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
-            switch result {
-            case .failure(let error):
-                if Self.isStaleSessionError(error) { self?.invalidateSession() }
-                completion(.failure(error))
-            case .success(let session):
-                let connection = NowhereUDPConnection(
-                    session: session,
-                    destination: destination,
-                    flowHeader: header
-                )
-                guard attempt?.bind(connection) != false else {
-                    completion(.failure(NowhereError.streamClosed))
-                    return
-                }
-                connection.open { error in
-                    if let error {
-                        connection.cancel()
-                        if Self.isStaleSessionError(error) {
-                            self?.invalidateSession(ifCurrent: session)
-                        }
-                        completion(.failure(error))
-                    } else {
-                        completion(.success(connection))
-                    }
-                }
+        isDefaultProxy: Bool
+    ) async throws -> ProxyConnection {
+        let session: NowhereSession
+        do {
+            session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+        } catch {
+            if Self.isStaleSessionError(error) { invalidateSession() }
+            throw error
+        }
+        let connection = NowhereUDPConnection(
+            session: session,
+            destination: destination,
+            flowHeader: header
+        )
+        guard attempt?.bind(connection) != false else {
+            throw NowhereError.streamClosed
+        }
+        do {
+            try await connection.open()
+            return connection
+        } catch {
+            connection.cancel()
+            if Self.isStaleSessionError(error) {
+                invalidateSession(ifCurrent: session)
             }
+            throw error
         }
     }
 
@@ -446,7 +420,7 @@ nonisolated final class NowhereClient {
     }
 
     static func closeAll() {
-        let (clients, pending): ([NowhereClient], [(Result<NowhereClient, Error>) -> Void]) = registry.withLock { state in
+        let (clients, pending): ([NowhereClient], [CheckedContinuation<NowhereClient, Error>]) = registry.withLock { state in
             let clients = Array(state.entries.values)
             state.entries.removeAll(keepingCapacity: false)
             let pending = state.pending.values.flatMap { $0 }
@@ -454,7 +428,7 @@ nonisolated final class NowhereClient {
             state.epoch &+= 1
             return (clients, pending)
         }
-        for callback in pending { callback(.failure(NowhereError.streamClosed)) }
+        for continuation in pending { continuation.resume(throwing: NowhereError.streamClosed) }
         for client in clients {
             client.invalidateSession()
         }

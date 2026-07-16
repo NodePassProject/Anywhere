@@ -28,78 +28,34 @@ extension ProxyClient {
         ).get()
     }
 
-    /// No network round-trip — just wraps the transport with cipher/PSK, completing synchronously.
-    func sendShadowsocksProtocolHandshake(
-        over connection: ProxyConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        completion(wrapWithShadowsocks(
-            inner: connection,
-            command: command,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort
-        ))
-    }
-
-    /// Async entry for the SS real-UDP path; bridges the still-callback body.
+    /// Opens a real-UDP path to the SS server (chain-tunnel datagram or direct UDP transport)
+    /// and wraps with SS UDP encryption keyed for the final destination. Native async.
     func connectShadowsocksRealUDP(
         destinationHost: String,
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-            self.connectShadowsocksRealUDP(
-                destinationHost: destinationHost, destinationPort: destinationPort
-            ) { continuation.resume(with: $0) }
-        }
-    }
-
-    /// Opens a real-UDP path to the SS server (chain-tunnel datagram or direct UDP transport)
-    /// and wraps with SS UDP encryption keyed for the final destination.
-    func connectShadowsocksRealUDP(
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let wrapAndComplete: (ProxyConnection) -> Void = { [weak self] udpInner in
-            guard let self else {
-                udpInner.cancel()
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            completion(self.wrapWithShadowsocks(
-                inner: udpInner,
-                command: .udp,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort
-            ))
-        }
-
+        let udpInner: ProxyConnection
         if let tunnel = self.tunnel {
             // SS UDP needs real datagrams; a TCP tunnel here is a config error — fail rather than silently truncate.
             guard tunnel.deliversDatagrams else {
-                completion(.failure(ProxyError.protocolError(
+                throw ProxyError.protocolError(
                     "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."
-                )))
-                return
+                )
             }
             self.tunnel = nil
-            wrapAndComplete(tunnel)
+            udpInner = tunnel
         } else {
             let transport = UDPTransport(host: directDialHost, port: configuration.serverPort)
             self.own(transport)
-            Task {
-                do {
-                    try await transport.connect()
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                wrapAndComplete(DirectUDPProxyConnection(transport: transport))
-            }
+            try await transport.connect()
+            udpInner = DirectUDPProxyConnection(transport: transport)
         }
+        return try wrapWithShadowsocks(
+            inner: udpInner,
+            command: .udp,
+            destinationHost: destinationHost,
+            destinationPort: destinationPort
+        ).get()
     }
 
     fileprivate func wrapWithShadowsocks(

@@ -14,10 +14,9 @@ enum MITMScriptTransform {
 
     /// Serial queue carrying every script invocation (off the lwIP queue, so a slow process(ctx)
     /// parks only its connection). Serial ordering keeps FrameCursor from concurrent touches.
-    static let scriptQueue = DispatchQueue(
-        label: AWCore.Identifier.mitmScriptQueue,
-        qos: .userInitiated
-    )
+    /// Owned by ``JSCConcurrencyBridge`` — the JSC vendored-boundary bridge; this alias keeps the
+    /// fire-and-forget confinement hops (compile, deinit release) reading naturally.
+    static var scriptQueue: DispatchQueue { JSCConcurrencyBridge.shared.queue }
 
     /// Compiles every script rule on scriptQueue at (re)configuration time so cold-start cost doesn't
     /// land on the first intercepted flow. One async dispatch per scope so real calls can interleave.
@@ -132,10 +131,12 @@ enum MITMScriptTransform {
 
     /// Applies all matching `.bodyJSON` then `.bodyReplace` rules; JSON runs first so the replacement
     /// regex sees the re-serialized JSON. Both run before any `.script` and survive `Anywhere.exit`.
+    /// `.bodyReplace` awaits the ReDoS-bounded substitution; neither op touches JSC, so this runs on
+    /// the caller's executor rather than `scriptQueue`.
     private static func applyNativeBodyEdits(
         _ message: HTTPMessage,
         rules: [CompiledMITMRule]
-    ) -> HTTPMessage {
+    ) async -> HTTPMessage {
         let requestURL = message.url
         var message = message
         let jsonOps = matchingBodyJSONOps(in: rules, requestURL: requestURL)
@@ -144,7 +145,7 @@ enum MITMScriptTransform {
         }
         let replaceOps = matchingBodyReplaceOps(in: rules, requestURL: requestURL)
         if !replaceOps.isEmpty {
-            message.body = MITMBodyReplace.applyAll(replaceOps, to: message.body)
+            message.body = await MITMBodyReplace.applyAll(replaceOps, to: message.body)
         }
         return message
     }
@@ -177,38 +178,32 @@ enum MITMScriptTransform {
         return ops
     }
 
-    /// Runs native body edits and the matching `.script` rule on scriptQueue. An awaiting
-    /// process(ctx) suspends without holding the queue; `completion` fires exactly once on
-    /// `resumeQueue`, and `message` is a value copy never aliased to the caller's buffer.
+    /// Runs native body edits and the matching `.script` rule. The `.script` engine hop confines the
+    /// JSC work to `scriptQueue` itself; an awaiting process(ctx) suspends without holding the queue.
+    /// `message` is a value copy never aliased to the caller's buffer. The caller awaits on its own
+    /// executor and re-establishes its confinement after the await.
     static func apply(
         _ message: HTTPMessage,
         rules: [CompiledMITMRule],
-        engineProvider: MITMScriptEngine.Provider?,
-        resumeOn resumeQueue: DispatchQueue,
-        completion: @escaping (Outcome) -> Void
-    ) {
-        scriptQueue.async {
-            let requestURL = message.url
-            let edited = applyNativeBodyEdits(message, rules: rules)
-            guard let match = lastMatchingScriptSource(in: rules, requestURL: requestURL),
-                  let engineProvider
-            else {
-                resumeQueue.async { completion(.message(edited)) }
-                return
-            }
-            engineProvider.get().applyAsync(
-                edited,
-                source: match.source,
-                sourceKey: match.sourceKey,
-                resumeOn: resumeQueue
-            ) { outcome in
-                switch outcome {
-                case .modified(let updated):  completion(.message(updated))
-                case .done(let updated):      completion(.message(updated))
-                case .exit:                   completion(.message(edited))
-                case .respond(let response):  completion(.synthesizedResponse(response))
-                }
-            }
+        engineProvider: MITMScriptEngine.Provider?
+    ) async -> Outcome {
+        let requestURL = message.url
+        let edited = await applyNativeBodyEdits(message, rules: rules)
+        guard let match = lastMatchingScriptSource(in: rules, requestURL: requestURL),
+              let engineProvider
+        else {
+            return .message(edited)
+        }
+        let outcome = await engineProvider.get().applyAsync(
+            edited,
+            source: match.source,
+            sourceKey: match.sourceKey
+        )
+        switch outcome {
+        case .modified(let updated):  return .message(updated)
+        case .done(let updated):      return .message(updated)
+        case .exit:                   return .message(edited)
+        case .respond(let response):  return .synthesizedResponse(response)
         }
     }
 
@@ -273,26 +268,24 @@ enum MITMScriptTransform {
         }
     }
 
-    /// Async counterpart: runs on scriptQueue, delivers on `resumeQueue` exactly once. Cursor
-    /// mutation is safe because the caller keeps only one frame in flight at a time.
+    /// Async counterpart: hops to the JSC bridge (the JSC home queue), runs the sync span, and
+    /// resumes the caller exactly once. Cursor mutation is safe because the caller keeps only one
+    /// frame in flight at a time.
     static func applyFrame(
         _ frame: Data,
         rules: [CompiledMITMRule],
         frameContext: MITMScriptEngine.FrameContext,
         cursor: FrameCursor,
-        engineProvider: MITMScriptEngine.Provider?,
-        resumeOn resumeQueue: DispatchQueue,
-        completion: @escaping (StreamFrameResult) -> Void
-    ) {
-        scriptQueue.async {
-            let result = applyFrame(
+        engineProvider: MITMScriptEngine.Provider?
+    ) async -> StreamFrameResult {
+        await JSCConcurrencyBridge.shared.run {
+            applyFrame(
                 frame,
                 rules: rules,
                 frameContext: frameContext,
                 cursor: cursor,
                 engineProvider: engineProvider
             )
-            resumeQueue.async { completion(result) }
         }
     }
 

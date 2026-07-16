@@ -193,11 +193,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// interface and flushes the OS DNS cache.
     private func reapplyTunnelSettings() {
         let settings = buildTunnelSettings()
-        setTunnelNetworkSettings(settings) { error in
-            if let error {
-                logger.error("[VPN] Failed to reapply tunnel settings: \(error.localizedDescription)")
-            } else {
+        Task {
+            do {
+                try await setTunnelNetworkSettings(settings)
                 logger.info("[VPN] Tunnel settings reapplied")
+            } catch {
+                logger.error("[VPN] Failed to reapply tunnel settings: \(error.localizedDescription)")
             }
         }
     }

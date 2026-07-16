@@ -100,9 +100,8 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     private let configuration: ProxyConfiguration
     private let directDialHost: String
 
-    /// Guards `dialing`; burst callers wait here so they share one handshake.
-    private let dialCondition = NSCondition()
-    private var dialing = false
+    /// Guards `dialing`; burst callers coalesce behind one handshake.
+    private let dialing = Mutex(false)
 
     /// Guarded by ``lock``.
     private var closed = false
@@ -133,24 +132,18 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     /// Restarts the idle clock at stream end, so a freed session is kept warm for the full
     /// idle timeout (not evicted right after a long transfer).
     func noteStreamEnded(_ multiplexer: SudokuMuxClient) {
-        lock.lock()
-        if lastActivity[ObjectIdentifier(multiplexer)] != nil {
-            lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+        lock.withLock { _ in
+            if lastActivity[ObjectIdentifier(multiplexer)] != nil {
+                lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            }
         }
-        lock.unlock()
     }
 
     // MARK: - Teardown
 
     /// Sets `closed` to reject new acquires, then defers to the base.
     override func closeAll() {
-        lock.lock()
-        closed = true
-        lock.unlock()
-        // Wake dial-waiters so they observe `closed` instead of blocking forever.
-        dialCondition.lock()
-        dialCondition.broadcast()
-        dialCondition.unlock()
+        lock.withLock { _ in closed = true }
         super.closeAll()
     }
 
@@ -161,13 +154,11 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
             if let existing = try reusableMultiplexer() {
                 return existing
             }
-            let claimedDial: Bool = {
-                dialCondition.lock()
-                defer { dialCondition.unlock() }
+            let claimedDial = dialing.withLock { dialing -> Bool in
                 if dialing { return false }
                 dialing = true
                 return true
-            }()
+            }
             if !claimedDial {
                 // Another caller is handshaking; poll (non-blocking) until it publishes a
                 // session or clears the dial slot, then re-check the pool.
@@ -175,12 +166,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
                 continue
             }
 
-            defer {
-                dialCondition.lock()
-                dialing = false
-                dialCondition.broadcast()
-                dialCondition.unlock()
-            }
+            defer { dialing.withLock { $0 = false } }
             return try await dialMultiplexer()
         }
     }
@@ -188,17 +174,17 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
     /// Returns the pooled session, pruning corpses that closed before `onClose` was armed
     /// (age-based idle eviction is the base's sweep).
     private func reusableMultiplexer() throws -> SudokuMuxClient? {
-        lock.lock()
-        defer { lock.unlock() }
-        if closed { throw SudokuNativeError.closed }
-        multiplexers[Self.bucket]?.removeAll { multiplexer in
-            guard multiplexer.isClosed else { return false }
-            lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-            return true
+        try lock.withLock { _ in
+            if closed { throw SudokuNativeError.closed }
+            multiplexers[Self.bucket]?.removeAll { multiplexer in
+                guard multiplexer.isClosed else { return false }
+                lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                return true
+            }
+            guard let existing = multiplexers[Self.bucket]?.first else { return nil }
+            lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+            return existing
         }
-        guard let existing = multiplexers[Self.bucket]?.first else { return nil }
-        lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
-        return existing
     }
 
     /// Dials a fresh session on its own factory; the session owns the factory and tears it
@@ -221,15 +207,17 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient> 
             guard let self, let multiplexer else { return }
             self.removeMultiplexer(multiplexer, key: Self.bucket)
         }
-        lock.lock()
-        if closed {
-            lock.unlock()
+        // close() re-enters removeMultiplexer via onClose, so it must run off-lock.
+        let wasClosed: Bool = lock.withLock { _ in
+            if closed { return true }
+            multiplexers[Self.bucket, default: []].append(multiplexer)
+            lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            return false
+        }
+        if wasClosed {
             multiplexer.close(error: nil)
             throw SudokuNativeError.closed
         }
-        multiplexers[Self.bucket, default: []].append(multiplexer)
-        lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
-        lock.unlock()
         logger.debug("[SudokuMultiplexerPool] new session \(configuration.serverAddress):\(configuration.serverPort)")
         return multiplexer
     }

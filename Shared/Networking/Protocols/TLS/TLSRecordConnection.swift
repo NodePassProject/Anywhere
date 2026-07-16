@@ -8,10 +8,9 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TLSRecordConnection")
-
-// MARK: - TLSRecordConnection
 
 nonisolated class TLSRecordConnection {
 
@@ -59,15 +58,19 @@ nonisolated class TLSRecordConnection {
 
     var clientSeqNum: UInt64 = 0
     var serverSeqNum: UInt64 = 0
-    let seqLock = UnfairLock()
+    /// Gate serializing the read-modify-write of the sequence counters and the per-direction key
+    /// epoch swap on a TLS 1.3 KeyUpdate. A pure critical-section gate: the guarded fields stay
+    /// plain stored properties (also read lock-free on the crypto hot path, ordered by
+    /// ``sendMutex`` on egress and the single reader on ingress).
+    let seqLock = Mutex<Void>(())
 
-    let sendLock = UnfairLock()
+    let sendLock = Mutex<Void>(())
     private var sentCloseNotify = false
 
     private static let maxRecordPlaintext = 16384
 
     private var receiveBuffer = Data(capacity: 256 * 1024)
-    private let receiveLock = UnfairLock()
+    private let receiveLock = Mutex<Void>(())
     
     var receivedCloseNotify = false
 
@@ -129,9 +132,7 @@ nonisolated class TLSRecordConnection {
 
     /// Buffers application bytes read during the handshake; call before any `receive()`.
     func prependToReceiveBuffer(_ data: Data) {
-        receiveLock.lock()
-        receiveBuffer.append(data)
-        receiveLock.unlock()
+        receiveLock.withLock { _ in receiveBuffer.append(data) }
     }
 
     // MARK: - Direction-aware Key/IV Selection
@@ -168,14 +169,13 @@ nonisolated class TLSRecordConnection {
     /// Receives raw (undecrypted) bytes: any handshake-buffered bytes first, then straight off the
     /// transport. `nil` signals a clean close.
     func receiveRaw() async throws -> Data? {
-        receiveLock.lock()
-        if !receiveBuffer.isEmpty {
+        let buffered: Data? = receiveLock.withLock { _ in
+            guard !receiveBuffer.isEmpty else { return nil }
             let data = receiveBuffer
             receiveBuffer.removeAll()
-            receiveLock.unlock()
             return data
         }
-        receiveLock.unlock()
+        if let buffered { return buffered }
 
         guard let connection else { throw TLSRecordError.connectionUnavailable }
         switch try await connection.receive() {
@@ -199,7 +199,7 @@ nonisolated class TLSRecordConnection {
     /// wire — even under concurrent callers — and it orders with the internal KeyUpdate response.
     func send(_ data: Data) async throws {
         try await sendMutex.withLock {
-            let record = try sendLock.withLock { () throws -> Data in
+            let record = try sendLock.withLock { _ throws -> Data in
                 guard connection != nil else { throw TLSRecordError.connectionUnavailable }
                 return try buildTLSRecords(for: data)
             }
@@ -211,11 +211,12 @@ nonisolated class TLSRecordConnection {
     /// Receives and decrypts one chunk of application data; `nil` signals a clean close.
     func receive() async throws -> Data? {
         while true {
-            receiveLock.lock()
-            let processed = processBuffer()
-            let needsKeyUpdateResponse = keyUpdateResponsePending
-            keyUpdateResponsePending = false
-            receiveLock.unlock()
+            let (processed, needsKeyUpdateResponse) = receiveLock.withLock { _ -> (BufferResult?, Bool) in
+                let processed = processBuffer()
+                let needsKeyUpdateResponse = keyUpdateResponsePending
+                keyUpdateResponsePending = false
+                return (processed, needsKeyUpdateResponse)
+            }
 
             if needsKeyUpdateResponse {
                 await sendKeyUpdateResponseAndRekeyEgress()
@@ -241,9 +242,7 @@ nonisolated class TLSRecordConnection {
             }
             switch try await connection.receive() {
             case .bytes(let data):
-                receiveLock.lock()
-                receiveBuffer.append(data)
-                receiveLock.unlock()
+                receiveLock.withLock { _ in receiveBuffer.append(data) }
                 continue             // re-process with the new bytes
             case .end:
                 return nil
@@ -266,14 +265,13 @@ nonisolated class TLSRecordConnection {
 
     /// Abortive teardown. Graceful callers must await `closeWrite` first.
     func cancel() {
-        sendLock.lock()
-        let transport = connection
-        connection = nil            // in-flight and subsequent sends see nil and abort
-        sendLock.unlock()
+        let transport = sendLock.withLock { _ -> (any AsyncByteTransport)? in
+            let transport = connection
+            connection = nil        // in-flight and subsequent sends see nil and abort
+            return transport
+        }
 
-        receiveLock.lock()
-        receiveBuffer.removeAll()
-        receiveLock.unlock()
+        receiveLock.withLock { _ in receiveBuffer.removeAll() }
 
         transport?.cancel()
     }
@@ -334,16 +332,15 @@ nonisolated class TLSRecordConnection {
             recordsProcessed += 1
 
             if contentType == TLSContentType.applicationData {
-                seqLock.lock()
-                let seqNum: UInt64
-                if direction == .server {
-                    seqNum = clientSeqNum
-                    clientSeqNum += 1
-                } else {
-                    seqNum = serverSeqNum
-                    serverSeqNum += 1
+                let seqNum: UInt64 = seqLock.withLock { _ in
+                    if direction == .server {
+                        defer { clientSeqNum += 1 }
+                        return clientSeqNum
+                    } else {
+                        defer { serverSeqNum += 1 }
+                        return serverSeqNum
+                    }
                 }
-                seqLock.unlock()
 
                 do {
                     let decrypted = try decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum)
@@ -368,16 +365,15 @@ nonisolated class TLSRecordConnection {
                 }
             } else if contentType == TLSContentType.alert {
                 if tlsVersion < 0x0304 {
-                    seqLock.lock()
-                    let seqNum: UInt64
-                    if direction == .server {
-                        seqNum = clientSeqNum
-                        clientSeqNum += 1
-                    } else {
-                        seqNum = serverSeqNum
-                        serverSeqNum += 1
+                    let seqNum: UInt64 = seqLock.withLock { _ in
+                        if direction == .server {
+                            defer { clientSeqNum += 1 }
+                            return clientSeqNum
+                        } else {
+                            defer { serverSeqNum += 1 }
+                            return serverSeqNum
+                        }
                     }
-                    seqLock.unlock()
 
                     consumed += totalLen
                     if let alert = try? decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum),

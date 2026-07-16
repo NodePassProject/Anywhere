@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMGateRegex")
 
@@ -52,12 +53,15 @@ final class MITMGateRegex: @unchecked Sendable {
     
     private static let maxCacheEntries = 64
 
-    private let lock = UnfairLock()
-    private var cache: [String: Bool] = [:]
-    /// Insertion-order mirror of `cache` for FIFO eviction.
-    private var cacheOrder: [String] = []
-    private var timeoutStrikes = 0
-    private var quarantined = false
+    private struct State {
+        var cache: [String: Bool] = [:]
+        /// Insertion-order mirror of `cache` for FIFO eviction.
+        var cacheOrder: [String] = []
+        var timeoutStrikes = 0
+        var quarantined = false
+    }
+
+    private let state = Mutex(State())
 
     /// nil when the pattern fails to compile; the caller drops the rule.
     init?(pattern: String) {
@@ -105,16 +109,17 @@ final class MITMGateRegex: @unchecked Sendable {
         if isLiteral {
             return normalizedURL.range(of: literalPattern, options: .literal) != nil
         }
-        lock.lock()
-        if quarantined {
-            lock.unlock()
-            return false
+        enum CachePeek { case quarantined, cached(Bool), miss }
+        let peek: CachePeek = state.withLock { state in
+            if state.quarantined { return .quarantined }
+            if let cached = state.cache[normalizedURL] { return .cached(cached) }
+            return .miss
         }
-        if let cached = cache[normalizedURL] {
-            lock.unlock()
-            return cached
+        switch peek {
+        case .quarantined: return false
+        case .cached(let cached): return cached
+        case .miss: break
         }
-        lock.unlock()
 
         switch boundedMatch(normalizedURL) {
         case .matched(let matched):
@@ -135,10 +140,7 @@ final class MITMGateRegex: @unchecked Sendable {
             guard let r = normalizedURL.range(of: literalPattern, options: .literal) else { return nil }
             return [String(normalizedURL[r])]
         }
-        lock.lock()
-        let isQuarantined = quarantined
-        lock.unlock()
-        if isQuarantined { return nil }
+        if state.withLock({ $0.quarantined }) { return nil }
 
         let captureBox = CaptureBox()
         let done = DispatchSemaphore(value: 0)
@@ -207,9 +209,13 @@ final class MITMGateRegex: @unchecked Sendable {
     }
 
     /// One-shot hard-cap crash check; the match's own semaphore is the liveness signal, so a
-    /// match that finishes within the cap makes this a no-op.
+    /// match that finishes within the cap makes this a no-op. The uninterruptible bounded match runs
+    /// synchronously (it gates the rule engine, which stays synchronous), so only this recovery is
+    /// async: a `Task.sleep` deadline then a non-blocking poll of the worker's semaphore, still
+    /// `fatalError` if a runaway is still pinning a core.
     private static func scheduleHardCapCheck(_ done: DispatchSemaphore, pattern: String) {
-        MITMWatchdogMonitor.queue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(hardCapSeconds))
             guard done.wait(timeout: .now()) != .success else { return }
             let shown = pattern.count > 200 ? String(pattern.prefix(200)) + "…" : pattern
             fatalError("URL-gate regex did not return \(hardCapSeconds)s after blowing its \(matchDeadlineMillis)ms budget — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed. Crashing the Network Extension so the system relaunches it clean. Offending pattern: \(shown)")
@@ -219,34 +225,37 @@ final class MITMGateRegex: @unchecked Sendable {
     /// FIFO-evicting memo store; no-op when quarantined. Idempotent so a caller store and a
     /// concurrent late worker store can't desync `cacheOrder`.
     private func store(_ url: String, _ matched: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !quarantined else { return }
-        if cache[url] == nil {
-            cache[url] = matched
-            cacheOrder.append(url)
-            if cacheOrder.count > Self.maxCacheEntries {
-                let evicted = cacheOrder.removeFirst()
-                cache.removeValue(forKey: evicted)
+        state.withLock { state in
+            guard !state.quarantined else { return }
+            if state.cache[url] == nil {
+                state.cache[url] = matched
+                state.cacheOrder.append(url)
+                if state.cacheOrder.count > Self.maxCacheEntries {
+                    let evicted = state.cacheOrder.removeFirst()
+                    state.cache.removeValue(forKey: evicted)
+                }
+            } else {
+                state.cache[url] = matched
             }
-        } else {
-            cache[url] = matched
         }
     }
 
     /// Tallies a timeout strike, quarantining the pattern at `strikeLimit`.
     private func recordStrike() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !quarantined else { return }
-        timeoutStrikes += 1
-        if timeoutStrikes >= Self.strikeLimit {
-            quarantined = true
-            cache.removeAll(keepingCapacity: false)
-            cacheOrder.removeAll(keepingCapacity: false)
-            logger.warning("URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each); the rule is disabled. Pattern: \(pattern)")
-        } else {
-            logger.warning("URL-gate match exceeded its \(Self.matchDeadlineMillis)ms budget (strike \(timeoutStrikes)/\(Self.strikeLimit)); failing this match closed. Pattern: \(pattern)")
+        let message: String? = state.withLock { state in
+            guard !state.quarantined else { return nil }
+            state.timeoutStrikes += 1
+            if state.timeoutStrikes >= Self.strikeLimit {
+                state.quarantined = true
+                state.cache.removeAll(keepingCapacity: false)
+                state.cacheOrder.removeAll(keepingCapacity: false)
+                return "URL-gate pattern quarantined after \(Self.strikeLimit) match timeouts (\(Self.matchDeadlineMillis)ms each); the rule is disabled. Pattern: \(pattern)"
+            } else {
+                return "URL-gate match exceeded its \(Self.matchDeadlineMillis)ms budget (strike \(state.timeoutStrikes)/\(Self.strikeLimit)); failing this match closed. Pattern: \(pattern)"
+            }
+        }
+        if let message {
+            logger.warning(message)
         }
     }
 

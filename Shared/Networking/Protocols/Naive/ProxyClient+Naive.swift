@@ -57,16 +57,14 @@ extension ProxyClient {
             return try await openTunnelAndWrap(NaiveTunnelAdapter(http11))
 
         case .http2:
-            let stream = await withCheckedContinuation { (continuation: CheckedContinuation<NaiveHTTP2Stream, Never>) in
-                NaiveHTTP2MultiplexerPool.shared.acquireStream(
-                    host: proxyHost,
-                    port: configuration.serverPort,
-                    sni: naiveConfig.effectiveSNI,
-                    tunnel: self.tunnel,
-                    connectHeaders: { NaiveProxyHeaders.http2(basicAuth: naiveConfig.basicAuth) },
-                    destination: destination
-                ) { continuation.resume(returning: $0) }
-            }
+            let stream = try await NaiveHTTP2MultiplexerPool.shared.acquireStream(
+                host: proxyHost,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                tunnel: self.tunnel,
+                connectHeaders: { NaiveProxyHeaders.http2(basicAuth: naiveConfig.basicAuth) },
+                destination: destination
+            )
             return try await openTunnelAndWrap(NaiveTunnelAdapter(stream))
 
         case .http3:
@@ -87,15 +85,13 @@ extension ProxyClient {
         destination: String,
         retriesLeft: Int
     ) async throws -> ProxyConnection {
-        let stream = await withCheckedContinuation { (continuation: CheckedContinuation<NaiveHTTP3Stream, Never>) in
-            NaiveHTTP3MultiplexerPool.shared.acquireStream(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                configuration: naiveConfig,
-                destination: destination
-            ) { continuation.resume(returning: $0) }
-        }
+        let stream = try await NaiveHTTP3MultiplexerPool.shared.acquireStream(
+            host: proxyHost,
+            port: configuration.serverPort,
+            sni: naiveConfig.effectiveSNI,
+            configuration: naiveConfig,
+            destination: destination
+        )
         own(stream)
         do {
             try await stream.openTunnel()

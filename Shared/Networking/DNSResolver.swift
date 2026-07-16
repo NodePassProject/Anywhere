@@ -7,17 +7,10 @@
 
 import Foundation
 import dnssd
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "DNSResolver")
 
-// MARK: - DNSResolver
-
-/// Thread-safe DNS cache resolving via `getaddrinfo` on the physical
-/// interface, bypassing the tunnel to avoid routing loops.
-///
-/// Stale entries are served immediately and refreshed in the background
-/// (coalesced per host), so connect paths block only on a cold miss;
-/// `forceFresh` overrides for callers that need accuracy.
 nonisolated final class DNSResolver {
     static let shared = DNSResolver()
 
@@ -45,24 +38,26 @@ nonisolated final class DNSResolver {
         let expiry: CFAbsoluteTime
     }
 
-    private var cache: [String: CacheEntry] = [:]
+    private struct State {
+        var cache: [String: CacheEntry] = [:]
 
-    /// ECHConfigList bytes discovered from DNS HTTPS records, keyed by
-    /// lowercased host.
-    private var echCache: [String: ECHCacheEntry] = [:]
+        /// ECHConfigList bytes discovered from DNS HTTPS records, keyed by
+        /// lowercased host.
+        var echCache: [String: ECHCacheEntry] = [:]
 
-    /// Coalesces concurrent ECH lookups for the same host (single-flight): the
-    /// first caller queries DNS, later callers wait on its result.
-    private var echWaiters: [String: [(Data?) -> Void]] = [:]
+        /// Coalesces concurrent ECH lookups for the same host (single-flight): the
+        /// first caller queries DNS, later callers await its shared task.
+        var echInFlight: [String: Task<Data?, Never>] = [:]
 
-    private let lock = ReadWriteLock()
+        /// Hosts with a background refresh in flight; coalesces duplicate lookups.
+        var inFlightRefreshes: Set<String> = []
 
-    /// Hosts with a background refresh in flight; coalesces duplicate lookups.
-    private var inFlightRefreshes: Set<String> = []
+        /// Epoch bumped by `flush`; a background refresh only commits if the epoch
+        /// it captured is still current.
+        var generation: UInt64 = 0
+    }
 
-    /// Epoch bumped by `flush`; a background refresh only commits if the epoch
-    /// it captured is still current. Lock-guarded alongside `cache`.
-    private var generation: UInt64 = 0
+    private let state = Mutex(State())
 
     private init() {}
 
@@ -78,7 +73,7 @@ nonisolated final class DNSResolver {
 
         let key = Self.cacheKey(for: bare)
 
-        let entry: CacheEntry? = lock.withReadLock { cache[key] }
+        let entry: CacheEntry? = state.withLock { $0.cache[key] }
         let cached = entry?.ips
         let expired = entry.map { $0.expiry <= CFAbsoluteTimeGetCurrent() } ?? false
 
@@ -96,9 +91,7 @@ nonisolated final class DNSResolver {
             return []
         }
 
-        lock.withWriteLock {
-            storeUnlocked(key: key, ips: ips)
-        }
+        state.withLock { Self.store(&$0, key: key, ips: ips) }
 
         return ips
     }
@@ -108,7 +101,7 @@ nonisolated final class DNSResolver {
         let bare = Self.stripBrackets(host)
         if Self.isIPAddress(bare) { return [bare] }
         let key = Self.cacheKey(for: bare)
-        return lock.withReadLock { cache[key]?.ips }
+        return state.withLock { $0.cache[key]?.ips }
     }
 
     /// Convenience: returns a single resolved IP (first result), or `nil` on failure.
@@ -126,15 +119,15 @@ nonisolated final class DNSResolver {
     /// generation voids in-flight refreshes; clearing `inFlightRefreshes` is
     /// required because voided commits bail without self-removing.
     func flush() {
-        let count: Int = lock.withWriteLock {
-            generation &+= 1
-            inFlightRefreshes.removeAll(keepingCapacity: true)
+        let count: Int = state.withLock { state in
+            state.generation &+= 1
+            state.inFlightRefreshes.removeAll(keepingCapacity: true)
             // ECH configs can be split-horizon / GeoDNS specific too; drop them
             // so the next connection rediscovers against the new path. The
             // generation bump above also voids an in-flight lookup's commit.
-            echCache.removeAll(keepingCapacity: true)
-            let count = cache.count
-            cache.removeAll(keepingCapacity: true)
+            state.echCache.removeAll(keepingCapacity: true)
+            let count = state.cache.count
+            state.cache.removeAll(keepingCapacity: true)
             return count
         }
         guard count > 0 else { return }
@@ -146,59 +139,56 @@ nonisolated final class DNSResolver {
     /// Fires a background refresh unless one is already in flight; the
     /// generation guard keeps a pre-flush lookup from committing.
     private func scheduleBackgroundRefresh(key: String, host: String) {
-        let (shouldFire, scheduledGeneration): (Bool, UInt64) = lock.withWriteLock {
-            if inFlightRefreshes.contains(key) { return (false, generation) }
-            inFlightRefreshes.insert(key)
-            return (true, generation)
+        let (shouldFire, scheduledGeneration): (Bool, UInt64) = state.withLock { state in
+            if state.inFlightRefreshes.contains(key) { return (false, state.generation) }
+            state.inFlightRefreshes.insert(key)
+            return (true, state.generation)
         }
         guard shouldFire else { return }
-        DispatchQueue.global(qos: .utility).async { [self] in
+        Task.detached(priority: .utility) { [self] in
             let ips = Self.resolveViaGetaddrinfo(host)
-            self.lock.withWriteLock {
+            state.withLock { state in
                 // Flushed mid-lookup; flush already cleared this key, so leave the set be.
-                guard scheduledGeneration == self.generation else { return }
+                guard scheduledGeneration == state.generation else { return }
                 if !ips.isEmpty {
-                    self.storeUnlocked(key: key, ips: ips)
+                    Self.store(&state, key: key, ips: ips)
                 }
-                self.inFlightRefreshes.remove(key)
+                state.inFlightRefreshes.remove(key)
             }
         }
     }
 
-    /// Inserts or refreshes `key`, then sweeps aged-out entries. Caller must
-    /// hold the write lock.
-    private func storeUnlocked(key: String, ips: [String]) {
+    /// Inserts or refreshes `key`, then sweeps aged-out entries.
+    private static func store(_ state: inout State, key: String, ips: [String]) {
         let now = CFAbsoluteTimeGetCurrent()
-        cache[key] = CacheEntry(ips: ips, expiry: now + Self.defaultTTL)
-        compactUnlocked(now: now)
+        state.cache[key] = CacheEntry(ips: ips, expiry: now + Self.defaultTTL)
+        compact(&state, now: now)
     }
 
     /// Drops entries past the stale-serve window, then trims to `maxEntries`.
-    /// Caller must hold the write lock.
-    private func compactUnlocked(now: CFAbsoluteTime) {
+    private static func compact(_ state: inout State, now: CFAbsoluteTime) {
         let cutoff = now - Self.staleServeWindow
-        if cache.contains(where: { $0.value.expiry <= cutoff }) {
-            cache = cache.filter { $0.value.expiry > cutoff }
+        if state.cache.contains(where: { $0.value.expiry <= cutoff }) {
+            state.cache = state.cache.filter { $0.value.expiry > cutoff }
         }
 
-        while cache.count > Self.maxEntries {
-            guard let coldest = cache.min(by: { $0.value.expiry < $1.value.expiry })?.key
+        while state.cache.count > Self.maxEntries {
+            guard let coldest = state.cache.min(by: { $0.value.expiry < $1.value.expiry })?.key
             else { break }
-            cache.removeValue(forKey: coldest)
+            state.cache.removeValue(forKey: coldest)
         }
     }
 
     /// Drops expired ECH entries (not served stale), then trims to `maxEntries`.
-    /// Caller must hold the write lock.
-    private func compactECHUnlocked(now: CFAbsoluteTime) {
-        if echCache.contains(where: { $0.value.expiry <= now }) {
-            echCache = echCache.filter { $0.value.expiry > now }
+    private static func compactECH(_ state: inout State, now: CFAbsoluteTime) {
+        if state.echCache.contains(where: { $0.value.expiry <= now }) {
+            state.echCache = state.echCache.filter { $0.value.expiry > now }
         }
 
-        while echCache.count > Self.maxEntries {
-            guard let coldest = echCache.min(by: { $0.value.expiry < $1.value.expiry })?.key
+        while state.echCache.count > Self.maxEntries {
+            guard let coldest = state.echCache.min(by: { $0.value.expiry < $1.value.expiry })?.key
             else { break }
-            echCache.removeValue(forKey: coldest)
+            state.echCache.removeValue(forKey: coldest)
         }
     }
 
@@ -266,57 +256,62 @@ nonisolated final class DNSResolver {
     /// SvcParamKey 5, `ech`). The query goes through the system resolver — the
     /// same mDNSResponder path as `getaddrinfo`, so it inherits the same
     /// tunnel-bypass behavior. Results are cached by the record's TTL and misses
-    /// are negatively cached briefly. `completion` runs on an arbitrary queue
-    /// with the ECHConfigList bytes, or nil when no usable record is published.
-    func resolveECHConfigList(for host: String, completion: @escaping (Data?) -> Void) {
+    /// are negatively cached briefly. Returns the ECHConfigList bytes, or nil when
+    /// no usable record is published. Concurrent callers for the same host share
+    /// one lookup.
+    func resolveECHConfigList(for host: String) async -> Data? {
         let bare = Self.stripBrackets(host)
         // An IP literal has no domain that could carry an HTTPS record.
-        if bare.isEmpty || Self.isIPAddress(bare) { completion(nil); return }
+        if bare.isEmpty || Self.isIPAddress(bare) { return nil }
 
         let key = Self.cacheKey(for: bare)
         let now = CFAbsoluteTimeGetCurrent()
 
-        enum Action { case cached(Data?); case joined; case lead(generation: UInt64) }
-        let action: Action = lock.withWriteLock {
-            if let entry = echCache[key], entry.expiry > now {
+        enum Action { case cached(Data?); case join(Task<Data?, Never>) }
+        let action: Action = state.withLock { state in
+            if let entry = state.echCache[key], entry.expiry > now {
                 return .cached(entry.config)
             }
-            if echWaiters[key] != nil {
-                echWaiters[key]?.append(completion)
-                return .joined
+            if let existing = state.echInFlight[key] {
+                return .join(existing)          // await the in-flight leader
             }
-            echWaiters[key] = []          // non-nil empty list claims leadership for this host
-            return .lead(generation: generation)
+            let scheduledGeneration = state.generation
+            let task = Task<Data?, Never> { [self] in
+                await lookupECH(bare: bare, key: key, scheduledGeneration: scheduledGeneration)
+            }
+            state.echInFlight[key] = task
+            return .join(task)
         }
 
         switch action {
         case .cached(let config):
-            completion(config)
-        case .joined:
-            break                          // resumed by the leader below
-        case .lead(let scheduledGeneration):
-            DispatchQueue.global(qos: .userInitiated).async { [self] in
-                let result = Self.queryHTTPSRecordECH(host: bare)
-                let (config, waiters): (Data?, [(Data?) -> Void]) = lock.withWriteLock {
-                    let waiters = echWaiters[key] ?? []
-                    echWaiters[key] = nil
-                    // A flush mid-lookup bumps the generation: this result may be
-                    // bound to the pre-change network path, so discard it and let
-                    // callers fail closed and rediscover rather than sealing
-                    // against a stale ECH key.
-                    guard scheduledGeneration == generation else { return (nil, waiters) }
-                    let ttl: TimeInterval = result
-                        .map { min(max(TimeInterval($0.ttl), Self.echMinTTL), Self.echMaxTTL) }
-                        ?? Self.echNegativeTTL
-                    let insertedAt = CFAbsoluteTimeGetCurrent()
-                    echCache[key] = ECHCacheEntry(config: result?.config,
-                                                  expiry: insertedAt + ttl)
-                    compactECHUnlocked(now: insertedAt)
-                    return (result?.config, waiters)
-                }
-                completion(config)
-                for waiter in waiters { waiter(config) }
-            }
+            return config
+        case .join(let task):
+            return await task.value
+        }
+    }
+
+    /// Runs the blocking HTTPS-record query off the cooperative pool, caches the
+    /// result under the generation guard, and clears the in-flight slot.
+    private func lookupECH(bare: String, key: String, scheduledGeneration: UInt64) async -> Data? {
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.queryHTTPSRecordECH(host: bare)
+        }.value
+
+        return state.withLock { state in
+            state.echInFlight[key] = nil
+            // A flush mid-lookup bumps the generation: this result may be bound
+            // to the pre-change network path, so discard it and let callers fail
+            // closed and rediscover rather than sealing against a stale ECH key.
+            guard scheduledGeneration == state.generation else { return nil }
+            let ttl: TimeInterval = result
+                .map { min(max(TimeInterval($0.ttl), Self.echMinTTL), Self.echMaxTTL) }
+                ?? Self.echNegativeTTL
+            let insertedAt = CFAbsoluteTimeGetCurrent()
+            state.echCache[key] = ECHCacheEntry(config: result?.config,
+                                                expiry: insertedAt + ttl)
+            Self.compactECH(&state, now: insertedAt)
+            return result?.config
         }
     }
 

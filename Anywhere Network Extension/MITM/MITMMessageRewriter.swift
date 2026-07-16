@@ -10,9 +10,9 @@ import Foundation
 /// HTTP/1.1 and HTTP/2 both conform so the session pumps plaintext without branching on protocol.
 protocol MITMMessageRewriter: AnyObject {
 
-    /// Feeds decrypted plaintext. `completion` is invoked exactly once — inline when
-    /// no script ran, or later on the lwIP queue when a parked script resumes.
-    func feed(_ data: Data, completion: @escaping (Data) -> Void)
+    /// Feeds decrypted plaintext, returning the rewritten bytes. Suspends across a parked script hop;
+    /// the implementation is lwIP-queue-confined, so callers await on their own executor.
+    func feed(_ data: Data) async -> Data
 
     /// Client-bound bytes the rewriter synthesized and is holding for the inner leg; drained after each feed.
     func drainPendingClientBytes() -> Data

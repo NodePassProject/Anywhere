@@ -33,13 +33,6 @@ final class MITMLeafCertCache {
     private static let maxEntries = 256
     private static let validity: TimeInterval = 7 * 24 * 60 * 60
     private static let refreshThreshold: TimeInterval = 24 * 60 * 60
-    
-    private static let mintQueue = DispatchQueue(
-        label: AWCore.Identifier.mitmCertMintQueue,
-        qos: .userInitiated,
-        attributes: .concurrent,
-        autoreleaseFrequency: .workItem
-    )
 
     private let entries = Mutex<[String: CacheEntry]>([:])
 
@@ -55,16 +48,16 @@ final class MITMLeafCertCache {
         self.leafPrivateKeySecKey = try Self.importSoftwareP256(key)
     }
 
-    /// Resolves a leaf for `hostname`, minting one if the cache misses.
-    func leaf(for hostname: String, completion: @escaping (Result<Leaf, Error>) -> Void) {
+    /// Resolves a leaf for `hostname`, minting one off the caller if the cache misses.
+    func leaf(for hostname: String) async throws -> Leaf {
         let normalized = hostname.lowercased()
         if let cached = cachedLeaf(for: normalized) {
-            completion(.success(cached))
-            return
+            return cached
         }
-        Self.mintQueue.async { [self] in
-            completion(Result { try mintAndStore(for: normalized) })
-        }
+        // Minting (X.509 build + Security import) runs off the caller so the lwIP queue isn't blocked.
+        return try await Task.detached(priority: .userInitiated) { [self] in
+            try mintAndStore(for: normalized)
+        }.value
     }
 
     // MARK: - Internals

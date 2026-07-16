@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPStream")
 
@@ -16,14 +17,21 @@ nonisolated class VLESSVisionUDPStream: MultiplexerStreamSink {
     let targetPort: UInt16
     weak var multiplexer: VLESSVisionUDPMultiplexer?
     private let globalID: Data?
+
+    /// Serializes this stream's sends so the SessionStatusNew frame (first send) always
+    /// lands — and completes on the wire — before any SessionStatusKeep frame, even when
+    /// the flow drives sends from concurrent tasks. `firstFrameSent` is only touched here.
+    private let sendMutex = AsyncMutex()
     private var firstFrameSent: Bool
-    private(set) var closed = false
 
-    var dataHandler: ((Data) -> Void)?
+    /// Closed once via EOF (clean End / cancel) or failure. Atomic because `deliverData`/
+    /// `deliverClose` run from the mux's read loop while `send`/`close` run from the flow.
+    private let _closed = Atomic<Bool>(false)
+    var closed: Bool { _closed.load(ordering: .relaxed) }
 
-    /// Non-nil error means the underlying mux connection died with a transport
-    /// failure; nil means the stream ended cleanly (End frame / normal cancel).
-    var closeHandler: ((Error?) -> Void)?
+    /// Inbound datagrams; EOF signals a clean End/close, a thrown error a transport failure.
+    /// Replaces the old `dataHandler`/`closeHandler` callbacks.
+    let inbox = AsyncByteChannel()
 
     init(
         sessionID: UInt16,
@@ -42,51 +50,50 @@ nonisolated class VLESSVisionUDPStream: MultiplexerStreamSink {
         self.multiplexer = multiplexer
     }
 
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
+    func send(data: Data) async throws {
         guard !closed else {
-            completion(ProxyError.connectionFailed("Mux stream closed"))
-            return
+            throw ProxyError.connectionFailed("Mux stream closed")
         }
-
         guard let multiplexer else {
-            completion(ProxyError.connectionFailed("Mux multiplexer deallocated"))
-            return
+            throw ProxyError.connectionFailed("Mux multiplexer deallocated")
         }
 
-        let isFirstFrame = !firstFrameSent
-        if isFirstFrame {
-            // Flip state before enqueueing the write so back-to-back packets do not
-            // race into multiple SessionStatusNew frames.
-            firstFrameSent = true
-        }
-
-        var metadata = VLESSVisionUDPFrameMetadata(
-            sessionID: sessionID,
-            status: isFirstFrame ? .new : .keep,
-            option: .data,
-            globalID: (isFirstFrame && network == .udp) ? globalID : nil
-        )
-        if network == .udp {
-            metadata.network = network
-            metadata.targetHost = targetHost
-            metadata.targetPort = targetPort
-        }
-
-        let frame = VLESSVisionUDPFrame.encode(metadata: metadata, payload: data)
-        multiplexer.writeFrame(frame) { [weak self] error in
-            if let error, isFirstFrame {
-                // Allow retry: first frame never committed, so roll back.
-                self?.firstFrameSent = false
-                completion(error)
-                return
+        try await sendMutex.withLock {
+            // Serialized: exactly one send observes `firstFrameSent == false` and builds the
+            // SessionStatusNew frame; it holds the mutex across the write so the New frame
+            // reaches the wire before the next send's Keep frame.
+            let isFirstFrame = !self.firstFrameSent
+            if isFirstFrame {
+                self.firstFrameSent = true
             }
-            completion(error)
+
+            var metadata = VLESSVisionUDPFrameMetadata(
+                sessionID: self.sessionID,
+                status: isFirstFrame ? .new : .keep,
+                option: .data,
+                globalID: (isFirstFrame && self.network == .udp) ? self.globalID : nil
+            )
+            if self.network == .udp {
+                metadata.network = self.network
+                metadata.targetHost = self.targetHost
+                metadata.targetPort = self.targetPort
+            }
+
+            let frame = VLESSVisionUDPFrame.encode(metadata: metadata, payload: data)
+            do {
+                try await multiplexer.writeFrame(frame)
+            } catch {
+                if isFirstFrame {
+                    // Allow retry: first frame never committed, so roll back.
+                    self.firstFrameSent = false
+                }
+                throw error
+            }
         }
     }
 
     func close() {
-        guard !closed else { return }
-        closed = true
+        guard !_closed.exchange(true, ordering: .relaxed) else { return }
 
         if let multiplexer {
             let metadata = VLESSVisionUDPFrameMetadata(
@@ -95,27 +102,30 @@ nonisolated class VLESSVisionUDPStream: MultiplexerStreamSink {
                 option: []
             )
             let frame = VLESSVisionUDPFrame.encode(metadata: metadata, payload: nil)
-            multiplexer.writeFrame(frame) { _ in }
-            multiplexer.removeStream(sessionID)
+            let sid = sessionID
+            // Fire-and-forget the End frame, then drop the stream from the mux.
+            Task {
+                try? await multiplexer.writeFrame(frame)
+                multiplexer.removeStream(sid)
+            }
         }
 
-        closeHandler?(nil)
-        dataHandler = nil
-        closeHandler = nil
+        inbox.finish()
     }
 
     // MARK: - Called by VLESSVisionUDPMultiplexer (demux)
 
     func deliverData(_ data: Data) {
         guard !closed else { return }
-        dataHandler?(data)
+        inbox.yield(data)
     }
 
     func deliverClose(error: Error? = nil) {
-        guard !closed else { return }
-        closed = true
-        closeHandler?(error)
-        dataHandler = nil
-        closeHandler = nil
+        guard !_closed.exchange(true, ordering: .relaxed) else { return }
+        if let error {
+            inbox.fail(error)
+        } else {
+            inbox.finish()
+        }
     }
 }

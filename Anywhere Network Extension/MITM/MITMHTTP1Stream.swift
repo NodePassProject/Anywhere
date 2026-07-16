@@ -213,8 +213,9 @@ final class MITMHTTP1Stream {
     /// Response phase only; set once before the first `transform`.
     weak var responseIRSink: MITMHTTP1ResponseIRSink?
 
-    /// In-flight completion, retained while a script hop is outstanding.
-    private var parkedCompletion: ((Data) -> Void)?
+    /// In-flight continuation, retained while a script hop is outstanding; resumed exactly once with
+    /// the rewritten bytes (or empty on teardown).
+    private var parkedContinuation: CheckedContinuation<Data, Never>?
 
     /// Bytes emitted before the script hop; the resume prepends them so output
     /// stays in wire order.
@@ -243,53 +244,80 @@ final class MITMHTTP1Stream {
     var isBetweenMessages: Bool {
         guard case .awaitingHead = mode else { return false }
         return rxBuffer.isEmpty
-            && parkedCompletion == nil
+            && parkedContinuation == nil
             && !forcePassthroughPending
             && pendingSynthAfterCurrentResponse.isEmpty
     }
 
     // MARK: - Public API
 
-    /// Feeds `data` through the rewrite pipeline. `completion` fires exactly once —
-    /// synchronously, or later on the lwIP queue when a script parks the stream.
-    func transform(_ data: Data, completion: @escaping (Data) -> Void) {
-        guard parkedCompletion == nil else { return failClosedReentry(completion) }
+    /// Hops onto the lwIP queue, runs `body`, and resumes with its result — the async seam between the
+    /// session pump (pure async/await) and this stream's lwIP-queue-confined state machine.
+    private func onLwip<T>(_ body: @escaping () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            lwipQueue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// Parked counterpart: hands the continuation to `body` on the lwIP queue; `body` resumes it inline
+    /// or stashes it (`parkedContinuation`) for a later script hop to resolve. Only the `lwipQueue.async`
+    /// + continuation scaffolding lives here.
+    private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            lwipQueue.async { body(continuation) }
+        }
+    }
+
+    /// Feeds `data` through the rewrite pipeline, returning the rewritten bytes. Suspends across a
+    /// parked script hop; the state machine is lwIP-queue-confined, so this self-hops onto that queue.
+    func transform(_ data: Data) async -> Data {
+        await onLwipParked { (continuation: CheckedContinuation<Data, Never>) in
+            self.transformOnQueue(data, continuation: continuation)
+        }
+    }
+
+    /// Runs the drive pass on the lwIP queue; resumes `continuation` inline, or parks it for a script hop.
+    private func transformOnQueue(_ data: Data, continuation: CheckedContinuation<Data, Never>) {
+        guard parkedContinuation == nil else { return failClosedReentry(continuation) }
         if case .passthrough = mode {
-            completion(data)
+            continuation.resume(returning: data)
             return
         }
         rxBuffer.append(data)
-        parkedCompletion = completion
+        parkedContinuation = continuation
         var output = Data()
         while drive(into: &output) { }
         finishDrivePass(output)
     }
 
-    /// Fires the stashed completion, or holds `output` while a script hop is outstanding.
+    /// Resumes the stashed continuation, or holds `output` while a script hop is outstanding.
     private func finishDrivePass(_ output: Data) {
         if case .awaitingScript = mode {
             pendingPreParkOutput = output
             return
         }
-        let completion = parkedCompletion
-        parkedCompletion = nil
-        completion?(output)
+        let continuation = parkedContinuation
+        parkedContinuation = nil
+        continuation?.resume(returning: output)
     }
 
-    /// Marks the stream torn down; later script resumes bail immediately. Idempotent.
+    /// Marks the stream torn down; later script resumes bail immediately. Idempotent. Resumes any
+    /// parked continuation (with empty bytes) so its awaiting caller never leaks.
     func markTorn() {
         torn = true
-        parkedCompletion = nil
+        let continuation = parkedContinuation
+        parkedContinuation = nil
         pendingPreParkOutput = Data()
         // Release buffers eagerly rather than pinning them until the session lets go.
         mode = .passthrough
         rxBuffer = MITMByteBuffer()
+        continuation?.resume(returning: Data())
     }
 
     /// Forces permanent passthrough and returns buffered bytes for forwarding;
     /// defers via `forcePassthroughPending` (returning empty) if a script hop is parked.
     func forcePassthrough() -> Data {
-        guard parkedCompletion == nil else {
+        guard parkedContinuation == nil else {
             forcePassthroughPending = true
             return Data()
         }
@@ -316,11 +344,11 @@ final class MITMHTTP1Stream {
         return true
     }
 
-    /// Re-entry while parked would stomp the stashed completion and hang the
-    /// connection; fire the new completion empty and keep the stashed one.
-    private func failClosedReentry(_ completion: (Data) -> Void) {
-        logger.error("HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
-        completion(Data())
+    /// Re-entry while parked would stomp the stashed continuation and hang the
+    /// connection; resume the new continuation empty and keep the stashed one.
+    private func failClosedReentry(_ continuation: CheckedContinuation<Data, Never>) {
+        logger.error("HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked continuation (one-read-in-flight invariant violated)")
+        continuation.resume(returning: Data())
     }
 
     /// Drains client-bound bytes queued by `Anywhere.respond(...)`.
@@ -330,36 +358,42 @@ final class MITMHTTP1Stream {
         return bytes
     }
 
-    /// Called on upstream EOF: flushes a `.rewritingUntilClose` body through the
-    /// script chain; fires `completion` inline in all other modes.
-    func finish(completion: @escaping (Data) -> Void) {
-        guard parkedCompletion == nil else { return failClosedReentry(completion) }
+    /// Called on upstream EOF: flushes a `.rewritingUntilClose` body through the script chain,
+    /// returning the flushed bytes (empty in all other modes). Self-hops onto the lwIP queue.
+    func finish() async -> Data {
+        await onLwipParked { (continuation: CheckedContinuation<Data, Never>) in
+            self.finishOnQueue(continuation: continuation)
+        }
+    }
+
+    private func finishOnQueue(continuation: CheckedContinuation<Data, Never>) {
+        guard parkedContinuation == nil else { return failClosedReentry(continuation) }
         if responseIRSink != nil {
             switch mode {
             case .bridgeForwardUntilClose:
                 _ = emitBridgeBody(Data(), endStream: true)
                 mode = .draining
-                completion(Data())
+                continuation.resume(returning: Data())
                 return
             case .forwardingLength, .forwardingChunked, .rewritingLength, .rewritingChunked:
                 // EOF arrived mid-body (a truncated upstream response) → reset the bridged stream
                 // rather than leave the client waiting for a body that won't finish.
                 responseIRSink?.http1ResponseReset()
                 mode = .draining
-                completion(Data())
+                continuation.resume(returning: Data())
                 return
             case .rewritingUntilClose:
                 break // fall through: run the buffered script chain at EOF; the resume delivers IR.
             default:
-                completion(Data())
+                continuation.resume(returning: Data())
                 return
             }
         }
         guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
-            completion(Data())
+            continuation.resume(returning: Data())
             return
         }
-        parkedCompletion = completion
+        parkedContinuation = continuation
         var output = Data()
         let parked = applyScriptsAndEmit(
             pending: pending,
@@ -656,17 +690,19 @@ final class MITMHTTP1Stream {
                 let fallback = rewrittenStartLine
                 let originatingMethod = originatingRequest?.method
                 mode = .awaitingScript
-                MITMScriptTransform.apply(
-                    message,
-                    rules: rules,
-                    engineProvider: scriptEngineProvider,
-                    resumeOn: lwipQueue
-                ) { [weak self] outcome in
-                    self?.resumeHeadNoBody(
-                        outcome: outcome,
-                        fallbackStartLine: fallback,
-                        originatingMethod: originatingMethod
-                    )
+                // Run the script off-queue; hop back to the lwIP queue to resume the drive pass.
+                let rules = self.rules
+                let engineProvider = self.scriptEngineProvider
+                Task { [weak self] in
+                    let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
+                    guard let self else { return }
+                    self.lwipQueue.async {
+                        self.resumeHeadNoBody(
+                            outcome: outcome,
+                            fallbackStartLine: fallback,
+                            originatingMethod: originatingMethod
+                        )
+                    }
                 }
                 return false // parked
             }
@@ -1191,15 +1227,21 @@ final class MITMHTTP1Stream {
         // cursor is shared by reference so engine mutations are visible on resume.
         let captured = streaming
         mode = .awaitingScript
-        MITMScriptTransform.applyFrame(
-            chunk,
-            rules: rules,
-            frameContext: frameContext,
-            cursor: streaming.cursor,
-            engineProvider: scriptEngineProvider,
-            resumeOn: lwipQueue
-        ) { [weak self] result in
-            self?.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame)
+        let rules = self.rules
+        let engineProvider = self.scriptEngineProvider
+        let cursor = streaming.cursor
+        Task { [weak self] in
+            let result = await MITMScriptTransform.applyFrame(
+                chunk,
+                rules: rules,
+                frameContext: frameContext,
+                cursor: cursor,
+                engineProvider: engineProvider
+            )
+            guard let self else { return }
+            self.lwipQueue.async {
+                self.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame)
+            }
         }
         return true
     }
@@ -1367,13 +1409,14 @@ final class MITMHTTP1Stream {
         )
         _ = originalSizes // chunked re-encoding is unused once we collapse to Content-Length
         mode = .awaitingScript
-        MITMScriptTransform.apply(
-            message,
-            rules: rules,
-            engineProvider: scriptEngineProvider,
-            resumeOn: lwipQueue
-        ) { [weak self] outcome in
-            self?.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode)
+        let rules = self.rules
+        let engineProvider = self.scriptEngineProvider
+        Task { [weak self] in
+            let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
+            guard let self else { return }
+            self.lwipQueue.async {
+                self.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode)
+            }
         }
         return true
     }
@@ -2477,8 +2520,8 @@ private final class ChunkedReader {
 
 extension MITMHTTP1Stream: MITMMessageRewriter {
 
-    func feed(_ data: Data, completion: @escaping (Data) -> Void) {
-        transform(data, completion: completion)
+    func feed(_ data: Data) async -> Data {
+        await transform(data)
     }
 
     /// HTTP/1 has no flow-control windows; HTTP/2-only concept.

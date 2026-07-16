@@ -40,10 +40,17 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
 
     var isOnQueue: Bool { quic.isOnQueue }
 
+    /// Runs `body` on the ngtcp2 queue and awaits its result (forwards the bridge hop), so the
+    /// queue-confined stream/pool consumers stay free of raw `queue.async`+continuation.
+    func run<T>(_ body: @escaping () -> T) async -> T { await quic.run(body) }
+    func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T { try await quic.run(body) }
+
     private var state: SessionState = .idle
 
     private var streams: [Int64: any HTTP3StreamHandler] = [:]
-    private var readyCallbacks: [(Error?) -> Void] = []
+    /// Awaiters coalesced behind one connect; resolves at `.ready` or on fail/close. The waiter
+    /// continuations live in the gate (async infra), not in this callback-driven layer.
+    private let readyGate = AsyncReadinessGate()
     var onClose: (() -> Void)?
 
     private var serverControlStreamID: Int64?
@@ -161,22 +168,27 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
 
     // MARK: - Connection Lifecycle
 
-    func ensureReady(completion: @escaping (Error?) -> Void) {
-        // Called on queue
-        switch state {
-        case .ready:
-            completion(nil)
-        case .draining:
-            completion(HTTP3Error.connectionFailed("Session draining (GOAWAY)"))
-        case .closed:
-            completion(HTTP3Error.connectionFailed("Session closed"))
-        case .connecting:
-            readyCallbacks.append(completion)
-        case .idle:
-            state = .connecting
-            readyCallbacks.append(completion)
-            startConnection()
+    /// Coalesces awaiters behind one connect; resolves at `.ready` or on fail/close. Kicks the
+    /// state machine on `queue`, then parks on the gate — callable from any async context.
+    func ensureReady() async throws {
+        let alreadyReady: Bool = try await run { [self] () -> Result<Bool, Error> in
+            switch state {
+            case .ready:
+                return .success(true)
+            case .draining:
+                return .failure(HTTP3Error.connectionFailed("Session draining (GOAWAY)"))
+            case .closed:
+                return .failure(HTTP3Error.connectionFailed("Session closed"))
+            case .connecting:
+                return .success(false)
+            case .idle:
+                state = .connecting
+                startConnection()
+                return .success(false)
+            }
         }
+        // Resolves on `.ready` (success) or teardown (fail/close).
+        if !alreadyReady { try await readyGate.wait() }
     }
 
     private func startConnection() {
@@ -204,9 +216,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
                 }
 
                 self.state = .ready
-                let callbacks = self.readyCallbacks
-                self.readyCallbacks.removeAll()
-                for callback in callbacks { callback(nil) }
+                self.readyGate.signalSuccess()
             }
         }
     }
@@ -234,8 +244,9 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
         quic.openBidiStream()
     }
 
-    func writeStream(_ streamID: Int64, data: Data, fin: Bool = false, completion: @escaping (Error?) -> Void) {
-        quic.writeStream(streamID, data: data, fin: fin, completion: completion)
+    /// Async stream write, forwarding to the QUIC ngtcp2-boundary continuation (async twin).
+    func writeStream(_ streamID: Int64, data: Data, fin: Bool = false) async throws {
+        try await quic.writeStream(streamID, data: data, fin: fin)
     }
 
     func extendStreamOffset(_ streamID: Int64, count: Int) {
@@ -420,6 +431,8 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
                 state.reservedStreams = 0
             }
 
+            self.readyGate.signalFailure(HTTP3Error.connectionFailed("Session closed"))
+
             let activeStreams = Array(self.streams.values)
             self.streams.removeAll()
             for stream in activeStreams {
@@ -441,9 +454,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             state.reservedStreams = 0
         }
 
-        let callbacks = readyCallbacks
-        readyCallbacks.removeAll()
-        for callback in callbacks { callback(error) }
+        readyGate.signalFailure(error)
 
         let activeStreams = Array(streams.values)
         streams.removeAll()

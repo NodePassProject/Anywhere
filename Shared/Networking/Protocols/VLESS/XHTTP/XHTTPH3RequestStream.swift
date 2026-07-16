@@ -7,9 +7,6 @@
 
 import Foundation
 
-/// The QUIC stream window is extended only as the app drains received DATA, so a
-/// slow reader backpressures the server. Every public method hops to the multiplexer
-/// queue, so all mutable state is touched on one serial queue.
 nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     // MARK: - State
@@ -25,18 +22,19 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
     private var headersReceived = false
     private(set) var responseStatus: Int?
 
-    /// Fired once with the response status when HEADERS arrive, or with an error
-    /// if the stream fails first; fire-and-forget callers leave it nil.
-    private var onResponse: ((Result<Int, Error>) -> Void)?
+    /// Resolves with the response `:status` when the HEADERS arrive, or a failure if the stream
+    /// fails first. ``awaitResponseStatus()`` awaits it; the resolving continuation lives in the
+    /// promise (async infra), bridging the multiplexer's demux loop.
+    private let responsePromise = AsyncPromise<Int>()
 
     // MARK: - Receive buffering
 
-    /// Each element carries its QUIC byte count so the flow-control window is
-    /// extended as chunks are consumed, not up-front.
-    private var receiveQueue: [(chunk: Data, quicBytes: Int)] = []
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var endStreamReceived = false
-    private var streamError: Error?
+    /// Inbound DATA payloads / EOF / error from the multiplexer's demux loop. QUIC flow control
+    /// counts every stream byte (HTTP/3 frame header + payload), so the per-chunk `quicBytes`
+    /// accounting is split: `deliverData` credits the frame-header octets on the multiplexer queue
+    /// as chunks arrive, and ``receive()`` credits the payload octets only once
+    /// ``AsyncByteChannel/next()`` hands them over — total credit stays exact, backpressure preserved.
+    private let inbox = AsyncByteChannel()
 
     // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
     // keeps cost amortized O(1).
@@ -51,101 +49,82 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     // MARK: - Request
 
-    /// Opens a bidirectional QUIC stream and writes the request HEADERS frame;
-    /// `completion` fires once the HEADERS are written (or the stream fails),
-    /// `onResponse` when the response `:status` arrives.
-    func sendRequest(headerBlock: Data,
-                     endStream: Bool,
-                     onResponse: ((Result<Int, Error>) -> Void)? = nil,
-                     completion: @escaping (Error?) -> Void) {
-        guard let multiplexer else { completion(HTTP3Error.streamClosed); return }
-        multiplexer.queue.async { [self] in
-            multiplexer.ensureReady { [weak self] error in
-                guard let self, let multiplexer = self.multiplexer else {
-                    completion(HTTP3Error.streamClosed)
-                    return
-                }
-                if let error {
-                    self.state = .closed
-                    completion(error)
-                    return
-                }
-
-                guard let streamID = multiplexer.openBidiStream() else {
-                    self.state = .closed
-                    multiplexer.markStreamBlocked()
-                    completion(HTTP3Error.streamIdBlocked)
-                    return
-                }
-                self.quicStreamID = streamID
-                // Register before the write so a fast response can't race ahead of the callback.
-                self.onResponse = onResponse
-                multiplexer.registerStream(self, streamID: streamID)
-                self.state = .requestSent
-
-                let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
-                multiplexer.writeStream(streamID, data: frame, fin: endStream) { [weak self] error in
-                    if let error {
-                        self?.multiplexer?.queue.async { self?.handleStreamError(error) }
-                    }
-                    completion(error)
-                }
+    /// Opens a bidirectional QUIC stream and writes the request HEADERS frame; returns once the
+    /// HEADERS are written (or throws if the stream fails). Await ``awaitResponseStatus()`` for
+    /// the response `:status`.
+    func sendRequest(headerBlock: Data, endStream: Bool) async throws {
+        guard let multiplexer else { throw HTTP3Error.streamClosed }
+        try await multiplexer.ensureReady()
+        let streamID: Int64 = try await multiplexer.run { [self] () -> Result<Int64, Error> in
+            guard let multiplexer = self.multiplexer else {
+                return .failure(HTTP3Error.streamClosed)
             }
+            guard let sid = multiplexer.openBidiStream() else {
+                self.state = .closed
+                multiplexer.markStreamBlocked()
+                return .failure(HTTP3Error.streamIdBlocked)
+            }
+            self.quicStreamID = sid
+            // Register before the write so a fast response is recorded, then surfaced by
+            // `awaitResponseStatus()` (via `responsePromise`) — never lost.
+            multiplexer.registerStream(self, streamID: sid)
+            self.state = .requestSent
+            return .success(sid)
+        }
+
+        let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
+        do {
+            try await multiplexer.writeStream(streamID, data: frame, fin: endStream)
+        } catch {
+            multiplexer.queue.async { [weak self] in self?.handleStreamError(error) }
+            throw error
         }
     }
 
-    func sendBody(_ data: Data, fin: Bool, completion: @escaping (Error?) -> Void) {
-        guard let multiplexer else { completion(HTTP3Error.streamClosed); return }
-        let block: () -> Void = { [self] in
+    /// Suspends until the response `:status` arrives (or the stream fails). If the HEADERS were
+    /// already parsed, the promise is resolved and returns immediately.
+    func awaitResponseStatus() async throws -> Int {
+        guard multiplexer != nil else { throw HTTP3Error.streamClosed }
+        return try await responsePromise.value()
+    }
+
+    func sendBody(_ data: Data, fin: Bool) async throws {
+        guard let multiplexer else { throw HTTP3Error.streamClosed }
+        let sid: Int64 = try await multiplexer.run { [self] () -> Result<Int64, Error> in
             guard state != .closed, let sid = quicStreamID else {
-                completion(HTTP3Error.streamClosed)
-                return
+                return .failure(HTTP3Error.streamClosed)
             }
-            if data.isEmpty && !fin {
-                completion(nil)
-                return
-            }
-            // An empty payload with fin==true is a bare half-close (FIN, no DATA frame).
-            let frame = data.isEmpty ? Data() : HTTP3Framer.dataFrame(payload: data)
-            multiplexer.writeStream(sid, data: frame, fin: fin, completion: completion)
+            return .success(sid)
         }
-        if multiplexer.isOnQueue { block() } else { multiplexer.queue.async(execute: block) }
+        if data.isEmpty && !fin { return }
+        // An empty payload with fin==true is a bare half-close (FIN, no DATA frame).
+        let frame = data.isEmpty ? Data() : HTTP3Framer.dataFrame(payload: data)
+        try await multiplexer.writeStream(sid, data: frame, fin: fin)
     }
 
-    func receive(completion: @escaping (Data?, Error?) -> Void) {
-        guard let multiplexer else { completion(nil, HTTP3Error.streamClosed); return }
-        let block: () -> Void = { [self] in
-            if let error = streamError {
-                completion(nil, error)
-                return
-            }
-            if !receiveQueue.isEmpty {
-                let (data, quicBytes) = receiveQueue.removeFirst()
-                ackQuicBytes(quicBytes)
-                completion(data, nil)
-                return
-            }
-            if endStreamReceived {
-                closeAndShutdown()
-                completion(nil, nil)
-                return
-            }
-            if state == .closed {
-                completion(nil, nil)
-                return
-            }
-            pendingReceive = completion
+    func receive() async throws -> Data? {
+        guard let multiplexer else { throw HTTP3Error.streamClosed }
+        let data = try await inbox.next()
+        guard let data else {
+            // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
+            multiplexer.queue.async { [weak self] in self?.closeAndShutdown() }
+            return nil
         }
-        if multiplexer.isOnQueue { block() } else { multiplexer.queue.async(execute: block) }
+        // Credit the payload octets now the app has consumed them (backpressure preserved). The
+        // frame-header octets were already credited on the queue in `deliverData`.
+        multiplexer.queue.async { [weak self] in self?.ackQuicBytes(data.count) }
+        return data
     }
 
     /// Reads and discards the entire response so the stream closes cleanly on EOF —
     /// avoids RESET_STREAM after FIN, which some servers treat as aborting the POST.
     func drainResponse() {
-        receive { [weak self] data, error in
-            guard let self else { return }
-            guard data != nil, error == nil else { return }
-            self.drainResponse()
+        Task { [weak self] in
+            while let self {
+                let data: Data?
+                do { data = try await self.receive() } catch { return }
+                guard data != nil else { return }
+            }
         }
     }
 
@@ -161,14 +140,8 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
                 let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
                 multiplexer.shutdownStream(sid, code: code)
             }
-            if let callback = onResponse {
-                onResponse = nil
-                callback(.failure(HTTP3Error.streamClosed))
-            }
-            if let pending = pendingReceive {
-                pendingReceive = nil
-                pending(nil, HTTP3Error.streamClosed)
-            }
+            responsePromise.resolve(.failure(HTTP3Error.streamClosed))
+            inbox.cancel()
         }
     }
 
@@ -180,14 +153,9 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
             processFrameBuffer()
         }
         if fin {
-            endStreamReceived = true
-            if let pending = pendingReceive, receiveQueue.isEmpty {
-                pendingReceive = nil
-                closeAndShutdown()
-                pending(nil, nil)
-            } else if receiveQueue.isEmpty {
-                closeAndShutdown()
-            }
+            // EOF ordered after every chunk already yielded to the inbox; the shutdown fires
+            // from `receive` once the consumer drains.
+            inbox.finish()
         }
     }
 
@@ -195,15 +163,8 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         // A benign QUIC connection close (NO_ERROR / H3_NO_ERROR) is a graceful end of the
         // response — surface EOF rather than a reset.
         if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
-            endStreamReceived = true
-            if let callback = onResponse {
-                onResponse = nil
-                callback(.failure(HTTP3Error.streamClosed))
-            }
-            if let pending = pendingReceive, receiveQueue.isEmpty {
-                pendingReceive = nil
-                pending(nil, nil)
-            }
+            responsePromise.resolve(.failure(HTTP3Error.streamClosed))
+            inbox.finish()
             return
         }
         handleStreamError(error)
@@ -261,13 +222,10 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         headersReceived = true
         state = .open
 
-        if let callback = onResponse {
-            onResponse = nil
-            if let status {
-                callback(.success(status))
-            } else {
-                callback(.failure(HTTP3Error.connectionFailed("Response missing :status")))
-            }
+        if let status {
+            responsePromise.resolve(.success(status))
+        } else {
+            responsePromise.resolve(.failure(HTTP3Error.connectionFailed("Response missing :status")))
         }
     }
 
@@ -276,13 +234,11 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
             if quicBytes > 0 { ackQuicBytes(quicBytes) }
             return
         }
-        if let pending = pendingReceive {
-            pendingReceive = nil
-            ackQuicBytes(quicBytes)
-            pending(data, nil)
-        } else {
-            receiveQueue.append((data, quicBytes))
-        }
+        // Credit the frame-header overhead now; the payload octets are credited in `receive`
+        // once the consumer drains them (backpressure preserved).
+        let headerBytes = quicBytes - data.count
+        if headerBytes > 0 { ackQuicBytes(headerBytes) }
+        inbox.yield(Data(data))
     }
 
     /// Extends the QUIC stream flow-control window once the app has consumed data.
@@ -293,16 +249,9 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     private func handleStreamError(_ error: Error) {
         guard state != .closed else { return }
-        streamError = error
         closeAndShutdown(code: .internalError)
-        if let callback = onResponse {
-            onResponse = nil
-            callback(.failure(error))
-        }
-        if let pending = pendingReceive {
-            pendingReceive = nil
-            pending(nil, error)
-        }
+        responsePromise.resolve(.failure(error))
+        inbox.fail(error)
     }
 
     private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {

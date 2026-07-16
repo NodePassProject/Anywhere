@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - MultiplexerPolicy
 
@@ -38,8 +39,11 @@ nonisolated struct MultiplexerPolicy {
 /// eviction, and reclaim; subclasses add their own `acquire`.
 nonisolated class MultiplexerPool<S: Multiplexer> {
 
-    /// Guards `multiplexers`, `lastActivity`, and `idleTimer`.
-    let lock = UnfairLock()
+    /// Critical-section gate guarding `multiplexers`, `lastActivity`, `policy`, `idleTask`, and
+    /// each subclass's own pool state. A `Mutex<Void>` (not `Mutex<State>`) because the guarded
+    /// fields are shared across the class hierarchy and one subclass drops the gate mid-acquire
+    /// to close a victim off-lock.
+    let lock = Mutex<Void>(())
 
     var multiplexers: [String: [S]] = [:]
 
@@ -47,16 +51,14 @@ nonisolated class MultiplexerPool<S: Multiplexer> {
     /// under ``lock`` on every acquire/reuse.
     var lastActivity: [ObjectIdentifier: TimeInterval] = [:]
 
-    private let evictionQueue = DispatchQueue(label: AWCore.Identifier.multiplexerEvictionQueue)
-    private var idleTimer: DispatchSourceTimer?
+    private var idleTask: Task<Void, Never>?
     private(set) var policy: MultiplexerPolicy?
 
     init() {}
 
-    /// A dropped-but-uncancelled `DispatchSourceTimer` is retained by libdispatch and fires
-    /// forever; always cancel.
+    /// A dropped idle-eviction loop keeps sweeping forever; always cancel.
     deinit {
-        idleTimer?.cancel()
+        idleTask?.cancel()
     }
 
     static func makeKey(host: String, port: UInt16, sni: String) -> String {
@@ -67,51 +69,50 @@ nonisolated class MultiplexerPool<S: Multiplexer> {
 
     /// Arms the shared idle-eviction sweep. Call once from the subclass init; idempotent.
     func startIdleEviction(_ policy: MultiplexerPolicy) {
-        let timer = DispatchSource.makeTimerSource(queue: evictionQueue)
-        timer.schedule(
-            deadline: .now() + policy.idleCheckInterval,
-            repeating: policy.idleCheckInterval,
-            leeway: .milliseconds(Int(policy.idleCheckInterval * 100))   // ~10%
-        )
-        timer.setEventHandler { [weak self] in self?.runIdleEviction() }
-        lock.lock()
-        self.policy = policy
-        idleTimer?.cancel()
-        idleTimer = timer
-        lock.unlock()
-        timer.resume()
+        lock.withLock { _ in
+            self.policy = policy
+            idleTask?.cancel()
+            idleTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(policy.idleCheckInterval))
+                    guard !Task.isCancelled, let self else { return }
+                    self.runIdleEviction()
+                }
+            }
+        }
     }
 
     private func runIdleEviction() {
         let now = MonotonicClock.now
-        var toClose: [S] = []
 
         // Decide and remove under one lock hold so a concurrent acquire can't reserve a mux
         // we're about to close; close() then runs off-lock.
-        lock.lock()
-        guard let policy else { lock.unlock(); return }
-        for key in Array(multiplexers.keys) {
-            guard let muxes = multiplexers[key] else { continue }
-            var idle = muxes.filter { $0.activeStreamCount == 0 && !$0.isClosed }
-            if policy.minIdleKeep > 0 {
-                // Keep the freshest `minIdleKeep` warm.
-                idle.sort { (lastActivity[ObjectIdentifier($0)] ?? 0) > (lastActivity[ObjectIdentifier($1)] ?? 0) }
-            }
-            for (index, mux) in idle.enumerated() {
-                if index < policy.minIdleKeep {
-                    lastActivity[ObjectIdentifier(mux)] = now
-                    continue
+        let toClose: [S] = lock.withLock { _ -> [S] in
+            guard let policy else { return [] }
+            var toClose: [S] = []
+            for key in Array(multiplexers.keys) {
+                guard let muxes = multiplexers[key] else { continue }
+                var idle = muxes.filter { $0.activeStreamCount == 0 && !$0.isClosed }
+                if policy.minIdleKeep > 0 {
+                    // Keep the freshest `minIdleKeep` warm.
+                    idle.sort { (lastActivity[ObjectIdentifier($0)] ?? 0) > (lastActivity[ObjectIdentifier($1)] ?? 0) }
                 }
-                let age = now - (lastActivity[ObjectIdentifier(mux)] ?? now)
-                if age > policy.idleTimeout {
-                    multiplexers[key]?.removeAll { $0 === mux }
-                    lastActivity.removeValue(forKey: ObjectIdentifier(mux))
-                    toClose.append(mux)
+                for (index, mux) in idle.enumerated() {
+                    if index < policy.minIdleKeep {
+                        lastActivity[ObjectIdentifier(mux)] = now
+                        continue
+                    }
+                    let age = now - (lastActivity[ObjectIdentifier(mux)] ?? now)
+                    if age > policy.idleTimeout {
+                        multiplexers[key]?.removeAll { $0 === mux }
+                        lastActivity.removeValue(forKey: ObjectIdentifier(mux))
+                        toClose.append(mux)
+                    }
                 }
+                if multiplexers[key]?.isEmpty == true { multiplexers.removeValue(forKey: key) }
             }
-            if multiplexers[key]?.isEmpty == true { multiplexers.removeValue(forKey: key) }
+            return toClose
         }
-        lock.unlock()
 
         for mux in toClose { mux.close(error: nil) }
     }
@@ -119,23 +120,24 @@ nonisolated class MultiplexerPool<S: Multiplexer> {
     // MARK: - Removal / teardown
 
     func removeMultiplexer(_ multiplexer: S, key: String) {
-        lock.lock()
-        multiplexers[key]?.removeAll { $0 === multiplexer }
-        if multiplexers[key]?.isEmpty == true {
-            multiplexers.removeValue(forKey: key)
+        lock.withLock { _ in
+            multiplexers[key]?.removeAll { $0 === multiplexer }
+            if multiplexers[key]?.isEmpty == true {
+                multiplexers.removeValue(forKey: key)
+            }
+            lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
         }
-        lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-        lock.unlock()
     }
 
-    /// Closes every pooled multiplexer. Leaves the idle timer running so reused singletons
+    /// Closes every pooled multiplexer. Leaves the idle sweep running so reused singletons
     /// keep sweeping; per-config pools cancel it in `deinit` when dropped.
     func closeAll() {
-        lock.lock()
-        let all = multiplexers.values.flatMap { $0 }
-        multiplexers.removeAll()
-        lastActivity.removeAll()
-        lock.unlock()
+        let all: [S] = lock.withLock { _ in
+            let all = multiplexers.values.flatMap { $0 }
+            multiplexers.removeAll()
+            lastActivity.removeAll()
+            return all
+        }
 
         for multiplexer in all {
             multiplexer.close(error: nil)

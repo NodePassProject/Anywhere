@@ -327,10 +327,7 @@ nonisolated final class VLESSEncryptionClient {
     }
 
     /// Perform the handshake over `connection`, choosing 0-RTT when a valid cached ticket exists.
-    func handshake(
-        over connection: ProxyConnection,
-        completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
-    ) {
+    func handshake(over connection: ProxyConnection) async throws -> VLESSEncryptedConnection {
         let cached: VLESSEncryption0RTTCache.Entry?
         if seconds > 0 {
             cached = VLESSEncryption0RTTCache.shared.lookup(key: cacheKey)
@@ -339,25 +336,10 @@ nonisolated final class VLESSEncryptionClient {
         }
 
         if let cached {
-            do {
-                try sendClientHello0RTT(over: connection, cached: cached, completion: completion)
-            } catch {
-                completion(.failure(error))
-            }
-            return
+            return try await sendClientHello0RTT(over: connection, cached: cached)
         }
-        do {
-            try sendClientHello1RTT(over: connection) { [self] result in
-                switch result {
-                case .failure(let error):
-                    completion(.failure(error))
-                case .success(let state):
-                    self.readServerHello(over: connection, state: state, completion: completion)
-                }
-            }
-        } catch {
-            completion(.failure(error))
-        }
+        let state = try await sendClientHello1RTT(over: connection)
+        return try await readServerHello(over: connection, state: state)
     }
 
     // MARK: - Shared helpers
@@ -422,9 +404,8 @@ nonisolated final class VLESSEncryptionClient {
     /// the hello bytes are prepended to the first application record via `preludeBytes`.
     private func sendClientHello0RTT(
         over connection: ProxyConnection,
-        cached: VLESSEncryption0RTTCache.Entry,
-        completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
-    ) throws {
+        cached: VLESSEncryption0RTTCache.Entry
+    ) async throws -> VLESSEncryptedConnection {
         let iv = try generateIV()
         let (relayBlock, nfsKey) = try buildRelayBlock(iv: iv)
 
@@ -478,7 +459,7 @@ nonisolated final class VLESSEncryptionClient {
             xorConnection: xorConnection,
             zeroRTTState: zeroRTT
         )
-        completion(.success(encryptedConnection))
+        return encryptedConnection
     }
 
     // MARK: - 1-RTT client hello
@@ -494,9 +475,8 @@ nonisolated final class VLESSEncryptionClient {
 
     /// Build the 1-RTT client hello, send it in padded fragments, and return the mid-handshake state.
     private func sendClientHello1RTT(
-        over connection: ProxyConnection,
-        completion: @escaping (Result<InFlightHandshake, Error>) -> Void
-    ) throws {
+        over connection: ProxyConnection
+    ) async throws -> InFlightHandshake {
         let iv = try generateIV()
         let (relayBlock, nfsKey) = try buildRelayBlock(iv: iv)
         let nfsAEAD = VLESSEncryptionAEAD(context: iv, key: nfsKey, useAES: useAES)
@@ -549,19 +529,14 @@ nonisolated final class VLESSEncryptionClient {
             pfsClientPublicKey: pfsPublic,
             nfsAEAD: nfsAEAD
         )
-        sendFragments(
+        try await sendFragments(
             over: connection,
             buffer: clientHello,
             lengths: fragmentLengths,
             gaps: paddingGaps,
             index: 0
-        ) { error in
-            if let error {
-                completion(.failure(error))
-            } else {
-                completion(.success(state))
-            }
-        }
+        )
+        return state
     }
 
     /// Recursively send `buffer` in `lengths`-sized chunks, sleeping `gaps` between them.
@@ -570,17 +545,11 @@ nonisolated final class VLESSEncryptionClient {
         buffer: Data,
         lengths: [Int],
         gaps: [TimeInterval],
-        index: Int,
-        completion: @escaping (Error?) -> Void
-    ) {
+        index: Int
+    ) async throws {
         if index >= lengths.count {
             if !buffer.isEmpty {
-                Task {
-                    do { try await connection.sendRaw(buffer); completion(nil) }
-                    catch { completion(error) }
-                }
-            } else {
-                completion(nil)
+                try await connection.sendRaw(buffer)
             }
             return
         }
@@ -588,40 +557,21 @@ nonisolated final class VLESSEncryptionClient {
         let head = buffer.prefix(length)
         let tail = buffer.suffix(from: buffer.startIndex + length)
 
-        let proceed: () -> Void = { [self] in
-            let gap = index < gaps.count ? gaps[index] : 0
-            if gap > 0 {
-                DispatchQueue.global().asyncAfter(deadline: .now() + gap) {
-                    self.sendFragments(
-                        over: connection,
-                        buffer: Data(tail),
-                        lengths: lengths,
-                        gaps: gaps,
-                        index: index + 1,
-                        completion: completion
-                    )
-                }
-            } else {
-                self.sendFragments(
-                    over: connection,
-                    buffer: Data(tail),
-                    lengths: lengths,
-                    gaps: gaps,
-                    index: index + 1,
-                    completion: completion
-                )
-            }
+        if !head.isEmpty {
+            try await connection.sendRaw(Data(head))
         }
 
-        if !head.isEmpty {
-            let chunk = Data(head)
-            Task {
-                do { try await connection.sendRaw(chunk); proceed() }
-                catch { completion(error) }
-            }
-        } else {
-            proceed()
+        let gap = index < gaps.count ? gaps[index] : 0
+        if gap > 0 {
+            try await Task.sleep(for: .seconds(gap))
         }
+        try await sendFragments(
+            over: connection,
+            buffer: Data(tail),
+            lengths: lengths,
+            gaps: gaps,
+            index: index + 1
+        )
     }
 
     // MARK: - Server hello
@@ -629,62 +579,50 @@ nonisolated final class VLESSEncryptionClient {
     /// Read server PFS hello + ticket + padding, derive session keys, return a ready connection.
     private func readServerHello(
         over connection: ProxyConnection,
-        state: InFlightHandshake,
-        completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
-    ) {
+        state: InFlightHandshake
+    ) async throws -> VLESSEncryptedConnection {
         let reader = VLESSEncryptionByteReader(connection: connection)
-        reader.readExact(VLESSWire.pfsServerHelloLength) { [self] result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let sealedServerPfs):
-                do {
-                    let serverPfsPublic = try state.nfsAEAD.open(
-                        sealedServerPfs,
-                        nonce: Data(repeating: 0xFF, count: 12),
-                        additionalData: nil
-                    )
-                    guard serverPfsPublic.count == 1088 + 32 else {
-                        throw VLESSEncryptionError.handshakeFailed("PFS server hello has wrong length")
-                    }
-                    let mlkemCiphertext = serverPfsPublic.prefix(1088)
-                    let x25519PubBytes = serverPfsPublic.suffix(32)
-
-                    let mlkemSecret = try state.mlkemPriv.decapsulate(mlkemCiphertext)
-                    let serverX25519 = try Curve25519.KeyAgreement.PublicKey(
-                        rawRepresentation: x25519PubBytes
-                    )
-                    let x25519Secret = try state.x25519Priv.sharedSecretFromKeyAgreement(with: serverX25519)
-
-                    var pfsKey = Data()
-                    pfsKey.append(mlkemSecret.withUnsafeBytes { Data($0) })   // 32 bytes
-                    pfsKey.append(x25519Secret.withUnsafeBytes { Data($0) })  // 32 bytes
-                    var unitedKey = pfsKey
-                    unitedKey.append(state.nfsKey)
-
-                    // Both AEADs are keyed on *plaintext* PFS public bytes.
-                    let writeAEAD = VLESSEncryptionAEAD(
-                        context: state.pfsClientPublicKey, key: unitedKey, useAES: useAES
-                    )
-                    let readAEAD = VLESSEncryptionAEAD(
-                        context: serverPfsPublic, key: unitedKey, useAES: useAES
-                    )
-
-                    self.readTicketAndPadding(
-                        reader: reader,
-                        connection: connection,
-                        state: state,
-                        pfsKey: pfsKey,
-                        unitedKey: unitedKey,
-                        writeAEAD: writeAEAD,
-                        readAEAD: readAEAD,
-                        completion: completion
-                    )
-                } catch {
-                    completion(.failure(error))
-                }
-            }
+        let sealedServerPfs = try await reader.readExact(VLESSWire.pfsServerHelloLength)
+        let serverPfsPublic = try state.nfsAEAD.open(
+            sealedServerPfs,
+            nonce: Data(repeating: 0xFF, count: 12),
+            additionalData: nil
+        )
+        guard serverPfsPublic.count == 1088 + 32 else {
+            throw VLESSEncryptionError.handshakeFailed("PFS server hello has wrong length")
         }
+        let mlkemCiphertext = serverPfsPublic.prefix(1088)
+        let x25519PubBytes = serverPfsPublic.suffix(32)
+
+        let mlkemSecret = try state.mlkemPriv.decapsulate(mlkemCiphertext)
+        let serverX25519 = try Curve25519.KeyAgreement.PublicKey(
+            rawRepresentation: x25519PubBytes
+        )
+        let x25519Secret = try state.x25519Priv.sharedSecretFromKeyAgreement(with: serverX25519)
+
+        var pfsKey = Data()
+        pfsKey.append(mlkemSecret.withUnsafeBytes { Data($0) })   // 32 bytes
+        pfsKey.append(x25519Secret.withUnsafeBytes { Data($0) })  // 32 bytes
+        var unitedKey = pfsKey
+        unitedKey.append(state.nfsKey)
+
+        // Both AEADs are keyed on *plaintext* PFS public bytes.
+        let writeAEAD = VLESSEncryptionAEAD(
+            context: state.pfsClientPublicKey, key: unitedKey, useAES: useAES
+        )
+        let readAEAD = VLESSEncryptionAEAD(
+            context: serverPfsPublic, key: unitedKey, useAES: useAES
+        )
+
+        return try await readTicketAndPadding(
+            reader: reader,
+            connection: connection,
+            state: state,
+            pfsKey: pfsKey,
+            unitedKey: unitedKey,
+            writeAEAD: writeAEAD,
+            readAEAD: readAEAD
+        )
     }
 
     private func readTicketAndPadding(
@@ -694,89 +632,66 @@ nonisolated final class VLESSEncryptionClient {
         pfsKey: Data,
         unitedKey: Data,
         writeAEAD: VLESSEncryptionAEAD,
-        readAEAD: VLESSEncryptionAEAD,
-        completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
-    ) {
-        reader.readExact(VLESSWire.encryptedTicketLength) { [self] result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let sealedTicket):
-                let ticketPayload: Data
-                do {
-                    ticketPayload = try readAEAD.open(sealedTicket, additionalData: nil)
-                } catch {
-                    completion(.failure(error))
-                    return
-                }
-                // First two bytes are a big-endian seconds TTL from the server; zero
-                // means no resumption. The cached ticket is the 16-byte plaintext body.
-                if seconds > 0, ticketPayload.count >= 16 {
-                    let serverSeconds = VLESSLength.decode(ticketPayload)
-                    if serverSeconds > 0 {
-                        let expire = CFAbsoluteTimeGetCurrent() + TimeInterval(serverSeconds)
-                        VLESSEncryption0RTTCache.shared.store(
-                            key: cacheKey,
-                            pfsKey: pfsKey,
-                            ticket: Data(ticketPayload.prefix(16)),
-                            expire: expire
-                        )
-                    }
-                }
-                reader.readExact(VLESSWire.sealedLengthFrame) { result in
-                    switch result {
-                    case .failure(let error):
-                        completion(.failure(error))
-                    case .success(let sealedLength):
-                        do {
-                            let lenBytes = try readAEAD.open(sealedLength, additionalData: nil)
-                            // Decoded value is the SEALED body size (plaintext + tag).
-                            guard lenBytes.count >= 2 else {
-                                throw VLESSEncryptionError.framingError("server sealed length frame too short: \(lenBytes.count) bytes")
-                            }
-                            let sealedPaddingBodySize = VLESSLength.decode(lenBytes)
-                            // Over-read bytes are padding tail, always unmasked (sent
-                            // before the server enables XOR masking); carry them over.
-                            let leftover = reader.drain()
-
-                            // inSkip covers padding tail still on the wire; leftover bytes
-                            // bypass the XOR wrapper via carryOverBytes, so don't skip them again.
-                            let xorConnection: VLESSXORConnection?
-                            let transport: ProxyConnection
-                            if self.xorMode == .random {
-                                let xor = VLESSXORConnection(
-                                    inner: connection,
-                                    outCTR: try VLESSEncryptionCTR(key: unitedKey, iv: state.iv),
-                                    inCTR: try VLESSEncryptionCTR(key: unitedKey, iv: Data(ticketPayload.prefix(16))),
-                                    outSkip: 0,
-                                    inSkip: max(0, sealedPaddingBodySize - leftover.count)
-                                )
-                                xorConnection = xor
-                                transport = xor
-                            } else {
-                                xorConnection = nil
-                                transport = connection
-                            }
-                            let encryptedConnection = VLESSEncryptedConnection(
-                                inner: transport,
-                                writeAEAD: writeAEAD,
-                                readAEAD: readAEAD,
-                                unitedKey: unitedKey,
-                                useAES: self.useAES,
-                                preludeBytes: nil,
-                                pendingServerPaddingLength: sealedPaddingBodySize,
-                                carryOverBytes: leftover,
-                                xorConnection: xorConnection,
-                                zeroRTTState: nil
-                            )
-                            completion(.success(encryptedConnection))
-                        } catch {
-                            completion(.failure(error))
-                        }
-                    }
-                }
+        readAEAD: VLESSEncryptionAEAD
+    ) async throws -> VLESSEncryptedConnection {
+        let sealedTicket = try await reader.readExact(VLESSWire.encryptedTicketLength)
+        let ticketPayload = try readAEAD.open(sealedTicket, additionalData: nil)
+        // First two bytes are a big-endian seconds TTL from the server; zero
+        // means no resumption. The cached ticket is the 16-byte plaintext body.
+        if seconds > 0, ticketPayload.count >= 16 {
+            let serverSeconds = VLESSLength.decode(ticketPayload)
+            if serverSeconds > 0 {
+                let expire = CFAbsoluteTimeGetCurrent() + TimeInterval(serverSeconds)
+                VLESSEncryption0RTTCache.shared.store(
+                    key: cacheKey,
+                    pfsKey: pfsKey,
+                    ticket: Data(ticketPayload.prefix(16)),
+                    expire: expire
+                )
             }
         }
+        let sealedLength = try await reader.readExact(VLESSWire.sealedLengthFrame)
+        let lenBytes = try readAEAD.open(sealedLength, additionalData: nil)
+        // Decoded value is the SEALED body size (plaintext + tag).
+        guard lenBytes.count >= 2 else {
+            throw VLESSEncryptionError.framingError("server sealed length frame too short: \(lenBytes.count) bytes")
+        }
+        let sealedPaddingBodySize = VLESSLength.decode(lenBytes)
+        // Over-read bytes are padding tail, always unmasked (sent
+        // before the server enables XOR masking); carry them over.
+        let leftover = reader.drain()
+
+        // inSkip covers padding tail still on the wire; leftover bytes
+        // bypass the XOR wrapper via carryOverBytes, so don't skip them again.
+        let xorConnection: VLESSXORConnection?
+        let transport: ProxyConnection
+        if xorMode == .random {
+            let xor = VLESSXORConnection(
+                inner: connection,
+                outCTR: try VLESSEncryptionCTR(key: unitedKey, iv: state.iv),
+                inCTR: try VLESSEncryptionCTR(key: unitedKey, iv: Data(ticketPayload.prefix(16))),
+                outSkip: 0,
+                inSkip: max(0, sealedPaddingBodySize - leftover.count)
+            )
+            xorConnection = xor
+            transport = xor
+        } else {
+            xorConnection = nil
+            transport = connection
+        }
+        let encryptedConnection = VLESSEncryptedConnection(
+            inner: transport,
+            writeAEAD: writeAEAD,
+            readAEAD: readAEAD,
+            unitedKey: unitedKey,
+            useAES: useAES,
+            preludeBytes: nil,
+            pendingServerPaddingLength: sealedPaddingBodySize,
+            carryOverBytes: leftover,
+            xorConnection: xorConnection,
+            zeroRTTState: nil
+        )
+        return encryptedConnection
     }
 }
 
@@ -791,32 +706,21 @@ private final class VLESSEncryptionByteReader {
         self.connection = connection
     }
 
-    func readExact(_ count: Int, completion: @escaping (Result<Data, Error>) -> Void) {
-        let head: Data? = buffer.withLock { buffer in
-            guard buffer.count >= count else { return nil }
-            let head = Data(buffer.prefix(count))
-            buffer.removeFirst(count)
-            return head
-        }
-        if let head {
-            completion(.success(head))
-            return
-        }
-        Task { [weak self] in
-            guard let self else {
-                completion(.failure(VLESSEncryptionError.connectionClosed))
-                return
+    func readExact(_ count: Int) async throws -> Data {
+        while true {
+            let head: Data? = buffer.withLock { buffer in
+                guard buffer.count >= count else { return nil }
+                let head = Data(buffer.prefix(count))
+                buffer.removeFirst(count)
+                return head
             }
-            do {
-                guard let data = try await self.connection.receiveRaw(), !data.isEmpty else {
-                    completion(.failure(VLESSEncryptionError.connectionClosed))
-                    return
-                }
-                self.buffer.withLock { $0.append(data) }
-                self.readExact(count, completion: completion)
-            } catch {
-                completion(.failure(error))
+            if let head {
+                return head
             }
+            guard let data = try await connection.receiveRaw(), !data.isEmpty else {
+                throw VLESSEncryptionError.connectionClosed
+            }
+            buffer.withLock { $0.append(data) }
         }
     }
 

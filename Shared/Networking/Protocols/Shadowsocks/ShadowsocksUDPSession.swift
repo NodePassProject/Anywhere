@@ -9,15 +9,11 @@ import Foundation
 import CryptoKit
 import CommonCrypto
 import Security
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "ShadowsocksUDPSession")
 
-// MARK: - ShadowsocksUDPSession
-
-/// Multiplexes every destination flow through one transport, sessionID, and packetID;
-/// replies demultiplex by (host, port), falling back to port-only when the server
-/// replies from an unseeded IP.
-nonisolated final class ShadowsocksUDPSession {
+actor ShadowsocksUDPSession {
 
     // MARK: - Mode
 
@@ -41,19 +37,16 @@ nonisolated final class ShadowsocksUDPSession {
         var responseHosts: Set<String>
         /// True once a reply source is pinned; port-only fallback prefers unpinned flows.
         var hasLearnedSource: Bool
-        let handler: (Data) -> Void
-        let errorHandler: ((Error) -> Void)?
+        /// Inbound datagrams for this flow; failed on transport error / session teardown,
+        /// EOF'd (`cancel()`) on unregister so the flow's reader unwinds cleanly.
+        let inbox = AsyncByteChannel()
 
         init(token: Token, port: UInt16, responseHosts: Set<String>,
-             hasLearnedSource: Bool,
-             handler: @escaping (Data) -> Void,
-             errorHandler: ((Error) -> Void)?) {
+             hasLearnedSource: Bool) {
             self.token = token
             self.port = port
             self.responseHosts = responseHosts
             self.hasLearnedSource = hasLearnedSource
-            self.handler = handler
-            self.errorHandler = errorHandler
         }
     }
 
@@ -75,28 +68,35 @@ nonisolated final class ShadowsocksUDPSession {
     private let mode: Mode
     private let serverHost: String
     private let serverPort: UInt16
-    /// Owner-supplied queue for all state mutations and callback delivery.
-    private let delegateQueue: DispatchQueue
 
-    // MARK: - Mutable state (all on `delegateQueue`)
+    // MARK: - Mutable state (actor-isolated)
 
     /// The async-native datagram transport; `connect()` is awaited in `beginConnect`.
     private let asyncTransport: UDPTransport
-    private var state: State = .idle
+
+    /// Readiness mirror: `true` while idle/connecting/ready, `false` once failed/cancelled.
+    /// Lets the owning stack poll `isUsable` without hopping onto the actor.
+    private let _isUsable = Atomic<Bool>(true)
+    private var _state: State = .idle
+    private var state: State {
+        get { _state }
+        set {
+            _state = newValue
+            switch newValue {
+            case .idle, .connecting, .ready: _isUsable.store(true, ordering: .relaxed)
+            case .failed, .cancelled: _isUsable.store(false, ordering: .relaxed)
+            }
+        }
+    }
+
+    /// Awaiting `send` calls parked while the transport dials; resumed (or thrown) once
+    /// `finishConnect` lands. Replaces the old ordered `pendingSends` buffer.
+    private var readyWaiters: [CheckedContinuation<Void, Error>] = []
 
     private var nextToken: Token = 0
     private var registrations: [Token: Registration] = [:]
     private var tokensByResponse: [ResponseKey: [Token]] = [:]
     private var tokensByPort: [UInt16: [Token]] = [:]
-
-    private struct PendingSend {
-        let token: Token
-        let dstHost: String
-        let dstPort: UInt16
-        let payload: Data
-        let completion: ((Error?) -> Void)?
-    }
-    private var pendingSends: [PendingSend] = []
 
     // SS 2022 session state — sessionwide, not per-flow.
     private var sessionID: UInt64 = 0
@@ -115,12 +115,10 @@ nonisolated final class ShadowsocksUDPSession {
 
     init(mode: Mode,
          serverHost: String,
-         serverPort: UInt16,
-         delegateQueue: DispatchQueue) {
+         serverPort: UInt16) {
         self.mode = mode
         self.serverHost = serverHost
         self.serverPort = serverPort
-        self.delegateQueue = delegateQueue
 
         let asyncTransport = UDPTransport(host: serverHost, port: serverPort)
         self.asyncTransport = asyncTransport
@@ -158,23 +156,20 @@ nonisolated final class ShadowsocksUDPSession {
         }
     }
 
-    // MARK: - Public API (call on `delegateQueue`)
+    // MARK: - Public API
 
-    var isUsable: Bool {
-        switch state {
-        case .idle, .connecting, .ready: return true
-        case .failed, .cancelled: return false
-        }
+    /// Nonisolated readiness poll for the owning stack (no actor hop). Mirrors `state`.
+    nonisolated var isUsable: Bool {
+        _isUsable.load(ordering: .relaxed)
     }
 
     /// Registers interest in UDP replies matching `(dstHost, dstPort)` or any hint.
     /// Servers typically reply with the resolved IP, so pass known IPs as hints for
-    /// exact demultiplexing; otherwise delivery falls back to port-only.
+    /// exact demultiplexing; otherwise delivery falls back to port-only. Returns the
+    /// flow's token and its inbound datagram channel (drained by the caller).
     func register(dstHost: String,
                   dstPort: UInt16,
-                  responseHostHints: [String] = [],
-                  handler: @escaping (Data) -> Void,
-                  errorHandler: ((Error) -> Void)? = nil) -> Token {
+                  responseHostHints: [String] = []) -> (token: Token, inbox: AsyncByteChannel) {
         nextToken += 1
         let token = nextToken
 
@@ -186,9 +181,7 @@ nonisolated final class ShadowsocksUDPSession {
 
         let registration = Registration(token: token, port: dstPort,
                                responseHosts: hosts,
-                               hasLearnedSource: pinned,
-                               handler: handler,
-                               errorHandler: errorHandler)
+                               hasLearnedSource: pinned)
         registrations[token] = registration
         for host in hosts {
             tokensByResponse[ResponseKey(host: host, port: dstPort), default: []].append(token)
@@ -198,7 +191,7 @@ nonisolated final class ShadowsocksUDPSession {
         if case .idle = state {
             beginConnect()
         }
-        return token
+        return (token, registration.inbox)
     }
 
     func addResponseHints(token: Token, hints: [String]) {
@@ -220,55 +213,77 @@ nonisolated final class ShadowsocksUDPSession {
             removeToken(token, from: &tokensByResponse, key: ResponseKey(host: host, port: registration.port))
         }
         removeToken(token, from: &tokensByPort, key: registration.port)
-        pendingSends.removeAll { $0.token == token }
+        // EOF the flow's reader so its receive loop unwinds without surfacing an error.
+        registration.inbox.cancel()
     }
 
-    /// Buffers in order while the transport is still connecting.
+    /// Awaits transport readiness (parking if still dialing), then encrypts and sends.
+    /// PacketID allocation happens synchronously before the wire `await`, so IDs stay unique.
     func send(token: Token,
               dstHost: String,
               dstPort: UInt16,
-              payload: Data,
-              completion: ((Error?) -> Void)? = nil) {
+              payload: Data) async throws {
         guard registrations[token] != nil else {
-            completion?(ShadowsocksError.invalidAddress)
-            return
+            throw ShadowsocksError.invalidAddress
         }
-        switch state {
-        case .idle, .connecting:
-            pendingSends.append(PendingSend(token: token,
-                                            dstHost: dstHost,
-                                            dstPort: dstPort,
-                                            payload: payload,
-                                            completion: completion))
-        case .ready:
-            sendNow(dstHost: dstHost, dstPort: dstPort,
-                    payload: payload, completion: completion)
-        case .failed(let error):
-            completion?(error)
-        case .cancelled:
-            completion?(ProxyError.connectionFailed("Session cancelled"))
-        }
+        try await ensureReadyForSend()
+        // Synchronous, actor-isolated: allocate packetID + encrypt before releasing the actor.
+        let encrypted = try encryptPacket(payload: payload,
+                                          dstHost: dstHost,
+                                          dstPort: dstPort)
+        // UDP datagrams are independent — the actor is free to service other sends across
+        // this await; each already holds its own unique packetID.
+        try await asyncTransport.send(encrypted)
     }
-    
+
     deinit {
         asyncTransport.cancel()
     }
 
-    /// In-flight send completions may still fire after this returns.
-    func cancel() {
+    /// Nonisolated so a synchronous purge can cancel without `await`. Flips the readiness
+    /// mirror and tears the socket down immediately; the actor-isolated teardown (notifying
+    /// flows, clearing maps) is scheduled after.
+    nonisolated func cancel() {
+        _isUsable.store(false, ordering: .relaxed)
+        asyncTransport.cancel()
+        Task { await self.performCancel() }
+    }
+
+    private func performCancel() {
         if case .cancelled = state { return }
         state = .cancelled
-        asyncTransport.cancel()
         notifyAllFlows(error: ProxyError.connectionFailed("Session cancelled"))
+        resumeReadyWaiters(throwing: ProxyError.connectionFailed("Session cancelled"))
         registrations.removeAll()
         tokensByResponse.removeAll()
         tokensByPort.removeAll()
-        pendingSends.removeAll()
     }
 
     // MARK: - Connect
 
+    /// Parks the caller until the transport is ready; kicks off the dial on first use.
+    private func ensureReadyForSend() async throws {
+        switch state {
+        case .ready:
+            return
+        case .failed(let error):
+            throw error
+        case .cancelled:
+            throw ProxyError.connectionFailed("Session cancelled")
+        case .idle:
+            beginConnect()
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                readyWaiters.append(c)
+            }
+        case .connecting:
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                readyWaiters.append(c)
+            }
+        }
+    }
+
     private func beginConnect() {
+        guard case .idle = state else { return }
         state = .connecting
         let asyncTransport = self.asyncTransport
         Task { [weak self] in
@@ -279,17 +294,11 @@ nonisolated final class ShadowsocksUDPSession {
             } catch {
                 connectResult = .failure(error)
             }
-            guard let self else { return }
-            // Resume on delegateQueue so state mutations and callbacks stay serialized there.
-            self.delegateQueue.async { [weak self] in
-                guard let self else { return }
-                self.finishConnect(connectResult)
-            }
+            await self?.finishConnect(connectResult)
         }
     }
 
-    /// Completes the dial on `delegateQueue`: arms the receive loop and drains buffered sends,
-    /// or fails the session.
+    /// Completes the dial: arms the receive loop and releases parked senders, or fails the session.
     private func finishConnect(_ result: Result<Void, Error>) {
         if case .cancelled = state { return }
 
@@ -297,75 +306,59 @@ nonisolated final class ShadowsocksUDPSession {
             state = .failed(error)
             asyncTransport.cancel()
             notifyAllFlows(error: error)
-            pendingSends.removeAll()
+            resumeReadyWaiters(throwing: error)
             return
         }
 
         state = .ready
-
         startReceiveLoop()
-
-        // Drain anything queued while connecting, preserving order.
-        let flushes = pendingSends
-        pendingSends.removeAll()
-        for pendingSend in flushes {
-            sendNow(dstHost: pendingSend.dstHost, dstPort: pendingSend.dstPort,
-                    payload: pendingSend.payload, completion: pendingSend.completion)
-        }
+        resumeReadyWaiters(throwing: nil)
     }
 
     private func handleTransportError(_ error: Error) {
-        if case .cancelled = state { return }
+        switch state {
+        case .cancelled, .failed: return
+        default: break
+        }
         state = .failed(error)
         asyncTransport.cancel()
         notifyAllFlows(error: error)
+        resumeReadyWaiters(throwing: error)
     }
 
-    /// Drives the datagram downlink on `delegateQueue`, matching the state-mutation queue.
-    /// The loop is unstored: it never retains the session and dies when
-    /// `asyncTransport.cancel()` errors its pending receive.
+    /// Drives the datagram downlink into the actor. The loop is unstored: it never retains
+    /// the session and dies when `asyncTransport.cancel()` errors its pending receive.
     private func startReceiveLoop() {
         let asyncTransport = self.asyncTransport
-        let queue = self.delegateQueue
         Task { [weak self] in
             do {
                 while true {
                     let datagram = try await asyncTransport.receive()
-                    queue.async { self?.handleReceivedDatagram(datagram) }
+                    await self?.handleReceivedDatagram(datagram)
                 }
             } catch {
-                queue.async { self?.handleTransportError(error) }
+                await self?.handleTransportError(error)
             }
         }
     }
 
+    /// Fails every registered flow's inbox (transport error / teardown).
     private func notifyAllFlows(error: Error) {
-        let handlers = registrations.values.compactMap { $0.errorHandler }
-        for handler in handlers {
-            handler(error)
+        for registration in registrations.values {
+            registration.inbox.fail(error)
         }
     }
 
-    // MARK: - Send
-
-    private func sendNow(dstHost: String, dstPort: UInt16, payload: Data,
-                         completion: ((Error?) -> Void)?) {
-        do {
-            let encrypted = try encryptPacket(payload: payload,
-                                              dstHost: dstHost,
-                                              dstPort: dstPort)
-            // UDP datagrams are independent, so each send is its own task (no ordering pump).
-            let asyncTransport = self.asyncTransport
-            Task {
-                do {
-                    try await asyncTransport.send(encrypted)
-                    completion?(nil)
-                } catch {
-                    completion?(error)
-                }
+    /// Resumes every parked sender exactly once — with success (`nil`) or the given error.
+    private func resumeReadyWaiters(throwing error: Error?) {
+        let waiters = readyWaiters
+        readyWaiters.removeAll()
+        for continuation in waiters {
+            if let error {
+                continuation.resume(throwing: error)
+            } else {
+                continuation.resume()
             }
-        } catch {
-            completion?(error)
         }
     }
 
@@ -385,7 +378,7 @@ nonisolated final class ShadowsocksUDPSession {
 
         if let tokens = tokensByResponse[key],
            let registration = firstRegistration(in: tokens) {
-            registration.handler(decoded.payload)
+            registration.inbox.yield(decoded.payload)
             return
         }
 
@@ -401,7 +394,7 @@ nonisolated final class ShadowsocksUDPSession {
                     tokensByResponse[key, default: []].append(target.token)
                 }
                 target.hasLearnedSource = true
-                target.handler(decoded.payload)
+                target.inbox.yield(decoded.payload)
                 return
             }
         }

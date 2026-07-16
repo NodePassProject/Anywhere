@@ -135,22 +135,27 @@ actor TCPConnection {
         uploadPipeline.buffer.count - uploadPipeline.bufferOffset
     }
 
-    private var activityTimer: ActivityTimer?
-    private var handshakeTimer: DispatchWorkItem?
-    /// Per-dial state (deadline, transport-cancel, settled flag, MITM completion), one instance per
-    /// in-flight dial rather than single-valued so the bridge's concurrent per-stream dials don't
-    /// cross-wire timeouts or cancels.
+    // MARK: Actor-isolated idle timer (replaces ActivityTimer)
+    //
+    // No queue+closure timer: the connection stores `lastActivityTick` and re-checks on the actor.
+    // `close()` fires when the connection has been quiet for `idleTimeout`.
+    private var idleActive = false
+    private var idleTimeout: TimeInterval = 0
+    private var lastActivityTick: TimeInterval = 0
+    private var idleCheckTask: Task<Void, Never>?
+
+    /// Bounds sniff/dial/handshake; cancelled on the first outbound leg or teardown. Actor-isolated.
+    private var handshakeTimeoutTask: Task<Void, Never>?
+    /// Per-dial teardown handle: cancels the in-flight transport/client, one instance per dial so the
+    /// bridge's concurrent per-stream dials don't cross-wire cancels. The deadline is a `Task.sleep`
+    /// raced inside ``raceHandshakeDeadline`` rather than a per-dial timer.
     private final class InFlightDial {
-        var deadline: DispatchWorkItem?
         var cancel: (() -> Void)?
-        var settled = false
-        /// The MITM session's completion, invoked exactly once by ``settleDial(_:_:)``.
-        var completion: ((Result<MITMDialResult, Error>) -> Void)?
     }
     /// Dials awaiting resolution; `releaseProxy` cancels every one on teardown.
     private var inFlightDials: [InFlightDial] = []
-    /// Commits the IP-based route if the sniff doesn't resolve in time.
-    private var sniffDeadline: DispatchWorkItem?
+    /// Commits the IP-based route if the sniff doesn't resolve in time. Actor-isolated.
+    private var sniffDeadlineTask: Task<Void, Never>?
     private var uplinkDone = false
     private var downlinkDone = false
     private var closePending = false
@@ -204,42 +209,44 @@ actor TCPConnection {
     /// Arms the handshake timer and either begins dialing or waits for the sniff deadline.
     /// The bridge's accept trampoline calls this once, on the lwIP queue, right after `init`.
     func start() {
-        let timer = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.assumeIsolated { me in
-                guard !me.closed else { return }
-                if me.isEstablishing {
-                    let phase = me.isSniffing ? "protocol sniff" : (me.bypass ? "direct dial" : "proxy dial")
-                    me.failureReporter.report(
-                        operation: "Handshake",
-                        endpoint: me.endpointDescription,
-                        error: HandshakeTimeoutError(phase: phase),
-                        context: DialDiagnostics.snapshot()
-                    )
-                    me.abort()
-                }
-            }
+        handshakeTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
+            guard !Task.isCancelled else { return }
+            await self?.handshakeTimedOut()
         }
-        handshakeTimer = timer
-        lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: timer)
 
         if sniffer == nil {
             beginConnecting()
         } else {
             // Server-speaks-first protocols (SSH, SMTP, FTP) never send client
             // bytes; commit the IP-based route at the deadline.
-            let deadline = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.assumeIsolated { me in
-                    guard !me.closed, me.isSniffing else { return }
-                    me.sniffer = nil
-                    me.httpSniffer = nil
-                    me.beginConnecting()
-                }
+            sniffDeadlineTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(TunnelConstants.sniffDeadline))
+                guard !Task.isCancelled else { return }
+                await self?.sniffDeadlineFired()
             }
-            sniffDeadline = deadline
-            lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.sniffDeadline, execute: deadline)
         }
+    }
+
+    /// Fires on the actor when the sniff/dial handshake overran its bound; aborts if still establishing.
+    private func handshakeTimedOut() {
+        guard !closed, isEstablishing else { return }
+        let phase = isSniffing ? "protocol sniff" : (bypass ? "direct dial" : "proxy dial")
+        failureReporter.report(
+            operation: "Handshake",
+            endpoint: endpointDescription,
+            error: HandshakeTimeoutError(phase: phase),
+            context: DialDiagnostics.snapshot()
+        )
+        abort()
+    }
+
+    /// Fires on the actor when the sniff deadline elapsed with no client bytes; commits the IP route.
+    private func sniffDeadlineFired() {
+        guard !closed, isSniffing else { return }
+        sniffer = nil
+        httpSniffer = nil
+        beginConnecting()
     }
 
     deinit {
@@ -249,8 +256,8 @@ actor TCPConnection {
     }
 
     private func cancelSniffDeadline() {
-        sniffDeadline?.cancel()
-        sniffDeadline = nil
+        sniffDeadlineTask?.cancel()
+        sniffDeadlineTask = nil
     }
 
     /// Appends to `pendingData`; aborts and returns `false` if the cap would be exceeded.
@@ -290,7 +297,7 @@ actor TCPConnection {
     /// Upload path: data from the local app via lwIP.
     func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
         guard !closed, count > 0 else { return }
-        activityTimer?.update()
+        markActivity()
 
         let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
 
@@ -352,7 +359,7 @@ actor TCPConnection {
             // yet (a large POST/PUT, or a slow upstream) produces no downlink to refresh the idle
             // timer, so without this it looks idle and is torn down mid-stream — the non-MITM upload
             // path refreshes the timer on every accepted chunk for the same reason.
-            activityTimer?.update()
+            markActivity()
             // Ack to lwIP up-front; MITMSession owns inner-leg flow control.
             acknowledgeReceivedBytes(count)
             mitmSession.feedClientBytes(chunk)
@@ -427,7 +434,7 @@ actor TCPConnection {
                     if !closed {
                         // Count proxy-side accepts as uplink activity; a long backpressured
                         // upload would otherwise look idle and close mid-stream.
-                        activityTimer?.update()
+                        markActivity()
                         acknowledgeReceivedBytes(chunk.count)
                         attemptDeferredClose()
                     }
@@ -474,12 +481,12 @@ actor TCPConnection {
             if uplinkDone {
                 closeWhenDrained()
             } else {
-                activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
+                setIdleTimeout(TunnelConstants.uplinkOnlyTimeout)
                 propagateDownlinkCloseIfReady()
             }
             return true
         }
-        activityTimer?.update()
+        markActivity()
         writeToLWIP(data)
         return false
     }
@@ -598,7 +605,7 @@ actor TCPConnection {
         if downlinkDone {
             closeWhenDrained()
         } else {
-            activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeout)
+            setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
 
@@ -788,9 +795,9 @@ actor TCPConnection {
             handleConnectFailure(error, bufferedClientData: initialData)
             return
         }
-        handshakeTimer?.cancel()
-        handshakeTimer = nil
-        activityTimer = makeIdleTimer()
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        startIdleTimer()
 
         if let initialData {
             uploadPipeline.buffer.append(initialData)
@@ -856,9 +863,9 @@ actor TCPConnection {
         switch result {
         case .success(let proxyConnection):
             self.proxyConnection = proxyConnection
-            handshakeTimer?.cancel()
-            handshakeTimer = nil
-            activityTimer = makeIdleTimer()
+            handshakeTimeoutTask?.cancel()
+            handshakeTimeoutTask = nil
+            startIdleTimer()
 
             if let initialData {
                 // Connect success implies handshake-carried initialData was accepted.
@@ -875,14 +882,68 @@ actor TCPConnection {
         }
     }
 
-    /// The idle-timeout timer, firing `close()` on the actor when the connection goes quiet.
-    private func makeIdleTimer() -> ActivityTimer {
-        ActivityTimer(queue: lwipQueue, timeout: initialIdleTimeout) { [weak self] in
-            guard let self else { return }
-            self.assumeIsolated { me in
-                guard !me.closed else { return }
-                me.close()
-            }
+    // MARK: - Idle Timer (actor-isolated)
+
+    /// Arms the idle timer at `initialIdleTimeout`; `close()` fires once the connection is quiet that long.
+    private func startIdleTimer() {
+        idleTimeout = initialIdleTimeout
+        lastActivityTick = MonotonicClock.now
+        idleActive = true
+        scheduleIdleCheck(after: idleTimeout)
+    }
+
+    /// Records traffic so the idle check sees the connection as active.
+    private func markActivity() {
+        lastActivityTick = MonotonicClock.now
+    }
+
+    /// Changes the idle window (e.g. tightened after a half-close). `<= 0`, or a window already
+    /// exceeded by the elapsed idle time, closes immediately.
+    private func setIdleTimeout(_ timeout: TimeInterval) {
+        guard idleActive else { return }
+        if timeout <= 0 {
+            cancelIdleTimer()
+            close()
+            return
+        }
+        idleTimeout = timeout
+        let elapsed = MonotonicClock.now - lastActivityTick
+        if elapsed >= timeout {
+            cancelIdleTimer()
+            close()
+            return
+        }
+        scheduleIdleCheck(after: timeout - elapsed)
+    }
+
+    private func cancelIdleTimer() {
+        idleActive = false
+        idleCheckTask?.cancel()
+        idleCheckTask = nil
+    }
+
+    /// Schedules the next idle re-check `delay` seconds out. Weak self so the sleep can't pin the
+    /// connection; `await` hops back onto the actor (lwIP executor).
+    private func scheduleIdleCheck(after delay: TimeInterval) {
+        idleCheckTask?.cancel()
+        guard idleActive, delay > 0 else { return }
+        idleCheckTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await self?.checkIdle()
+        }
+    }
+
+    /// Runs on the actor: closes if idle past `idleTimeout`, else re-arms for the remaining window.
+    private func checkIdle() {
+        guard !closed, idleActive, idleTimeout > 0 else { return }
+        let elapsed = MonotonicClock.now - lastActivityTick
+        if elapsed >= idleTimeout {
+            idleActive = false
+            idleCheckTask = nil
+            close()
+        } else {
+            scheduleIdleCheck(after: idleTimeout - elapsed)
         }
     }
 
@@ -910,9 +971,9 @@ actor TCPConnection {
             }
         }
 
-        handshakeTimer?.cancel()
-        handshakeTimer = nil
-        activityTimer = makeIdleTimer()
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        startIdleTimer()
 
         let initialClientHello = pendingData
         pendingData.removeAll(keepingCapacity: true)
@@ -934,7 +995,7 @@ actor TCPConnection {
             self.lwipQueue.async {
                 self.assumeIsolated { me in
                     guard !me.closed else { return }
-                    me.activityTimer?.update()
+                    me.markActivity()
                     me.writeToLWIP(data)
                 }
             }
@@ -970,64 +1031,57 @@ actor TCPConnection {
     }
 
     private func makeMITMDialer() -> MITMDialer {
-        return { [weak self] host, port, completion in
-            guard let self else { completion(.failure(TransportError.notConnected)); return }
-            self.lwipQueue.async {
-                self.assumeIsolated { me in
-                    guard !me.closed else { completion(.failure(TransportError.notConnected)); return }
-                    me.dialUpstreamBounded(host: host, port: port, completion: completion)
-                }
-            }
+        return { [weak self] host, port in
+            guard let self else { throw TransportError.notConnected }
+            // Hops onto the actor (lwIP executor); the deadline race and route commit run there.
+            return try await self.dialUpstreamBounded(host: host, port: port)
         }
     }
 
     /// Bounds the deferred MITM upstream dial (TCP connect + proxy protocol handshake) — the gap between the
-    /// per-connection `handshakeTimer` and the session's TLS-only `armUpstreamHandshakeTimeout`, where a stalled
-    /// protocol handshake would otherwise linger on the 300 s idle timer. On expiry the transport is cancelled,
-    /// not just failed; `completion` fires exactly once via ``settleDial(_:_:)``.
-    private func dialUpstreamBounded(
-        host: String, port: UInt16,
-        completion: @escaping (Result<MITMDialResult, Error>) -> Void
-    ) {
-        let dial = InFlightDial()
-        dial.completion = completion
-        inFlightDials.append(dial)
-
-        let deadline = DispatchWorkItem { [weak self, weak dial] in
-            guard let self, let dial else { return }
-            self.assumeIsolated { me in
-                guard !me.closed, !dial.settled else { return }
-                dial.settled = true
-                dial.cancel?()
-                me.forgetDial(dial)
-                dial.completion?(.failure(HandshakeTimeoutError(phase: "upstream dial")))
-            }
-        }
-        dial.deadline = deadline
-        lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: deadline)
-
+    /// per-connection handshake timeout and the session's TLS-only `armUpstreamHandshakeTimeout`, where a
+    /// stalled protocol handshake would otherwise linger on the 300 s idle timer. On expiry the transport is
+    /// cancelled, not just failed (see ``raceHandshakeDeadline``). Actor-isolated.
+    private func dialUpstreamBounded(host: String, port: UInt16) async throws -> MITMDialResult {
+        guard !closed else { throw TransportError.notConnected }
         switch commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
-            settleDial(dial, .failure(TransportError.connectionFailed("rejected by routing rule: \(host)")))
+            throw TransportError.connectionFailed("rejected by routing rule: \(host)")
         case .direct:
-            dialDirectUpstream(host: host, port: port, dial: dial)
+            return try await dialDirectUpstream(host: host, port: port)
         case .proxy(_, let configuration):
-            dialProxyUpstream(configuration: configuration, host: host, port: port, dial: dial)
+            return try await dialProxyUpstream(configuration: configuration, host: host, port: port)
         }
     }
 
-    /// Resolves a dial exactly once: first of {dial resolves, deadline fires, teardown} wins.
-    /// A late result cancels whatever it produced, so a timed-out or torn-down dial can't hand
-    /// back a live socket.
-    private func settleDial(_ dial: InFlightDial, _ result: Result<MITMDialResult, Error>) {
-        guard !dial.settled else {
-            if case .success(let d) = result { d.connection.cancel(); d.proxyClient?.cancel() }
-            return
+    private enum DialRace<T: Sendable>: Sendable { case value(T), timedOut }
+
+    /// Races `body` against a `handshakeTimeout` `Task.sleep`. On timeout, `cancelOnTimeout` aborts the
+    /// in-flight transport so the (uncancellable) handshake fails instead of leaking a socket, and a
+    /// `HandshakeTimeoutError` is thrown; a `body` failure propagates as-is. Replaces the old per-dial
+    /// `DispatchWorkItem` deadline + settled-flag race with structured concurrency.
+    private func raceHandshakeDeadline<T: Sendable>(
+        cancelOnTimeout: @escaping @Sendable () -> Void,
+        _ body: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: DialRace<T>.self) { group in
+            group.addTask { .value(try await body()) }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
+                return .timedOut
+            }
+            defer { group.cancelAll() }
+            while let next = try await group.next() {
+                switch next {
+                case .value(let value):
+                    return value
+                case .timedOut:
+                    cancelOnTimeout()   // abort the in-flight handshake so `body` unwinds
+                    throw HandshakeTimeoutError(phase: "upstream dial")
+                }
+            }
+            throw HandshakeTimeoutError(phase: "upstream dial")
         }
-        dial.settled = true
-        dial.deadline?.cancel()
-        forgetDial(dial)
-        dial.completion?(result)
     }
 
     private func forgetDial(_ dial: InFlightDial) {
@@ -1081,59 +1135,47 @@ actor TCPConnection {
         return .proxy(routeTarget: stack.defaultRouteTarget, configuration: configuration)
     }
 
-    private func dialDirectUpstream(host: String, port: UInt16, dial: InFlightDial) {
+    private func dialDirectUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
         // Direct/bypass — not a proxied connection. TCPTransport has no dial
         // timer, so it stays out of the Dial stat automatically.
         let transport = TCPTransport(host: host, port: port)
         let connection = DirectProxyConnection(transport: transport)
-        dial.cancel = { [weak connection] in connection?.cancel() }
-        Task { [weak self] in
-            let error: Error?
-            do {
+        let dial = InFlightDial()
+        dial.cancel = { connection.cancel() }
+        inFlightDials.append(dial)
+        defer { forgetDial(dial) }
+        do {
+            try await raceHandshakeDeadline(cancelOnTimeout: { connection.cancel() }) {
                 try await transport.connect()
-                error = nil
-            } catch let dialError {
-                error = dialError
             }
-            guard let self else {
-                connection.cancel()
-                return
-            }
-            if let error {
-                // onTeardown reports the failure; don't double-report.
-                await self.settleDial(dial, .failure(error))
-            } else {
-                await self.settleDial(dial, .success(MITMDialResult(connection: connection, proxyClient: nil)))
-            }
+            return MITMDialResult(connection: connection, proxyClient: nil)
+        } catch {
+            // onTeardown reports the failure; don't double-report. Cancel a socket the connect may
+            // have opened before failing / timing out.
+            connection.cancel()
+            throw error
         }
     }
 
-    private func dialProxyUpstream(configuration: ProxyConfiguration, host: String, port: UInt16,
-                                   dial: InFlightDial) {
+    private func dialProxyUpstream(configuration: ProxyConfiguration, host: String, port: UInt16) async throws -> MITMDialResult {
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
-        dial.cancel = { [weak client] in client?.cancel() }
-        Task { [weak self] in
-            let result: Result<ProxyConnection, Error>
-            do {
-                result = .success(try await client.connect(to: host, port: port, initialData: nil))
-            } catch {
-                result = .failure(error)
+        let dial = InFlightDial()
+        dial.cancel = { client.cancel() }
+        inFlightDials.append(dial)
+        defer { forgetDial(dial) }
+        do {
+            let connection = try await raceHandshakeDeadline(cancelOnTimeout: { client.cancel() }) {
+                try await client.connect(to: host, port: port, initialData: nil)
             }
-            guard let self else {
-                if case .success(let connection) = result { connection.cancel() }
-                await client.cancel()
-                return
-            }
-            switch result {
-            case .success(let connection):
-                await self.settleDial(dial, .success(MITMDialResult(connection: connection, proxyClient: client)))
-            case .failure(let error):
-                // onTeardown reports the failure; don't double-report.
-                await self.settleDial(dial, .failure(error))
-            }
+            return MITMDialResult(connection: connection, proxyClient: client)
+        } catch {
+            // onTeardown reports the failure; don't double-report. The client owns any half-open
+            // socket from a raced success; cancel it.
+            await client.cancel()
+            throw error
         }
     }
 
@@ -1200,7 +1242,7 @@ actor TCPConnection {
 
             if written > 0 {
                 // Drain progress is activity; the tightened post-FIN timeout must not fire mid-backlog.
-                activityTimer?.update()
+                markActivity()
                 pendingWriteOffset += written
                 if pendingWriteOffset >= pendingWrite.count {
                     pendingWrite.removeAll(keepingCapacity: true)
@@ -1213,13 +1255,11 @@ actor TCPConnection {
                 bridge.tcpOutput(pcb)
             } else {
                 // Nothing drained (ERR_MEM / zero window) — retry after a delay;
-                // don't rearm the receive while stalled.
-                lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
-                    guard let self else { return }
-                    self.assumeIsolated { me in
-                        guard !me.closed else { return }
-                        me.drainPendingWrite()
-                    }
+                // don't rearm the receive while stalled. `drainPendingWrite` re-checks `closed`.
+                Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(TunnelConstants.drainRetryDelayMs))
+                    guard !Task.isCancelled else { return }
+                    await self?.drainPendingWrite()
                 }
                 return
             }
@@ -1260,7 +1300,7 @@ actor TCPConnection {
     private func closeWhenDrained() {
         guard !closed else { return }
         closePending = true
-        activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeout)
+        setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
         attemptDeferredClose()
     }
 
@@ -1327,20 +1367,18 @@ actor TCPConnection {
     /// `abortive` closes the outbound leg with RST instead of a graceful FIN.
     private func releaseProxy(abortive: Bool = false) {
         settlePendingAdmission()
-        handshakeTimer?.cancel()
-        handshakeTimer = nil
-        // Mark settled so a dial resolving after teardown cancels its socket instead of completing.
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        // Cancel every in-flight dial's transport so it fails instead of handing back a live socket
+        // after teardown (a success racing teardown is also cancelled by the MITM session consumer).
         for dial in inFlightDials {
-            dial.settled = true
-            dial.deadline?.cancel()
             dial.cancel?()
         }
         inFlightDials.removeAll()
-        sniffDeadline?.cancel()
-        sniffDeadline = nil
+        sniffDeadlineTask?.cancel()
+        sniffDeadlineTask = nil
         sniffer = nil
-        activityTimer?.cancel()
-        activityTimer = nil
+        cancelIdleTimer()
         let connection = proxyConnection
         let client = proxyClient
         let session = mitmSession

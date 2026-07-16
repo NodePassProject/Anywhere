@@ -7,7 +7,6 @@
 
 import Foundation
 import NetworkExtension
-import Combine
 import SwiftUI
 import Observation
 
@@ -39,7 +38,7 @@ class VPNViewModel {
 
     private(set) var isManagerReady = false
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
-    @ObservationIgnored private var statusObserver: AnyCancellable?
+    @ObservationIgnored private var statusObserver: Task<Void, Never>?
     private(set) var pendingReconnect = false
     /// Debounces a transient `.reasserting` (network blip) while connected so the UI keeps
     /// showing "Connected" unless the reconnect persists past ``reassertingDebounceInterval``.
@@ -363,15 +362,16 @@ class VPNViewModel {
     // MARK: - Setup
 
     private func setupStatusObserver() {
-        statusObserver = NotificationCenter.default
-            .publisher(for: .NEVPNStatusDidChange)
-            .compactMap { $0.object as? NEVPNConnection }
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] connection in
-                guard let self else { return }
-                guard connection === self.vpnManager?.connection else { return }
+        // The enclosing type is @MainActor, so this Task and `handleStatusChange` run on the
+        // main actor — matching the former `.receive(on: DispatchQueue.main)`.
+        statusObserver = Task { [weak self] in
+            for await note in NotificationCenter.default.notifications(named: .NEVPNStatusDidChange) {
+                guard !Task.isCancelled, let self else { return }
+                guard let connection = note.object as? NEVPNConnection,
+                      connection === self.vpnManager?.connection else { continue }
                 self.handleStatusChange(connection.status, on: connection)
             }
+        }
     }
 
     /// Routes a raw tunnel status to the UI, debouncing a transient reconnect.

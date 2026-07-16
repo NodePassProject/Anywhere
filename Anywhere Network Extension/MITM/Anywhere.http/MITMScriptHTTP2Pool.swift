@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2Pool")
 
@@ -13,7 +14,6 @@ enum MITMScriptHTTP2Outcome {
     case response(MITMScriptHTTPClient.Response)
     /// The origin doesn't speak `h2`; the caller should retry over HTTP/1.1.
     case fallbackToHTTP1
-    case failure(Error)
 }
 
 /// Pools multiplexed HTTP/2 connections per origin so concurrent script requests share one TCP+TLS connection.
@@ -40,7 +40,7 @@ nonisolated final class MITMScriptHTTP2Pool: MultiplexerPool<MITMScriptHTTP2Conn
 
     // MARK: - Perform
 
-    /// Runs one request over a pooled (or newly dialed) HTTP/2 connection. `completion` fires once.
+    /// Runs one request over a pooled (or newly dialed) HTTP/2 connection.
     func perform(
         request: URLRequest,
         host: String,
@@ -48,59 +48,51 @@ nonisolated final class MITMScriptHTTP2Pool: MultiplexerPool<MITMScriptHTTP2Conn
         hostHeader: String,
         insecure: Bool,
         maxBytes: Int,
-        resourceTimeout: TimeInterval,
-        completion: @escaping (MITMScriptHTTP2Outcome) -> Void
-    ) {
+        resourceTimeout: TimeInterval
+    ) async throws -> MITMScriptHTTP2Outcome {
         let key = Self.originKey(host: host, port: port, insecure: insecure)
         if isKnownHTTP1(key) {
-            completion(.fallbackToHTTP1)
-            return
+            return .fallbackToHTTP1
         }
 
-        let connection: MITMScriptHTTP2Connection
-        lock.lock()
-        multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
+        // The base `lock` (a `Mutex<Void>` gate) guards pool storage; no `await` inside the hold.
+        let connection: MITMScriptHTTP2Connection = lock.withLock { _ in
+            multiplexers[key]?.removeAll { $0.isClosed || $0.poolIsGoingAway }
 
-        if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-            lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
-            connection = existing
-        } else {
-            let new = MITMScriptHTTP2Connection(host: host, port: port, insecure: insecure)
-            new.onClose = { [weak self, weak new] in
-                guard let self, let new else { return }
-                self.removeMultiplexer(new, key: key)
-            }
-            new.onNegotiatedHTTP1 = { [weak self] in self?.markHTTP1(key) }
-            _ = new.tryReserveStream()   // fresh connection always has capacity
-            multiplexers[key, default: []].append(new)
-            lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
-            connection = new
-        }
-        lock.unlock()
-
-        connection.perform(
-            request: request,
-            hostHeader: hostHeader,
-            maxBytes: maxBytes,
-            resourceTimeout: resourceTimeout
-        ) { result in
-            switch result {
-            case .success(let response):
-                completion(.response(response))
-            case .failure(let error):
-                if case MITMScriptHTTP2Error.needsHTTP1Fallback = error {
-                    completion(.fallbackToHTTP1)
-                } else {
-                    completion(.failure(error))
+            if let existing = multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+                lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+                return existing
+            } else {
+                let new = MITMScriptHTTP2Connection(host: host, port: port, insecure: insecure)
+                new.onClose = { [weak self, weak new] in
+                    guard let self, let new else { return }
+                    self.removeMultiplexer(new, key: key)
                 }
+                new.onNegotiatedHTTP1 = { [weak self] in self?.markHTTP1(key) }
+                _ = new.tryReserveStream()   // fresh connection always has capacity
+                multiplexers[key, default: []].append(new)
+                lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
+                return new
             }
+        }
+
+        do {
+            let response = try await connection.perform(
+                request: request,
+                hostHeader: hostHeader,
+                maxBytes: maxBytes,
+                resourceTimeout: resourceTimeout
+            )
+            return .response(response)
+        } catch MITMScriptHTTP2Error.needsHTTP1Fallback {
+            return .fallbackToHTTP1
         }
     }
 
     // MARK: - HTTP/1.1-only origin cache
 
     private func isKnownHTTP1(_ key: String) -> Bool {
-        lock.withLock {
+        lock.withLock { _ in
             guard let expiry = http1Origins[key] else { return false }
             if MonotonicClock.now < expiry { return true }
             http1Origins.removeValue(forKey: key)
@@ -109,7 +101,7 @@ nonisolated final class MITMScriptHTTP2Pool: MultiplexerPool<MITMScriptHTTP2Conn
     }
 
     private func markHTTP1(_ key: String) {
-        lock.withLock {
+        lock.withLock { _ in
             if http1Origins[key] == nil, http1Origins.count >= Self.maxHTTP1Origins {
                 if let oldest = http1Origins.min(by: { $0.value < $1.value })?.key {
                     http1Origins.removeValue(forKey: oldest)

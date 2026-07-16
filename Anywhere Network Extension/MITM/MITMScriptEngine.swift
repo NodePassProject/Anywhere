@@ -83,8 +83,8 @@ final class MITMScriptEngine {
         // Async buffered-script fields — nil/unused on the frame path.
         let original: Message?
         var ctxValue: JSValue?
-        let resumeQueue: DispatchQueue?
-        let completion: ((Outcome) -> Void)?
+        /// The async bridge back to the awaiting caller; resumed exactly once by ``deliver``.
+        var continuation: CheckedContinuation<Outcome, Never>?
         /// Held so JSC keeps the promise's reactions reachable while suspended.
         var resultPromise: JSValue?
         var inFlightFetches = 0
@@ -95,14 +95,13 @@ final class MITMScriptEngine {
         var pinnedBodyBytes = 0
 
         /// Idle watchdog; fires and reverts the invocation if the promise never settles.
-        var watchdog: DispatchWorkItem?
+        var watchdog: Task<Void, Never>?
 
-        init(scope: UUID?, original: Message, resumeQueue: DispatchQueue, completion: @escaping (Outcome) -> Void) {
+        init(scope: UUID?, original: Message, continuation: CheckedContinuation<Outcome, Never>) {
             self.scope = scope
             self.allowsHTTP = true
             self.original = original
-            self.resumeQueue = resumeQueue
-            self.completion = completion
+            self.continuation = continuation
         }
 
         /// Lightweight sync-span invocation: carries only scope, HTTP gate, and directive slot.
@@ -110,32 +109,42 @@ final class MITMScriptEngine {
             self.scope = scope
             self.allowsHTTP = allowsHTTP
             self.original = nil
-            self.resumeQueue = nil
-            self.completion = nil
+            self.continuation = nil
         }
     }
-    
+
     private var context: JSContext
-    
+
     /// Compiled `process(ctx)` functions keyed by source hash; `byteCount` is a hash-collision guard.
     private struct CompiledEntry {
         let byteCount: Int
         let function: JSValue
     }
-    private var compiled: [Int: CompiledEntry] = [:]
 
-    /// Invocation whose synchronous JS span is running right now; nil between spans.
-    private var currentInvocation: Invocation?
+    /// State guarded by ``stateLock``: the executing span and the compile cache. Held only for short
+    /// critical sections — never across a JSC call (`function.call`/`evaluateScript`/settle) or an
+    /// `await`, since JSC re-enters to read `currentInvocation` and `Mutex` is non-reentrant.
+    private struct EngineState {
+        /// Invocation whose synchronous JS span is running right now; nil between spans.
+        var currentInvocation: Invocation?
+        /// Compiled `process(ctx)` functions keyed by source hash.
+        var compiled: [Int: CompiledEntry] = [:]
+    }
+    private let stateLock = Mutex(EngineState())
 
-    /// Suspended async invocations, retained until delivery so weak captures in fetch/settle closures stay valid.
+    /// Suspended async invocations, retained until delivery so weak captures in fetch/settle closures
+    /// stay valid. Script-queue-confined (all engine methods run on `MITMScriptTransform.scriptQueue`).
     private var liveInvocations: [ObjectIdentifier: Invocation] = [:]
 
     /// Shared across all engines: per-rule-set VMs would multiply JSC's multi-MiB per-VM
     /// overhead beyond the NE's ~50 MiB budget. JSC serializes heap access internally.
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
-    /// Serializes synchronous JS spans and guards `currentInvocation`/`compiled`; never held across an `await`.
-    private let invocationLock = NSLock()
+    /// The span whose JS is executing right now, read (re-entrantly) by the Anywhere.* blocks.
+    private var activeInvocation: Invocation? { stateLock.withLock { $0.currentInvocation } }
+    private func setActiveInvocation(_ invocation: Invocation?) {
+        stateLock.withLock { $0.currentInvocation = invocation }
+    }
 
     /// Ceiling on input-body bytes pinned by concurrently-suspended async invocations. A new
     /// invocation whose body would push past this passes its flow through unmodified.
@@ -233,23 +242,30 @@ final class MITMScriptEngine {
         return JSObjectIsFunction(ctxRef, object)
     }
 
-    /// Runs `process(ctx)`; a thenable return suspends without holding the script
-    /// queue. ``completion`` fires exactly once on ``resumeQueue`` at settlement.
+    /// Runs `process(ctx)`; a thenable return suspends without holding the script queue. Resolves
+    /// exactly once at settlement (or the idle watchdog). Hops onto the JSC-owning `scriptQueue`, so
+    /// it's callable from any async context; the caller re-establishes its own executor after the await.
     func applyAsync(
         _ message: Message,
         source: String,
+        sourceKey: Int
+    ) async -> Outcome {
+        // The parked hop lives in the JSC bridge: `runApply` resumes the continuation inline for a
+        // synchronous script or parks it in the ``Invocation`` for the promise-settle path to resolve.
+        await JSCConcurrencyBridge.shared.runParked { (continuation: CheckedContinuation<Outcome, Never>) in
+            self.runApply(message, source: source, sourceKey: sourceKey, continuation: continuation)
+        }
+    }
+
+    /// Runs on `scriptQueue`. Never holds `stateLock` across the JSC `function.call` (JSC re-enters the
+    /// Anywhere.* blocks, which read `currentInvocation` through the same lock).
+    private func runApply(
+        _ message: Message,
+        source: String,
         sourceKey: Int,
-        resumeOn resumeQueue: DispatchQueue,
-        completion: @escaping (Outcome) -> Void
+        continuation: CheckedContinuation<Outcome, Never>
     ) {
-        let inv = Invocation(
-            scope: message.ruleSetID,
-            original: message,
-            resumeQueue: resumeQueue,
-            completion: completion
-        )
-        invocationLock.lock()
-        defer { invocationLock.unlock() }
+        let inv = Invocation(scope: message.ruleSetID, original: message, continuation: continuation)
         // Admission control: if awaiting scripts already pin the body budget, pass this flow through
         // unmodified.
         let bodyBytes = message.body.count
@@ -265,10 +281,10 @@ final class MITMScriptEngine {
         }
         let contextValue = makeContextValue(message)
         inv.ctxValue = contextValue
-        currentInvocation = inv
+        setActiveInvocation(inv)
         let returned = runUserScript(source) { function.call(withArguments: [contextValue]) }
         guard let returned, isThenable(returned) else {
-            currentInvocation = nil
+            setActiveInvocation(nil)
             let updated = readBack(message, from: contextValue)
             deliver(finalize(original: message, updated: updated, directive: inv.directive), for: inv)
             return
@@ -279,7 +295,7 @@ final class MITMScriptEngine {
         Self.addSuspendedBodyBytes(bodyBytes)
         inv.resultPromise = returned
         liveInvocations[ObjectIdentifier(inv)] = inv
-        currentInvocation = nil
+        setActiveInvocation(nil)
         // Arm first: an already-settled promise delivers synchronously and deliver() cancels the timer.
         armWatchdog(for: inv)
         attachSettleHandlers(to: returned, for: inv)
@@ -335,23 +351,26 @@ final class MITMScriptEngine {
         }
         inv.resultPromise = nil
         inv.ctxValue = nil
-        guard let resumeQueue = inv.resumeQueue, let completion = inv.completion else { return }
-        resumeQueue.async { completion(outcome) }
+        // Resume the awaiting caller exactly once (resuming just schedules its task; no re-entrancy).
+        let continuation = inv.continuation
+        inv.continuation = nil
+        continuation?.resume(returning: outcome)
     }
 
-    /// (Re)arms the idle watchdog; settlement cancels it first, so settlement always wins.
+    /// (Re)arms the idle watchdog; settlement cancels it first, so settlement always wins. The revert
+    /// runs on `scriptQueue` (JSC-confined), so it's serialized with settlement there.
     private func armWatchdog(for inv: Invocation) {
         inv.watchdog?.cancel()
-        let item = DispatchWorkItem { [weak self, weak inv] in
-            guard let self, let inv else { return }
-            self.invocationLock.lock()
-            defer { self.invocationLock.unlock() }
-            guard !inv.delivered, let original = inv.original else { return }
-            logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
-            self.deliver(.modified(original), for: inv)
+        let timeout = Self.invocationIdleTimeout
+        inv.watchdog = Task { [weak self, weak inv] in
+            try? await Task.sleep(for: .seconds(timeout))
+            guard !Task.isCancelled, let self, let inv else { return }
+            MITMScriptTransform.scriptQueue.async {
+                guard !inv.delivered, let original = inv.original else { return }
+                logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
+                self.deliver(.modified(original), for: inv)
+            }
         }
-        inv.watchdog = item
-        MITMScriptTransform.scriptQueue.asyncAfter(deadline: .now() + Self.invocationIdleTimeout, execute: item)
     }
 
     private static func suspendedBodyBytes() -> Int {
@@ -362,7 +381,8 @@ final class MITMScriptEngine {
         mitmScriptSuspendedBodyBytes.wrappingAdd(delta, ordering: .relaxed)
     }
 
-    /// Runs ``source`` against one streaming frame; on failure emits the frame unchanged.
+    /// Runs ``source`` against one streaming frame; on failure emits the frame unchanged. Called on
+    /// `scriptQueue` (via ``MITMScriptTransform.applyFrame``); the sync span never suspends.
     func applyFrame(
         _ frame: Data,
         source: String,
@@ -370,14 +390,13 @@ final class MITMScriptEngine {
         frameContext: FrameContext,
         state: JSValue?
     ) -> FrameOutcome {
-        invocationLock.lock()
-        defer { invocationLock.unlock() }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
         let inv = Invocation(scope: frameContext.ruleSetID, allowsHTTP: false)
-        currentInvocation = inv
-        defer { currentInvocation = nil }
+        // Set/clear around the JSC call only; `stateLock` is never held across `function.call`.
+        setActiveInvocation(inv)
+        defer { setActiveInvocation(nil) }
         let ctxArg = makeFrameContextValue(frameContext, frame: frame, state: state)
         _ = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         // Ignore mutations to method/url/status/headers — HEADERS are on the wire.
@@ -411,39 +430,40 @@ final class MITMScriptEngine {
     // MARK: - Compilation
 
     /// Compiles into the cache ahead of traffic without running `process` —
-    /// a fabricated ctx could fire respond, mutate the store, or spin.
+    /// a fabricated ctx could fire respond, mutate the store, or spin. Script-queue only.
     func precompile(source: String, sourceKey: Int) {
-        invocationLock.lock()
-        defer { invocationLock.unlock() }
         _ = compileIfNeeded(source, key: sourceKey)
     }
 
     /// Drops cache entries not in ``keep``. Must be called on the script queue
     /// so dropped JSValues release on the VM-owning queue.
     func pruneCompiled(keeping keep: Set<Int>) {
-        invocationLock.lock()
-        defer { invocationLock.unlock() }
-        let stale = compiled.keys.filter { !keep.contains($0) }
-        for key in stale { compiled.removeValue(forKey: key) }
+        stateLock.withLock { state in
+            let stale = state.compiled.keys.filter { !keep.contains($0) }
+            for key in stale { state.compiled.removeValue(forKey: key) }
+        }
     }
 
     /// Reload reset. Script-queue only.
     fileprivate func resetOnReload(keepingCompiled keep: Set<Int>) {
-        invocationLock.lock()
-        defer { invocationLock.unlock() }
-        guard currentInvocation == nil, liveInvocations.isEmpty else {
-            let stale = compiled.keys.filter { !keep.contains($0) }
-            for key in stale { compiled.removeValue(forKey: key) }
+        let inSpan = stateLock.withLock { $0.currentInvocation != nil }
+        guard !inSpan, liveInvocations.isEmpty else {
+            stateLock.withLock { state in
+                let stale = state.compiled.keys.filter { !keep.contains($0) }
+                for key in stale { state.compiled.removeValue(forKey: key) }
+            }
             return
         }
-        compiled.removeAll()
+        stateLock.withLock { $0.compiled.removeAll() }
         context = JSContext(virtualMachine: Self.sharedVM)
         configureContext()
     }
 
+    /// Script-queue only. Never holds `stateLock` across `evaluateScript` — a script's top-level code
+    /// runs there and re-enters the Anywhere.* blocks, which read `currentInvocation` through the lock.
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
         let byteCount = source.utf8.count
-        if let cached = compiled[key] {
+        if let cached = stateLock.withLock({ $0.compiled[key] }) {
             // 64-bit hash collision guard — a byte-count mismatch recompiles.
             if cached.byteCount == byteCount { return cached.function }
             logger.warning("[MITM][JS] cache-key collision: recompiling under same key")
@@ -469,7 +489,7 @@ final class MITMScriptEngine {
             logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
             return nil
         }
-        compiled[key] = CompiledEntry(byteCount: byteCount, function: value)
+        stateLock.withLock { $0.compiled[key] = CompiledEntry(byteCount: byteCount, function: value) }
         return value
     }
 
@@ -1324,14 +1344,14 @@ final class MITMScriptEngine {
         let store = JSValue(newObjectIn: context)!
         let storeGet: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.currentInvocation?.scope,
+            guard let scope = self?.activeInvocation?.scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk)
             else { return JSValue(undefinedIn: context) }
             return Self.makeUint8Array(in: context, from: bytes)
         }
         let storeGetString: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.currentInvocation?.scope,
+            guard let scope = self?.activeInvocation?.scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk),
                   let string = String(data: bytes, encoding: .utf8)
             else { return JSValue(undefinedIn: context) }
@@ -1339,7 +1359,7 @@ final class MITMScriptEngine {
         }
         let storeSet: @convention(block) (String, JSValue, Bool) -> Void = { [weak self] key, val, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.currentInvocation?.scope else { return }
+            guard let scope = self?.activeInvocation?.scope else { return }
             let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             do {
                 try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes, onDisk: onDisk)
@@ -1359,11 +1379,11 @@ final class MITMScriptEngine {
             }
         }
         let storeDelete: @convention(block) (String, Bool) -> Void = { [weak self] key, onDisk in
-            guard let scope = self?.currentInvocation?.scope else { return }
+            guard let scope = self?.activeInvocation?.scope else { return }
             MITMScriptStore.shared.delete(scope: scope, key: key, onDisk: onDisk)
         }
         let storeKeys: @convention(block) (Bool) -> [String] = { [weak self] onDisk in
-            guard let scope = self?.currentInvocation?.scope else { return [] }
+            guard let scope = self?.activeInvocation?.scope else { return [] }
             return MITMScriptStore.shared.keys(scope: scope, onDisk: onDisk)
         }
         store.setObject(storeGet, forKeyedSubscript: "get" as NSString)
@@ -1379,17 +1399,17 @@ final class MITMScriptEngine {
         let params = JSValue(newObjectIn: context)!
         let paramsGet: @convention(block) (String) -> JSValue = { [weak self] key in
             let context = JSContext.current()!
-            guard let scope = self?.currentInvocation?.scope,
+            guard let scope = self?.activeInvocation?.scope,
                   let value = MITMParamStore.shared.get(scope: scope, key: key)
             else { return JSValue(undefinedIn: context) }
             return JSValue(object: value, in: context)
         }
         let paramsKeys: @convention(block) () -> [String] = { [weak self] in
-            guard let scope = self?.currentInvocation?.scope else { return [] }
+            guard let scope = self?.activeInvocation?.scope else { return [] }
             return MITMParamStore.shared.keys(scope: scope)
         }
         let paramsAll: @convention(block) () -> [String: String] = { [weak self] in
-            guard let scope = self?.currentInvocation?.scope else { return [:] }
+            guard let scope = self?.activeInvocation?.scope else { return [:] }
             return MITMParamStore.shared.all(scope: scope)
         }
         params.setObject(paramsGet, forKeyedSubscript: "get" as NSString)
@@ -1421,10 +1441,10 @@ final class MITMScriptEngine {
 
     private func installControlGlobals(on anywhere: JSValue) {
         let doneBlock: @convention(block) () -> Void = { [weak self] in
-            self?.currentInvocation?.directive = .done
+            self?.activeInvocation?.directive = .done
         }
         let exitBlock: @convention(block) () -> Void = { [weak self] in
-            self?.currentInvocation?.directive = .exit
+            self?.activeInvocation?.directive = .exit
         }
         anywhere.setObject(doneBlock, forKeyedSubscript: "done" as NSString)
         anywhere.setObject(exitBlock, forKeyedSubscript: "exit" as NSString)
@@ -1432,7 +1452,7 @@ final class MITMScriptEngine {
         let respondBlock: @convention(block) (JSValue) -> Void = { [weak self] spec in
             guard let self else { return }
             guard !spec.isUndefined, !spec.isNull else {
-                self.currentInvocation?.directive = .respond(
+                self.activeInvocation?.directive = .respond(
                     SynthesizedResponse(status: 200, headers: [], body: Data())
                 )
                 return
@@ -1467,7 +1487,7 @@ final class MITMScriptEngine {
             } else {
                 body = Data()
             }
-            self.currentInvocation?.directive = .respond(
+            self.activeInvocation?.directive = .respond(
                 SynthesizedResponse(status: status, headers: headers, body: body)
             )
         }
@@ -1503,7 +1523,7 @@ final class MITMScriptEngine {
     }
 
     private func startHTTP(defaultMethod: String, urlVal: JSValue, optsVal: JSValue, in ctx: JSContext) -> JSValue {
-        guard let inv = currentInvocation, inv.allowsHTTP, inv.resumeQueue != nil else {
+        guard let inv = activeInvocation, inv.allowsHTTP else {
             return Self.rejected(
                 "Anywhere.http is only available inside a buffered `script` rule — an `async function process(ctx)` that awaits it. It is unavailable in stream-script.",
                 in: ctx
@@ -1576,14 +1596,23 @@ final class MITMScriptEngine {
             liveInv.inFlightFetches += 1
             liveInv.totalFetches += 1
             Self.reserveGlobalFetchSlot()
-            MITMScriptHTTPClient.shared.send(
-                request,
-                followRedirects: followRedirects,
-                insecure: insecure,
-                maxBytes: maxBytes,
-                // timeoutInterval bounds inactivity; resourceTimeout is the wall-clock cap.
-                resourceTimeout: Self.invocationIdleTimeout
-            ) { result in
+            // The JSC promise executor is synchronous, so bridge the async client through a Task,
+            // then settle back on the script queue exactly as the completion path did.
+            Task {
+                let result: Result<MITMScriptHTTPClient.Response, Error>
+                do {
+                    let response = try await MITMScriptHTTPClient.shared.send(
+                        request,
+                        followRedirects: followRedirects,
+                        insecure: insecure,
+                        maxBytes: maxBytes,
+                        // timeoutInterval bounds inactivity; resourceTimeout is the wall-clock cap.
+                        resourceTimeout: Self.invocationIdleTimeout
+                    )
+                    result = .success(response)
+                } catch {
+                    result = .failure(error)
+                }
                 MITMScriptTransform.scriptQueue.async {
                     Self.releaseGlobalFetchSlot()
                     guard let inv else { return }   // delivered/torn down — drop
@@ -1601,15 +1630,14 @@ final class MITMScriptEngine {
         reject: JSValue?,
         result: Result<MITMScriptHTTPClient.Response, Error>
     ) {
-        invocationLock.lock()
-        defer { invocationLock.unlock() }
+        // Runs on `scriptQueue`; `stateLock` is never held across the JSC continuation call below.
         if inv.inFlightFetches > 0 { inv.inFlightFetches -= 1 }
         // Progress: re-arm the watchdog for the continuation window.
         if !inv.delivered { armWatchdog(for: inv) }
         // Settle even if already delivered: a no-op in JS, but a `Promise.all`
         // still needs all legs settled to release JSC references.
-        currentInvocation = inv
-        defer { currentInvocation = nil }
+        setActiveInvocation(inv)
+        defer { setActiveInvocation(nil) }
         // The continuation runs synchronously — guard it: a `while(true)` after an await wedges here.
         _ = runUserScript("async script (Anywhere.http resume continuation)") {
             switch result {

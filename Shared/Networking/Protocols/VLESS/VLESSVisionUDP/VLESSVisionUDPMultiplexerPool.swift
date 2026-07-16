@@ -8,14 +8,6 @@
 import Foundation
 import Synchronization
 
-/// Warm pool of Vision-UDP mux connections for one tunnel, owned by ``TunnelStack`` on
-/// ``TunnelStack/udpQueue`` and torn down there on wake/path-change/stop.
-///
-/// Deliberately standalone rather than a ``MultiplexerPool`` subclass: each
-/// ``VLESSVisionUDPMultiplexer`` runs its own idle timer, and an XUDP (globalID) mux pins a
-/// single flow for its lifetime — neither fits the base's pool-driven idle sweep and per-key
-/// bucketing. The `multiplexers` collection is guarded by a `Mutex`, but each mux's own state
-/// stays confined to `flowQueue`, so `acquireStream` must be called on `flowQueue`.
 nonisolated final class VLESSVisionUDPMultiplexerPool {
     let configuration: ProxyConfiguration
     let flowQueue: DispatchQueue
@@ -26,15 +18,13 @@ nonisolated final class VLESSVisionUDPMultiplexerPool {
         self.flowQueue = flowQueue
     }
 
-    /// Reuses a mux with spare capacity or dials a fresh one, then opens a stream. Must be
-    /// called on `flowQueue`.
+    /// Reuses a mux with spare capacity or dials a fresh one, then opens a stream.
     func acquireStream(
         network: VLESSVisionUDPNetwork,
         host: String,
         port: UInt16,
-        globalID: Data?,
-        completion: @escaping (Result<VLESSVisionUDPStream, Error>) -> Void
-    ) {
+        globalID: Data?
+    ) async throws -> VLESSVisionUDPStream {
         let multiplexer: VLESSVisionUDPMultiplexer = multiplexers.withLock { multiplexers in
             multiplexers.removeAll { $0.isClosed }
 
@@ -42,9 +32,9 @@ nonisolated final class VLESSVisionUDPMultiplexerPool {
                 return reusable
             }
 
-            let created = VLESSVisionUDPMultiplexer(configuration: configuration, flowQueue: flowQueue)
+            let created = VLESSVisionUDPMultiplexer(configuration: configuration)
             // Self-eviction: a mux that idle-times-out or fails removes itself here instead of
-            // lingering until the next acquire. `onClose` fires on flowQueue, off this lock.
+            // lingering until the next acquire. `onClose` fires off this lock.
             created.onClose = { [weak self, weak created] in
                 guard let self, let created else { return }
                 self.multiplexers.withLock { $0.removeAll { $0 === created } }
@@ -53,7 +43,7 @@ nonisolated final class VLESSVisionUDPMultiplexerPool {
             return created
         }
 
-        multiplexer.openStream(network: network, host: host, port: port, globalID: globalID, completion: completion)
+        return try await multiplexer.openStream(network: network, host: host, port: port, globalID: globalID)
     }
 
     func closeAll() {

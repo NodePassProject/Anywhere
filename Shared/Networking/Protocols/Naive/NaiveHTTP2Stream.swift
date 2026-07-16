@@ -36,12 +36,16 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
     private var recvConsumed: Int = 0
     private var recvWindowSize: Int = NaiveHTTP2FlowControl.naiveInitialWindowSize
 
-    private var receiveQueue: [Data] = []
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var endStreamReceived = false
-    private var streamError: Error?
+    /// Inbound DATA payloads / EOF / error from the multiplexer's read loop; the async
+    /// replacement for the parked `pendingReceive` completion. QUIC-style backpressure is
+    /// preserved: flow-control credit is returned in ``receiveData()`` only once
+    /// ``AsyncByteChannel/next()`` hands the bytes over. H2 flow control counts DATA payload
+    /// octets (RFC 7540 §6.9.1), so `data.count` is the exact amount to credit.
+    private let inbox = AsyncByteChannel()
 
-    private var connectCompletion: ((Error?) -> Void)?
+    /// Resolves when the CONNECT response (200) arrives, or the stream fails first. The waiter
+    /// continuation lives in the promise (async infra), bridging the multiplexer's read loop.
+    private let connectPromise = AsyncPromise<Void>()
 
     /// CONNECT response headers exposed for proxy-layer negotiation.
     private(set) var responseHeaders: [(name: String, value: String)] = []
@@ -59,115 +63,46 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
 
     // MARK: - HTTPTunnel
 
-    // The multiplexer pushes frames on its own queue and fulfils the parked completions;
-    // the async surface parks the caller's continuation there, preserving the state machine.
+    // The multiplexer pushes frames on its own queue and resolves the parked continuations /
+    // yields to the inbox; the async surface awaits them there, preserving the state machine.
 
     func openTunnel() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            openTunnel { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
+        guard let multiplexer else { throw NaiveHTTP2Error.notReady }
+        try await multiplexer.ensureReady()
+        // Set up the stream and fire the CONNECT HEADERS write on the multiplexer queue;
+        // `connectPromise` resolves later in `handleHeaders` (200) or `handleStreamError` (failure).
+        await multiplexer.run { [self] in
+            // peerInitialWindowSize is set once SETTINGS is exchanged (ensureReady done).
+            self.sendWindow = multiplexer.peerInitialWindowSize
+            self.state = .connectSent
 
-    private func openTunnel(completion: @escaping (Error?) -> Void) {
-        guard let multiplexer else {
-            completion(NaiveHTTP2Error.notReady)
-            return
-        }
-
-        multiplexer.queue.async { [self] in
-            multiplexer.ensureReady { [weak self] error in
+            Task { [weak self] in
                 guard let self, let multiplexer = self.multiplexer else { return }
-                // ensureReady completion fires on multiplexer.queue
-                if let error {
-                    self.state = .closed
-                    completion(error)
-                    return
-                }
-
-                self.sendWindow = multiplexer.peerInitialWindowSize
-
-                self.connectCompletion = completion
-                self.state = .connectSent
-
-                multiplexer.sendConnect(stream: self) { [weak self] error in
-                    guard let self, let multiplexer = self.multiplexer else { return }
-                    multiplexer.queue.async {
-                        if let error {
-                            self.state = .closed
-                            let callback = self.connectCompletion
-                            self.connectCompletion = nil
-                            multiplexer.removeStream(self)
-                            callback?(error)
-                        }
-                    }
+                do {
+                    try await multiplexer.sendConnect(stream: self)
+                } catch {
+                    multiplexer.queue.async { self.handleStreamError(error) }
                 }
             }
         }
+        try await connectPromise.value()
     }
 
     func sendData(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendData(data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-    }
-
-    private func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
-        guard let multiplexer else {
-            completion(NaiveHTTP2Error.notReady)
-            return
-        }
-        multiplexer.queue.async { [self] in
-            guard state == .open else {
-                completion(NaiveHTTP2Error.notReady)
-                return
-            }
-            multiplexer.sendData(data, on: self, completion: completion)
-        }
+        guard let multiplexer else { throw NaiveHTTP2Error.notReady }
+        // Guard `state == .open` on the multiplexer queue, then delegate to the flow-controlled send.
+        let open: Bool = await multiplexer.run { [self] in state == .open }
+        guard open else { throw NaiveHTTP2Error.notReady }
+        try await multiplexer.sendData(data, on: self)
     }
 
     func receiveData() async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            receiveData { data, error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume(returning: data) }
-            }
+        let data = try await inbox.next()
+        if let data, !data.isEmpty, let multiplexer {
+            // Return flow-control credit only now the app has taken the bytes (preserves backpressure).
+            multiplexer.queue.async { [weak self] in self?.acknowledgeConsumedData(count: data.count) }
         }
-    }
-
-    private func receiveData(completion: @escaping (Data?, Error?) -> Void) {
-        guard let multiplexer else {
-            completion(nil, NaiveHTTP2Error.notReady)
-            return
-        }
-        multiplexer.queue.async { [self] in
-            if let error = streamError {
-                completion(nil, error)
-                return
-            }
-
-            if !receiveQueue.isEmpty {
-                let data = receiveQueue.removeFirst()
-                self.acknowledgeConsumedData(count: data.count)
-                completion(data, nil)
-                return
-            }
-
-            if endStreamReceived {
-                state = .closed
-                completion(nil, nil)
-                return
-            }
-
-            guard state == .open else {
-                completion(nil, NaiveHTTP2Error.notReady)
-                return
-            }
-
-            pendingReceive = completion
-        }
+        return data
     }
 
     func close() {
@@ -185,14 +120,8 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
                 )
             }
 
-            if let callback = connectCompletion {
-                connectCompletion = nil
-                callback(NaiveHTTP2Error.connectionFailed("Stream closed"))
-            }
-            if let pending = pendingReceive {
-                pendingReceive = nil
-                pending(nil, NaiveHTTP2Error.connectionFailed("Stream closed"))
-            }
+            connectPromise.resolve(.failure(NaiveHTTP2Error.connectionFailed("Stream closed")))
+            inbox.cancel()
         }
     }
 
@@ -217,9 +146,7 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
             if status == "200" {
                 responseHeaders = headers
                 state = .open
-                let callback = connectCompletion
-                connectCompletion = nil
-                callback?(nil)
+                connectPromise.resolve(.success(()))
             } else if status == "407" {
                 handleStreamError(NaiveHTTP2Error.authenticationRequired)
             } else {
@@ -229,32 +156,19 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
     }
 
     func handleData(_ payload: Data, endStream: Bool) {
-        if endStream {
-            endStreamReceived = true
+        // Yield payload to the inbox; the reader credits flow control as it drains (backpressure).
+        if !payload.isEmpty {
+            inbox.yield(Data(payload))
         }
 
-        if let pending = pendingReceive {
-            if !payload.isEmpty {
-                pendingReceive = nil
-                acknowledgeConsumedData(count: payload.count)
-                pending(payload, nil)
-            } else if endStream {
-                pendingReceive = nil
+        if endStream {
+            // END_STREAM: free the multiplexer slot now even if buffered data remains unread.
+            // The inbox still delivers every queued chunk before its EOF, so ordering is preserved.
+            if state != .closed {
                 state = .closed
                 multiplexer?.removeStream(self)
-                pending(nil, nil)
             }
-            // Empty DATA without END_STREAM: keep waiting
-        } else if !payload.isEmpty {
-            receiveQueue.append(payload)
-        } else if endStream && receiveQueue.isEmpty {
-            state = .closed
-            multiplexer?.removeStream(self)
-        }
-
-        // END_STREAM: free the multiplexer slot now even if buffered data remains unread.
-        if endStream && state != .closed {
-            multiplexer?.removeStream(self)
+            inbox.finish()
         }
     }
 
@@ -273,17 +187,10 @@ nonisolated class NaiveHTTP2Stream: HTTPTunnel {
     private func handleStreamError(_ error: Error) {
         guard state != .closed else { return }
         state = .closed
-        streamError = error
         multiplexer?.removeStream(self)
 
-        if let callback = connectCompletion {
-            connectCompletion = nil
-            callback(error)
-        }
-        if let pending = pendingReceive {
-            pendingReceive = nil
-            pending(nil, error)
-        }
+        connectPromise.resolve(.failure(error))
+        inbox.fail(error)
     }
 
     // MARK: - Flow Control (called by multiplexer on multiplexer.queue)

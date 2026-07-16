@@ -49,8 +49,8 @@ extension TunnelStack {
         stopObservingSettings()
         lwipQueue.sync { [self] in
             running = false
-            deferredRestart?.cancel()
-            deferredRestart = nil
+            deferredRestartTask?.cancel()
+            deferredRestartTask = nil
             shutdownInternal()
             // After shutdown so the teardown's own callbacks (RSTs, errors)
             // still reach the stack.
@@ -209,24 +209,26 @@ extension TunnelStack {
     private func restartStack(configuration: ProxyConfiguration, revalidateMode: Bool = false) {
         // A trusted-network restart is redundant when one is already pending — that
         // restart re-derives the effective mode from the current egress when it runs.
-        if revalidateMode, deferredRestart != nil { return }
+        if revalidateMode, deferredRestartTask != nil { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastRestartTime
 
         if elapsed < TunnelConstants.restartThrottleInterval {
-            deferredRestart?.cancel()
+            deferredRestartTask?.cancel()
             let delay = TunnelConstants.restartThrottleInterval - elapsed
-            let work = DispatchWorkItem { [self] in
-                deferredRestart = nil
-                guard running else { return }
-                // The egress (and effective mode) may have reverted within the
-                // throttle window; skip the teardown when it already matches.
-                if revalidateMode, computeEffectiveProxyMode() == proxyMode { return }
-                restartStackNow(configuration: configuration)
+            deferredRestartTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled, let self else { return }
+                self.lwipQueue.async {
+                    self.deferredRestartTask = nil
+                    guard self.running else { return }
+                    // The egress (and effective mode) may have reverted within the
+                    // throttle window; skip the teardown when it already matches.
+                    if revalidateMode, self.computeEffectiveProxyMode() == self.proxyMode { return }
+                    self.restartStackNow(configuration: configuration)
+                }
             }
-            deferredRestart = work
-            lwipQueue.asyncAfter(deadline: .now() + delay, execute: work)
             logger.debug("[TunnelStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
             return
         }
@@ -239,8 +241,8 @@ extension TunnelStack {
     /// pool is preserved — routing is decided at connection time, so cached
     /// fake IPs stay valid.
     private func restartStackNow(configuration: ProxyConfiguration) {
-        deferredRestart?.cancel()
-        deferredRestart = nil
+        deferredRestartTask?.cancel()
+        deferredRestartTask = nil
         lastRestartTime = CFAbsoluteTimeGetCurrent()
 
         shutdownInternal()

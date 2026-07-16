@@ -35,7 +35,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         var buffering: Bool = true
         var outboundBuffer: Data = Data()
 
-        var synDoneTimer: DispatchSourceTimer?
+        var synDoneTask: Task<Void, Never>?
 
         /// Buffer for partial inbound frames (TLS records don't align with AnyTLS frames).
         var recvBuffer = Data()
@@ -54,8 +54,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     private let sendMutex = AsyncMutex()
 
     var seq: UInt64 = 0
-
-    private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSSessionTimerQueue)
 
     var onClose: (() -> Void)?
 
@@ -136,20 +134,18 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     /// Must be called with `lock` held (inside a `withLock` on it).
     private func armSynDoneTimerLocked(_ state: inout State) {
-        state.synDoneTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
-        timer.schedule(deadline: .now() + .seconds(3))
-        timer.setEventHandler { [weak self] in
+        state.synDoneTask?.cancel()
+        state.synDoneTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
             self?.close(error: ProxyError.connectionFailed("AnyTLS SYN-ACK timeout"))
         }
-        timer.resume()
-        state.synDoneTimer = timer
     }
 
     /// Must be called with `lock` held (inside a `withLock` on it).
     private func cancelSynDoneTimerLocked(_ state: inout State) {
-        state.synDoneTimer?.cancel()
-        state.synDoneTimer = nil
+        state.synDoneTask?.cancel()
+        state.synDoneTask = nil
     }
 
     // MARK: - Streams
@@ -475,6 +471,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     deinit {
         // Reclaim the SYN-done watchdog if the multiplexer was dropped without close().
-        lock.withLock { $0.synDoneTimer?.cancel() }
+        lock.withLock { $0.synDoneTask?.cancel() }
     }
 }

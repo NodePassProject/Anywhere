@@ -12,8 +12,6 @@ import Security
 
 nonisolated private let logger = AnywhereLogger(category: "RealityClient")
 
-// MARK: - RealityClient
-
 nonisolated class RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any AsyncByteTransport)?
@@ -88,29 +86,6 @@ nonisolated class RealityClient {
         } catch {
             releaseOnFailure()
             throw error
-        }
-    }
-
-    // MARK: Callback bridges (for consumers not yet migrated to the async surface)
-
-    func connect(
-        host: String,
-        port: UInt16,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        Task {
-            do { completion(.success(try await connect(host: host, port: port))) }
-            catch { completion(.failure(error)) }
-        }
-    }
-
-    func connect(
-        overTunnel tunnel: ProxyConnection,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
-    ) {
-        Task {
-            do { completion(.success(try await connect(overTunnel: tunnel))) }
-            catch { completion(.failure(error)) }
         }
     }
 

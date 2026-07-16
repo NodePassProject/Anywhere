@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
 
@@ -42,7 +43,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
 
     /// The opened stream expects a destination address as its first cmdPSH payload.
     func acquireStream() async throws -> AnyTLSStream {
-        let reused: AnyTLSMultiplexer? = try lock.withLock { () throws -> AnyTLSMultiplexer? in
+        let reused: AnyTLSMultiplexer? = try lock.withLock { _ throws -> AnyTLSMultiplexer? in
             if closed {
                 logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
                 throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
@@ -60,7 +61,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
         logger.debug("[AnyTLSMultiplexerPool] acquireStream — no idle multiplexer, dialing fresh TLS multiplexer")
 
         let connection = try await dialOut()
-        let multiplexer: AnyTLSMultiplexer = try lock.withLock { () throws -> AnyTLSMultiplexer in
+        let multiplexer: AnyTLSMultiplexer = try lock.withLock { _ throws -> AnyTLSMultiplexer in
             if closed {
                 connection.cancel()
                 logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
@@ -91,9 +92,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
 
     /// Sets `closed` to reject new acquires, then defers to the base.
     override func closeAll() {
-        lock.lock()
-        closed = true
-        lock.unlock()
+        lock.withLock { _ in closed = true }
         super.closeAll()
     }
 
@@ -110,11 +109,11 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
             guard let multiplexer else { return }
             multiplexer.releaseReservation()
             guard let self else { return }
-            self.lock.lock()
-            if self.lastActivity[ObjectIdentifier(multiplexer)] != nil {
-                self.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+            self.lock.withLock { _ in
+                if self.lastActivity[ObjectIdentifier(multiplexer)] != nil {
+                    self.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+                }
             }
-            self.lock.unlock()
         }
         return stream
     }

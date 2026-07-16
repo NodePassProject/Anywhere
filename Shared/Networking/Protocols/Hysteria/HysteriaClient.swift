@@ -25,7 +25,7 @@ nonisolated final class HysteriaClient {
     private struct RegistryState {
         var entries: [Key: HysteriaClient] = [:]
         /// Coalesces concurrent first-time builds for the same key.
-        var pending: [Key: [(Result<HysteriaClient, Error>) -> Void]] = [:]
+        var pending: [Key: [CheckedContinuation<HysteriaClient, Error>]] = [:]
     }
     private static let registry = Mutex(RegistryState())
 
@@ -69,9 +69,8 @@ nonisolated final class HysteriaClient {
     static func acquireChained(
         configuration: HysteriaConfiguration,
         chainSignature: String,
-        builder: @escaping (@escaping (Result<(QUICDatagramTransport, [ProxyClient]), Error>) -> Void) -> Void,
-        completion: @escaping (Result<HysteriaClient, Error>) -> Void
-    ) {
+        builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
+    ) async throws -> HysteriaClient {
         let key = Key(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
@@ -80,47 +79,48 @@ nonisolated final class HysteriaClient {
             chainSignature: chainSignature
         )
 
-        // Fast paths resolve under the lock; the completion itself fires outside.
-        var existing: HysteriaClient?
-        var shouldBuild = false
-        registry.withLock { state in
-            if let client = state.entries[key] {
-                existing = client
-                return
+        enum Decision { case existing(HysteriaClient); case joined; case build }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HysteriaClient, Error>) in
+            let decision: Decision = registry.withLock { state in
+                if let client = state.entries[key] { return .existing(client) }
+                if state.pending[key] != nil {
+                    state.pending[key]?.append(continuation)
+                    return .joined
+                }
+                state.pending[key] = [continuation]      // our own continuation leads; drained below
+                return .build
             }
-            if state.pending[key] != nil {
-                state.pending[key]?.append(completion)
-                return
-            }
-            state.pending[key] = [completion]
-            shouldBuild = true
-        }
-        if let existing {
-            completion(.success(existing))
-            return
-        }
-        guard shouldBuild else { return }
-
-        builder { builderResult in
-            // Registry insert and waiter drain happen atomically; the coalesced
-            // completions fire after the lock is released.
-            let (queued, outcome): ([(Result<HysteriaClient, Error>) -> Void], Result<HysteriaClient, Error>) = Self.registry.withLock { state in
-                let queued = state.pending.removeValue(forKey: key) ?? []
-                switch builderResult {
-                case .success(let (transport, holders)):
-                    let client = HysteriaClient(
-                        configuration: configuration,
-                        transport: transport,
-                        chainHolders: holders,
-                        poolKey: key
-                    )
-                    state.entries[key] = client
-                    return (queued, .success(client))
-                case .failure(let error):
-                    return (queued, .failure(error))
+            switch decision {
+            case .existing(let client):
+                continuation.resume(returning: client)
+            case .joined:
+                break                                     // resumed by the build leader's drain
+            case .build:
+                Task {
+                    let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
+                    do { builderResult = .success(try await builder()) }
+                    catch { builderResult = .failure(error) }
+                    // Registry insert and waiter drain happen atomically; the coalesced
+                    // continuations resume after the lock is released.
+                    let (queued, outcome): ([CheckedContinuation<HysteriaClient, Error>], Result<HysteriaClient, Error>) = Self.registry.withLock { state in
+                        let queued = state.pending.removeValue(forKey: key) ?? []
+                        switch builderResult {
+                        case .success(let (transport, holders)):
+                            let client = HysteriaClient(
+                                configuration: configuration,
+                                transport: transport,
+                                chainHolders: holders,
+                                poolKey: key
+                            )
+                            state.entries[key] = client
+                            return (queued, .success(client))
+                        case .failure(let error):
+                            return (queued, .failure(error))
+                        }
+                    }
+                    for waiter in queued { waiter.resume(with: outcome) }
                 }
             }
-            for callback in queued { callback(outcome) }
         }
     }
 
@@ -151,7 +151,7 @@ nonisolated final class HysteriaClient {
         self.poolKey = poolKey
     }
 
-    private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<HysteriaSession, Error>) -> Void) {
+    private func acquireSession(isDefaultProxy: Bool) async throws -> HysteriaSession {
         enum Acquired {
             case reuse(HysteriaSession)
             case transportSpent
@@ -182,40 +182,25 @@ nonisolated final class HysteriaClient {
             return .fresh(newSession)
         }
 
-        let newSession: HysteriaSession
         switch acquired {
         case .reuse(let existing):
-            existing.ensureReady { error in
-                if let error { completion(.failure(error)) }
-                else { completion(.success(existing)) }
-            }
-            return
+            try await existing.ensureReady()
+            return existing
         case .transportSpent:
-            completion(.failure(HysteriaError.streamClosed))
-            return
-        case .fresh(let fresh):
-            newSession = fresh
-        }
-
-        newSession.onClose = { [weak self, weak newSession] in
-            guard let self, let newSession else { return }
-            self.handleSessionClose(newSession)
-        }
-        
-        var handshakeTimer = MetricTimer(.handshakeNoDial)
-        handshakeTimer.enabled = isDefaultProxy
-        handshakeTimer.start()
-
-        newSession.ensureReady { [weak newSession, handshakeTimer] error in
-            guard let newSession else {
-                completion(.failure(HysteriaError.connectionFailed("Session deallocated")))
-                return
+            throw HysteriaError.streamClosed
+        case .fresh(let newSession):
+            newSession.onClose = { [weak self, weak newSession] in
+                guard let self, let newSession else { return }
+                self.handleSessionClose(newSession)
             }
-            if let error { completion(.failure(error)) }
-            else {
-                handshakeTimer.stop()
-                completion(.success(newSession))
-            }
+
+            var handshakeTimer = MetricTimer(.handshakeNoDial)
+            handshakeTimer.enabled = isDefaultProxy
+            handshakeTimer.start()
+
+            try await newSession.ensureReady()
+            handshakeTimer.stop()
+            return newSession
         }
     }
 
@@ -243,66 +228,48 @@ nonisolated final class HysteriaClient {
         }
     }
 
-    func openTCP(destination: String, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        openTCP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
-    }
-
-    private func openTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        // The idle-close timer can fire between `isClosed` check and
-        // stream open; one retry with a fresh session covers that window.
-        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
-            switch result {
-            case .failure(let error):
-                if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                    self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
-                } else {
-                    completion(.failure(error))
-                }
-            case .success(let session):
-                let connection = HysteriaConnection(session: session, destination: destination)
-                connection.open { error in
-                    if let error {
-                        connection.cancel()
-                        if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                            self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
-                        } else {
-                            completion(.failure(error))
-                        }
-                    } else {
-                        completion(.success(connection))
-                    }
-                }
+    // The idle-close timer can fire between the `isClosed` check and stream open; one retry
+    // with a fresh session covers that window. Session acquire and stream open share the budget.
+    func openTCP(destination: String, isDefaultProxy: Bool) async throws -> ProxyConnection {
+        var retriesLeft = 1
+        while true {
+            let session: HysteriaSession
+            do {
+                session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+            } catch {
+                if retriesLeft > 0, Self.isStaleSessionError(error) { retriesLeft -= 1; continue }
+                throw error
+            }
+            let connection = HysteriaConnection(session: session, destination: destination)
+            do {
+                try await connection.open()
+                return connection
+            } catch {
+                connection.cancel()
+                if retriesLeft > 0, Self.isStaleSessionError(error) { retriesLeft -= 1; continue }
+                throw error
             }
         }
     }
 
-    func openUDP(destination: String, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        openUDP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
-    }
-
-    private func openUDP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
-            switch result {
-            case .failure(let error):
-                if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                    self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
-                } else {
-                    completion(.failure(error))
-                }
-            case .success(let session):
-                let connection = HysteriaUDPConnection(session: session, destination: destination)
-                connection.open { error in
-                    if let error {
-                        connection.cancel()
-                        if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                            self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
-                        } else {
-                            completion(.failure(error))
-                        }
-                    } else {
-                        completion(.success(connection))
-                    }
-                }
+    func openUDP(destination: String, isDefaultProxy: Bool) async throws -> ProxyConnection {
+        var retriesLeft = 1
+        while true {
+            let session: HysteriaSession
+            do {
+                session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+            } catch {
+                if retriesLeft > 0, Self.isStaleSessionError(error) { retriesLeft -= 1; continue }
+                throw error
+            }
+            let connection = HysteriaUDPConnection(session: session, destination: destination)
+            do {
+                try await connection.open()
+                return connection
+            } catch {
+                connection.cancel()
+                if retriesLeft > 0, Self.isStaleSessionError(error) { retriesLeft -= 1; continue }
+                throw error
             }
         }
     }

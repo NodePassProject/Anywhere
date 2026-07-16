@@ -80,17 +80,13 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
 
     // MARK: - Open
 
-    func open(completion: @escaping (Error?) -> Void) {
-        session.registerUDPSession(self) { [weak self] result in
-            guard let self else { completion(HysteriaError.streamClosed); return }
-            switch result {
-            case .failure(let error):
-                completion(error)
-            case .success(let sid):
-                self.sessionID = sid
-                self.state = .ready
-                completion(nil)
-            }
+    func open() async throws {
+        let sid = try await session.registerUDPSession(self)
+        // Assign the id and flip to ready on the session queue (where the old completion ran),
+        // so the queue-confined `_state` write doesn't race the datagram demux reads.
+        await session.run { [self] in
+            sessionID = sid
+            state = .ready
         }
     }
 

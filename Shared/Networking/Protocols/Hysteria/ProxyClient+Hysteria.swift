@@ -9,31 +9,16 @@ import Foundation
 import Synchronization
 
 extension ProxyClient {
-    func connectWithHysteria(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16
-    ) async throws -> ProxyConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-            self.connectWithHysteria(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort
-            ) { continuation.resume(with: $0) }
-        }
-    }
-
     /// Connects through a Hysteria v2 server. Routes by chain context:
     /// direct (no chain) shares one QUIC session; chained outer pools per
     /// `(server, chain)`; chain link reuses the inbound tunnel per-flow.
     func connectWithHysteria(
         command: ProxyCommand,
         destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
         guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni) = configuration.outbound else {
-            completion(.failure(ProxyError.protocolError("Hysteria password not set")))
-            return
+            throw ProxyError.protocolError("Hysteria password not set")
         }
 
         let hysteriaConfiguration = HysteriaConfiguration(
@@ -56,36 +41,32 @@ extension ProxyClient {
             let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
             self.tunnel = nil
             let client = HysteriaClient.chained(configuration: hysteriaConfiguration, transport: transport)
-            dispatchHysteria(client: client, command: command, destination: destination, completion: completion)
-            return
+            return try await dispatchHysteria(client: client, command: command, destination: destination)
         }
 
         if let chain = configuration.chain, !chain.isEmpty {
-            connectPooledChainedHysteria(
+            return try await connectPooledChainedHysteria(
                 hysteriaConfiguration: hysteriaConfiguration,
                 chain: chain,
                 command: command,
-                destination: destination,
-                completion: completion
+                destination: destination
             )
-            return
         }
 
         let client = HysteriaClient.shared(for: hysteriaConfiguration)
-        dispatchHysteria(client: client, command: command, destination: destination, completion: completion)
+        return try await dispatchHysteria(client: client, command: command, destination: destination)
     }
 
     private func dispatchHysteria(
         client: HysteriaClient,
         command: ProxyCommand,
-        destination: String,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        destination: String
+    ) async throws -> ProxyConnection {
         switch command {
         case .tcp, .mux:
-            client.openTCP(destination: destination, isDefaultProxy: isDefaultProxy, completion: completion)
+            return try await client.openTCP(destination: destination, isDefaultProxy: isDefaultProxy)
         case .udp:
-            client.openUDP(destination: destination, isDefaultProxy: isDefaultProxy, completion: completion)
+            return try await client.openUDP(destination: destination, isDefaultProxy: isDefaultProxy)
         }
     }
 
@@ -95,9 +76,8 @@ extension ProxyClient {
         hysteriaConfiguration: HysteriaConfiguration,
         chain: [ProxyConfiguration],
         command: ProxyCommand,
-        destination: String,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        destination: String
+    ) async throws -> ProxyConnection {
         let chainSignature = chain.map { $0.id.uuidString }.joined(separator: ":")
 
         // Validate the chain synchronously so config errors aren't deferred behind pool registration.
@@ -110,59 +90,40 @@ extension ProxyClient {
         case .success(let cmds):
             cascadeCommands = cmds
         case .failure(let error):
-            completion(.failure(error))
-            return
+            throw error
         }
 
         let hyServerAddress = configuration.serverAddress
         let hyServerPort = configuration.serverPort
         let useResolvedAddress = useResolvedAddressForDirectDial
 
-        HysteriaClient.acquireChained(
+        let client = try await HysteriaClient.acquireChained(
             configuration: hysteriaConfiguration,
             chainSignature: chainSignature,
             // Builder must be self-free: one build is shared across concurrent
             // waiters and outlives any single caller's ProxyClient.
-            builder: { builderCompletion in
+            builder: {
                 let holders = Mutex<[ProxyClient]>([])
-                Task {
-                    do {
-                        let chainTunnel = try await ProxyClient.buildDetachedChainTunnel(
-                            chain: chain,
-                            hopCommands: cascadeCommands,
-                            finalDestination: (hyServerAddress, hyServerPort),
-                            useResolvedAddressForDirectDial: useResolvedAddress,
-                            track: { client in
-                                holders.withLock { $0.append(client) }
-                            }
-                        )
-                        let snapshot = holders.withLock { $0 }
-                        let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
-                        builderCompletion(.success((transport, snapshot)))
-                    } catch {
-                        let snapshot = holders.withLock { $0 }
-                        for c in snapshot { await c.cancel() }
-                        builderCompletion(.failure(error))
-                    }
-                }
-            },
-            completion: { [weak self] clientResult in
-                switch clientResult {
-                case .success(let client):
-                    if let self {
-                        self.dispatchHysteria(
-                            client: client,
-                            command: command,
-                            destination: destination,
-                            completion: completion
-                        )
-                    } else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated after pool acquire")))
-                    }
-                case .failure(let error):
-                    completion(.failure(error))
+                do {
+                    let chainTunnel = try await ProxyClient.buildDetachedChainTunnel(
+                        chain: chain,
+                        hopCommands: cascadeCommands,
+                        finalDestination: (hyServerAddress, hyServerPort),
+                        useResolvedAddressForDirectDial: useResolvedAddress,
+                        track: { client in
+                            holders.withLock { $0.append(client) }
+                        }
+                    )
+                    let snapshot = holders.withLock { $0 }
+                    let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
+                    return (transport, snapshot)
+                } catch {
+                    let snapshot = holders.withLock { $0 }
+                    for c in snapshot { await c.cancel() }
+                    throw error
                 }
             }
         )
+        return try await dispatchHysteria(client: client, command: command, destination: destination)
     }
 }

@@ -8,22 +8,22 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Synchronization
 
 extension TLSRecordConnection {
 
     // MARK: - TLS 1.2 Record Crypto
 
     func encryptTLS12Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        seqLock.lock()
-        let seqNum: UInt64
-        if direction == .server {
-            seqNum = serverSeqNum
-            serverSeqNum += 1
-        } else {
-            seqNum = clientSeqNum
-            clientSeqNum += 1
+        let seqNum: UInt64 = seqLock.withLock { _ in
+            if direction == .server {
+                defer { serverSeqNum += 1 }
+                return serverSeqNum
+            } else {
+                defer { clientSeqNum += 1 }
+                return clientSeqNum
+            }
         }
-        seqLock.unlock()
 
         let version = tlsVersion
 

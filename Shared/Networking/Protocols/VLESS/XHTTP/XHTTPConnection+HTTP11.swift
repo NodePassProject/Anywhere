@@ -6,8 +6,7 @@
 //
 
 import Foundation
-
-// MARK: - HTTP/1.1 Setup & Transport
+import Synchronization
 
 extension XHTTPConnection {
 
@@ -70,7 +69,7 @@ extension XHTTPConnection {
         } catch {
             throw XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)")
         }
-        lock.withLock { uploadTransport = closures }
+        state.withLock { $0.uploadTransport = closures }
         startUploadResponseDrain()
     }
 
@@ -78,10 +77,10 @@ extension XHTTPConnection {
 
     /// Discards POST responses in a loop; otherwise they fill the TCP receive buffer and stall the server.
     func startUploadResponseDrain() {
-        guard let upload = lock.withLock({ uploadTransport }) else { return }
+        guard let upload = state.withLock({ $0.uploadTransport }) else { return }
         Task { [weak self] in
             while true {
-                guard let self, self.lock.withLock({ self._isConnected }) else { return }
+                guard let self, self.state.withLock({ $0._isConnected }) else { return }
                 let chunk: TransportChunk
                 do {
                     chunk = try await upload.receive()
@@ -119,7 +118,7 @@ extension XHTTPConnection {
         } catch {
             throw XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)")
         }
-        lock.withLock { uploadTransport = closures }
+        state.withLock { $0.uploadTransport = closures }
 
         let postRequest = buildStreamUpPOSTRequest()
         guard let postData = postRequest.data(using: .utf8) else {
@@ -153,7 +152,7 @@ extension XHTTPConnection {
         let upload = AsyncTransportClosures(
             send: download.send, finishSend: download.finishSend, receive: download.receive, cancel: {}
         )
-        lock.withLock { uploadTransport = upload }
+        state.withLock { $0.uploadTransport = upload }
 
         if mode == .streamUp {
             let postRequest = buildStreamUpPOSTRequest()
@@ -225,14 +224,14 @@ extension XHTTPConnection {
                 throw XHTTPError.setupFailed("Empty response from server")
             }
 
-            let headerData: Data? = lock.withLock {
-                headerBuffer.append(data)
-                guard let range = headerBuffer.range(of: headerEnd) else { return nil }
-                let headerData = Data(headerBuffer[headerBuffer.startIndex..<range.lowerBound])
-                let leftover = Data(headerBuffer[range.upperBound...])
-                headerBuffer.removeAll()
-                downloadHeadersParsed = true
-                if !leftover.isEmpty { chunkedDecoder.feed(leftover) }
+            let headerData: Data? = state.withLock { state in
+                state.headerBuffer.append(data)
+                guard let range = state.headerBuffer.range(of: headerEnd) else { return nil }
+                let headerData = Data(state.headerBuffer[state.headerBuffer.startIndex..<range.lowerBound])
+                let leftover = Data(state.headerBuffer[range.upperBound...])
+                state.headerBuffer.removeAll()
+                state.downloadHeadersParsed = true
+                if !leftover.isEmpty { state.chunkedDecoder.feed(leftover) }
                 return headerData
             }
             guard let headerData else { continue } // headers not yet complete; read more
@@ -255,7 +254,7 @@ extension XHTTPConnection {
     }
 
     func sendStreamUp(data: Data) async throws {
-        guard let upload = lock.withLock({ uploadTransport }) else {
+        guard let upload = state.withLock({ $0.uploadTransport }) else {
             throw XHTTPError.setupFailed("Upload connection not established")
         }
         try await upload.send(ChunkedTransferEncoder.encode(data))
@@ -264,7 +263,7 @@ extension XHTTPConnection {
     /// Sends the packet-up payload as one POST, re-splitting an oversized payload into
     /// back-to-back POSTs (each with its own seq). Called under `packetUpMutex`.
     func sendPacketUpHTTP11(data: Data) async throws {
-        guard let upload = lock.withLock({ uploadTransport }) else {
+        guard let upload = state.withLock({ $0.uploadTransport }) else {
             throw XHTTPError.setupFailed("Upload connection not established")
         }
         let maxSize = max(1, configuration.scMaxEachPostBytes)
@@ -272,7 +271,7 @@ extension XHTTPConnection {
         repeat {
             let piece = Data(remaining.prefix(maxSize))
             remaining = Data(remaining.dropFirst(maxSize))
-            let seq = lock.withLock { () -> Int64 in let s = nextSeq; nextSeq += 1; return s }
+            let seq = state.withLock { state -> Int64 in let s = state.nextSeq; state.nextSeq += 1; return s }
             try await sendSinglePost(data: piece, seq: seq, upload: upload)
         } while !remaining.isEmpty
     }

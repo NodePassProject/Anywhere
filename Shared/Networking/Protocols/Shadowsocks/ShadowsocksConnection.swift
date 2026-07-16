@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection")
 
@@ -13,17 +14,16 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection
 
 /// Address header is prepended to the first send, encrypted as part of the AEAD stream.
 nonisolated class ShadowsocksConnection: ProxyConnection {
-    private let lock = UnfairLock()
     private let inner: ProxyConnection
     private let writer: ShadowsocksAEADWriter
     private let reader: ShadowsocksAEADReader
-    private var addressHeader: Data?
+    private let addressHeader: Mutex<Data?>
 
     init(inner: ProxyConnection, cipher: ShadowsocksCipher, masterKey: Data, addressHeader: Data) {
         self.inner = inner
         self.writer = ShadowsocksAEADWriter(cipher: cipher, masterKey: masterKey)
         self.reader = ShadowsocksAEADReader(cipher: cipher, masterKey: masterKey)
-        self.addressHeader = addressHeader
+        self.addressHeader = Mutex(addressHeader)
         super.init()
     }
 
@@ -31,12 +31,12 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
 
     override func sendRaw(_ data: Data) async throws {
         var plaintext = Data()
-        lock.lock()
-        if let header = addressHeader {
-            plaintext.append(header)
-            addressHeader = nil
+        addressHeader.withLock { header in
+            if let h = header {
+                plaintext.append(h)
+                header = nil
+            }
         }
-        lock.unlock()
         plaintext.append(data)
 
         let encrypted = try writer.seal(plaintext: plaintext)

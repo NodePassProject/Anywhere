@@ -20,39 +20,22 @@ private struct NowhereLogicalOpenError: Error {
 }
 
 extension ProxyClient {
-    func connectWithNowhere(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16
-    ) async throws -> ProxyConnection {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-            self.connectWithNowhere(
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort
-            ) { continuation.resume(with: $0) }
-        }
-    }
-
     /// Connects through a Nowhere server. The iOS TUN stack already splits
     /// TCP and UDP flows, so this goes directly to Nowhere stream/DATAGRAM
     /// sessions instead of using the SOCKS5 ingress.
     func connectWithNowhere(
         command: ProxyCommand,
         destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        destinationPort: UInt16
+    ) async throws -> ProxyConnection {
         guard case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound else {
-            completion(.failure(ProxyError.protocolError("Invalid Nowhere configuration")))
-            return
+            throw ProxyError.protocolError("Invalid Nowhere configuration")
         }
         guard let tls = securityLayer.tlsConfiguration else {
-            completion(.failure(ProxyError.protocolError("Nowhere TLS configuration not set")))
-            return
+            throw ProxyError.protocolError("Nowhere TLS configuration not set")
         }
         let normalizedSpec = NowhereProtocol.normalizedSpec(spec)
 
-        let nwConfig: NowhereConfiguration
         let identityKey = NowhereTransportIdentityKey(
             configurationID: configuration.id,
             proxyHost: configuration.serverAddress,
@@ -63,31 +46,26 @@ extension ProxyClient {
             downlink: downlink,
             tls: tls
         )
-        do {
-            let sessionID = try NowhereTransportIdentityRegistry.shared.identity(for: identityKey)
-            nwConfig = try NowhereConfiguration(
-                proxyHost: configuration.serverAddress,
-                proxyPort: configuration.serverPort,
-                key: key,
-                spec: normalizedSpec,
-                uplink: uplink,
-                downlink: downlink,
-                pool: pool,
-                sessionID: sessionID,
-                tls: tls
-            )
-        } catch {
-            completion(.failure(error))
-            return
-        }
+        let sessionID = try NowhereTransportIdentityRegistry.shared.identity(for: identityKey)
+        let nwConfig = try NowhereConfiguration(
+            proxyHost: configuration.serverAddress,
+            proxyPort: configuration.serverPort,
+            key: key,
+            spec: normalizedSpec,
+            uplink: uplink,
+            downlink: downlink,
+            pool: pool,
+            sessionID: sessionID,
+            tls: tls
+        )
 
+        // RFC 3986 §3.2.2: IPv6 literals must be bracketed.
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
 
         let asymmetric = uplink != downlink
         if asymmetric, tunnel != nil || configuration.chain?.isEmpty == false {
-            completion(.failure(ProxyError.protocolError("Asymmetric Nowhere carriers do not support proxy chains")))
-            return
+            throw ProxyError.protocolError("Asymmetric Nowhere carriers do not support proxy chains")
         }
 
         if uplink != .tcp || downlink != .tcp || pool == 0 || tunnel != nil {
@@ -99,14 +77,13 @@ extension ProxyClient {
         let retries = tunnel == nil || configuredChainCanRebuildQUIC ? 1 : 0
         let deadline = DispatchTime.now() + .seconds(30)
 
-        connectLogicalNowhere(
+        return try await connectLogicalNowhere(
             nwConfig: nwConfig,
             command: command,
             destination: destination,
             identityKey: identityKey,
             deadline: deadline,
-            retriesLeft: retries,
-            completion: completion
+            retriesLeft: retries
         )
     }
 
@@ -116,38 +93,67 @@ extension ProxyClient {
         destination: String,
         identityKey: NowhereTransportIdentityKey,
         deadline: DispatchTime,
-        retriesLeft: Int,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let flowID: UInt64
-        do {
-            flowID = try NowhereTransportIdentityRegistry.shared.nextFlowID(
+        retriesLeft: Int
+    ) async throws -> ProxyConnection {
+        // The idle-close timer / SessionReplaced can race an open; retries share the
+        // absolute 30 s `deadline` so the total budget spans all attempts.
+        var retriesLeft = retriesLeft
+        while true {
+            let flowID = try NowhereTransportIdentityRegistry.shared.nextFlowID(
                 for: identityKey,
                 sessionID: nwConfig.sessionID
             )
-        } catch {
-            completion(.failure(error))
-            return
-        }
 
-        let attempt = NowhereFlowOpenAttempt()
-        attempt.armDeadline(at: deadline) {
-            completion(.failure(NowhereError.flowOpenTimeout))
-        }
-
-        let finish: (Result<ProxyConnection, Error>) -> Void = { [weak self] result in
-            guard attempt.claimResult() else {
-                if case .success(let connection) = result { connection.cancel() }
-                return
-            }
-            switch result {
-            case .success:
-                completion(result)
-            case .failure(let error):
+            let attempt = NowhereFlowOpenAttempt()
+            do {
+                let connection = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
+                    // Single-winner gate: the deadline, or the open (success/failure), whichever
+                    // claims first. The deadline handler tears down bound halves before failing.
+                    attempt.armDeadline(at: deadline) {
+                        continuation.resume(throwing: NowhereError.flowOpenTimeout)
+                    }
+                    Task { [weak self] in
+                        guard let self else {
+                            if attempt.claimResult() {
+                                continuation.resume(throwing: ProxyError.connectionFailed("Client deallocated during connect"))
+                            }
+                            return
+                        }
+                        do {
+                            let opened: ProxyConnection
+                            if nwConfig.uplink != nwConfig.downlink {
+                                opened = try await self.connectAsymmetricNowhere(
+                                    nwConfig: nwConfig,
+                                    command: command,
+                                    destination: destination,
+                                    flowID: flowID,
+                                    attempt: attempt
+                                )
+                            } else {
+                                opened = try await self.connectDuplexNowhere(
+                                    nwConfig: nwConfig,
+                                    command: command,
+                                    destination: destination,
+                                    flowID: flowID,
+                                    attempt: attempt
+                                )
+                            }
+                            if attempt.claimResult() {
+                                continuation.resume(returning: opened)
+                            } else {
+                                opened.cancel()   // the deadline already won
+                            }
+                        } catch {
+                            if attempt.claimResult() {
+                                continuation.resume(throwing: error)
+                            }
+                        }
+                    }
+                }
+                return connection
+            } catch {
                 attempt.cancel()
-                if retriesLeft > 0,
-                   Self.isRetryableLogicalNowhereError(error),
-                   let self {
+                if retriesLeft > 0, Self.isRetryableLogicalNowhereError(error) {
                     if Self.shouldInvalidateAsymmetricQUICSession(
                         error: error,
                         uplink: nwConfig.uplink,
@@ -155,39 +161,11 @@ extension ProxyClient {
                     ) {
                         NowhereClient.invalidateSharedSession(for: nwConfig)
                     }
-                    self.connectLogicalNowhere(
-                        nwConfig: nwConfig,
-                        command: command,
-                        destination: destination,
-                        identityKey: identityKey,
-                        deadline: deadline,
-                        retriesLeft: retriesLeft - 1,
-                        completion: completion
-                    )
-                } else {
-                    completion(.failure(Self.underlyingLogicalNowhereError(error)))
+                    retriesLeft -= 1
+                    continue
                 }
+                throw Self.underlyingLogicalNowhereError(error)
             }
-        }
-
-        if nwConfig.uplink != nwConfig.downlink {
-            connectAsymmetricNowhere(
-                nwConfig: nwConfig,
-                command: command,
-                destination: destination,
-                flowID: flowID,
-                attempt: attempt,
-                completion: finish
-            )
-        } else {
-            connectDuplexNowhere(
-                nwConfig: nwConfig,
-                command: command,
-                destination: destination,
-                flowID: flowID,
-                attempt: attempt,
-                completion: finish
-            )
         }
     }
 
@@ -238,12 +216,10 @@ extension ProxyClient {
         command: ProxyCommand,
         destination: String,
         flowID: UInt64,
-        attempt: NowhereFlowOpenAttempt,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        attempt: NowhereFlowOpenAttempt
+    ) async throws -> ProxyConnection {
         guard let (kind, mode) = Self.flowKindAndMode(command) else {
-            completion(.failure(ProxyError.dropped))
-            return
+            throw ProxyError.dropped
         }
         let header = NowhereProtocol.FlowHeader(
             role: .duplex,
@@ -254,33 +230,26 @@ extension ProxyClient {
         )
 
         if nwConfig.uplink == .tcp {
-            let deliver: (Result<ProxyConnection, Error>) -> Void = { result in
-                switch result {
-                case .failure(let error):
-                    completion(.failure(Self.logicalNowhereError(
-                        error,
-                        context: .tcpCarrier
-                    )))
-                case .success(let connection):
-                    completion(.success(NowhereDirectionalConnection(
-                        uplink: connection,
-                        downlink: connection,
-                        kind: kind
-                    )))
-                }
-            }
             if nwConfig.pool > 0, tunnel == nil {
-                NowhereTCPConnectionPoolRegistry.shared.acquire(
-                    configurationID: configuration.id,
-                    configuration: nwConfig,
-                    connectHost: directDialHost,
-                    destination: destination,
-                    mode: mode,
-                    flowHeader: header,
-                    attempt: attempt,
-                    completion: deliver
+                let connection: ProxyConnection
+                do {
+                    connection = try await NowhereTCPConnectionPoolRegistry.shared.acquire(
+                        configurationID: configuration.id,
+                        configuration: nwConfig,
+                        connectHost: directDialHost,
+                        destination: destination,
+                        mode: mode,
+                        flowHeader: header,
+                        attempt: attempt
+                    )
+                } catch {
+                    throw Self.logicalNowhereError(error, context: .tcpCarrier)
+                }
+                return NowhereDirectionalConnection(
+                    uplink: connection,
+                    downlink: connection,
+                    kind: kind
                 )
-                return
             }
 
             let connection = NowhereTCPConnection(
@@ -290,61 +259,56 @@ extension ProxyClient {
             )
             guard own(connection) else {
                 tunnel = nil
-                completion(.failure(ProxyError.connectionFailed("Client released during connect")))
-                return
+                throw ProxyError.connectionFailed("Client released during connect")
             }
             guard attempt.bind(connection) else {
-                completion(.failure(NowhereError.streamClosed))
-                return
+                throw NowhereError.streamClosed
             }
             tunnel = nil
-            connection.openFresh(destination: destination, mode: mode, flowHeader: header) { error in
-                if let error {
-                    connection.cancel()
-                    deliver(.failure(error))
-                } else {
-                    let logical: ProxyConnection = mode == .tcp
-                        ? connection
-                        : NowhereTCPUDPConnection(inner: connection)
-                    deliver(.success(logical))
-                }
+            do {
+                try await connection.openFresh(destination: destination, mode: mode, flowHeader: header)
+            } catch {
+                connection.cancel()
+                throw Self.logicalNowhereError(error, context: .tcpCarrier)
             }
-            return
+            let logical: ProxyConnection = mode == .tcp
+                ? connection
+                : NowhereTCPUDPConnection(inner: connection)
+            return NowhereDirectionalConnection(
+                uplink: logical,
+                downlink: logical,
+                kind: kind
+            )
         }
 
         if let chainTunnel = tunnel {
             let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
             self.tunnel = nil
             let client = NowhereClient.chained(configuration: nwConfig, transport: transport)
-            dispatchNowhere(
+            return try await dispatchNowhere(
                 client: client,
                 header: header,
                 attempt: attempt,
-                destination: destination,
-                completion: completion
+                destination: destination
             )
-            return
         }
 
         if let chain = configuration.chain, !chain.isEmpty {
-            connectPooledChainedNowhere(
+            return try await connectPooledChainedNowhere(
                 nwConfig: nwConfig,
                 chain: chain,
                 header: header,
                 attempt: attempt,
-                destination: destination,
-                completion: completion
+                destination: destination
             )
-            return
         }
 
         let client = NowhereClient.shared(for: nwConfig)
-        dispatchNowhere(
+        return try await dispatchNowhere(
             client: client,
             header: header,
             attempt: attempt,
-            destination: destination,
-            completion: completion
+            destination: destination
         )
     }
 
@@ -353,12 +317,10 @@ extension ProxyClient {
         command: ProxyCommand,
         destination: String,
         flowID: UInt64,
-        attempt: NowhereFlowOpenAttempt,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        attempt: NowhereFlowOpenAttempt
+    ) async throws -> ProxyConnection {
         guard let (kind, mode) = Self.flowKindAndMode(command) else {
-            completion(.failure(ProxyError.dropped))
-            return
+            throw ProxyError.dropped
         }
         let open = NowhereProtocol.FlowHeader(
             role: .open, flowID: flowID, kind: kind,
@@ -368,58 +330,61 @@ extension ProxyClient {
             role: .attach, flowID: flowID, kind: kind,
             uplink: nwConfig.uplink, downlink: nwConfig.downlink
         )
-        struct JoinState {
+
+        // Race the two carrier halves; the first hard failure aborts the sibling. A half
+        // that already succeeded is bound to `attempt`, so the caller's teardown reaches it.
+        return try await withThrowingTaskGroup(of: (isUplink: Bool, connection: ProxyConnection).self) { group in
+            group.addTask {
+                do {
+                    let connection = try await self.openAsymmetricHalf(
+                        nwConfig: nwConfig, destination: destination, mode: mode,
+                        header: open, carrier: nwConfig.uplink, attempt: attempt
+                    )
+                    return (true, connection)
+                } catch {
+                    throw Self.logicalNowhereError(
+                        error, context: nwConfig.uplink == .udp ? .quicSession : .tcpCarrier
+                    )
+                }
+            }
+            group.addTask {
+                do {
+                    let connection = try await self.openAsymmetricHalf(
+                        nwConfig: nwConfig, destination: destination, mode: mode,
+                        header: attach, carrier: nwConfig.downlink, attempt: attempt
+                    )
+                    return (false, connection)
+                } catch {
+                    throw Self.logicalNowhereError(
+                        error, context: nwConfig.downlink == .udp ? .quicSession : .tcpCarrier
+                    )
+                }
+            }
+
             var uplink: ProxyConnection?
             var downlink: ProxyConnection?
-            var finished = false
-        }
-        let join = Mutex(JoinState())
-
-        func receive(_ result: Result<ProxyConnection, Error>, isUplink: Bool) {
-            // First hard failure wins immediately and cancels the sibling setup.
-            let (outcome, discard): (
-                Result<ProxyConnection, Error>?, ProxyConnection?
-            ) = join.withLock { state in
-                guard !state.finished else {
-                    if case .success(let connection) = result { return (nil, connection) }
-                    return (nil, nil)
+            do {
+                for try await result in group {
+                    if result.isUplink { uplink = result.connection }
+                    else { downlink = result.connection }
                 }
-                switch result {
-                case .failure(let error):
-                    state.finished = true
-                    let carrier = isUplink ? nwConfig.uplink : nwConfig.downlink
-                    let context: NowhereLogicalFailureContext = carrier == .udp
-                        ? .quicSession : .tcpCarrier
-                    return (.failure(Self.logicalNowhereError(
-                        error,
-                        context: context
-                    )), nil)
-                case .success(let connection):
-                    if isUplink { state.uplink = connection } else { state.downlink = connection }
-                }
-                guard let up = state.uplink, let down = state.downlink else {
-                    return (nil, nil)
-                }
-                state.finished = true
-                return (.success(NowhereDirectionalConnection(
-                    uplink: up,
-                    downlink: down,
-                    kind: kind
-                )), nil)
+            } catch {
+                // First hard failure aborts the sibling: cancelling the attempt tears down
+                // the already-bound (or in-flight) half so its open unblocks promptly, then
+                // the group drains before we rethrow.
+                attempt.cancel()
+                group.cancelAll()
+                throw error
             }
-            discard?.cancel()
-            if case .failure = outcome { attempt.cancel() }
-            if let outcome { completion(outcome) }
+            guard let uplink, let downlink else {
+                throw NowhereError.streamClosed
+            }
+            return NowhereDirectionalConnection(
+                uplink: uplink,
+                downlink: downlink,
+                kind: kind
+            )
         }
-
-        openAsymmetricHalf(
-            nwConfig: nwConfig, destination: destination, mode: mode,
-            header: open, carrier: nwConfig.uplink, attempt: attempt
-        ) { receive($0, isUplink: true) }
-        openAsymmetricHalf(
-            nwConfig: nwConfig, destination: destination, mode: mode,
-            header: attach, carrier: nwConfig.downlink, attempt: attempt
-        ) { receive($0, isUplink: false) }
     }
 
     private static func flowKindAndMode(
@@ -437,9 +402,8 @@ extension ProxyClient {
         mode: NowhereTCPRelayMode,
         header: NowhereProtocol.FlowHeader,
         carrier: NowhereNetwork,
-        attempt: NowhereFlowOpenAttempt,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        attempt: NowhereFlowOpenAttempt
+    ) async throws -> ProxyConnection {
         if carrier == .tcp {
             let connection = NowhereTCPConnection(
                 configuration: nwConfig,
@@ -447,48 +411,39 @@ extension ProxyClient {
                 tunnel: nil
             )
             guard own(connection) else {
-                completion(.failure(ProxyError.connectionFailed("Client released during connect")))
-                return
+                throw ProxyError.connectionFailed("Client released during connect")
             }
             guard attempt.bind(connection) else {
-                completion(.failure(NowhereError.streamClosed))
-                return
+                throw NowhereError.streamClosed
             }
-            connection.openFresh(destination: destination, mode: mode, flowHeader: header) { error in
-                if let error {
-                    connection.cancel()
-                    completion(.failure(error))
-                    return
-                }
-                switch mode {
-                case .tcp:
-                    completion(.success(connection))
-                case .udp:
-                    completion(.success(NowhereTCPUDPConnection(
-                        inner: connection
-                    )))
-                }
+            do {
+                try await connection.openFresh(destination: destination, mode: mode, flowHeader: header)
+            } catch {
+                connection.cancel()
+                throw error
             }
-            return
+            switch mode {
+            case .tcp:
+                return connection
+            case .udp:
+                return NowhereTCPUDPConnection(inner: connection)
+            }
         }
 
         let client = NowhereClient.shared(for: nwConfig)
         if header.kind == .tcp {
-            client.openTCPHalf(
+            return try await client.openTCPHalf(
                 destination: destination,
                 header: header,
                 attempt: attempt,
-                isDefaultProxy: isDefaultProxy,
-                completion: completion
+                isDefaultProxy: isDefaultProxy
             )
-            return
         }
-        client.openUDP(
+        return try await client.openUDP(
             destination: destination,
             header: header,
             attempt: attempt,
-            isDefaultProxy: isDefaultProxy,
-            completion: completion
+            isDefaultProxy: isDefaultProxy
         )
     }
 
@@ -496,42 +451,34 @@ extension ProxyClient {
         client: NowhereClient,
         header: NowhereProtocol.FlowHeader,
         attempt: NowhereFlowOpenAttempt,
-        destination: String,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let opened: (Result<ProxyConnection, Error>) -> Void = { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(Self.logicalNowhereError(
-                    error,
-                    context: .quicSession
-                )))
-            case .success(let connection):
-                completion(.success(NowhereDirectionalConnection(
-                    uplink: connection,
-                    downlink: connection,
-                    kind: header.kind
-                )))
+        destination: String
+    ) async throws -> ProxyConnection {
+        let connection: ProxyConnection
+        do {
+            switch header.kind {
+            case .tcp:
+                connection = try await client.openTCPHalf(
+                    destination: destination,
+                    header: header,
+                    attempt: attempt,
+                    isDefaultProxy: isDefaultProxy
+                )
+            case .udp:
+                connection = try await client.openUDP(
+                    destination: destination,
+                    header: header,
+                    attempt: attempt,
+                    isDefaultProxy: isDefaultProxy
+                )
             }
+        } catch {
+            throw Self.logicalNowhereError(error, context: .quicSession)
         }
-        switch header.kind {
-        case .tcp:
-            client.openTCPHalf(
-                destination: destination,
-                header: header,
-                attempt: attempt,
-                isDefaultProxy: isDefaultProxy,
-                completion: opened
-            )
-        case .udp:
-            client.openUDP(
-                destination: destination,
-                header: header,
-                attempt: attempt,
-                isDefaultProxy: isDefaultProxy,
-                completion: opened
-            )
-        }
+        return NowhereDirectionalConnection(
+            uplink: connection,
+            downlink: connection,
+            kind: header.kind
+        )
     }
 
     private func connectPooledChainedNowhere(
@@ -539,9 +486,8 @@ extension ProxyClient {
         chain: [ProxyConfiguration],
         header: NowhereProtocol.FlowHeader,
         attempt: NowhereFlowOpenAttempt,
-        destination: String,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        destination: String
+    ) async throws -> ProxyConnection {
         let chainSignature = chain.map { $0.id.uuidString }.joined(separator: ":")
 
         let cascadeCommands: [ProxyCommand]
@@ -553,20 +499,22 @@ extension ProxyClient {
         case .success(let cmds):
             cascadeCommands = cmds
         case .failure(let error):
-            completion(.failure(error))
-            return
+            throw error
         }
 
         let nwServerAddress = configuration.serverAddress
         let nwServerPort = configuration.serverPort
         let useResolvedAddress = useResolvedAddressForDirectDial
 
-        NowhereClient.acquireChained(
-            configuration: nwConfig,
-            chainSignature: chainSignature,
-            builder: { builderCompletion in
-                let holders = Mutex<[ProxyClient]>([])
-                Task {
+        let client: NowhereClient
+        do {
+            client = try await NowhereClient.acquireChained(
+                configuration: nwConfig,
+                chainSignature: chainSignature,
+                // Builder must be self-free: one build is shared across concurrent
+                // waiters and outlives any single caller's ProxyClient.
+                builder: {
+                    let holders = Mutex<[ProxyClient]>([])
                     do {
                         let chainTunnel = try await ProxyClient.buildDetachedChainTunnel(
                             chain: chain,
@@ -579,35 +527,22 @@ extension ProxyClient {
                         )
                         let snapshot = holders.withLock { $0 }
                         let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
-                        builderCompletion(.success((transport, snapshot)))
+                        return (transport, snapshot)
                     } catch {
                         let snapshot = holders.withLock { $0 }
                         for c in snapshot { await c.cancel() }
-                        builderCompletion(.failure(error))
+                        throw error
                     }
                 }
-            },
-            completion: { [weak self] clientResult in
-                switch clientResult {
-                case .success(let client):
-                    if let self {
-                        self.dispatchNowhere(
-                            client: client,
-                            header: header,
-                            attempt: attempt,
-                            destination: destination,
-                            completion: completion
-                        )
-                    } else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated after pool acquire")))
-                    }
-                case .failure(let error):
-                    completion(.failure(Self.logicalNowhereError(
-                        error,
-                        context: .chainBuild
-                    )))
-                }
-            }
+            )
+        } catch {
+            throw Self.logicalNowhereError(error, context: .chainBuild)
+        }
+        return try await dispatchNowhere(
+            client: client,
+            header: header,
+            attempt: attempt,
+            destination: destination
         )
     }
 }

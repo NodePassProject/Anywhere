@@ -46,8 +46,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     /// Held to re-arm the feed after a streaming-script (per-frame) hop parks the pump. Buffered
     /// response scripts are non-blocking and never set this, so a slow/async script doesn't stall
-    /// the other streams multiplexed on this connection.
-    private var parkedCompletion: (() -> Void)?
+    /// the other streams multiplexed on this connection. Resumed exactly once per `feed`.
+    private var parkedContinuation: CheckedContinuation<Void, Never>?
 
     private struct Pending {
         let streamID: UInt32
@@ -273,7 +273,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     func markTorn() {
         torn = true
-        parkedCompletion = nil
+        let continuation = parkedContinuation
+        parkedContinuation = nil
         rxBuffer = MITMByteBuffer()
         pendingRequestBodies.removeAll()
         responseStreams.removeAll()
@@ -287,6 +288,8 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         batchedConnCredit = 0
         batchedStreamCredit.removeAll()
         pending = nil
+        // Resume any parked feed so its awaiting pump unwinds instead of leaking.
+        continuation?.resume()
     }
 
     /// Sends the HTTP/2 client connection preface (magic + SETTINGS) once. SETTINGS carries
@@ -542,17 +545,34 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
 
     // MARK: - Upstream h2 → response IR
 
-    func feed(_ data: Data, completion: @escaping () -> Void) {
-        guard parkedCompletion == nil else {
+    /// Parked lwIP-queue seam: hands the continuation to `body` on the lwIP queue; `body` resumes it
+    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. Only the
+    /// `lwipQueue.async` + continuation scaffolding lives here.
+    private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            lwipQueue.async { body(continuation) }
+        }
+    }
+
+    /// Feeds one inbound chunk; suspends across a streaming-script (per-frame) hop. lwIP-queue-confined,
+    /// so it self-hops onto that queue.
+    func feed(_ data: Data) async {
+        await onLwipParked { (continuation: CheckedContinuation<Void, Never>) in
+            self.feedOnQueue(data, continuation: continuation)
+        }
+    }
+
+    private func feedOnQueue(_ data: Data, continuation: CheckedContinuation<Void, Never>) {
+        guard parkedContinuation == nil else {
             // Dropping the chunk would desync frame boundaries and leak receive-window
             // credit with the connection alive — fail closed.
             fail("feed re-entered while parked")
-            completion()
+            continuation.resume()
             return
         }
-        if parseError || torn { completion(); return }
+        if parseError || torn { continuation.resume(); return }
         rxBuffer.append(data)
-        parkedCompletion = completion
+        parkedContinuation = continuation
         let parked = pump()
         finishPass(parked: parked)
     }
@@ -574,7 +594,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
         // before it can stall on a depleted window, and never lingers across a script hop.
         flushBatchedCredits()
         if parked { return }
-        let completion = parkedCompletion; parkedCompletion = nil; completion?()
+        let continuation = parkedContinuation; parkedContinuation = nil; continuation?.resume()
     }
 
     /// Emits the WINDOW_UPDATEs accumulated this pass — one per credited stream plus one for the
@@ -593,7 +613,7 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
     }
 
     private func resumeAfterScript() {
-        guard !torn, !parseError else { let completion = parkedCompletion; parkedCompletion = nil; completion?(); return }
+        guard !torn, !parseError else { let continuation = parkedContinuation; parkedContinuation = nil; continuation?.resume(); return }
         let parked = pump()
         finishPass(parked: parked)
     }
@@ -1090,24 +1110,29 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             body: plaintext,
             ruleSetID: rewriter.ruleSetID
         )
-        rewriter.applyScripts(message, phase: .httpResponse, resumeOn: lwipQueue) { [weak self] outcome in
-            guard let self, !self.torn else { return }
-            let regular = scriptedHeaders.filter { !$0.name.hasPrefix(":") }
-            switch outcome {
-            case .message(let updated):
-                var body = updated.body
-                if body.count > plaintext.count, body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
-                    logger.warning("h2-upstream \(self.host) stream \(streamID): response grew over cap; using original body")
-                    body = plaintext
+        let rewriter = self.rewriter
+        Task { [weak self] in
+            let outcome = await rewriter.applyScripts(message, phase: .httpResponse)
+            guard let self else { return }
+            self.lwipQueue.async {
+                guard !self.torn else { return }
+                let regular = scriptedHeaders.filter { !$0.name.hasPrefix(":") }
+                switch outcome {
+                case .message(let updated):
+                    var body = updated.body
+                    if body.count > plaintext.count, body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
+                        logger.warning("h2-upstream \(self.host) stream \(streamID): response grew over cap; using original body")
+                        body = plaintext
+                    }
+                    self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: body, trailers: trailers, neverIndexed: buffer.neverIndexed)
+                case .synthesizedResponse:
+                    // Anywhere.respond is request-phase only; ignore on response and emit original.
+                    self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buffer.neverIndexed)
                 }
-                self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: body, trailers: trailers, neverIndexed: buffer.neverIndexed)
-            case .synthesizedResponse:
-                // Anywhere.respond is request-phase only; ignore on response and emit original.
-                self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buffer.neverIndexed)
+                // Non-blocking: the stream is already released and the pump kept running, so just
+                // deliver. Out-of-order delivery is valid (h2 streams complete independently) and keeps
+                // a slow/async response script from stalling the other multiplexed streams.
             }
-            // Non-blocking: the stream is already released and the pump kept running, so just
-            // deliver. Out-of-order delivery is valid (h2 streams complete independently) and keeps
-            // a slow/async response script from stalling the other multiplexed streams.
         }
         // Don't park: a buffered response script runs at END_STREAM after the stream is released, so
         // siblings keep flowing. (A per-frame streaming-script still parks — see handleStreamingData.)
@@ -1142,18 +1167,24 @@ final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
             isLast: endStream,
             ruleSetID: rewriter.ruleSetID
         )
-        MITMScriptTransform.applyFrame(
-            body,
-            rules: rewriter.rules(phase: .httpResponse),
-            frameContext: context,
-            cursor: streamingResponse.cursor,
-            engineProvider: rewriter.scriptEngineProvider,
-            resumeOn: lwipQueue
-        ) { [weak self] result in
-            guard let self, !self.torn else { return }
-            self.advanceStreaming(streamID, growth: result.body.count - body.count)
-            self.deliverStreamingFrame(streamID: streamID, body: result.body, endStream: endStream, trailers: trailers)
-            self.resumeAfterScript()
+        let rewriter = self.rewriter
+        let cursor = streamingResponse.cursor
+        Task { [weak self] in
+            let result = await MITMScriptTransform.applyFrame(
+                body,
+                rules: rewriter.rules(phase: .httpResponse),
+                frameContext: context,
+                cursor: cursor,
+                engineProvider: rewriter.scriptEngineProvider
+            )
+            guard let self else { return }
+            self.lwipQueue.async {
+                // Torn resumes the parked feed via markTorn; here just don't touch stream state.
+                guard !self.torn else { return }
+                self.advanceStreaming(streamID, growth: result.body.count - body.count)
+                self.deliverStreamingFrame(streamID: streamID, body: result.body, endStream: endStream, trailers: trailers)
+                self.resumeAfterScript()
+            }
         }
         return true
     }

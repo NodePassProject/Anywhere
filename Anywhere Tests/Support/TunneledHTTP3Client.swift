@@ -55,17 +55,11 @@ private final class HTTP3GetRequest: HTTP3StreamHandler {
     }
 
     func run() async throws -> HTTPResponse {
-        try await withCheckedThrowingContinuation { continuation in
+        try await multiplexer.ensureReady()
+        return try await withCheckedThrowingContinuation { continuation in
             multiplexer.queue.async { [self] in
                 self.continuation = continuation
-                multiplexer.ensureReady { [weak self] error in
-                    guard let self else { return }
-                    if let error {
-                        self.complete(.failure(error))
-                    } else {
-                        self.sendRequest()
-                    }
-                }
+                self.sendRequest()
             }
         }
     }
@@ -86,9 +80,13 @@ private final class HTTP3GetRequest: HTTP3StreamHandler {
             extraHeaders: [(name: "user-agent", value: "Anywhere")]
         )
         let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
-        multiplexer.writeStream(streamID, data: frame, fin: true) { [weak self] error in
-            guard let self, let error else { return }
-            self.multiplexer.queue.async { self.handleSessionError(error) }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.multiplexer.writeStream(streamID, data: frame, fin: true)
+            } catch {
+                self.multiplexer.queue.async { self.handleSessionError(error) }
+            }
         }
     }
 

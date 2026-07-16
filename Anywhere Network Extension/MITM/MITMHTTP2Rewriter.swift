@@ -123,21 +123,17 @@ final class MITMHTTP2Rewriter {
     /// Matched rule set ID used as the script-store scope key.
     var ruleSetID: UUID? { cachedRuleSetID }
 
-    /// Runs off-queue, resuming on `resumeQueue`. Caller must pass a decompressed body.
-    /// `.synthesizedResponse` fires only on request phase — caller must then suppress
-    /// upstream emission and answer on the inner leg.
+    /// Runs off the caller's executor; the caller re-establishes its confinement (lwIP queue) after
+    /// the await. Caller must pass a decompressed body. `.synthesizedResponse` fires only on request
+    /// phase — caller must then suppress upstream emission and answer on the inner leg.
     func applyScripts(
         _ message: HTTPMessage,
-        phase: MITMPhase,
-        resumeOn resumeQueue: DispatchQueue,
-        completion: @escaping (MITMScriptTransform.Outcome) -> Void
-    ) {
-        MITMScriptTransform.apply(
+        phase: MITMPhase
+    ) async -> MITMScriptTransform.Outcome {
+        await MITMScriptTransform.apply(
             message,
             rules: rules(phase: phase),
-            engineProvider: scriptEngineProvider,
-            resumeOn: resumeQueue,
-            completion: completion
+            engineProvider: scriptEngineProvider
         )
     }
 

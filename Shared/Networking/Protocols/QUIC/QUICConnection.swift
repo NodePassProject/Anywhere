@@ -92,6 +92,18 @@ actor QUICConnection {
     /// consumers that share this queue can read it and the C callbacks can hop onto it.
     nonisolated var queue: DispatchQueue { bridge.queue }
 
+    /// Runs `body` on the ngtcp2 serial queue and awaits its result — the sanctioned async hop
+    /// for queue-confined consumers (sessions/multiplexers), so the `queue.async`+continuation
+    /// stays inside the bridge instead of leaking into their pure-async code.
+    nonisolated func run<T>(_ body: @escaping () -> T) async -> T {
+        await bridge.run(body)
+    }
+
+    /// Throwing variant: `body` returns a `Result` computed on the ngtcp2 queue.
+    nonisolated func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T {
+        try await bridge.run(body).get()
+    }
+
     fileprivate var connectionOpaquePointer: OpaquePointer?
     private var connRefStorage = ngtcp2_crypto_conn_ref()
 
@@ -130,7 +142,7 @@ actor QUICConnection {
     /// validation only `path_validation` can resolve. Gates eager aborts mid-probe.
     private var proactiveValidating = false
     /// Fires if a proactive target never becomes ready; bounds the in-flight state.
-    private var proactiveDeadline: DispatchWorkItem?
+    private var proactiveDeadlineTask: Task<Void, Never>?
     private static let proactiveReadyTimeout: TimeInterval = 5
 
     fileprivate var tlsHandler: QUICTLSHandler?
@@ -259,6 +271,15 @@ actor QUICConnection {
                 me.state = .connecting
                 me.connectCompletion = completion
                 me.setupUDP(completion: completion)
+            }
+        }
+    }
+
+    /// Async connect — wraps the single-shot ngtcp2 connect completion at the C boundary.
+    nonisolated func connect() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connect { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
             }
         }
     }
@@ -1116,16 +1137,19 @@ actor QUICConnection {
         target.onPathDown = { [weak self] in self?.assumeIsolated { $0.abortProactiveIfNotValidating() } }
 
         // If the target never reaches `.ready`, give up rather than wedge `migrationKind`.
-        let deadline = DispatchWorkItem { [weak self, weak target] in
-            guard let self, let target else { return }
-            self.assumeIsolated { me in
-                guard me.migratingCarrier === target, !me.proactiveValidating else { return }
-                logger.warning("[QUIC] Proactive migration target not ready in \(Int(Self.proactiveReadyTimeout))s; staying put")
-                me.abortProactiveMigration(countAsFailure: false)
+        // Fires on `queue` (hopped back onto the ngtcp2 home queue) to touch migration state.
+        proactiveDeadlineTask?.cancel()
+        proactiveDeadlineTask = Task { [weak self, weak target] in
+            try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
+            guard !Task.isCancelled, let self, let target else { return }
+            self.queue.async {
+                self.assumeIsolated { me in
+                    guard me.migratingCarrier === target, !me.proactiveValidating else { return }
+                    logger.warning("[QUIC] Proactive migration target not ready in \(Int(Self.proactiveReadyTimeout))s; staying put")
+                    me.abortProactiveMigration(countAsFailure: false)
+                }
             }
         }
-        proactiveDeadline = deadline
-        queue.asyncAfter(deadline: .now() + Self.proactiveReadyTimeout, execute: deadline)
 
         // Once the target is up and confirmed a *different* interface, start validation.
         // NWConnection buffers the probe until ready.
@@ -1152,8 +1176,8 @@ actor QUICConnection {
                 // Committed: ngtcp2 owns the validation now. Cancel the readiness deadline;
                 // path_validation success/failure drives the rest.
                 me.proactiveValidating = true
-                me.proactiveDeadline?.cancel()
-                me.proactiveDeadline = nil
+                me.proactiveDeadlineTask?.cancel()
+                me.proactiveDeadlineTask = nil
                 logger.info("[QUIC] Proactive migration: validating better path")
                 me.writeToUDP()
                 me.rescheduleTimer()
@@ -1180,8 +1204,8 @@ actor QUICConnection {
 
     /// Clears migration tracking and the readiness deadline; leaves `migrationFailures`. Runs on `queue`.
     private func clearMigrationState() {
-        proactiveDeadline?.cancel()
-        proactiveDeadline = nil
+        proactiveDeadlineTask?.cancel()
+        proactiveDeadlineTask = nil
         proactiveValidating = false
         migratingCarrier = nil
         migrationKind = nil

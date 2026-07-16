@@ -6,22 +6,19 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TrojanUDPConnection")
 
-// MARK: - TrojanUDPConnection
-
-/// Each datagram is framed as `addr:port + length + CRLF + payload`, after a one-shot UDP request header.
 nonisolated final class TrojanUDPConnection: ProxyConnection {
-    private let lock = UnfairLock()
     private let inner: ProxyConnection
     private let passwordKey: Data
     private let destinationHost: String
     private let destinationPort: UInt16
 
-    private var headerSent = false
+    private let headerSent = Atomic<Bool>(false)
     /// Leftover TLS stream bytes carried across receives until a full packet is framed.
-    private var receiveBuffer = Data()
+    private let receiveBuffer = Mutex(Data())
 
     init(inner: ProxyConnection, password: String, destinationHost: String, destinationPort: UInt16) {
         self.inner = inner
@@ -51,35 +48,33 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
 
     private func frame(_ payload: Data) -> Data {
         var out = Data()
-        lock.lock()
-        if !headerSent {
+        if !headerSent.exchange(true, ordering: .acquiringAndReleasing) {
             out.append(TrojanProtocol.buildRequestHeader(
                 passwordKey: passwordKey,
                 command: TrojanProtocol.commandUDP,
                 host: destinationHost,
                 port: destinationPort
             ))
-            headerSent = true
         }
-        lock.unlock()
         out.append(TrojanProtocol.encodeUDPPacket(host: destinationHost, port: destinationPort, payload: payload))
         return out
     }
 
     private func nextPacket() async throws -> Data? {
         while true {
-            let parsed: (payload: Data, consumed: Int)? = try lock.withLock {
-                try TrojanProtocol.tryDecodeUDPPacket(buffer: receiveBuffer)
+            let parsed: Data? = try receiveBuffer.withLock { buffer in
+                guard let parsed = try TrojanProtocol.tryDecodeUDPPacket(buffer: buffer) else { return nil }
+                buffer.removeFirst(parsed.consumed)
+                return parsed.payload
             }
             if let parsed {
-                lock.withLock { receiveBuffer.removeFirst(parsed.consumed) }
-                return parsed.payload
+                return parsed
             }
 
             guard let data = try await inner.receiveRaw(), !data.isEmpty else {
                 return nil
             }
-            lock.withLock { receiveBuffer.append(data) }
+            receiveBuffer.withLock { $0.append(data) }
         }
     }
 }

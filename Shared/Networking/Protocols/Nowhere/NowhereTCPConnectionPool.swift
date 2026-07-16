@@ -44,9 +44,8 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
         destination: String,
         mode: NowhereTCPRelayMode = .tcp,
         flowHeader: NowhereProtocol.FlowHeader,
-        attempt: NowhereFlowOpenAttempt,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        attempt: NowhereFlowOpenAttempt
+    ) async throws -> ProxyConnection {
         let key = Key(
             configurationID: configurationID,
             connectHost: connectHost,
@@ -79,12 +78,11 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
             return pool
         }
         replaced?.closeAll()
-        pool.acquire(
+        return try await pool.acquire(
             destination: destination,
             mode: mode,
             flowHeader: flowHeader,
-            attempt: attempt,
-            completion: completion
+            attempt: attempt
         )
     }
 
@@ -105,16 +103,12 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
 
 nonisolated private final class NowhereTCPConnectionPool {
 
-    private static let warmConnectionTTL: DispatchTimeInterval = .seconds(30)
-    private static let expiryQueue = DispatchQueue(
-        label: "com.argsment.Anywhere.NowhereTCPPoolExpiry",
-        qos: .utility
-    )
+    private static let warmConnectionTTL: Duration = .seconds(30)
 
     private struct State {
         var idle: [NowhereTCPConnection] = []
         var preparing: [ObjectIdentifier: NowhereTCPConnection] = [:]
-        var expirations: [ObjectIdentifier: DispatchWorkItem] = [:]
+        var expirations: [ObjectIdentifier: Task<Void, Never>] = [:]
         var targetSize: Int
         var closed = false
     }
@@ -154,9 +148,8 @@ nonisolated private final class NowhereTCPConnectionPool {
         destination: String,
         mode: NowhereTCPRelayMode,
         flowHeader: NowhereProtocol.FlowHeader,
-        attempt: NowhereFlowOpenAttempt,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        attempt: NowhereFlowOpenAttempt
+    ) async throws -> ProxyConnection {
         var selected: NowhereTCPConnection?
         var stale: [NowhereTCPConnection] = []
         var unavailable = false
@@ -193,8 +186,7 @@ nonisolated private final class NowhereTCPConnectionPool {
         }
 
         if unavailable {
-            completion(.failure(ProxyError.connectionFailed("Nowhere TCP pool closed")))
-            return
+            throw ProxyError.connectionFailed("Nowhere TCP pool closed")
         }
         for connection in stale {
             connection.setPreparedCloseHandler(nil)
@@ -205,24 +197,21 @@ nonisolated private final class NowhereTCPConnectionPool {
         if let selected {
             selected.setPreparedCloseHandler(nil)
             guard attempt.bind(selected) else {
-                completion(.failure(NowhereError.streamClosed))
-                return
+                throw NowhereError.streamClosed
             }
-            selected.activate(destination: destination, mode: mode, flowHeader: flowHeader) { error in
-                if let error {
-                    selected.cancel()
-                    completion(.failure(error))
-                } else {
-                    completion(.success(Self.proxyConnection(selected, mode: mode)))
-                }
+            do {
+                try await selected.activate(destination: destination, mode: mode, flowHeader: flowHeader)
+                return Self.proxyConnection(selected, mode: mode)
+            } catch {
+                selected.cancel()
+                throw error
             }
         } else {
-            openFresh(
+            return try await openFresh(
                 destination: destination,
                 mode: mode,
                 flowHeader: flowHeader,
-                attempt: attempt,
-                completion: completion
+                attempt: attempt
             )
         }
     }
@@ -249,25 +238,22 @@ nonisolated private final class NowhereTCPConnectionPool {
         destination: String,
         mode: NowhereTCPRelayMode,
         flowHeader: NowhereProtocol.FlowHeader,
-        attempt: NowhereFlowOpenAttempt,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
+        attempt: NowhereFlowOpenAttempt
+    ) async throws -> ProxyConnection {
         let connection = NowhereTCPConnection(
             configuration: configuration,
             connectHost: connectHost,
             tunnel: nil
         )
         guard attempt.bind(connection) else {
-            completion(.failure(NowhereError.streamClosed))
-            return
+            throw NowhereError.streamClosed
         }
-        connection.openFresh(destination: destination, mode: mode, flowHeader: flowHeader) { error in
-            if let error {
-                connection.cancel()
-                completion(.failure(error))
-            } else {
-                completion(.success(Self.proxyConnection(connection, mode: mode)))
-            }
+        do {
+            try await connection.openFresh(destination: destination, mode: mode, flowHeader: flowHeader)
+            return Self.proxyConnection(connection, mode: mode)
+        } catch {
+            connection.cancel()
+            throw error
         }
     }
 
@@ -287,12 +273,19 @@ nonisolated private final class NowhereTCPConnectionPool {
 
     private func startReplenishments(_ connections: [NowhereTCPConnection]) {
         for connection in connections {
-            connection.prepare { [weak self] error in
+            Task { [weak self] in
+                let prepareError: Error?
+                do {
+                    try await connection.prepare()
+                    prepareError = nil
+                } catch {
+                    prepareError = error
+                }
                 guard let self else {
                     connection.cancel()
                     return
                 }
-                self.finishPreparation(connection: connection, error: error)
+                self.finishPreparation(connection: connection, error: prepareError)
             }
         }
     }
@@ -333,15 +326,14 @@ nonisolated private final class NowhereTCPConnectionPool {
 
     private func armExpirationLocked(for connection: NowhereTCPConnection, in state: inout State) {
         let identifier = ObjectIdentifier(connection)
-        let expiration = DispatchWorkItem { [weak self, weak connection] in
-            guard let self, let connection else { return }
+        // `State` (and thus `expirations`) is Mutex-guarded, so `expire` is safe to fire
+        // straight from the Task without a queue hop.
+        let expiration = Task { [weak self, weak connection] in
+            try? await Task.sleep(for: Self.warmConnectionTTL)
+            guard !Task.isCancelled, let self, let connection else { return }
             self.expire(connection)
         }
         state.expirations[identifier] = expiration
-        Self.expiryQueue.asyncAfter(
-            deadline: .now() + Self.warmConnectionTTL,
-            execute: expiration
-        )
     }
 
     private func cancelExpirationLocked(for connection: NowhereTCPConnection, in state: inout State) {

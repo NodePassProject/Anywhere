@@ -7,6 +7,7 @@
 
 import Foundation
 import Security
+import Synchronization
 
 // MARK: - Constants
 
@@ -335,22 +336,21 @@ private func isCompleteTLSRecord(data: Data) -> Bool {
 // MARK: - Vision Connection Wrapper
 
 nonisolated class VLESSVisionConnection: ProxyConnection {
-    /// Guards `trafficState` mutations across the async send/receive paths.
-    private let lock = UnfairLock()
     private let innerConnection: ProxyConnection
-    private let trafficState: VisionTrafficState
+    /// Guards `VisionTrafficState` mutations across the async send/receive paths.
+    private let trafficState: Mutex<VisionTrafficState>
 
     init(connection: ProxyConnection, userUUID: Data) {
         self.innerConnection = connection
-        self.trafficState = VisionTrafficState(userUUID: userUUID)
+        self.trafficState = Mutex(VisionTrafficState(userUUID: userUUID))
         super.init()
     }
 
     /// Sends an empty padding frame to camouflage the VLESS header when no initial
     /// data is available. Callers must await it before subsequent sends.
     func sendEmptyPadding() async throws {
-        let padded = lock.withLock {
-            visionPadding(data: nil, command: .paddingContinue, state: trafficState, longPadding: true)
+        let padded = trafficState.withLock { state in
+            visionPadding(data: nil, command: .paddingContinue, state: state, longPadding: true)
         }
         try await innerConnection.send(padded)
     }
@@ -365,10 +365,9 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
     // connection already handled response-header/byte accounting.
 
     override func sendRaw(_ data: Data) async throws {
-        lock.lock()
-        let isDirectCopy = trafficState.writerDirectCopy
-        let paddedData = processSendData(data)
-        lock.unlock()
+        let (isDirectCopy, paddedData) = trafficState.withLock { state -> (Bool, Data) in
+            (state.writerDirectCopy, processSendData(data, state: state))
+        }
 
         if isDirectCopy {
             try await innerConnection.sendDirectRaw(paddedData)
@@ -381,27 +380,27 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         try await receiveRaw()
     }
 
-    private func processSendData(_ data: Data) -> Data {
-        if !trafficState.isTLS {
-            visionDetectClientHello(data: data, state: trafficState)
+    private func processSendData(_ data: Data, state: VisionTrafficState) -> Data {
+        if !state.isTLS {
+            visionDetectClientHello(data: data, state: state)
         }
 
-        if trafficState.writerDirectCopy {
+        if state.writerDirectCopy {
             return data
         }
 
-        guard trafficState.writerIsPadding else {
+        guard state.writerIsPadding else {
             return data
         }
 
-        let longPadding = trafficState.isTLS
+        let longPadding = state.isTLS
         let isComplete = isCompleteTLSRecord(data: data)
 
         let chunks = reshapeData(data)
 
         // A complete TLS application-data record ends padding mode.
         let startIdx = data.startIndex
-        if trafficState.isTLS && data.count >= 6 &&
+        if state.isTLS && data.count >= 6 &&
            data[startIdx] == tlsApplicationDataStart[0] &&
            data[data.index(startIdx, offsetBy: 1)] == tlsApplicationDataStart[1] &&
            data[data.index(startIdx, offsetBy: 2)] == tlsApplicationDataStart[2] &&
@@ -411,42 +410,40 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
             for (i, chunk) in chunks.enumerated() {
                 if i == chunks.count - 1 {
                     var command: VisionCommand = .paddingEnd
-                    if trafficState.enableXtls {
+                    if state.enableXtls {
                         command = .paddingDirect
-                        trafficState.writerDirectCopy = true
+                        state.writerDirectCopy = true
                     }
-                    trafficState.writerIsPadding = false
-                    result.append(visionPadding(data: chunk, command: command, state: trafficState, longPadding: false))
+                    state.writerIsPadding = false
+                    result.append(visionPadding(data: chunk, command: command, state: state, longPadding: false))
                 } else {
-                    result.append(visionPadding(data: chunk, command: .paddingContinue, state: trafficState, longPadding: true))
+                    result.append(visionPadding(data: chunk, command: .paddingContinue, state: state, longPadding: true))
                 }
             }
             return result
         }
 
         // Finish padding one packet early for older Vision receivers (the `<= 1` boundary).
-        if !trafficState.isTLS12orAbove && trafficState.numberOfPacketsToFilter <= 1 {
-            trafficState.writerIsPadding = false
+        if !state.isTLS12orAbove && state.numberOfPacketsToFilter <= 1 {
+            state.writerIsPadding = false
             var result = Data()
             for (i, chunk) in chunks.enumerated() {
                 let cmd: VisionCommand = (i == chunks.count - 1) ? .paddingEnd : .paddingContinue
-                result.append(visionPadding(data: chunk, command: cmd, state: trafficState, longPadding: longPadding))
+                result.append(visionPadding(data: chunk, command: cmd, state: state, longPadding: longPadding))
             }
             return result
         }
 
         var result = Data()
         for chunk in chunks {
-            result.append(visionPadding(data: chunk, command: .paddingContinue, state: trafficState, longPadding: longPadding))
+            result.append(visionPadding(data: chunk, command: .paddingContinue, state: state, longPadding: longPadding))
         }
         return result
     }
 
     override func receiveRaw() async throws -> Data? {
         while true {
-            lock.lock()
-            let isDirectCopy = trafficState.readerDirectCopy
-            lock.unlock()
+            let isDirectCopy = trafficState.withLock { $0.readerDirectCopy }
 
             if isDirectCopy {
                 // Direct copy bypasses Reality decryption.
@@ -458,9 +455,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
             let received = try await innerConnection.receive()
             guard var data = received, !data.isEmpty else { return nil }
 
-            lock.lock()
-            let processedData = processReceiveData(&data)
-            lock.unlock()
+            let processedData = trafficState.withLock { processReceiveData(&data, state: $0) }
 
             // Empty result means only padding was received; continue rather than signalling EOF.
             if processedData.isEmpty {
@@ -470,25 +465,25 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
         }
     }
 
-    private func processReceiveData(_ data: inout Data) -> Data {
-        if trafficState.numberOfPacketsToFilter > 0 {
-            visionFilterTLS(data: data, state: trafficState)
+    private func processReceiveData(_ data: inout Data, state: VisionTrafficState) -> Data {
+        if state.numberOfPacketsToFilter > 0 {
+            visionFilterTLS(data: data, state: state)
         }
 
-        if trafficState.readerDirectCopy {
+        if state.readerDirectCopy {
             return data
         }
 
-        if trafficState.readerWithinPaddingBuffers || trafficState.numberOfPacketsToFilter > 0 {
-            let unpadded = visionUnpadding(data: &data, state: trafficState)
+        if state.readerWithinPaddingBuffers || state.numberOfPacketsToFilter > 0 {
+            let unpadded = visionUnpadding(data: &data, state: state)
 
-            if trafficState.remainingContent > 0 || trafficState.remainingPadding > 0 || trafficState.currentCommand == 0 {
-                trafficState.readerWithinPaddingBuffers = true
-            } else if trafficState.currentCommand == 1 {
-                trafficState.readerWithinPaddingBuffers = false
-            } else if trafficState.currentCommand == 2 {
-                trafficState.readerWithinPaddingBuffers = false
-                trafficState.readerDirectCopy = true
+            if state.remainingContent > 0 || state.remainingPadding > 0 || state.currentCommand == 0 {
+                state.readerWithinPaddingBuffers = true
+            } else if state.currentCommand == 1 {
+                state.readerWithinPaddingBuffers = false
+            } else if state.currentCommand == 2 {
+                state.readerWithinPaddingBuffers = false
+                state.readerDirectCopy = true
             }
 
             return unpadded

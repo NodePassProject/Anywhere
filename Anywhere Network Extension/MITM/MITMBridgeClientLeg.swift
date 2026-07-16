@@ -72,8 +72,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     /// Held to re-arm the inner pump after a parking script hop. Buffered request scripts are
     /// non-blocking and never set this, so a slow/async script doesn't stall the other streams
-    /// multiplexed on this client connection.
-    private var parkedCompletion: (() -> Void)?
+    /// multiplexed on this client connection. Resumed exactly once per `feed`.
+    private var parkedContinuation: CheckedContinuation<Void, Never>?
 
     private var highestStreamID: UInt32 = 0
 
@@ -167,7 +167,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     func markTorn() {
         torn = true
-        parkedCompletion = nil
+        let continuation = parkedContinuation
+        parkedContinuation = nil
         rxBuffer = MITMByteBuffer()
         requestStreams.removeAll()
         streamMethods.removeAll()
@@ -177,6 +178,8 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         batchedStreamCredit.removeAll()
         streamDeferredUpload.removeAll()
         pending = nil
+        // Resume any parked feed so its awaiting pump unwinds instead of leaking.
+        continuation?.resume()
     }
 
     func rejectStream(_ streamID: UInt32, errorCode: UInt32) {
@@ -199,15 +202,32 @@ final class MITMBridgeClientLeg: MITMResponseSink {
 
     // MARK: - Client → MITM
 
-    func feed(_ data: Data, completion: @escaping () -> Void) {
-        guard parkedCompletion == nil else {
+    /// Parked lwIP-queue seam: hands the continuation to `body` on the lwIP queue; `body` resumes it
+    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. Only the
+    /// `lwipQueue.async` + continuation scaffolding lives here.
+    private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            lwipQueue.async { body(continuation) }
+        }
+    }
+
+    /// Feeds one inbound chunk; suspends across a parking script hop. lwIP-queue-confined, so it
+    /// self-hops onto that queue.
+    func feed(_ data: Data) async {
+        await onLwipParked { (continuation: CheckedContinuation<Void, Never>) in
+            self.feedOnQueue(data, continuation: continuation)
+        }
+    }
+
+    private func feedOnQueue(_ data: Data, continuation: CheckedContinuation<Void, Never>) {
+        guard parkedContinuation == nil else {
             // Dropping the chunk would desync frame boundaries and leak receive-window
             // credit with the connection alive — fail closed.
             fail("feed re-entered while a script hop is outstanding", code: Codec.ErrorCode.internalError)
-            completion()
+            continuation.resume()
             return
         }
-        if parseError || torn { completion(); return }
+        if parseError || torn { continuation.resume(); return }
         var input = data
         if prefaceRemaining > 0, !input.isEmpty {
             let take = min(prefaceRemaining, input.count)
@@ -216,7 +236,7 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         }
         if !input.isEmpty { rxBuffer.append(input) }
         ensureServerPrefaceSent()
-        parkedCompletion = completion
+        parkedContinuation = continuation
         let parked = pump()
         finishPass(parked: parked)
     }
@@ -270,9 +290,9 @@ final class MITMBridgeClientLeg: MITMResponseSink {
         // on a depleted window, and never lingers across a script hop.
         flushBatchedCredits()
         if parked { return }
-        let completion = parkedCompletion
-        parkedCompletion = nil
-        completion?()
+        let continuation = parkedContinuation
+        parkedContinuation = nil
+        continuation?.resume()
     }
 
     /// Emits the WINDOW_UPDATEs accumulated this pass (one per credited stream plus one for the
@@ -837,22 +857,27 @@ final class MITMBridgeClientLeg: MITMResponseSink {
             body: plaintext,
             ruleSetID: rewriter.ruleSetID
         )
-        rewriter.applyScripts(message, phase: .httpRequest, resumeOn: lwipQueue) { [weak self] outcome in
-            guard let self, !self.torn else { return }
-            // The client can RST the stream while the script runs; only `streamMethods` still
-            // tracks it here. If it's gone, drop the result — forwarding would open an origin
-            // stream whose response every sink guard drops, and a synth answer would strand a
-            // dead `.synthAnswered` entry.
-            guard self.streamMethods[streamID] != nil else { return }
-            switch outcome {
-            case .message(let updated):
-                self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
-            case .synthesizedResponse(let response):
-                self.answerSynth(streamID: streamID, response: response)
+        let rewriter = self.rewriter
+        Task { [weak self] in
+            let outcome = await rewriter.applyScripts(message, phase: .httpRequest)
+            guard let self else { return }
+            self.lwipQueue.async {
+                guard !self.torn else { return }
+                // The client can RST the stream while the script runs; only `streamMethods` still
+                // tracks it here. If it's gone, drop the result — forwarding would open an origin
+                // stream whose response every sink guard drops, and a synth answer would strand a
+                // dead `.synthAnswered` entry.
+                guard self.streamMethods[streamID] != nil else { return }
+                switch outcome {
+                case .message(let updated):
+                    self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
+                case .synthesizedResponse(let response):
+                    self.answerSynth(streamID: streamID, response: response)
+                }
+                // Non-blocking: the stream was already removed and the pump kept running, so emit
+                // without re-pumping. Out-of-order forwarding is fine (the h2 upstream leg reorders to
+                // monotonic IDs; an h1 upstream dials per stream).
             }
-            // Non-blocking: the stream was already removed and the pump kept running, so emit
-            // without re-pumping. Out-of-order forwarding is fine (the h2 upstream leg reorders to
-            // monotonic IDs; an h1 upstream dials per stream).
         }
         // Don't park: the script runs at END_STREAM after the stream is removed, so sibling streams
         // must keep flowing while it runs.

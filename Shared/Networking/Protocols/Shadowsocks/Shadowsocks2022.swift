@@ -9,6 +9,7 @@ import Foundation
 import CryptoKit
 import CommonCrypto
 import Security
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "Shadowsocks2022")
 
@@ -24,7 +25,6 @@ private let tagSize = 16
 
 /// Wire format: salt + seal(fixedHeader) + seal(variableHeader+payload) [+ AEAD chunks].
 nonisolated class Shadowsocks2022Connection: ProxyConnection {
-    private let lock = UnfairLock()
     private let inner: ProxyConnection
     private let cipher: ShadowsocksCipher
     private let psk: Data
@@ -34,7 +34,6 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
     private var requestSalt: Data?
     private var writeNonce: ShadowsocksNonce
     private var writeSubkey: Data?
-    private var handshakeSent = false
 
     private var readNonce: ShadowsocksNonce
     private var readSubkey: Data?
@@ -43,14 +42,16 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
     private var pendingVarHeaderLen: Int? = nil    // fixed header parsed, variable header not yet buffered
     private var pendingPayloadLength: Int? = nil   // length chunk decoded (nonce consumed), payload not yet buffered
 
-    private var addressHeader: Data?
+    /// The one-shot address header, consumed on the first send. Guarded because concurrent
+    /// sends must hand the handshake to exactly one caller.
+    private let handshake: Mutex<Data?>
 
     init(inner: ProxyConnection, cipher: ShadowsocksCipher, pskList: [Data], addressHeader: Data) {
         self.inner = inner
         self.cipher = cipher
         self.pskList = pskList
         self.psk = pskList.last!
-        self.addressHeader = addressHeader
+        self.handshake = Mutex(addressHeader)
 
         var hashes: [Data] = []
         for i in 1..<pskList.count {
@@ -66,17 +67,13 @@ nonisolated class Shadowsocks2022Connection: ProxyConnection {
     override var isConnected: Bool { inner.isConnected }
 
     override func sendRaw(_ data: Data) async throws {
-        lock.lock()
-        let needsHandshake = !handshakeSent
-        let header = addressHeader
-        if needsHandshake {
-            handshakeSent = true
-            addressHeader = nil
+        let header: Data? = handshake.withLock { header in
+            defer { header = nil }
+            return header
         }
-        lock.unlock()
 
-        if needsHandshake {
-            let output = try buildRequest(payload: data, addressHeader: header!)
+        if let header {
+            let output = try buildRequest(payload: data, addressHeader: header)
             try await inner.sendRaw(output)
         } else {
             let encrypted = try sealChunks(plaintext: data)

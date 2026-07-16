@@ -53,6 +53,20 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     /// Serial queue guarding all mutable multiplexer + stream state; `.userInitiated` to match the data-plane chain.
     let queue = DispatchQueue(label: AWCore.Identifier.http2SessionQueue, qos: .userInitiated)
 
+    /// Runs `body` on ``queue`` and awaits its result — this multiplexer's own bridge hop, so its
+    /// streams/pool stay free of raw `queue.async`+continuation. This ONE helper is where the
+    /// continuation-wrapping-`queue.async` lives.
+    func run<T>(_ body: @escaping () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: body()) }
+        }
+    }
+    func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { continuation.resume(with: body()) }
+        }
+    }
+
     private var streams: [UInt32: NaiveHTTP2Stream] = [:]
     private var nextStreamID: UInt32 = 1
     private var maxConcurrentStreams: UInt32 = 100
@@ -69,7 +83,13 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     private var receiveBuffer = Data()
     private static let maxReceiveBufferSize = 2_097_152
 
-    private var readyCallbacks: [(Error?) -> Void] = []
+    /// Readiness awaiters coalesced behind one handshake; resolves at `.ready` or on fail/close.
+    /// The waiter continuations live in the gate (async infra), not this queue-confined layer.
+    private let readyGate = AsyncReadinessGate()
+
+    /// Send-side parks waiting on a WINDOW_UPDATE that re-opens flow control. Queue-confined;
+    /// replaces the old 50 ms flow-control retry poll (mirrors GRPCConnection.parkForFlowWindow).
+    private var flowResumptions: [CheckedContinuation<Void, Never>] = []
 
     /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
     var onClose: (() -> Void)?
@@ -146,19 +166,23 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
     // MARK: - Session Setup
 
-    /// Must be called on `queue`.
-    func ensureReady(completion: @escaping (Error?) -> Void) {
-        switch state {
-        case .ready:
-            completion(nil)
-        case .idle:
-            readyCallbacks.append(completion)
-            beginSetup()
-        case .connecting, .prefaceSent:
-            readyCallbacks.append(completion)
-        case .goingAway, .closed:
-            completion(NaiveHTTP2Error.notReady)
+    /// Coalesces awaiters behind one handshake; resolves at `.ready` or on fail/close. Kicks the
+    /// handshake on `queue`, then parks on the gate — callable from any async context.
+    func ensureReady() async throws {
+        let alreadyReady: Bool = try await run { [self] () -> Result<Bool, Error> in
+            switch state {
+            case .ready:
+                return .success(true)
+            case .idle:
+                beginSetup()
+                return .success(false)
+            case .connecting, .prefaceSent:
+                return .success(false)
+            case .goingAway, .closed:
+                return .failure(NaiveHTTP2Error.notReady)
+            }
         }
+        if !alreadyReady { try await readyGate.wait() }
     }
 
     private func beginSetup() {
@@ -173,7 +197,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
                 self.queue.async {
                     self.state = .closed
                     self.updatePoolSnapshot()
-                    self.completeReadyCallbacks(error)
+                    self.completeReadyContinuations(error)
                 }
             }
         }
@@ -236,7 +260,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
                     self.transport.cancel()
                     self.sendPump.finish()
                     self.updatePoolSnapshot()
-                    self.completeReadyCallbacks(error)
+                    self.completeReadyContinuations(error)
                     return
                 }
                 self.state = .prefaceSent
@@ -356,7 +380,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
         if state == .prefaceSent {
             state = .ready
-            completeReadyCallbacks(nil)
+            completeReadyContinuations(nil)
         }
         updatePoolSnapshot()
     }
@@ -372,7 +396,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
             }
         }
         if previousState == .prefaceSent || previousState == .connecting {
-            completeReadyCallbacks(NaiveHTTP2Error.goaway)
+            completeReadyContinuations(NaiveHTTP2Error.goaway)
         }
     }
 
@@ -383,6 +407,17 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         } else if let stream = streams[frame.streamID] {
             stream.adjustSendWindow(delta: Int(increment))
         }
+        // A re-opened window (connection- or stream-level) wakes parked sends; each re-checks
+        // its own min(connection, stream) window before building frames.
+        resumeFlowParks()
+    }
+
+    /// Wakes every parked send so it re-evaluates flow control. Queue-confined.
+    private func resumeFlowParks() {
+        guard !flowResumptions.isEmpty else { return }
+        let resumptions = flowResumptions
+        flowResumptions.removeAll()
+        for continuation in resumptions { continuation.resume() }
     }
 
     private func handleDataFrame(_ frame: NaiveHTTP2Frame, stream: NaiveHTTP2Stream) {
@@ -402,7 +437,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
     // MARK: - Send (called by streams)
 
-    func sendConnect(stream: NaiveHTTP2Stream, completion: @escaping (Error?) -> Void) {
+    func sendConnect(stream: NaiveHTTP2Stream) async throws {
         let extraHeaders = connectHeaders()
 
         let headerBlock = HPACKEncoder.encodeConnectRequest(
@@ -415,58 +450,87 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
             endStream: false
         )
 
-        sendPump.enqueueSend(headersFrame.serialized, completion: completion)
+        try await enqueueOrdered(headersFrame.serialized)
     }
 
-    /// Sends DATA frames for a stream, respecting connection + stream flow control.
-    func sendData(_ data: Data, on stream: NaiveHTTP2Stream, offset: Int = 0,
-                  completion: @escaping (Error?) -> Void) {
-        guard offset < data.count else {
-            completion(nil)
-            return
-        }
+    /// One outcome of a flow-control-bounded frame-build pass, decided on `queue`.
+    private enum SendStep {
+        case closed
+        case park
+        case built(frames: Data, nextOffset: Int)
+    }
 
-        let maxPayload = NaiveHTTP2Framer.maxDataPayload
-        var currentOffset = offset
-        var frames = Data()
-
-        while currentOffset < data.count {
-            let remaining = data.count - currentOffset
-            let maxByFlow = min(connectionSendWindow, stream.sendWindow)
-            let chunkSize = min(remaining, min(maxPayload, maxByFlow))
-
-            guard chunkSize > 0 else { break }
-
-            connectionSendWindow -= chunkSize
-            stream.consumeSendWindow(chunkSize)
-
-            let chunk = Data(data[currentOffset..<(currentOffset + chunkSize)])
-            let frame = NaiveHTTP2Framer.dataFrame(streamID: stream.streamID, payload: chunk)
-            frames.append(frame.serialized)
-            currentOffset += chunkSize
-        }
-
-        if frames.isEmpty {
-            // Flow control window exhausted — wait for WINDOW_UPDATE and retry
-            queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-                self?.sendData(data, on: stream, offset: offset, completion: completion)
+    /// Sends DATA frames for a stream, respecting connection + stream flow control. When the
+    /// window is exhausted it parks on a continuation resumed by the next WINDOW_UPDATE, instead
+    /// of the old 50 ms poll (mirrors GRPCConnection.sendH2Data / XHTTPH2Multiplexer.sendData).
+    func sendData(_ data: Data, on stream: NaiveHTTP2Stream) async throws {
+        var offset = 0
+        while offset < data.count {
+            let step: SendStep = await buildDataStep(data, on: stream, offset: offset)
+            switch step {
+            case .closed:
+                throw NaiveHTTP2Error.notReady
+            case .park:
+                await parkForFlow(stream: stream)
+            case .built(let frames, let nextOffset):
+                try await enqueueOrdered(frames)
+                offset = nextOffset
             }
-            return
         }
+    }
 
-        let nextOffset = currentOffset
-        sendPump.enqueueSend(frames) { [weak self] error in
-            guard let self else { return }
-            self.queue.async {
-                if let error {
-                    completion(error)
-                    return
-                }
-                if nextOffset < data.count {
-                    self.sendData(data, on: stream, offset: nextOffset, completion: completion)
-                } else {
-                    completion(nil)
-                }
+    /// Builds as many DATA frames as the current flow window allows, debiting the windows. Runs on
+    /// `queue`; returns `.park` when the window is exhausted so the caller can suspend off-queue.
+    private func buildDataStep(_ data: Data, on stream: NaiveHTTP2Stream, offset: Int) async -> SendStep {
+        await run { [self] in
+            guard state != .closed else { return .closed }
+
+            let maxPayload = NaiveHTTP2Framer.maxDataPayload
+            var currentOffset = offset
+            var frames = Data()
+
+            while currentOffset < data.count {
+                let remaining = data.count - currentOffset
+                let maxByFlow = min(connectionSendWindow, stream.sendWindow)
+                let chunkSize = min(remaining, min(maxPayload, maxByFlow))
+
+                guard chunkSize > 0 else { break }
+
+                connectionSendWindow -= chunkSize
+                stream.consumeSendWindow(chunkSize)
+
+                let chunk = Data(data[data.startIndex + currentOffset ..< data.startIndex + currentOffset + chunkSize])
+                let frame = NaiveHTTP2Framer.dataFrame(streamID: stream.streamID, payload: chunk)
+                frames.append(frame.serialized)
+                currentOffset += chunkSize
+            }
+
+            if frames.isEmpty {
+                return .park
+            } else {
+                return .built(frames: frames, nextOffset: currentOffset)
+            }
+        }
+    }
+
+    /// Suspends until a WINDOW_UPDATE re-opens the send window (or the session closes). Re-checks
+    /// under `queue` before parking so a window re-open racing the caller isn't missed.
+    private func parkForFlow(stream: NaiveHTTP2Stream) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [self] in
+                if state == .closed { continuation.resume(); return }
+                if min(connectionSendWindow, stream.sendWindow) > 0 { continuation.resume(); return }
+                flowResumptions.append(continuation)
+            }
+        }
+    }
+
+    /// Enqueues one ordered send on the pump and awaits its completion (bridges the pump's
+    /// single-shot completion into async; the pump preserves submission order).
+    private func enqueueOrdered(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendPump.enqueueSend(data) { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
             }
         }
     }
@@ -487,7 +551,8 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         state = .closed
         transport.cancel()
         sendPump.finish()
-        completeReadyCallbacks(error)
+        completeReadyContinuations(error)
+        resumeFlowParks()
         for (_, stream) in streams {
             stream.handleSessionError(error)
         }
@@ -496,12 +561,8 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         onClose?()
     }
 
-    private func completeReadyCallbacks(_ error: Error?) {
-        let callbacks = readyCallbacks
-        readyCallbacks.removeAll()
-        for callback in callbacks {
-            callback(error)
-        }
+    private func completeReadyContinuations(_ error: Error?) {
+        if let error { readyGate.signalFailure(error) } else { readyGate.signalSuccess() }
     }
 
     func close(error: Error? = nil) {
@@ -510,6 +571,8 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
             state = .closed
             transport.cancel()
             sendPump.finish()
+            completeReadyContinuations(NaiveHTTP2Error.connectionFailed("Session closed"))
+            resumeFlowParks()
             for (_, stream) in streams {
                 stream.handleSessionError(NaiveHTTP2Error.connectionFailed("Session closed"))
             }

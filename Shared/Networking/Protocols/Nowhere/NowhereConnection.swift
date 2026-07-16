@@ -55,7 +55,9 @@ nonisolated final class NowhereConnection: ProxyConnection {
     /// replacement for the parked `pendingReceive`. Stream credit is returned in
     /// ``receiveRaw()`` only once the app takes the bytes (backpressure preserved).
     private let inbox = AsyncByteChannel()
-    private var openCompletion: ((Error?) -> Void)?
+    /// Resolves when the Nowhere flow result is demuxed (or the open fails). The waiter
+    /// continuation lives in the promise (async infra), bridging the session's ngtcp2 demux loop.
+    private let openPromise = AsyncPromise<Void>()
     private var setupTerminationError: Error?
 
     init(
@@ -75,29 +77,27 @@ nonisolated final class NowhereConnection: ProxyConnection {
 
     override var outerTLSVersion: TLSVersion? { .tls13 }
 
-    func open(completion: @escaping (Error?) -> Void) {
-        session.queue.async { [weak self] in
-            guard let self else { completion(NowhereError.streamClosed); return }
-            guard self.state == .idle else { completion(NowhereError.notReady); return }
-            self.openCompletion = completion
-            self.state = .openingStream
+    func open() async throws {
+        // Claim the connection on the ngtcp2 queue; `openPromise` resolves later in
+        // `finishOpen`/`processFlowResultIfAvailable` (result) or `fail` (error).
+        let started: Bool = await session.run { [self] in
+            guard state == .idle else { return false }
+            state = .openingStream
+            return true
+        }
+        guard started else { throw NowhereError.notReady }
 
-            self.session.openTCPStream(for: self) { [weak self] sid, error in
-                guard let self else { return }
-                self.session.queue.async {
-                    if let error {
-                        self.fail(error)
-                        return
-                    }
-                    guard let sid else {
-                        self.fail(NowhereError.connectionFailed("No stream"))
-                        return
-                    }
-                    self.streamID = sid
-                    self.sendTCPRequest()
-                }
+        // Reserve the stream, then send the request.
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let streamID = try await self.session.openTCPStream(for: self)
+                await self.session.run { self.streamID = streamID; self.sendTCPRequest() }
+            } catch {
+                await self.session.run { self.fail(error) }
             }
         }
+        try await openPromise.value()
     }
 
     private func sendTCPRequest() {
@@ -113,16 +113,23 @@ nonisolated final class NowhereConnection: ProxyConnection {
             fail(error)
             return
         }
-        session.writeStream(streamID, data: frame) { [weak self] error in
+        Task { [weak self] in
             guard let self else { return }
+            let writeError: Error?
+            do {
+                try await self.session.writeStream(self.streamID, data: frame)
+                writeError = nil
+            } catch {
+                writeError = error
+            }
             self.session.queue.async {
                 guard self.state == .handshaking else { return }
                 if self.flowHeader.role != .open {
                     self.state = .waitingResult
                     self.processFlowResultIfAvailable()
                     guard self.state == .waitingResult else { return }
-                    if let error {
-                        self.fail(error)
+                    if let writeError {
+                        self.fail(writeError)
                     } else if self.readClosed {
                         self.fail(NowhereError.connectionFailed(
                             "Stream closed before complete READY"
@@ -130,7 +137,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
                     }
                 } else {
                     if let terminalError = Self.openSetupError(
-                        writeError: error,
+                        writeError: writeError,
                         terminationError: self.setupTerminationError
                     ) {
                         self.fail(terminalError)
@@ -221,9 +228,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
     private func finishOpen() {
         guard state != .closed else { return }
         state = .ready
-        let callback = openCompletion
-        openCompletion = nil
-        callback?(nil)
+        openPromise.resolve(.success(()))
         // Flush any coalesced post-result app data, then honour a buffered FIN.
         flushBufferToInbox()
         if readClosed { inbox.finish() }
@@ -283,10 +288,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
             session.releaseTCPStream(streamID)
         }
 
-        if let callback = openCompletion {
-            openCompletion = nil
-            callback(error)
-        }
+        openPromise.resolve(.failure(error))
         inbox.fail(error)
     }
 
@@ -324,10 +326,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
                 self.session.releaseTCPStream(self.streamID)
             }
             self.inbox.cancel()
-            if let callback = self.openCompletion {
-                self.openCompletion = nil
-                callback(NowhereError.streamClosed)
-            }
+            self.openPromise.resolve(.failure(NowhereError.streamClosed))
         }
     }
 }
@@ -347,11 +346,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         var finished = false
     }
     private let cancelState = Mutex(CancelState())
-    private static let closeFlushQueue = DispatchQueue(
-        label: "com.argsment.Anywhere.NowhereUoTClose",
-        qos: .utility
-    )
-    private static let closeFlushBound: DispatchTimeInterval = .milliseconds(250)
+    private static let closeFlushBound: Duration = .milliseconds(250)
 
     init(inner: NowhereTCPConnection) {
         self.inner = inner
@@ -491,13 +486,14 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
             finishCancel()
             return
         }
+        // Best-effort close-frame flush bounded by `closeFlushBound`; whichever of the
+        // send or the deadline finishes first triggers the (idempotent) teardown.
         Task { [weak self] in
             guard let self else { return }
-            try? await self.inner.sendRaw(close)
+            _ = try? await raceDialDeadline(Self.closeFlushBound) { [weak self] in
+                try await self?.inner.sendRaw(close)
+            }
             self.finishCancel()
-        }
-        Self.closeFlushQueue.asyncAfter(deadline: .now() + Self.closeFlushBound) { [self] in
-            finishCancel()
         }
     }
 
@@ -513,28 +509,34 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
 
 nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
 
-    private enum State { case idle, connecting, authenticating, prepared, requesting, waitingResult, ready, closed }
+    private enum Phase { case idle, connecting, authenticating, prepared, requesting, waitingResult, ready, closed }
 
-    /// Guards this connection's flow-open state machine.
-    private let lock = UnfairLock()
     private let configuration: NowhereConfiguration
     private let connectHost: String
     private let tunnel: ProxyConnection?
 
-    private var state: State = .idle
-    private var tlsClient: TLSClient?
-    private var inner: TLSProxyConnection?
-    private var openCompletion: ((Error?) -> Void)?
-    private var receiveBuffer = Data()
-    private var pendingReceive: ((Data?, Error?) -> Void)?
-    private var terminalError: Error?
-    private var preparedCloseHandler: (() -> Void)?
-    private var transportReadInFlight = false
-    private var transportReadClosed = false
-    private var transportWriteClosed = false
-    private var flowResultKind: NowhereProtocol.FlowKind?
-    private var flowRole: NowhereProtocol.FlowRole?
-    private var didBecomeReady = false
+    /// Guards this connection's flow-open state machine.
+    private struct State {
+        var phase: Phase = .idle
+        var tlsClient: TLSClient?
+        var inner: TLSProxyConnection?
+        /// Parked until the flow reaches `.prepared`/`.ready` or fails. The async bridge
+        /// over the TLS-carrier setup state machine.
+        var openContinuation: CheckedContinuation<Void, Error>?
+        var receiveBuffer = Data()
+        /// Residual receive park (single continuation); see MIGRATION.md's residual-continuations note.
+        var pendingReceive: ((Data?, Error?) -> Void)?
+        var terminalError: Error?
+        var preparedCloseHandler: (() -> Void)?
+        var transportReadInFlight = false
+        var transportReadClosed = false
+        var transportWriteClosed = false
+        var flowResultKind: NowhereProtocol.FlowKind?
+        var flowRole: NowhereProtocol.FlowRole?
+        var didBecomeReady = false
+    }
+    private let state = Mutex(State())
+
     private struct TerminationState {
         var handler: ((Error?) -> Void)?
         var terminated = false
@@ -554,15 +556,15 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     override var isConnected: Bool {
-        lock.withLock { state == .ready && inner?.isConnected == true }
+        state.withLock { $0.phase == .ready && $0.inner?.isConnected == true }
     }
 
     override var outerTLSVersion: TLSVersion? {
-        lock.withLock { inner?.outerTLSVersion }
+        state.withLock { $0.inner?.outerTLSVersion }
     }
 
     var isPrepared: Bool {
-        lock.withLock { state == .prepared && inner?.isConnected == true }
+        state.withLock { $0.phase == .prepared && $0.inner?.isConnected == true }
     }
 
     func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
@@ -579,7 +581,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             return
         }
         guard handler != nil,
-              let connection = lock.withLock({ state == .ready ? inner : nil }) else { return }
+              let connection = state.withLock({ $0.phase == .ready ? $0.inner : nil }) else { return }
         armTransportRead(on: connection)
     }
 
@@ -590,8 +592,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     /// Only the asymmetric UoT OPEN half has no application receive loop. Its
     /// peer must send no DATA, so one bounded frame probe can monitor liveness
     /// without prefetching valid downlink traffic into an unbounded buffer.
-    private var shouldProbeUOTUplink: Bool {
-        flowResultKind == .udp && flowRole == .open && hasTerminationHandler
+    private func shouldProbeUOTUplink(_ state: State) -> Bool {
+        state.flowResultKind == .udp && state.flowRole == .open && hasTerminationHandler
     }
 
     private func notifyTermination(error: Error?) {
@@ -607,129 +609,109 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     func setPreparedCloseHandler(_ handler: (() -> Void)?) {
-        lock.withLock { preparedCloseHandler = handler }
+        state.withLock { $0.preparedCloseHandler = handler }
     }
 
-    func prepare(completion: @escaping (Error?) -> Void) {
-        let auth: Data
-        do {
-            auth = try NowhereProtocol.makeAuthFrame(
-                key: configuration.key,
-                protocolSpec: configuration.protocolSpec,
-                sessionID: configuration.sessionID
-            )
-        } catch {
-            completion(error)
-            return
-        }
+    func prepare() async throws {
+        let auth = try NowhereProtocol.makeAuthFrame(
+            key: configuration.key,
+            protocolSpec: configuration.protocolSpec,
+            sessionID: configuration.sessionID
+        )
 
-        connectAndSend(
+        try await connectAndSend(
             payload: auth,
             successState: .prepared,
             expectsFlowResult: false,
             flowKind: nil,
-            flowRole: nil,
-            completion: completion
+            flowRole: nil
         )
     }
 
     func openFresh(
         destination: String,
         mode: NowhereTCPRelayMode = .tcp,
-        flowHeader: NowhereProtocol.FlowHeader,
-        completion: @escaping (Error?) -> Void
-    ) {
-        let bootstrap: Data
-        do {
-            bootstrap = try NowhereProtocol.makeAuthFrame(
-                key: configuration.key,
-                protocolSpec: configuration.protocolSpec,
-                sessionID: configuration.sessionID
-            ) + requestPayload(destination: destination, flowHeader: flowHeader)
-        } catch {
-            completion(error)
-            return
-        }
+        flowHeader: NowhereProtocol.FlowHeader
+    ) async throws {
+        let bootstrap = try NowhereProtocol.makeAuthFrame(
+            key: configuration.key,
+            protocolSpec: configuration.protocolSpec,
+            sessionID: configuration.sessionID
+        ) + requestPayload(destination: destination, flowHeader: flowHeader)
 
-        connectAndSend(
+        try await connectAndSend(
             payload: bootstrap,
             successState: .ready,
             expectsFlowResult: flowHeader.role != .open,
             flowKind: flowHeader.kind,
-            flowRole: flowHeader.role,
-            completion: completion
+            flowRole: flowHeader.role
         )
     }
 
     func activate(
         destination: String,
         mode: NowhereTCPRelayMode = .tcp,
-        flowHeader: NowhereProtocol.FlowHeader,
-        completion: @escaping (Error?) -> Void
-    ) {
-        let request: Data
-        do {
-            request = try requestPayload(destination: destination, flowHeader: flowHeader)
-        } catch {
-            completion(error)
-            return
-        }
+        flowHeader: NowhereProtocol.FlowHeader
+    ) async throws {
+        let request = try requestPayload(destination: destination, flowHeader: flowHeader)
 
-        let connection: TLSProxyConnection? = lock.withLock {
-            guard state == .prepared, let inner else { return nil }
-            state = .requesting
-            preparedCloseHandler = nil
-            openCompletion = completion
-            flowResultKind = flowHeader.kind
-            flowRole = flowHeader.role
-            return inner
-        }
-        guard let connection else {
-            completion(NowhereError.streamClosed)
-            return
-        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let connection: TLSProxyConnection? = state.withLock { state in
+                guard state.phase == .prepared, let inner = state.inner else { return nil }
+                state.phase = .requesting
+                state.preparedCloseHandler = nil
+                state.openContinuation = continuation
+                state.flowResultKind = flowHeader.kind
+                state.flowRole = flowHeader.role
+                return inner
+            }
+            guard let connection else {
+                continuation.resume(throwing: NowhereError.streamClosed)
+                return
+            }
 
-        let onRequestSent: (Error?) -> Void = { [weak self] error in
-            guard let self else { return }
-            if flowHeader.role != .open {
-                let canProcess = self.lock.withLock {
-                    guard self.state == .requesting else { return false }
-                    self.state = .waitingResult
+            let onRequestSent: (Error?) -> Void = { [weak self] error in
+                guard let self else { return }
+                if flowHeader.role != .open {
+                    let canProcess = self.state.withLock { state -> Bool in
+                        guard state.phase == .requesting else { return false }
+                        state.phase = .waitingResult
+                        return true
+                    }
+                    guard canProcess else { return }
+                    self.processBufferedFlowResult(on: connection, fallbackError: error)
+                    return
+                }
+
+                var readyContinuation: CheckedContinuation<Void, Error>?
+                var failure = error
+                let wasRequesting = self.state.withLock { state -> Bool in
+                    guard state.phase == .requesting else { return false }
+                    if failure == nil, state.transportReadClosed {
+                        failure = state.terminalError ?? NowhereError.connectionFailed(
+                            "OPEN stream closed before request completed"
+                        )
+                    }
+                    if failure == nil {
+                        state.phase = .ready
+                        state.didBecomeReady = true
+                        readyContinuation = state.openContinuation
+                        state.openContinuation = nil
+                    }
                     return true
                 }
-                guard canProcess else { return }
-                self.processBufferedFlowResult(on: connection, fallbackError: error)
-                return
-            }
-
-            var callback: ((Error?) -> Void)?
-            var failure = error
-            let wasRequesting = self.lock.withLock { () -> Bool in
-                guard self.state == .requesting else { return false }
-                if failure == nil, self.transportReadClosed {
-                    failure = self.terminalError ?? NowhereError.connectionFailed(
-                        "OPEN stream closed before request completed"
-                    )
+                guard wasRequesting else { return }
+                if let failure {
+                    self.fail(failure)
+                    return
                 }
-                if failure == nil {
-                    self.state = .ready
-                    self.didBecomeReady = true
-                    callback = self.openCompletion
-                    self.openCompletion = nil
-                }
-                return true
+                readyContinuation?.resume()
+                self.deliverPendingReceive()
             }
-            guard wasRequesting else { return }
-            if let failure {
-                self.fail(failure)
-                return
+            Task {
+                do { try await connection.sendRaw(request); onRequestSent(nil) }
+                catch { onRequestSent(error) }
             }
-            callback?(nil)
-            self.deliverPendingReceive()
-        }
-        Task {
-            do { try await connection.sendRaw(request); onRequestSent(nil) }
-            catch { onRequestSent(error) }
         }
     }
 
@@ -746,102 +728,111 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
 
     private func connectAndSend(
         payload: Data,
-        successState: State,
+        successState: Phase,
         expectsFlowResult: Bool,
         flowKind: NowhereProtocol.FlowKind?,
-        flowRole: NowhereProtocol.FlowRole?,
-        completion: @escaping (Error?) -> Void
-    ) {
-        let canOpen = lock.withLock {
-            guard state == .idle else { return false }
-            state = .connecting
-            openCompletion = completion
-            self.flowResultKind = flowKind
-            self.flowRole = flowRole
-            return true
-        }
-        guard canOpen else {
-            completion(NowhereError.notReady)
-            return
-        }
+        flowRole: NowhereProtocol.FlowRole?
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let canOpen = state.withLock { state -> Bool in
+                guard state.phase == .idle else { return false }
+                state.phase = .connecting
+                state.openContinuation = continuation
+                state.flowResultKind = flowKind
+                state.flowRole = flowRole
+                return true
+            }
+            guard canOpen else {
+                continuation.resume(throwing: NowhereError.notReady)
+                return
+            }
 
-        let baseTLS = configuration.tls
-        let tlsConfiguration = TLSConfiguration(
-            serverName: baseTLS.serverName,
-            alpn: [configuration.protocolSpec.effectiveALPN],
-            minVersion: .tls13,
-            maxVersion: .tls13,
-            echEnabled: baseTLS.echEnabled,
-            echConfig: baseTLS.echConfig,
-            fingerprint: baseTLS.fingerprint
-        )
-        let client = TLSClient(configuration: tlsConfiguration)
-        lock.withLock { tlsClient = client }
+            let baseTLS = configuration.tls
+            let tlsConfiguration = TLSConfiguration(
+                serverName: baseTLS.serverName,
+                alpn: [configuration.protocolSpec.effectiveALPN],
+                minVersion: .tls13,
+                maxVersion: .tls13,
+                echEnabled: baseTLS.echEnabled,
+                echConfig: baseTLS.echConfig,
+                fingerprint: baseTLS.fingerprint
+            )
+            let client = TLSClient(configuration: tlsConfiguration)
+            state.withLock { $0.tlsClient = client }
 
-        let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure(let error):
-                self.fail(error)
-            case .success(let tlsConnection):
-                let proxy = TLSProxyConnection(tlsConnection: tlsConnection)
-                let shouldSend = self.lock.withLock {
-                    guard self.state == .connecting else { return false }
-                    self.state = .authenticating
-                    self.tlsClient = nil
-                    self.inner = proxy
-                    return true
-                }
-                guard shouldSend else {
-                    proxy.cancel()
-                    return
-                }
-                let onPayloadSent: (Error?) -> Void = { [weak self] error in
-                    guard let self else { return }
-                    if let error {
-                        self.fail(error)
+            let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .failure(let error):
+                    self.fail(error)
+                case .success(let tlsConnection):
+                    let proxy = TLSProxyConnection(tlsConnection: tlsConnection)
+                    let shouldSend = self.state.withLock { state -> Bool in
+                        guard state.phase == .connecting else { return false }
+                        state.phase = .authenticating
+                        state.tlsClient = nil
+                        state.inner = proxy
+                        return true
+                    }
+                    guard shouldSend else {
+                        proxy.cancel()
                         return
                     }
-                    let callback: ((Error?) -> Void)? = self.lock.withLock {
-                        guard self.state == .authenticating else { return nil }
-                        if expectsFlowResult {
-                            self.state = .waitingResult
-                            return nil
+                    let onPayloadSent: (Error?) -> Void = { [weak self] error in
+                        guard let self else { return }
+                        if let error {
+                            self.fail(error)
+                            return
                         }
-                        self.state = successState
-                        if successState == .ready { self.didBecomeReady = true }
-                        let callback = self.openCompletion
-                        self.openCompletion = nil
-                        return callback
+                        let readyContinuation: CheckedContinuation<Void, Error>? = self.state.withLock { state -> CheckedContinuation<Void, Error>? in
+                            guard state.phase == .authenticating else { return nil }
+                            if expectsFlowResult {
+                                state.phase = .waitingResult
+                                return nil
+                            }
+                            state.phase = successState
+                            if successState == .ready { state.didBecomeReady = true }
+                            let continuation = state.openContinuation
+                            state.openContinuation = nil
+                            return continuation
+                        }
+                        if !expectsFlowResult { readyContinuation?.resume() }
+                        self.armTransportRead(on: proxy)
                     }
-                    if !expectsFlowResult { callback?(nil) }
-                    self.armTransportRead(on: proxy)
-                }
-                Task {
-                    do { try await proxy.sendRaw(payload); onPayloadSent(nil) }
-                    catch { onPayloadSent(error) }
+                    Task {
+                        do { try await proxy.sendRaw(payload); onPayloadSent(nil) }
+                        catch { onPayloadSent(error) }
+                    }
                 }
             }
-        }
 
-        if let tunnel {
-            client.connect(overTunnel: tunnel, completion: handleResult)
-        } else {
-            client.connect(host: connectHost, port: configuration.proxyPort, completion: handleResult)
+            Task {
+                do {
+                    let tlsConnection: TLSRecordConnection
+                    if let tunnel {
+                        tlsConnection = try await client.connect(overTunnel: tunnel)
+                    } else {
+                        tlsConnection = try await client.connect(host: connectHost, port: configuration.proxyPort)
+                    }
+                    handleResult(.success(tlsConnection))
+                } catch {
+                    handleResult(.failure(error))
+                }
+            }
         }
     }
 
     private func armTransportRead(on connection: TLSProxyConnection) {
-        let shouldRead: Bool = lock.withLock {
-            guard inner === connection, state != .closed,
-                  !transportReadClosed, !transportReadInFlight else {
+        let shouldRead: Bool = state.withLock { state in
+            guard state.inner === connection, state.phase != .closed,
+                  !state.transportReadClosed, !state.transportReadInFlight else {
                 return false
             }
-            guard state == .prepared || state == .requesting || state == .waitingResult
-                    || (state == .ready && (pendingReceive != nil || shouldProbeUOTUplink)) else {
+            guard state.phase == .prepared || state.phase == .requesting || state.phase == .waitingResult
+                    || (state.phase == .ready && (state.pendingReceive != nil || shouldProbeUOTUplink(state))) else {
                 return false
             }
-            transportReadInFlight = true
+            state.transportReadInFlight = true
             return true
         }
         guard shouldRead else { return }
@@ -865,7 +856,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         var deliveredData: Data?
         var closeHandler: (() -> Void)?
         var continueReading = false
-        var openCallback: ((Error?) -> Void)?
+        var openContinuation: CheckedContinuation<Void, Error>?
         var flowError: Error?
         var becameReady = false
         var shouldCancelTransport = false
@@ -873,84 +864,88 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         var notificationError: Error?
         let terminal = error != nil || data == nil || data?.isEmpty == true
 
-        lock.lock()
-        guard inner === connection, state != .closed else {
-            lock.unlock()
-            return
-        }
-        transportReadInFlight = false
-        if terminal {
-            shouldNotifyTermination = true
-            notificationError = error
-            if state == .requesting {
-                // A prepared connection can receive F2+FIN before the request
-                // write callback. Preserve both the buffered result and EOF;
-                // the callback transitions to waitingResult and resolves F2.
-                transportReadClosed = true
-                terminalError = error
-            } else if error == nil, state == .ready {
-                transportReadClosed = true
-                delivery = pendingReceive
-                pendingReceive = nil
-                if transportWriteClosed {
-                    state = .closed
-                    inner = nil
+        let proceed: Bool = state.withLock { state in
+            guard state.inner === connection, state.phase != .closed else {
+                return false
+            }
+            state.transportReadInFlight = false
+            if terminal {
+                shouldNotifyTermination = true
+                notificationError = error
+                if state.phase == .requesting {
+                    // A prepared connection can receive F2+FIN before the request
+                    // write callback. Preserve both the buffered result and EOF;
+                    // the callback transitions to waitingResult and resolves F2.
+                    state.transportReadClosed = true
+                    state.terminalError = error
+                } else if error == nil, state.phase == .ready {
+                    state.transportReadClosed = true
+                    delivery = state.pendingReceive
+                    state.pendingReceive = nil
+                    if state.transportWriteClosed {
+                        state.phase = .closed
+                        state.inner = nil
+                        shouldCancelTransport = true
+                    }
+                } else {
+                    let wasPrepared = state.phase == .prepared
+                    state.phase = .closed
+                    state.terminalError = error
+                    state.inner = nil
+                    closeHandler = wasPrepared ? state.preparedCloseHandler : nil
+                    state.preparedCloseHandler = nil
+                    openContinuation = state.openContinuation
+                    state.openContinuation = nil
+                    delivery = state.pendingReceive
+                    state.pendingReceive = nil
                     shouldCancelTransport = true
                 }
-            } else {
-                let wasPrepared = state == .prepared
-                state = .closed
-                terminalError = error
-                inner = nil
-                closeHandler = wasPrepared ? preparedCloseHandler : nil
-                preparedCloseHandler = nil
-                openCallback = openCompletion
-                openCompletion = nil
-                delivery = pendingReceive
-                pendingReceive = nil
-                shouldCancelTransport = true
-            }
-        } else if let data, !data.isEmpty {
-            receiveBuffer.append(data)
-            if state == .waitingResult {
-                switch takeFlowResultLocked() {
-                case .needMore:
-                    continueReading = true
-                case .ready:
-                    state = .ready
-                    didBecomeReady = true
-                    openCallback = openCompletion
-                    openCompletion = nil
-                    becameReady = true
-                    let terminal = bufferedUOTTerminationLocked()
+            } else if let data, !data.isEmpty {
+                state.receiveBuffer.append(data)
+                if state.phase == .waitingResult {
+                    switch takeFlowResult(&state) {
+                    case .needMore:
+                        continueReading = true
+                    case .ready:
+                        state.phase = .ready
+                        state.didBecomeReady = true
+                        openContinuation = state.openContinuation
+                        state.openContinuation = nil
+                        becameReady = true
+                        let terminal = bufferedUOTTermination(state)
+                        shouldNotifyTermination = terminal.terminated
+                        notificationError = terminal.error
+                    case .reject(let code):
+                        flowError = NowhereError.flowRejected(code)
+                    case .invalid:
+                        flowError = NowhereError.connectionFailed("Invalid flow result")
+                    }
+                } else if state.phase == .ready, let callback = state.pendingReceive {
+                    state.pendingReceive = nil
+                    delivery = callback
+                    deliveredData = state.receiveBuffer
+                    state.receiveBuffer.removeAll(keepingCapacity: true)
+                } else if state.phase == .ready, shouldProbeUOTUplink(state) {
+                    let terminal = bufferedUOTTermination(state)
                     shouldNotifyTermination = terminal.terminated
                     notificationError = terminal.error
-                case .reject(let code):
-                    flowError = NowhereError.flowRejected(code)
-                case .invalid:
-                    flowError = NowhereError.connectionFailed("Invalid flow result")
+                    continueReading = !terminal.terminated
+                } else {
+                    continueReading = state.phase == .prepared || state.phase == .requesting
                 }
-            } else if state == .ready, let callback = pendingReceive {
-                pendingReceive = nil
-                delivery = callback
-                deliveredData = receiveBuffer
-                receiveBuffer.removeAll(keepingCapacity: true)
-            } else if state == .ready, shouldProbeUOTUplink {
-                let terminal = bufferedUOTTerminationLocked()
-                shouldNotifyTermination = terminal.terminated
-                notificationError = terminal.error
-                continueReading = !terminal.terminated
-            } else {
-                continueReading = state == .prepared || state == .requesting
             }
+            return true
         }
-        lock.unlock()
+        guard proceed else { return }
 
         if let flowError {
             fail(flowError)
             return
         }
-        openCallback?(becameReady ? nil : (error ?? NowhereError.streamClosed))
+        if let openContinuation {
+            if becameReady { openContinuation.resume() }
+            else { openContinuation.resume(throwing: error ?? NowhereError.streamClosed) }
+        }
         delivery?(deliveredData, error)
         closeHandler?()
         if shouldNotifyTermination { notifyTermination(error: notificationError) }
@@ -979,9 +974,9 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
 
     /// Inspects buffered UoT frames without consuming application DATA. This is
     /// used only by the background termination probe installed for UDP flows.
-    private func bufferedUOTTerminationLocked() -> (terminated: Bool, error: Error?) {
-        guard flowResultKind == .udp, flowRole == .open else { return (false, nil) }
-        switch Self.bufferedUOTTerminationStep(buffer: receiveBuffer) {
+    private func bufferedUOTTermination(_ state: State) -> (terminated: Bool, error: Error?) {
+        guard state.flowResultKind == .udp, state.flowRole == .open else { return (false, nil) }
+        switch Self.bufferedUOTTerminationStep(buffer: state.receiveBuffer) {
         case .none:
             return (false, nil)
         case .close:
@@ -1029,49 +1024,50 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         on connection: TLSProxyConnection,
         fallbackError: Error? = nil
     ) {
-        var callback: ((Error?) -> Void)?
+        var continuation: CheckedContinuation<Void, Error>?
         var failure: Error?
         var shouldRead = false
         var becameReady = false
         var bufferedTermination = (terminated: false, error: Optional<Error>.none)
 
-        lock.lock()
-        guard inner === connection, state == .waitingResult else {
-            lock.unlock()
-            return
-        }
-        switch takeFlowResultLocked() {
-        case .needMore:
-            if let fallbackError {
-                failure = fallbackError
-            } else if transportReadClosed {
-                failure = terminalError ?? NowhereError.streamClosed
-            } else {
-                shouldRead = true
+        let proceed: Bool = state.withLock { state in
+            guard state.inner === connection, state.phase == .waitingResult else {
+                return false
             }
-        case .ready:
-            if let terminalError {
-                failure = terminalError
-            } else {
-                state = .ready
-                didBecomeReady = true
-                callback = openCompletion
-                openCompletion = nil
-                becameReady = true
-                bufferedTermination = bufferedUOTTerminationLocked()
+            switch takeFlowResult(&state) {
+            case .needMore:
+                if let fallbackError {
+                    failure = fallbackError
+                } else if state.transportReadClosed {
+                    failure = state.terminalError ?? NowhereError.streamClosed
+                } else {
+                    shouldRead = true
+                }
+            case .ready:
+                if let terminalError = state.terminalError {
+                    failure = terminalError
+                } else {
+                    state.phase = .ready
+                    state.didBecomeReady = true
+                    continuation = state.openContinuation
+                    state.openContinuation = nil
+                    becameReady = true
+                    bufferedTermination = bufferedUOTTermination(state)
+                }
+            case .reject(let code):
+                failure = NowhereError.flowRejected(code)
+            case .invalid:
+                failure = NowhereError.connectionFailed("Invalid flow result")
             }
-        case .reject(let code):
-            failure = NowhereError.flowRejected(code)
-        case .invalid:
-            failure = NowhereError.connectionFailed("Invalid flow result")
+            return true
         }
-        lock.unlock()
+        guard proceed else { return }
 
         if let failure {
             fail(failure)
             return
         }
-        callback?(nil)
+        continuation?.resume()
         if bufferedTermination.terminated {
             notifyTermination(error: bufferedTermination.error)
         }
@@ -1082,13 +1078,13 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         }
     }
 
-    /// Must be called while `lock` is held. It consumes only the setup prefix,
+    /// Must be called while `state` is held. It consumes only the setup prefix,
     /// preserving any coalesced first payload in `receiveBuffer`.
-    private func takeFlowResultLocked() -> FlowResultStep {
-        guard let flowResultKind else { return .invalid }
+    private func takeFlowResult(_ state: inout State) -> FlowResultStep {
+        guard let flowResultKind = state.flowResultKind else { return .invalid }
         let step = Self.bufferedTLSFlowResultStep(
             kind: flowResultKind,
-            buffer: receiveBuffer
+            buffer: state.receiveBuffer
         )
         switch step {
         case .ready, .reject:
@@ -1097,10 +1093,10 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             case .tcp:
                 consumed = NowhereProtocol.flowResultSize
             case .udp:
-                consumed = 3 + ((Int(receiveBuffer[receiveBuffer.startIndex + 1]) << 8)
-                    | Int(receiveBuffer[receiveBuffer.startIndex + 2]))
+                consumed = 3 + ((Int(state.receiveBuffer[state.receiveBuffer.startIndex + 1]) << 8)
+                    | Int(state.receiveBuffer[state.receiveBuffer.startIndex + 2]))
             }
-            receiveBuffer.removeFirst(consumed)
+            state.receiveBuffer.removeFirst(consumed)
         case .needMore, .invalid:
             break
         }
@@ -1145,34 +1141,34 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     private func deliverPendingReceive() {
         var callback: ((Data?, Error?) -> Void)?
         var data: Data?
-        lock.lock()
-        if didBecomeReady, !receiveBuffer.isEmpty, let pending = pendingReceive {
-            callback = pending
-            pendingReceive = nil
-            data = receiveBuffer
-            receiveBuffer.removeAll(keepingCapacity: true)
+        state.withLock { state in
+            if state.didBecomeReady, !state.receiveBuffer.isEmpty, let pending = state.pendingReceive {
+                callback = pending
+                state.pendingReceive = nil
+                data = state.receiveBuffer
+                state.receiveBuffer.removeAll(keepingCapacity: true)
+            }
         }
-        lock.unlock()
         callback?(data, nil)
     }
 
     private func fail(_ error: Error) {
-        let resources: (TLSClient?, TLSProxyConnection?, ((Error?) -> Void)?, ((Data?, Error?) -> Void)?, (() -> Void)?) = lock.withLock {
-            guard state != .closed else { return (nil, nil, nil, nil, nil) }
-            let wasPrepared = state == .prepared
-            state = .closed
-            terminalError = error
-            let result = (tlsClient, inner, openCompletion, pendingReceive, wasPrepared ? preparedCloseHandler : nil)
-            tlsClient = nil
-            inner = nil
-            openCompletion = nil
-            pendingReceive = nil
-            preparedCloseHandler = nil
+        let resources: (TLSClient?, TLSProxyConnection?, CheckedContinuation<Void, Error>?, ((Data?, Error?) -> Void)?, (() -> Void)?) = state.withLock { state in
+            guard state.phase != .closed else { return (nil, nil, nil, nil, nil) }
+            let wasPrepared = state.phase == .prepared
+            state.phase = .closed
+            state.terminalError = error
+            let result = (state.tlsClient, state.inner, state.openContinuation, state.pendingReceive, wasPrepared ? state.preparedCloseHandler : nil)
+            state.tlsClient = nil
+            state.inner = nil
+            state.openContinuation = nil
+            state.pendingReceive = nil
+            state.preparedCloseHandler = nil
             return result
         }
         resources.0?.cancel()
         resources.1?.cancel()
-        resources.2?(error)
+        resources.2?.resume(throwing: error)
         resources.3?(nil, error)
         resources.4?()
         notifyTermination(error: error)
@@ -1181,8 +1177,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     // MARK: - ProxyConnection overrides
 
     override func sendRaw(_ data: Data) async throws {
-        let connection = lock.withLock {
-            state == .ready && !transportWriteClosed ? inner : nil
+        let connection = state.withLock { state in
+            state.phase == .ready && !state.transportWriteClosed ? state.inner : nil
         }
         guard let connection else {
             throw NowhereError.streamClosed
@@ -1201,50 +1197,50 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             }
             var result: (Data?, Error?)?
             var staleReceive: ((Data?, Error?) -> Void)?
-            lock.lock()
-            if didBecomeReady, !receiveBuffer.isEmpty {
-                let data = receiveBuffer
-                receiveBuffer.removeAll(keepingCapacity: true)
-                result = (data, nil)
-            } else if transportReadClosed {
-                result = (nil, nil)
-            } else if state == .closed {
-                result = (nil, terminalError)
-            } else if state == .ready {
-                staleReceive = pendingReceive
-                pendingReceive = completion
-            } else {
-                result = (nil, NowhereError.notReady)
+            state.withLock { state in
+                if state.didBecomeReady, !state.receiveBuffer.isEmpty {
+                    let data = state.receiveBuffer
+                    state.receiveBuffer.removeAll(keepingCapacity: true)
+                    result = (data, nil)
+                } else if state.transportReadClosed {
+                    result = (nil, nil)
+                } else if state.phase == .closed {
+                    result = (nil, state.terminalError)
+                } else if state.phase == .ready {
+                    staleReceive = state.pendingReceive
+                    state.pendingReceive = completion
+                } else {
+                    result = (nil, NowhereError.notReady)
+                }
             }
-            lock.unlock()
             staleReceive?(nil, NowhereError.connectionFailed(
                 "overlapping receiveRaw on Nowhere TCP stream"
             ))
             if let result { completion(result.0, result.1) }
-            else if let connection = lock.withLock({ state == .ready ? inner : nil }) {
+            else if let connection = state.withLock({ $0.phase == .ready ? $0.inner : nil }) {
                 armTransportRead(on: connection)
             }
         }
     }
 
     override func closeWrite() async throws {
-        let connection: TLSProxyConnection? = lock.withLock {
-            guard state == .ready, !transportWriteClosed else { return nil }
-            return inner
+        let connection: TLSProxyConnection? = state.withLock { state in
+            guard state.phase == .ready, !state.transportWriteClosed else { return nil }
+            return state.inner
         }
         guard let connection else {
-            let alreadyClosed = lock.withLock { state == .ready && transportWriteClosed }
+            let alreadyClosed = state.withLock { $0.phase == .ready && $0.transportWriteClosed }
             if alreadyClosed { return }
             throw NowhereError.streamClosed
         }
         try await connection.closeWrite()
         var shouldCancel = false
-        lock.withLock {
-            guard self.inner === connection, self.state == .ready else { return }
-            self.transportWriteClosed = true
-            if self.transportReadClosed {
-                self.state = .closed
-                self.inner = nil
+        state.withLock { state in
+            guard state.inner === connection, state.phase == .ready else { return }
+            state.transportWriteClosed = true
+            if state.transportReadClosed {
+                state.phase = .closed
+                state.inner = nil
                 shouldCancel = true
             }
         }
@@ -1252,22 +1248,22 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     override func cancel() {
-        let resources: (TLSClient?, TLSProxyConnection?, ((Error?) -> Void)?, ((Data?, Error?) -> Void)?, (() -> Void)?) = lock.withLock {
-            guard state != .closed else { return (nil, nil, nil, nil, nil) }
-            let wasPrepared = state == .prepared
-            state = .closed
-            terminalError = NowhereError.streamClosed
-            let result = (tlsClient, inner, openCompletion, pendingReceive, wasPrepared ? preparedCloseHandler : nil)
-            tlsClient = nil
-            inner = nil
-            openCompletion = nil
-            pendingReceive = nil
-            preparedCloseHandler = nil
+        let resources: (TLSClient?, TLSProxyConnection?, CheckedContinuation<Void, Error>?, ((Data?, Error?) -> Void)?, (() -> Void)?) = state.withLock { state in
+            guard state.phase != .closed else { return (nil, nil, nil, nil, nil) }
+            let wasPrepared = state.phase == .prepared
+            state.phase = .closed
+            state.terminalError = NowhereError.streamClosed
+            let result = (state.tlsClient, state.inner, state.openContinuation, state.pendingReceive, wasPrepared ? state.preparedCloseHandler : nil)
+            state.tlsClient = nil
+            state.inner = nil
+            state.openContinuation = nil
+            state.pendingReceive = nil
+            state.preparedCloseHandler = nil
             return result
         }
         resources.0?.cancel()
         resources.1?.cancel()
-        resources.2?(NowhereError.streamClosed)
+        resources.2?.resume(throwing: NowhereError.streamClosed)
         resources.3?(nil, NowhereError.streamClosed)
         resources.4?()
         notifyTermination(error: NowhereError.streamClosed)

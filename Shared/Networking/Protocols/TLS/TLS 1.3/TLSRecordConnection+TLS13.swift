@@ -8,22 +8,22 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Synchronization
 
 extension TLSRecordConnection {
 
     // MARK: - TLS 1.3 Record Crypto
 
     func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        seqLock.lock()
-        let seqNum: UInt64
-        if direction == .server {
-            seqNum = serverSeqNum
-            serverSeqNum += 1
-        } else {
-            seqNum = clientSeqNum
-            clientSeqNum += 1
+        let seqNum: UInt64 = seqLock.withLock { _ in
+            if direction == .server {
+                defer { serverSeqNum += 1 }
+                return serverSeqNum
+            } else {
+                defer { clientSeqNum += 1 }
+                return clientSeqNum
+            }
         }
-        seqLock.unlock()
 
         let innerLen = plaintext.count + 1
         let encryptedLen = innerLen + 16
@@ -133,23 +133,23 @@ extension TLSRecordConnection {
         if direction == .server {
             guard let current = clientAppSecret else { return }
             let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
-            seqLock.lock()
-            clientAppSecret = next.secret
-            clientKey = next.key
-            clientIV = next.iv
-            clientSymmetricKey = SymmetricKey(data: next.key)
-            clientSeqNum = 0
-            seqLock.unlock()
+            seqLock.withLock { _ in
+                clientAppSecret = next.secret
+                clientKey = next.key
+                clientIV = next.iv
+                clientSymmetricKey = SymmetricKey(data: next.key)
+                clientSeqNum = 0
+            }
         } else {
             guard let current = serverAppSecret else { return }
             let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
-            seqLock.lock()
-            serverAppSecret = next.secret
-            serverKey = next.key
-            serverIV = next.iv
-            serverSymmetricKey = SymmetricKey(data: next.key)
-            serverSeqNum = 0
-            seqLock.unlock()
+            seqLock.withLock { _ in
+                serverAppSecret = next.secret
+                serverKey = next.key
+                serverIV = next.iv
+                serverSymmetricKey = SymmetricKey(data: next.key)
+                serverSeqNum = 0
+            }
         }
     }
 
@@ -162,7 +162,7 @@ extension TLSRecordConnection {
             // egress — all under `sendMutex` so no application send interleaves the key switch.
             let record: Data
             do {
-                record = try sendLock.withLock { () throws -> Data in
+                record = try sendLock.withLock { _ throws -> Data in
                     // KeyUpdate: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).
                     let keyUpdate = Data([TLSHandshakeType.keyUpdate, 0x00, 0x00, 0x01, 0x00])
                     return try encryptTLS13Record(plaintext: keyUpdate, contentType: TLSContentType.handshake)
@@ -176,28 +176,28 @@ extension TLSRecordConnection {
             }
 
             let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
-            sendLock.lock()
-            defer { sendLock.unlock() }
-            if direction == .server {
-                guard let current = serverAppSecret else { return }
-                let next = kd.nextApplicationGeneration(trafficSecret: current)
-                seqLock.lock()
-                serverAppSecret = next.secret
-                serverKey = next.key
-                serverIV = next.iv
-                serverSymmetricKey = SymmetricKey(data: next.key)
-                serverSeqNum = 0
-                seqLock.unlock()
-            } else {
-                guard let current = clientAppSecret else { return }
-                let next = kd.nextApplicationGeneration(trafficSecret: current)
-                seqLock.lock()
-                clientAppSecret = next.secret
-                clientKey = next.key
-                clientIV = next.iv
-                clientSymmetricKey = SymmetricKey(data: next.key)
-                clientSeqNum = 0
-                seqLock.unlock()
+            sendLock.withLock { _ in
+                if direction == .server {
+                    guard let current = serverAppSecret else { return }
+                    let next = kd.nextApplicationGeneration(trafficSecret: current)
+                    seqLock.withLock { _ in
+                        serverAppSecret = next.secret
+                        serverKey = next.key
+                        serverIV = next.iv
+                        serverSymmetricKey = SymmetricKey(data: next.key)
+                        serverSeqNum = 0
+                    }
+                } else {
+                    guard let current = clientAppSecret else { return }
+                    let next = kd.nextApplicationGeneration(trafficSecret: current)
+                    seqLock.withLock { _ in
+                        clientAppSecret = next.secret
+                        clientKey = next.key
+                        clientIV = next.iv
+                        clientSymmetricKey = SymmetricKey(data: next.key)
+                        clientSeqNum = 0
+                    }
+                }
             }
         }
     }
