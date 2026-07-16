@@ -26,19 +26,13 @@ final class VoyagerStore {
 
     var isPresentingVoyagerView = false
 
-    @ObservationIgnored private var updatesTask: Task<Void, Never>?
-
     private init() {
         isMember = AWCore.getVoyagerMembership()
-        updatesTask = listenForTransactions()
+        listenForTransactions()
         Task {
             await loadProduct()
             await refreshEntitlement()
         }
-    }
-
-    deinit {
-        updatesTask?.cancel()
     }
 
     // MARK: - Loading
@@ -115,8 +109,8 @@ final class VoyagerStore {
     }
 
     // MARK: - Transaction updates
-
-    private func listenForTransactions() -> Task<Void, Never> {
+    
+    private func listenForTransactions() {
         Task { [weak self] in
             for await result in Transaction.updates {
                 guard case .verified(let transaction) = result else { continue }
