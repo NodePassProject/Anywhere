@@ -37,10 +37,9 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, @unchecked 
     /// `send(data:completion:)` this replaced serialized through the connection's own pump).
     private let sendPump: AsyncSendPump
 
-    /// Push handler + receive loop, stored so the loop's `Task` captures only `self`
-    /// (the raw closures aren't `Sendable`).
+    /// Push handler stored here so the receive loop's `Task` captures only `self`
+    /// (the raw closure isn't `Sendable`).
     private let receiveHandler = Mutex<((Data) -> Void)?>(nil)
-    private let receiveTask = Mutex<Task<Void, Never>?>(nil)
 
     init(connection: ProxyConnection) {
         self.connection = connection
@@ -53,11 +52,6 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, @unchecked 
             },
             finish: {}
         )
-    }
-
-    deinit {
-        sendPump.finish()
-        receiveTask.withLock { $0?.cancel() }
     }
 
     func sendDatagram(_ data: Data) {
@@ -106,7 +100,7 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, @unchecked 
                         errorHandler: @escaping (Error?) -> Void) {
         failureState.withLock { $0.handler = errorHandler }
         receiveHandler.withLock { $0 = handler }
-        let task = Task { [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             do {
                 while true {
@@ -120,14 +114,12 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, @unchecked 
                 self.surfaceFailure(error)
             }
         }
-        receiveTask.withLock { $0 = task }
     }
 
     func cancel() {
         // Swallow the teardown-driven EOF/error the receive loop will observe once the
         // connection is cancelled, so it isn't surfaced as a spurious transport failure.
         failureState.withLock { $0.failed = true; $0.handler = nil }
-        receiveTask.withLock { $0?.cancel(); $0 = nil }
         sendPump.finish()
         connection.cancel()
     }

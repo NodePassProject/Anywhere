@@ -111,8 +111,6 @@ actor TCPConnection {
     // runs on the lwIP executor with no hop; two `AsyncStream` wakeups nudge each driver
     // when upload work appears (new bytes / the app's FIN) or download capacity opens
     // (backlog drained below the low-water mark).
-    private var uploadDriver: Task<Void, Never>?
-    private var downloadDriver: Task<Void, Never>?
     private let uploadWake: AsyncStream<Void>
     private let uploadWakeContinuation: AsyncStream<Void>.Continuation
     private let downloadWake: AsyncStream<Void>
@@ -372,12 +370,10 @@ actor TCPConnection {
     }
 
     // MARK: - Relay Drivers
-
-    /// Starts the upload/download copy loops once the proxy leg is up.
+    
     private func startRelayDrivers(_ connection: ProxyConnection) {
-        uploadDriver = Task { [weak self] in await self?.runUploadDriver(connection) }
-        downloadDriver = Task { [weak self] in await self?.runDownloadDriver(connection) }
-        // Flush anything buffered during the handshake (and honor an app FIN that already landed).
+        Task { [weak self] in await self?.runUploadDriver(connection) }
+        Task { [weak self] in await self?.runDownloadDriver(connection) }
         uploadWakeContinuation.yield(())
     }
 
@@ -1355,14 +1351,8 @@ actor TCPConnection {
         pendingWrite = Data()
         pendingWriteOffset = 0
         uploadPipeline = UploadPipeline()
-        // Stop the relay drivers: finishing the wakeup streams ends any parked `for await`,
-        // and cancelling unblocks a driver awaiting `send`/`receive` via the connection cancel below.
         uploadWakeContinuation.finish()
         downloadWakeContinuation.finish()
-        uploadDriver?.cancel()
-        uploadDriver = nil
-        downloadDriver?.cancel()
-        downloadDriver = nil
         mitmSession = nil
         session?.cancel(error: nil)
         if abortive {

@@ -43,15 +43,12 @@ class UDPFlow {
                         : TunnelConstants.udpIdleTimeoutUnreplied)
     }
 
-    // Direct bypass path — the async datagram transport is driven natively by a
-    // `for await` receive loop, so there is no callback adapter or push handler.
+    // Direct bypass path
     private var directTransport: UDPTransport?
-    private var directReceiveTask: Task<Void, Never>?
 
     // Non-mux path
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
-    private var proxyReceiveTask: Task<Void, Never>?
 
     // Shared SS UDP session owned by TunnelStack; borrowed only.
     private weak var ssUDPSession: ShadowsocksUDPSession?
@@ -525,15 +522,13 @@ class UDPFlow {
 
                 // Drive the datagram downlink with a native `for await` receive loop;
                 // a non-EAGAIN recv error closes the flow so we don't sit on a dead transport.
-                self.directReceiveTask = Task { [weak self] in
+                Task { [weak self] in
                     do {
                         while true {
                             let datagram = try await transport.receive()
-                            if Task.isCancelled { return }
                             self?.handleProxyData(datagram)
                         }
                     } catch {
-                        if Task.isCancelled { return }
                         guard let self else { return }
                         self.flowQueue.async {
                             guard !self.closed else { return }
@@ -548,21 +543,20 @@ class UDPFlow {
     }
 
     private func startProxyReceiving(proxyConnection: ProxyConnection) {
-        proxyReceiveTask = Task { [weak self] in
+        Task { [weak self] in
             do {
                 while let data = try await proxyConnection.receive() {
-                    if Task.isCancelled { return }
                     self?.handleProxyData(data)
                 }
                 // Clean EOF: close without reporting a failure.
-                guard let self, !Task.isCancelled else { return }
+                guard let self else { return }
                 self.flowQueue.async {
                     guard !self.closed else { return }
                     self.close()
                     self.stack?.removeUDPFlow(self)
                 }
             } catch {
-                guard let self, !Task.isCancelled else { return }
+                guard let self else { return }
                 self.flowQueue.async {
                     guard !self.closed else { return }
                     self.reportFailure("Receive", error: error)
@@ -605,10 +599,6 @@ class UDPFlow {
         let connection = proxyConnection
         let client = proxyClient
         let session = udpStream
-        directReceiveTask?.cancel()
-        directReceiveTask = nil
-        proxyReceiveTask?.cancel()
-        proxyReceiveTask = nil
         directTransport = nil
         ssUDPSession = nil
         ssUDPSessionToken = nil

@@ -82,8 +82,6 @@ nonisolated final class ShadowsocksUDPSession {
 
     /// The async-native datagram transport; `connect()` is awaited in `beginConnect`.
     private let asyncTransport: UDPTransport
-    /// Drives the datagram downlink; armed in `finishConnect`, cancelled on teardown.
-    private var receiveTask: Task<Void, Never>?
     private var state: State = .idle
 
     private var nextToken: Token = 0
@@ -253,7 +251,6 @@ nonisolated final class ShadowsocksUDPSession {
     }
     
     deinit {
-        receiveTask?.cancel()
         asyncTransport.cancel()
     }
 
@@ -261,8 +258,6 @@ nonisolated final class ShadowsocksUDPSession {
     func cancel() {
         if case .cancelled = state { return }
         state = .cancelled
-        receiveTask?.cancel()
-        receiveTask = nil
         asyncTransport.cancel()
         notifyAllFlows(error: ProxyError.connectionFailed("Session cancelled"))
         registrations.removeAll()
@@ -322,25 +317,23 @@ nonisolated final class ShadowsocksUDPSession {
     private func handleTransportError(_ error: Error) {
         if case .cancelled = state { return }
         state = .failed(error)
-        receiveTask?.cancel()
-        receiveTask = nil
         asyncTransport.cancel()
         notifyAllFlows(error: error)
     }
 
     /// Drives the datagram downlink on `delegateQueue`, matching the state-mutation queue.
+    /// The loop is unstored: it never retains the session and dies when
+    /// `asyncTransport.cancel()` errors its pending receive.
     private func startReceiveLoop() {
         let asyncTransport = self.asyncTransport
         let queue = self.delegateQueue
-        receiveTask = Task { [weak self] in
+        Task { [weak self] in
             do {
                 while true {
                     let datagram = try await asyncTransport.receive()
-                    if Task.isCancelled { return }
                     queue.async { self?.handleReceivedDatagram(datagram) }
                 }
             } catch {
-                if Task.isCancelled { return }
                 queue.async { self?.handleTransportError(error) }
             }
         }

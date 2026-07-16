@@ -2365,7 +2365,6 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
     private let factory: SudokuConnectionFactory?
     private let condition = NSCondition()
     private let keepaliveTimer: DispatchSourceTimer
-    private var readerTask: Task<Void, Never>?
     private var streams: [UInt32: SudokuMuxStream] = [:]
     private var nextStreamID: UInt32 = 0
     private var lastWrite = DispatchTime.now().uptimeNanoseconds
@@ -2399,7 +2398,7 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
             self?.sendKeepaliveIfIdle()
         }
         keepaliveTimer.resume()
-        readerTask = Task { [weak self] in await self?.readerLoop() }
+        Task { [weak self] in await self?.readerLoop() }
     }
 
     func dialTCP(host: String, port: UInt16) async throws -> SudokuMuxStream {
@@ -2467,7 +2466,6 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
         condition.broadcast()
         condition.unlock()
         keepaliveTimer.cancel()
-        readerTask?.cancel()
         for stream in streamsToClose {
             stream.markClosed(discardQueuedData: true)
         }
