@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLS13ServerHandshakeState {
+nonisolated struct TLS13ServerHandshakeState {
     var keyDerivation: TLS13KeyDerivation?
     var handshakeSecret: Data?
     var handshakeKeys: TLS13HandshakeKeys?

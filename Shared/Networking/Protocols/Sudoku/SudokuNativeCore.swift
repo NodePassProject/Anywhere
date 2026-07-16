@@ -21,7 +21,7 @@ func sudokuObfsWireReadSize(decodedRemaining: Int, pureDownlink: Bool, maxRaw: I
     return min(maxRaw, decodedRemaining * multiplier + sudokuObfsMinDecodeReadSize)
 }
 
-struct SudokuXorshift64Star {
+nonisolated struct SudokuXorshift64Star {
     private var state: UInt64
     private var cachedUInt32: UInt32?
 
@@ -236,7 +236,7 @@ private let sudokuGoCooked: [Int64] = [
         8382142935188824023, 9103922860780351547, 4152330101494654406
 ]
 
-private struct SudokuGoSource {
+nonisolated private struct SudokuGoSource {
     private var tap = 0
     private var feed = 607 - 273
     private var lagTable = Array(repeating: Int64(0), count: 607)
@@ -302,7 +302,7 @@ private struct SudokuGoSource {
     }
 }
 
-private struct SudokuStaticTables {
+nonisolated private struct SudokuStaticTables {
     let grids: [[UInt8]]
     let hintPositions: [[UInt8]]
 
@@ -351,7 +351,7 @@ private struct SudokuStaticTables {
     }
 }
 
-private struct SudokuLayout {
+nonisolated private struct SudokuLayout {
     let name: String
     let padMarker: UInt8
     let paddingPool: [UInt8]
@@ -598,7 +598,7 @@ nonisolated final class SudokuTablePair {
     }
 }
 
-private struct SudokuDecodedPending {
+nonisolated private struct SudokuDecodedPending {
     private var storage = Data()
     private var offset = 0
 
@@ -645,7 +645,7 @@ private struct SudokuDecodedPending {
     }
 }
 
-struct SudokuPureDecoder {
+nonisolated struct SudokuPureDecoder {
     private var hintBuffer = Array(repeating: UInt8(0), count: 4)
     private var hintCount = 0
     private var pending = SudokuDecodedPending()
@@ -709,7 +709,7 @@ struct SudokuPureDecoder {
     }
 }
 
-struct SudokuPackedDecoder {
+nonisolated struct SudokuPackedDecoder {
     private let padMarker: UInt8
     private var bitBuffer: UInt64 = 0
     private var bitCount = 0
@@ -791,7 +791,7 @@ struct SudokuPackedDecoder {
     }
 }
 
-private struct SudokuUInt128 {
+nonisolated private struct SudokuUInt128 {
     var hi: UInt64
     var lo: UInt64
     static let zero = SudokuUInt128(hi: 0, lo: 0)
@@ -802,7 +802,7 @@ private struct SudokuUInt128 {
     func shiftedRight(_ bits: UInt64) -> UInt64 { bits == 0 ? lo : ((hi << (64 - bits)) | (lo >> bits)) }
 }
 
-private struct SudokuFE25519 {
+nonisolated private struct SudokuFE25519 {
     static let mask: UInt64 = (1 << 51) - 1
     static let p: [UInt64] = [2251799813685229, 2251799813685247, 2251799813685247, 2251799813685247, 2251799813685247]
     static let d2 = SudokuFE25519([1859910466990425, 932731440258426, 1072319116312658, 1815898335770999, 633789495995903])
@@ -832,7 +832,7 @@ private struct SudokuFE25519 {
     func isOdd() -> Bool { (toBytes()[0] & 1) != 0 }
 }
 
-private struct SudokuEdPoint {
+nonisolated private struct SudokuEdPoint {
     var x: SudokuFE25519; var y: SudokuFE25519; var z: SudokuFE25519; var t: SudokuFE25519
     static var identity: SudokuEdPoint { SudokuEdPoint(x: SudokuFE25519(), y: .one, z: .one, t: SudokuFE25519()) }
     static var base: SudokuEdPoint { let x = SudokuFE25519.baseX; let y = SudokuFE25519.baseY; return SudokuEdPoint(x: x, y: y, z: .one, t: x * y) }
@@ -872,7 +872,7 @@ private struct SudokuEdPoint {
     }
 }
 
-enum SudokuKeyRecovery {
+nonisolated enum SudokuKeyRecovery {
     fileprivate static let l: [UInt8] = [0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]
     fileprivate static let pMinus2: [UInt8] = [0xeb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]
     static func recoverPublicKeyHex(_ keyHex: String) -> String? { guard let raw = Data(hexString: keyHex), raw.count == 32 || raw.count == 64 else { return nil }; if raw.count == 32 { return raw.hexEncodedString() }; let scalar = scalarAdd(Array(raw.prefix(32)), Array(raw.suffix(32))); return Data(scalarBasePublic(scalar)).hexEncodedString() }

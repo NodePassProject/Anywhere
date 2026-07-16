@@ -12,7 +12,7 @@ nonisolated final class GRPCConnection: Sendable {
 
     // MARK: Transport
 
-    private let transport: AsyncTransportClosures
+    private let transport: any ByteTransport
 
     // MARK: Configuration
 
@@ -75,7 +75,7 @@ nonisolated final class GRPCConnection: Sendable {
 
     // MARK: - Initializers
 
-    init(transport: AsyncTransportClosures, configuration: GRPCConfiguration, authority: String) {
+    init(transport: any ByteTransport, configuration: GRPCConfiguration, authority: String) {
         self.configuration = configuration
         self.authority = authority
         self.transport = transport
@@ -88,16 +88,12 @@ nonisolated final class GRPCConnection: Sendable {
         self.state = Mutex(initialState)
     }
 
-    convenience init(transport: any AsyncByteTransport, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: AsyncTransportClosures(transport), configuration: configuration, authority: authority)
-    }
-
     convenience init(tlsConnection: TLSRecordConnection, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: AsyncTransportClosures(tls: tlsConnection), configuration: configuration, authority: authority)
+        self.init(transport: TLSByteTransport(tlsConnection), configuration: configuration, authority: authority)
     }
 
     convenience init(tunnel: ProxyConnection, configuration: GRPCConfiguration, authority: String) {
-        self.init(transport: AsyncTransportClosures(proxyConnection: tunnel), configuration: configuration, authority: authority)
+        self.init(transport: TunneledTransport(tunnel: tunnel), configuration: configuration, authority: authority)
     }
 
     // MARK: - Setup

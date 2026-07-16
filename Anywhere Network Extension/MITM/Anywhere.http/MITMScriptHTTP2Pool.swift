@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2Pool")
 
-enum MITMScriptHTTP2Outcome {
+nonisolated enum MITMScriptHTTP2Outcome {
     case response(MITMScriptHTTPClient.Response)
     case fallbackToHTTP1
 }

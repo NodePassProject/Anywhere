@@ -9,7 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBridgeClientLeg")
 
-protocol MITMBridgeClientLegDelegate: AnyObject {
+nonisolated protocol MITMBridgeClientLegDelegate: AnyObject {
     /// Session dials (first request) and binds the upstream leg from negotiated ALPN. `url` seeds
     /// the response-phase rewrite correlation.
     func clientLegSendRequestHead(_ head: MITMRequestHead, url: String?, endStream: Bool)
@@ -29,7 +29,7 @@ protocol MITMBridgeClientLegDelegate: AnyObject {
 }
 
 /// lwIP-queue-confined.
-final class MITMBridgeClientLeg: MITMResponseSink {
+nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
 
     weak var delegate: MITMBridgeClientLegDelegate?
 

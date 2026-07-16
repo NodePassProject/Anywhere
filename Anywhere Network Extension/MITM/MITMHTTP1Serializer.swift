@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum MITMHTTP1Serializer {
+nonisolated enum MITMHTTP1Serializer {
 
     /// Builds the request line + headers + framing header + blank line. Derives `Host`
     /// from `head.authority` when absent, coalesces `Cookie` with `"; "` (RFC 6265 §5.4 —

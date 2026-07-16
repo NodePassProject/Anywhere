@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct NetworkContext: Equatable {
+nonisolated struct NetworkContext: Equatable {
     var isWiFi = false
     var isCellular = false
     var ssid: String?

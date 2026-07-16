@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "ConnectionRouter")
 
 /// A connection-time routing decision, shared by the TCP SYN filter, TCP
 /// accept, and UDP flow-creation paths so the three can't drift.
-struct RouteDecision {
+nonisolated struct RouteDecision {
     enum Action {
         /// A rule matched: commit `target`, dialing through `configuration`
         /// when non-nil (nil for `.direct`, or when a proxy rule's
@@ -45,7 +45,7 @@ struct RouteDecision {
 /// Callable from ``TunnelStack/lwipQueue`` and ``TunnelStack/udpQueue``: the
 /// pool and matcher are internally synchronized, and the Prevent DNS Leak
 /// flag is published through a Mutex.
-final class ConnectionRouter {
+nonisolated final class ConnectionRouter {
     let fakeIPPool: FakeIPPool
     let domainRouter: DomainRouter
 

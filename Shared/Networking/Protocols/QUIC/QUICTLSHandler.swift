@@ -14,7 +14,7 @@ nonisolated private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
 // MARK: - Session Ticket Cache
 
-struct QUICSessionTicket {
+nonisolated struct QUICSessionTicket {
     let ticket: Data
     let nonce: Data
     let psk: Data
@@ -29,7 +29,7 @@ extension QUICSessionTicket {
     static let maxLifetime = UInt32(604800)
 }
 
-enum QUICSessionTicketCache {
+nonisolated enum QUICSessionTicketCache {
     private static let cache = Mutex<[String: QUICSessionTicket]>([:])
     private static let maxEntries = 64
 
@@ -62,7 +62,7 @@ enum QUICSessionTicketCache {
     }
 }
 
-enum QUICTLSResult {
+nonisolated enum QUICTLSResult {
     case success
     case needMoreData
     case error(Int32)

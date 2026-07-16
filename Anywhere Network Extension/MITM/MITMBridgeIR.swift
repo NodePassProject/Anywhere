@@ -8,13 +8,13 @@
 import Foundation
 
 /// HTTP/1.1 upstream framing; an HTTP/2 upstream ignores it and frames with DATA/END_STREAM.
-enum MITMBridgeBodyFraming: Equatable {
+nonisolated enum MITMBridgeBodyFraming: Equatable {
     case none
     case contentLength(Int)
     case chunked
 }
 
-struct MITMRequestHead {
+nonisolated struct MITMRequestHead {
     let clientStreamID: UInt32
     let method: String
     let scheme: String
@@ -40,7 +40,7 @@ struct MITMRequestHead {
     let originalURL: String?
 }
 
-protocol MITMUpstreamLeg: AnyObject {
+nonisolated protocol MITMUpstreamLeg: AnyObject {
     func sendRequestHead(_ head: MITMRequestHead, endStream: Bool)
     func sendRequestData(streamID: UInt32, _ data: Data, endStream: Bool)
     /// Terminal request trailers (e.g. gRPC), after the body. An h2 upstream sends a trailing
@@ -57,7 +57,7 @@ extension MITMUpstreamLeg {
     }
 }
 
-protocol MITMResponseSink: AnyObject {
+nonisolated protocol MITMResponseSink: AnyObject {
     /// `neverIndexed`: lowercased names the upstream marked never-indexed (RFC 7541 §6.2.3);
     /// the sink re-emits them never-indexed toward the client (§7.1.3).
     func deliverResponseHead(streamID: UInt32, status: Int, headers: [(name: String, value: String)], endStream: Bool, neverIndexed: Set<String>)
@@ -86,7 +86,7 @@ extension MITMResponseSink {
     }
 }
 
-enum MITMBridgeHeaders {
+nonisolated enum MITMBridgeHeaders {
 
     /// Hop-by-hop / connection-specific fields not forwarded across the bridge
     /// (RFC 9113 §8.2.2, RFC 9110 §7.6.1). Lowercased for matching.

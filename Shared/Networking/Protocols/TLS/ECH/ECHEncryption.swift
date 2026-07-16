@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 
 /// One context corresponds to one ClientHelloOuter.
-final class ECHClientContext {
+nonisolated final class ECHClientContext {
     let config: ECHConfig
     let cipherSuite: ECHCipherSuite
     let encapsulatedKey: Data
@@ -79,7 +79,7 @@ final class ECHClientContext {
     }
 }
 
-enum ECHEncryptionError: Error, LocalizedError {
+nonisolated enum ECHEncryptionError: Error, LocalizedError {
     case unsupportedKEM
     case unsupportedKDF
     case unsupportedAEAD
@@ -101,7 +101,7 @@ enum ECHEncryptionError: Error, LocalizedError {
     }
 }
 
-enum ECHEncryption {
+nonisolated enum ECHEncryption {
 
     /// All ECH AEADs in use share a 16-byte authentication tag.
     static let aeadTagLength = 16

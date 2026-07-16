@@ -14,7 +14,7 @@ import WidgetKit
 
 nonisolated private let logger = AnywhereLogger(category: "PacketTunnelProvider")
 
-class PacketTunnelProvider: NEPacketTunnelProvider {
+nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()
     private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)

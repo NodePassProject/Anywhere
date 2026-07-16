@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct WebSocketConfiguration: Codable, Equatable, Hashable {
+nonisolated struct WebSocketConfiguration: Codable, Equatable, Hashable {
     let host: String
     let path: String
     let headers: [String: String]
@@ -51,7 +51,7 @@ struct WebSocketConfiguration: Codable, Equatable, Hashable {
     }
 }
 
-enum WebSocketError: Error, LocalizedError {
+nonisolated enum WebSocketError: Error, LocalizedError {
     case upgradeFailed(String)
     case invalidFrame(String)
     case connectionClosed(UInt16, String)

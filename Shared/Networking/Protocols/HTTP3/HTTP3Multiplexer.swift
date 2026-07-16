@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
 
 // MARK: - HTTP3StreamHandler
 
-protocol HTTP3StreamHandler: AnyObject {
+nonisolated protocol HTTP3StreamHandler: AnyObject {
     // Requirements are nonisolated: handlers run on the QUICConnection's serial
     // queue, never the main actor (the project default isolation).
 

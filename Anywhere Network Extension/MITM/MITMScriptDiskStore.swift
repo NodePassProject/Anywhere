@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptDiskStore")
 
-final class MITMScriptDiskStore {
+nonisolated final class MITMScriptDiskStore {
 
     static let shared = MITMScriptDiskStore()
     

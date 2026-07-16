@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum MonotonicClock {
+nonisolated enum MonotonicClock {
     /// Seconds per `mach_continuous_time()` tick; timebase is fixed for the process lifetime.
     private static let secondsPerTick: Double = {
         var info = mach_timebase_info_data_t()

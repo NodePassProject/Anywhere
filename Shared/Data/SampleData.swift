@@ -9,7 +9,7 @@
 
 import Foundation
 
-enum SampleData {
+nonisolated enum SampleData {
 
     static let subscriptionId = UUID()
 

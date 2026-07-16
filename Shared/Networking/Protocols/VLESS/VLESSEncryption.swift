@@ -8,7 +8,7 @@
 import Foundation
 
 /// Wire grammar: `mlkem768x25519plus.<xor>.<rtt>[.<padSeg>...].<base64Key>[.<base64Key>...]`.
-struct VLESSEncryptionConfig: Equatable, Hashable {
+nonisolated struct VLESSEncryptionConfig: Equatable, Hashable {
 
     enum XORMode: UInt8 {
         case native = 0

@@ -7,19 +7,19 @@
 
 import Foundation
 
-enum ProxyCommand: UInt8 {
+nonisolated enum ProxyCommand: UInt8 {
     case tcp = 0x01
     case udp = 0x02
     case mux = 0x03
 }
 
-enum VLESSAddressType: UInt8 {
+nonisolated enum VLESSAddressType: UInt8 {
     case ipv4 = 0x01
     case domain = 0x02
     case ipv6 = 0x03
 }
 
-struct VLESSProtocol {
+nonisolated struct VLESSProtocol {
 
     static let version: UInt8 = 0
 

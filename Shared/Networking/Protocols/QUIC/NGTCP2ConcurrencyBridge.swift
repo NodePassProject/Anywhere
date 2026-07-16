@@ -56,6 +56,24 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
         connHeld = previous
     }
 
+    // MARK: - Conn-ref context
+    //
+    // ngtcp2's `ngtcp2_crypto_conn_ref.user_data` (also handed to the crypto callbacks)
+    // carries an **unretained** back-reference to the owning ``QUICConnection`` — the
+    // connection owns the `ngtcp2_conn` and outlives it, driving `ngtcp2_conn_del` itself.
+    // These wrap the pointer round-trip so the connection layer never touches
+    // ``BridgeContext`` directly.
+
+    /// The `user_data` pointer to store in `ngtcp2_crypto_conn_ref` (unretained).
+    static func connRefContext(_ connection: QUICConnection) -> UnsafeMutableRawPointer {
+        BridgeContext.passUnretained(connection)
+    }
+
+    /// Recovers the connection behind a conn-ref / crypto-callback `user_data` pointer.
+    static func connection(from userData: UnsafeMutableRawPointer) -> QUICConnection {
+        BridgeContext.unretained(userData, as: QUICConnection.self)
+    }
+
     // MARK: - Connection operations
     //
     // Thin wrappers over the `ngtcp2_conn_*` / `ngtcp2_swift_conn_*` entry points the

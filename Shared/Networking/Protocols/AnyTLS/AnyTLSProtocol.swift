@@ -17,7 +17,7 @@ import CommonCrypto
 /// followed by length-prefixed frames:
 ///
 ///     [cmd (1 B)] [sid (BE u32)] [length (BE u16)] [length B payload]
-enum AnyTLSProtocol {
+nonisolated enum AnyTLSProtocol {
 
     // MARK: - Frame commands
 

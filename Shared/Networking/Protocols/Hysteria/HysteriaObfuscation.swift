@@ -8,7 +8,7 @@
 import Foundation
 
 /// Hysteria2 packet obfuscation: `salamander` (XOR keystream) or `gecko` (adds handshake fragmentation).
-enum HysteriaObfuscation: Hashable {
+nonisolated enum HysteriaObfuscation: Hashable {
     case salamander(password: String)
     case gecko(password: String, minPacketSize: Int, maxPacketSize: Int)
 

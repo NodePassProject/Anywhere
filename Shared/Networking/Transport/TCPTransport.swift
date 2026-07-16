@@ -9,7 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
+nonisolated final class TCPTransport: ByteTransport, Sendable {
 
     // MARK: Constants
 
@@ -33,14 +33,24 @@ nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
         var eofLatched = false
     }
 
-    /// State and promises shared with the driver task.
+    /// State and one-shot signals shared with the driver task. Both signals are
+    /// element-less streams used as latches: the first `finish` wins, later finishes
+    /// are no-ops, and each has exactly one consumer.
     private final class Guts: Sendable {
         let state = Mutex(State())
-        /// Resolved when the dial reaches ready (success) or fails/times out.
-        let connectPromise = AsyncPromise<Void>()
-        /// Resolved to unwind the driver: `cancel()`, a viability drop, or a fatal
-        /// send/receive error.
-        let teardownPromise = AsyncPromise<Void>()
+        /// Consumed once by `connect()`: finished on ready, finished throwing on
+        /// failure/timeout/cancel.
+        let dialOutcome: AsyncThrowingStream<Never, Error>
+        let dialSignal: AsyncThrowingStream<Never, Error>.Continuation
+        /// Consumed once by the driver's hold-open: finished by `cancel()`, a
+        /// viability drop, or a fatal send/receive error.
+        let teardown: AsyncStream<Never>
+        let teardownSignal: AsyncStream<Never>.Continuation
+
+        init() {
+            (dialOutcome, dialSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+            (teardown, teardownSignal) = AsyncStream.makeStream(of: Never.self)
+        }
     }
 
     private let guts = Guts()
@@ -93,15 +103,18 @@ nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
         }
 
         try await withTaskCancellationHandler {
-            try await guts.connectPromise.value()
+            for try await _ in guts.dialOutcome {}
         } onCancel: {
             cancel()
         }
+        // A cancelled iteration ends without throwing; only a live, ready
+        // transport may report a successful dial.
+        guard isReady else { throw TransportError.connectionFailed("Cancelled") }
     }
 
     /// Owns the connection scope for the whole session. Publishes the connection,
-    /// resolves the dial, then parks on `teardownPromise` until cancel / viability loss /
-    /// a fatal I/O error unwinds it.
+    /// resolves the dial, then parks on the teardown signal until cancel / viability
+    /// loss / a fatal I/O error unwinds it.
     private static func runDriver(guts: Guts, endpoint: NWEndpoint, initialData: Data?, slot: FlowSlot) async {
         let hasInitialData = initialData?.isEmpty == false
         do {
@@ -118,51 +131,52 @@ nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
                     case .ready:
                         guts.state.withLock { $0.ready = true }
                     case .failed(let error), .waiting(let error):
-                        guts.connectPromise.resolve(.failure(error.transportError(op: .connect)))
-                        guts.teardownPromise.resolve(.success(()))
+                        guts.dialSignal.finish(throwing: error.transportError(op: .connect))
+                        guts.teardownSignal.finish()
                     default:
                         break  // .setup, .preparing, .cancelled
                     }
                 }
                 .onViabilityUpdate { _, viable in
-                    if !viable { guts.teardownPromise.resolve(.success(())) }
+                    if !viable { guts.teardownSignal.finish() }
                 }
 
                 if let initialData, hasInitialData {
                     do {
                         try await raceDialDeadline(Self.dialDeadline, onExpire: {
-                            guts.teardownPromise.resolve(.success(()))
+                            guts.teardownSignal.finish()
                         }) {
                             try await connection.send(initialData, endOfStream: false)
                         }
                     } catch {
-                        guts.connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
+                        guts.dialSignal.finish(throwing: TransportError.from(error, op: .connect))
                         throw error  // exit scope → tear the connection down
                     }
                 }
 
                 guts.state.withLock { $0.ready = true }
-                guts.connectPromise.resolve(.success(()))
+                guts.dialSignal.finish()
 
-                // Hold the connection open until something asks for teardown.
-                _ = try? await guts.teardownPromise.value()
+                // Hold the connection open until something asks for teardown; ends
+                // early if the driver task itself is cancelled.
+                for await _ in guts.teardown {}
             }
         } catch {
             // No-op if the dial already resolved; covers a pre-ready scope failure.
-            guts.connectPromise.resolve(.failure(TransportError.from(error, op: .connect)))
+            guts.dialSignal.finish(throwing: TransportError.from(error, op: .connect))
         }
         slot.release()
         guts.state.withLock { $0.connection = nil }
     }
 
-    // MARK: - AsyncByteTransport
+    // MARK: - ByteTransport
 
     func send(_ data: Data) async throws {
         let connection = try activeConnection()
         do {
             try await connection.send(data, endOfStream: false)
         } catch {
-            guts.teardownPromise.resolve(.success(()))
+            guts.teardownSignal.finish()
             throw TransportError.from(error, op: .send)
         }
     }
@@ -172,7 +186,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
         do {
             try await connection.send(Data(), endOfStream: true)
         } catch {
-            guts.teardownPromise.resolve(.success(()))
+            guts.teardownSignal.finish()
             throw TransportError.from(error, op: .send)
         }
     }
@@ -186,7 +200,7 @@ nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
             do {
                 message = try await connection.receive(atLeast: 1, atMost: Self.maxReceiveLength)
             } catch {
-                guts.teardownPromise.resolve(.success(()))
+                guts.teardownSignal.finish()
                 throw TransportError.from(error, op: .receive)
             }
 
@@ -215,8 +229,8 @@ nonisolated final class TCPTransport: AsyncByteTransport, Sendable {
         }
         // Unblock a pending connect() and the driver's hold-open; cancel the driver
         // so an in-flight establish send unwinds.
-        guts.connectPromise.resolve(.failure(TransportError.connectionFailed("Cancelled")))
-        guts.teardownPromise.resolve(.success(()))
+        guts.dialSignal.finish(throwing: TransportError.connectionFailed("Cancelled"))
+        guts.teardownSignal.finish()
         task?.cancel()
     }
 

@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLS13HandshakeKeys {
+nonisolated struct TLS13HandshakeKeys {
     let clientKey: Data
     let clientIV: Data
     let serverKey: Data

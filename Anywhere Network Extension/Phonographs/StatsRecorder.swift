@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-final class StatsRecorder: Sendable {
+nonisolated final class StatsRecorder: Sendable {
     struct RawValues {
         let byteCounts: TrafficByteCounts
         let tcpConnectionCount: Int

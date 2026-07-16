@@ -19,7 +19,7 @@ private let sudokuHTTPMaskMaxPollLineBytes = 256 * 1024
 private let sudokuMuxMaxQueueBytes = 4 * 1024 * 1024
 private let sudokuHTTPMaskStreamEOFHeader = "x-sudoku-stream-eof"
 
-private enum SudokuHTTPMaskAuth {
+nonisolated private enum SudokuHTTPMaskAuth {
     static func token(key: String, mode: String, method: String, path: String) -> String {
         var keyMaterial = Data("sudoku-httpmask-auth-v1:".utf8)
         keyMaterial.append(Data(key.utf8))
@@ -40,7 +40,7 @@ private enum SudokuHTTPMaskAuth {
     }
 }
 
-private enum SudokuHTTPMaskPathRoot {
+nonisolated private enum SudokuHTTPMaskPathRoot {
     static func apply(_ root: String, to path: String) -> String {
         let clean = normalize(root)
         guard !clean.isEmpty else { return path }
@@ -64,7 +64,7 @@ private enum SudokuHTTPMaskPathRoot {
     }
 }
 
-private struct SudokuDataQueue {
+nonisolated private struct SudokuDataQueue {
     private var storage = Data()
     private var offset = 0
 
@@ -141,7 +141,7 @@ private struct SudokuDataQueue {
     }
 }
 
-enum SudokuNativeError: Error, LocalizedError {
+nonisolated enum SudokuNativeError: Error, LocalizedError {
     case invalidConfiguration(String)
     case connectionFailed(String)
     case protocolError(String)
@@ -157,7 +157,7 @@ enum SudokuNativeError: Error, LocalizedError {
     }
 }
 
-private enum SudokuNativeCrypto {
+nonisolated private enum SudokuNativeCrypto {
     static func randomData(count: Int) throws -> Data {
         guard count > 0 else { return Data() }
         var data = Data(count: count)
@@ -359,13 +359,13 @@ nonisolated final class SudokuNativeConfig {
     }
 }
 
-private struct SudokuTableCacheKey: Hashable {
+nonisolated private struct SudokuTableCacheKey: Hashable {
     let key: String
     let asciiMode: String
     let customTable: String
 }
 
-private enum SudokuTableCache {
+nonisolated private enum SudokuTableCache {
     private static let maxEntries = 16
 
     private struct State {
@@ -1119,7 +1119,7 @@ private func sudokuReadHTTPLine(
     return String(data: data, encoding: .utf8) ?? ""
 }
 
-private final class SudokuHTTPBodyReader {
+nonisolated private final class SudokuHTTPBodyReader {
     private let stream: BlockingProxyStream
     let status: Int
     private let chunked: Bool
@@ -2012,7 +2012,7 @@ nonisolated final class SudokuRecordStream {
     }
 }
 
-private struct SudokuKIPClientState {
+nonisolated private struct SudokuKIPClientState {
     let privateKey: Curve25519.KeyAgreement.PrivateKey
     let nonce: Data
 }
@@ -2287,7 +2287,7 @@ nonisolated final class SudokuNativeClient {
     }
 }
 
-private enum SudokuAddress {
+nonisolated private enum SudokuAddress {
     static func encode(host: String, port: UInt16) throws -> Data {
         var out = Data()
         var ipv4 = in_addr()

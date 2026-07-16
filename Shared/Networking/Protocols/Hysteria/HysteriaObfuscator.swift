@@ -12,7 +12,7 @@ import Security
 
 /// XOR obfuscation: every datagram is `salt(8) || (packet XOR keystream)`, where the keystream is
 /// BLAKE2b-256 over `password || salt` cycled to the packet length.
-final class SalamanderObfuscator: QUICPacketObfuscator {
+nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
     static let saltLength = 8
     private static let keyLength = 32  // BLAKE2b-256 digest
 
@@ -64,7 +64,7 @@ final class SalamanderObfuscator: QUICPacketObfuscator {
 /// only.
 ///
 /// All methods run on `QUICConnection.queue`, so reassembly state needs no locking.
-final class GeckoObfuscator: QUICPacketObfuscator {
+nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     private static let fragmentFlag: UInt8 = 0x80
     private static let headerLength = 5
     private static let minChunks = 2

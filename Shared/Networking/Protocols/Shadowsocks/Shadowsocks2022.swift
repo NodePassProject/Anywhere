@@ -753,7 +753,7 @@ private func aesECBDecrypt(key: Data, block: Data) throws -> Data {
 // MARK: - XChaCha20-Poly1305
 
 /// Built from HChaCha20 + ChaChaPoly (no native XChaCha in CryptoKit).
-enum XChaCha20Poly1305 {
+nonisolated enum XChaCha20Poly1305 {
 
     static func seal(key: Data, nonce: Data, plaintext: Data) throws -> Data {
         guard nonce.count == 24, key.count == 32 else {

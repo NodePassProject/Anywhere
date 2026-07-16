@@ -9,7 +9,7 @@ import Foundation
 
 /// Capture refs: `$0` whole match, `$1`…`$9` single-digit groups, `${10}` braced for
 /// any index, `$$` a literal `$`; any other `$` stays literal.
-struct MITMCaptureTemplate: Equatable {
+nonisolated struct MITMCaptureTemplate: Equatable {
     private enum Token: Equatable {
         case literal(String)
         case group(Int)

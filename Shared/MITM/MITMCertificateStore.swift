@@ -10,7 +10,7 @@ import CryptoKit
 import Security
 import Synchronization
 
-enum MITMCertificateStoreError: Error {
+nonisolated enum MITMCertificateStoreError: Error {
     case keyGenerationFailed(String)
     case keychainWriteFailed(OSStatus)
     case keychainReadFailed(OSStatus)
@@ -18,7 +18,7 @@ enum MITMCertificateStoreError: Error {
     case missingCAComponents
 }
 
-final class MITMCertificateStore {
+nonisolated final class MITMCertificateStore {
 
     // MARK: - Configuration
     

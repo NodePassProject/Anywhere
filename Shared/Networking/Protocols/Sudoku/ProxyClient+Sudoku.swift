@@ -7,7 +7,7 @@
 
 import Foundation
 
-private enum SudokuConnectCommand {
+nonisolated private enum SudokuConnectCommand {
     case tcp
     case udp
 }

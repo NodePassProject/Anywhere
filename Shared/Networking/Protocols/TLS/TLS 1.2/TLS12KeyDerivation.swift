@@ -8,7 +8,7 @@
 import Foundation
 import CryptoKit
 
-struct TLS12KeyDerivation {
+nonisolated struct TLS12KeyDerivation {
 
     // MARK: - PRF (Pseudo-Random Function)
 

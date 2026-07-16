@@ -8,7 +8,7 @@
 import Foundation
 import Security
 
-enum VLESSVisionUDPGlobalID {
+nonisolated enum VLESSVisionUDPGlobalID {
     private static let baseKey: [UInt8] = {
         var key = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, 32, &key)

@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-enum NowhereError: Error, LocalizedError {
+nonisolated enum NowhereError: Error, LocalizedError {
     case notReady
     case connectionFailed(String)
     case authFailed(String)

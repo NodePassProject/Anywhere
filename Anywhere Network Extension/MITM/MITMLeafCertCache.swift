@@ -12,7 +12,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
 
-final class MITMLeafCertCache {
+nonisolated final class MITMLeafCertCache {
 
     // MARK: - Public Types
 

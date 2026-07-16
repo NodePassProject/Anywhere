@@ -10,7 +10,7 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "MITMRequestLog")
 
 /// Not thread-safe — serialized on the lwIP queue.
-final class MITMRequestLog {
+nonisolated final class MITMRequestLog {
 
     struct Record {
         let method: String?

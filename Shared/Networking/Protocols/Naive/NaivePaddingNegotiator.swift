@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-enum NaivePaddingNegotiator {
+nonisolated enum NaivePaddingNegotiator {
 
     enum PaddingType: Int {
         case none = 0

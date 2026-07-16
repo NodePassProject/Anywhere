@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "MITMBodyCodec")
 
 /// `Content-Encoding` decoders so body rules operate on plaintext. Decode-only:
 /// after rewriting we emit identity, always implicitly accepted (RFC 7231 §5.3.4).
-enum MITMBodyCodec {
+nonisolated enum MITMBodyCodec {
 
     static let maxBufferedBodyBytes: Int = 4 * 1024 * 1024
 

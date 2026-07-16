@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 /// h2→h1 bridge response delivery: the rewritten response is delivered as IR (head / body / reset)
 /// rather than HTTP/1.1 bytes the bridge would only re-parse. Chunked response trailers are dropped.
 /// lwIP-queue-confined.
-protocol MITMHTTP1ResponseIRSink: AnyObject {
+nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject {
     /// `endStream` true ⇒ no body follows (the IR consumer ends the stream on the head).
     func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool)
     /// An interim 1xx informational response (e.g. 103 Early Hints) ahead of the final response:
@@ -25,7 +25,7 @@ protocol MITMHTTP1ResponseIRSink: AnyObject {
 
 /// One direction of an HTTP/1.x byte stream through the MITM, emitting rewritten plaintext for the
 /// opposite TLS leg. Unparseable input permanently downgrades to passthrough.
-final class MITMHTTP1Stream {
+nonisolated final class MITMHTTP1Stream {
 
     /// Cap on bytes buffered awaiting the CRLF CRLF head terminator (Apache's
     /// 64 KiB default); on exceed the stream downgrades to passthrough.
@@ -2325,7 +2325,7 @@ final class MITMHTTP1Stream {
 /// Streaming chunked-transfer decoder: `consumeForward` re-emits framing verbatim,
 /// `consumeForwardIR` hands decoded payloads to a closure, and `consumeBuffered`
 /// emits decoded data and returns the original chunk sizes.
-private final class ChunkedReader {
+nonisolated private final class ChunkedReader {
     private enum State {
         case sizeLine
         case chunkData(remaining: Int, originalSize: Int)

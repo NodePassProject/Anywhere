@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
-struct CompiledMITMRule {
+nonisolated struct CompiledMITMRule {
     let phase: MITMPhase
     let gate: MITMGateRegex
     let operation: CompiledMITMOperation
@@ -80,7 +80,7 @@ extension CompiledMITMRule {
     }
 }
 
-struct ReplacementURL: Equatable {
+nonisolated struct ReplacementURL: Equatable {
     /// IPv6 URI brackets stripped, matching the form the resolver expects.
     let host: String
     let port: UInt16?
@@ -95,17 +95,17 @@ struct ReplacementURL: Equatable {
     }
 }
 
-enum TransparentTarget {
+nonisolated enum TransparentTarget {
     case resolved(ReplacementURL)
     case templated(MITMCaptureTemplate)
 }
 
-enum RedirectTarget {
+nonisolated enum RedirectTarget {
     case location(String)
     case templated(MITMCaptureTemplate)
 }
 
-enum CompiledRewriteAction {
+nonisolated enum CompiledRewriteAction {
     case transparent(TransparentTarget)
     case redirect302(RedirectTarget)
     case reject200Text(content: String)
@@ -113,7 +113,7 @@ enum CompiledRewriteAction {
     case reject200Data(base64: String)
 }
 
-enum ResolvedRewriteAction {
+nonisolated enum ResolvedRewriteAction {
     case transparent(ReplacementURL)
     case redirect302(location: String)
     case reject200Text(content: String)
@@ -121,7 +121,7 @@ enum ResolvedRewriteAction {
     case reject200Data(base64: String)
 }
 
-enum CompiledMITMOperation {
+nonisolated enum CompiledMITMOperation {
     case rewrite(CompiledRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
@@ -132,13 +132,13 @@ enum CompiledMITMOperation {
     case streamScript(source: String, sourceKey: Int)
 }
 
-struct CompiledMITMRuleSet {
+nonisolated struct CompiledMITMRuleSet {
     let id: UUID
     let domainSuffix: String
     let rules: [CompiledMITMRule]
 }
 
-final class MITMRewritePolicy {
+nonisolated final class MITMRewritePolicy {
     private struct PolicyState {
         var trie = FlatLabelTrie<Int16>()
         var compiledSets: [CompiledMITMRuleSet] = []
@@ -485,7 +485,7 @@ final class MITMRewritePolicy {
 // MARK: - Binary deserialization
 
 /// Decodes the `AMR1` binary blob into `MITMRuleSet` models.
-enum MITMBinaryReader {
+nonisolated enum MITMBinaryReader {
     private enum ReadError: Error { case badMagic, badVersion, truncated, malformed }
 
     /// nil on bad magic/version/truncation.

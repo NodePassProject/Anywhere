@@ -13,7 +13,7 @@ nonisolated private let logger = AnywhereLogger(category: "XHTTPConnection")
 // MARK: - XHTTP Channel Role
 
 /// A detached session pairs a `.downloadOnly` leg (GET) with an `.uploadOnly` leg (POSTs) sharing one session ID.
-enum XHTTPChannelRole {
+nonisolated enum XHTTPChannelRole {
     case combined
     case downloadOnly
     case uploadOnly
@@ -28,10 +28,10 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
     let sessionId: String
 
     // Download / stream-one transport.
-    let download: AsyncTransportClosures
+    let download: any ByteTransport
 
     // Upload transport factory (packet-up and stream-up), async-native.
-    let uploadConnectionFactory: (() async throws -> AsyncTransportClosures)?
+    let uploadConnectionFactory: (() async throws -> any ByteTransport)?
 
     var role: XHTTPChannelRole = .combined
     /// Upload leg owned by this download leg when detached; sends are delegated to it.
@@ -75,7 +75,7 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
     /// are always resumed *after* `withLock` returns, never while the lock is held.
     nonisolated struct State {
         // Upload transport, established at setup (packet-up and stream-up).
-        var uploadTransport: AsyncTransportClosures?
+        var uploadTransport: (any ByteTransport)?
 
         var nextSeq: Int64 = 0
         var chunkedDecoder = ChunkedTransferDecoder()
@@ -288,7 +288,7 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
 
     // MARK: - Initializers
 
-    init(download: AsyncTransportClosures, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: (() async throws -> AsyncTransportClosures)? = nil) {
+    init(download: any ByteTransport, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: (() async throws -> any ByteTransport)? = nil) {
         self.configuration = configuration
         self.mode = mode
         self.sessionId = sessionId
@@ -301,14 +301,14 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
 
     /// Over HTTP/3, byte I/O is multiplexed by the session, so the download closures are the no-op `.unused`.
     convenience init(h3Multiplexer: HTTP3Multiplexer, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
-        self.init(download: .unused, configuration: configuration, mode: mode, sessionId: sessionId)
+        self.init(download: NullByteTransport(), configuration: configuration, mode: mode, sessionId: sessionId)
         self.h3Multiplexer = h3Multiplexer
     }
 
     /// Over a shared multiplexing H2 connection (xmux), streams are virtual, so the download
     /// closures are the no-op `.unused` and `useHTTP2` stays false (the shared path is used instead).
     convenience init(sharedH2: XHTTPH2Multiplexer, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
-        self.init(download: .unused, configuration: configuration, mode: mode, sessionId: sessionId)
+        self.init(download: NullByteTransport(), configuration: configuration, mode: mode, sessionId: sessionId)
         self.sharedH2 = sharedH2
     }
 
@@ -432,7 +432,7 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
             sharedH2Download: XHTTPH2Stream?,
             sharedH2Upload: XHTTPH2Stream?,
             lease: XHTTPXMUXMultiplexerLease?,
-            upload: AsyncTransportClosures?
+            upload: (any ByteTransport)?
         ) in
             state._isConnected = false
             state.chunkedDecoder = ChunkedTransferDecoder()
@@ -528,7 +528,7 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
 
 /// A poolable underlying XHTTP transport that multiple XHTTP sessions can share
 /// (a multiplexing H2 connection or an H3/QUIC session).
-protocol XHTTPXMUXMultiplexerPoolable: AnyObject {
+nonisolated protocol XHTTPXMUXMultiplexerPoolable: AnyObject {
     /// True once the connection can no longer carry new sessions.
     var isPoolClosed: Bool { get }
     /// Tears down the underlying connection once the pool retires it with no active leases.
@@ -892,7 +892,7 @@ nonisolated final class XHTTPH2Stream: @unchecked Sendable {
 
 /// One always-on read loop demuxes frames to per-stream buffers. State under the `state` mutex.
 nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unchecked Sendable {
-    private let transport: AsyncTransportClosures
+    private let transport: any ByteTransport
     /// Demuxes the shared socket into H2 frames; one always-on read loop drives it.
     private let frameReader: H2FrameReader
 
@@ -924,9 +924,9 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
         var deliver: (() -> Void)?
     }
 
-    init(transport: AsyncTransportClosures) {
+    init(transport: any ByteTransport) {
         self.transport = transport
-        frameReader = H2FrameReader(maxBufferSize: Self.maxReadBuffer, receive: transport.receive)
+        frameReader = H2FrameReader(maxBufferSize: Self.maxReadBuffer, receive: { try await transport.receive() })
     }
 
     /// Keeps a dial-time object (TLS/Reality client) alive for the connection's lifetime.
@@ -1367,7 +1367,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
 // mis-framed response.
 
 nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, @unchecked Sendable {
-    private let transport: AsyncTransportClosures
+    private let transport: any ByteTransport
 
     nonisolated private enum ParseState { case headers; case body(Int) }
 
@@ -1385,7 +1385,7 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     /// Lease for the current session; refreshed on each pool acquire.
     var lease: XHTTPXMUXMultiplexerLease?
 
-    init(transport: AsyncTransportClosures) {
+    init(transport: any ByteTransport) {
         self.transport = transport
         startDrain()
     }
@@ -1407,16 +1407,30 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
 
     /// Transport handed to the XHTTP session: each write is one POST; the session needn't read
     /// (this connection drains internally); cancel returns the connection to the pool.
-    var sessionClosures: AsyncTransportClosures {
-        AsyncTransportClosures(
-            send: { [weak self] data in
-                guard let self else { throw XHTTPError.connectionClosed }
-                self.state.withLock { $0.outstanding += 1 }
-                try await self.transport.send(data)
-            },
-            receive: { .end },
-            cancel: { [weak self] in self?.releaseToPool() }
-        )
+    var sessionTransport: any ByteTransport {
+        SessionTransport(multiplexer: self)
+    }
+
+    /// One POST per send, no reads, pool-return on cancel — the H1-pool multiplexer's
+    /// per-session byte surface. Holds its owner weakly (the owner outlives it in the pool).
+    private final class SessionTransport: ByteTransport, @unchecked Sendable {
+        private weak var multiplexer: XHTTPH1Multiplexer?
+
+        init(multiplexer: XHTTPH1Multiplexer) {
+            self.multiplexer = multiplexer
+        }
+
+        var isReady: Bool { multiplexer?.isPoolClosed == false }
+
+        func send(_ data: Data) async throws {
+            guard let multiplexer else { throw XHTTPError.connectionClosed }
+            multiplexer.state.withLock { $0.outstanding += 1 }
+            try await multiplexer.transport.send(data)
+        }
+
+        func receive() async throws -> TransportChunk { .end }
+
+        func cancel() { multiplexer?.releaseToPool() }
     }
 
     private func releaseToPool() {

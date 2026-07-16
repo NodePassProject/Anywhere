@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct QUICTuning {
+nonisolated struct QUICTuning {
 
     // MARK: Congestion control
 

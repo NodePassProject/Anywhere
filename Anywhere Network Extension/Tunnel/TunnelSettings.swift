@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TunnelSettings: Equatable {
+nonisolated struct TunnelSettings: Equatable {
     var baseProxyMode: ProxyMode = .rule
     var trustedSSIDs: Set<String> = []
     var alwaysTrustCellular = false

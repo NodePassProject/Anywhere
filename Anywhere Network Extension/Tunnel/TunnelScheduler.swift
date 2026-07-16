@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-final class TunnelScheduler {
+nonisolated final class TunnelScheduler {
     private final class ScheduledTask {
         let label: String
         let queue: DispatchQueue

@@ -10,7 +10,7 @@ import Synchronization
 
 /// JSC sync execution is uninterruptible, so crashing for a clean OS relaunch is the only recovery.
 /// A suspended `await` already called end(), so slow async fetches never trip this.
-enum MITMScriptWatchdog {
+nonisolated enum MITMScriptWatchdog {
 
     /// Hard wall-clock cap on one synchronous JS span; any legitimate span finishes far inside this.
     static let hardCapSeconds = 30

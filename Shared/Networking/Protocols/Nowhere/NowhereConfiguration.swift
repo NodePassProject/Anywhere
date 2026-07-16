@@ -9,18 +9,18 @@ import Foundation
 import Security
 import Synchronization
 
-enum NowhereNetwork: String, Codable, CaseIterable {
+nonisolated enum NowhereNetwork: String, Codable, CaseIterable {
     case udp
     case tcp
 }
 
-enum NowherePool {
+nonisolated enum NowherePool {
     static let validRange = 0...9
     static let sliderRange = 1...9
     static let enabledDefault = 5
 }
 
-struct NowhereTransportIdentityKey: Hashable {
+nonisolated struct NowhereTransportIdentityKey: Hashable {
     let configurationID: UUID
     let proxyHost: String
     let proxyPort: UInt16
@@ -31,7 +31,7 @@ struct NowhereTransportIdentityKey: Hashable {
     let tls: TLSConfiguration
 }
 
-struct NowhereConfiguration: Hashable {
+nonisolated struct NowhereConfiguration: Hashable {
     let proxyHost: String
     let proxyPort: UInt16
     let key: String

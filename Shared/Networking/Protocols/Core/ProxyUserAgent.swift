@@ -5,7 +5,7 @@
 
 import Foundation
 
-enum ProxyUserAgent {
+nonisolated enum ProxyUserAgent {
     static let `default`: String = chrome
     
     static let chrome: String = {

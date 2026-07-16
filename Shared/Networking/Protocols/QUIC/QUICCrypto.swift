@@ -8,7 +8,7 @@
 import Foundation
 import CryptoKit
 
-enum QUICCrypto {
+nonisolated enum QUICCrypto {
 
     /// Call before any connection is created.
     static func registerCallbacks() {

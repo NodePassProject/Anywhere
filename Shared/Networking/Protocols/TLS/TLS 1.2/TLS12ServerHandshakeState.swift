@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLS12ServerHandshakeState {
+nonisolated struct TLS12ServerHandshakeState {
     var transcript: Data = Data()
     var masterSecret: Data?
     var keys: TLS12HandshakeKeys?

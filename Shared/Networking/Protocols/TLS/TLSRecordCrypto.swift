@@ -8,7 +8,7 @@
 import Foundation
 import CryptoKit
 
-struct TLSRecordCrypto {
+nonisolated struct TLSRecordCrypto {
 
     static func encryptHandshakeRecord(plaintext: Data, key: SymmetricKey, iv: Data, sequenceNumber: UInt64, cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) throws -> Data {
         let nonce = buildNonce(iv: iv, seqNum: sequenceNumber)
@@ -105,7 +105,7 @@ struct TLSRecordCrypto {
     }
 }
 
-enum TLSRecordError: Error, LocalizedError {
+nonisolated enum TLSRecordError: Error, LocalizedError {
     case ciphertextTooShort
     case emptyDecryptedData
     case noContentTypeFound

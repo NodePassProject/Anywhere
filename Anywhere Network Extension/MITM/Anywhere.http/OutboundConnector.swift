@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "OutboundConnector")
 
-enum OutboundConnector {
+nonisolated enum OutboundConnector {
 
     struct Dialed {
         let connection: ProxyConnection

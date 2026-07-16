@@ -7,14 +7,14 @@
 
 import Foundation
 
-enum TLSVersion: UInt16, Codable {
+nonisolated enum TLSVersion: UInt16, Codable {
     case tls10 = 0x0301
     case tls11 = 0x0302
     case tls12 = 0x0303
     case tls13 = 0x0304
 }
 
-struct TLSConfiguration {
+nonisolated struct TLSConfiguration {
     let serverName: String              // SNI (defaults to server address)
     let alpn: [String]?                 // e.g. ["h2", "http/1.1"]
     let minVersion: TLSVersion?         // nil = no constraint
@@ -168,7 +168,7 @@ extension TLSConfiguration: Equatable, Hashable {
     }
 }
 
-enum TLSError: Error, LocalizedError {
+nonisolated enum TLSError: Error, LocalizedError {
     case handshakeFailed(String)
     case certificateValidationFailed(String)
     case connectionFailed(String)

@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLS13ApplicationKeys {
+nonisolated struct TLS13ApplicationKeys {
     let clientKey: Data
     let clientIV: Data
     let serverKey: Data

@@ -8,7 +8,7 @@
 import Foundation
 import JavaScriptCore
 
-enum MITMScriptTransform {
+nonisolated enum MITMScriptTransform {
 
     /// Serial queue carrying every script invocation (off the lwIP queue, so a slow process(ctx)
     /// parks only its connection). Serial ordering keeps FrameCursor from concurrent touches.

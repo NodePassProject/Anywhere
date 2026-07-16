@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMSession")
 
-struct MITMDialResult {
+nonisolated struct MITMDialResult {
     let connection: ProxyConnection
     /// nil for a direct connection; the session owns its lifetime.
     let proxyClient: ProxyClient?
@@ -20,7 +20,7 @@ struct MITMDialResult {
 /// bounds it with its own dial deadline; callers re-establish lwIP-queue confinement after the await.
 typealias MITMDialer = @Sendable (_ host: String, _ port: UInt16) async throws -> MITMDialResult
 
-final class MITMSession {
+nonisolated final class MITMSession {
 
     // MARK: - Inner Transport (async byte transport for the lwIP side)
 
@@ -28,7 +28,7 @@ final class MITMSession {
     /// Client→session bytes arrive via ``feedFromClient(_:)``/``endOfClient()`` and drain through an
     /// ``AsyncByteChannel``; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
     /// lwIP write buffers and gives no backpressure signal).
-    final class InnerTransport: AsyncByteTransport, @unchecked Sendable {
+    final class InnerTransport: ByteTransport, @unchecked Sendable {
         let queue: DispatchQueue
         var onSendToClient: ((Data) -> Void)?
 
@@ -48,7 +48,7 @@ final class MITMSession {
             self.queue = queue
         }
 
-        // MARK: AsyncByteTransport
+        // MARK: ByteTransport
 
         func send(_ data: Data) async throws {
             guard !state.withLock({ $0.closed }) else { throw TransportError.notConnected }

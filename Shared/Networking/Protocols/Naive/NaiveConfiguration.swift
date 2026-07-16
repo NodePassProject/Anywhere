@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct NaiveConfiguration {
+nonisolated struct NaiveConfiguration {
     let proxyHost: String
     let proxyPort: UInt16
     let username: String?

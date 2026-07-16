@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-protocol TLSServerDelegate: AnyObject {
+nonisolated protocol TLSServerDelegate: AnyObject {
     func tlsServer(_ server: TLSServer, didProduceOutput data: Data)
 
     /// Handshake completed; `clientFinishedHandshakeTrailer` holds application bytes that arrived

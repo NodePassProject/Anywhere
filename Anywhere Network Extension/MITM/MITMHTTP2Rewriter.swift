@@ -9,7 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2Rewriter")
 
-final class MITMHTTP2Rewriter {
+nonisolated final class MITMHTTP2Rewriter {
 
     let host: String
     /// Split by phase at init so per-frame paths don't re-pay the policy trie walk.

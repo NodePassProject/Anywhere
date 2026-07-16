@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum TunnelConstants {
+nonisolated enum TunnelConstants {
 
     // MARK: - Tunnel Addresses
 

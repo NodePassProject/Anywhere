@@ -9,7 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "LatencyTester")
 
-private enum LatencyTestError: Error, LocalizedError {
+nonisolated private enum LatencyTestError: Error, LocalizedError {
     case unexpectedStatus(String)
 
     var errorDescription: String? {

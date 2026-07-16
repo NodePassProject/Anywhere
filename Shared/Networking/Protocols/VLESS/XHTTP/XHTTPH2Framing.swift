@@ -12,7 +12,7 @@ import Synchronization
 //
 // One copy of the byte layout shared by the 1:1 and shared-multiplexing H2 paths so they can't drift.
 
-enum H2Framing {
+nonisolated enum H2Framing {
     typealias Frame = (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)
 
     static let headerSize = 9

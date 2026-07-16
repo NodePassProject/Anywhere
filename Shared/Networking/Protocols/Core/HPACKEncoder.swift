@@ -144,7 +144,7 @@ nonisolated class HPACKDecoder {
     }
 }
 
-enum HPACKEncoder {
+nonisolated enum HPACKEncoder {
 
     // MARK: - CONNECT Request Encoding
 
@@ -514,7 +514,7 @@ enum HPACKEncoder {
 
 // MARK: - HPACK Huffman Decoder
 
-enum HPACKHuffman {
+nonisolated enum HPACKHuffman {
 
     /// Trie node for Huffman decoding. Children are array indices; -1 = no child.
     private struct Node {
@@ -682,7 +682,7 @@ enum HPACKHuffman {
 
 /// Byte-format-only layer (RFC 9113 §4.1) shared by both hand-rolled HTTP/2 stacks so a wire-format
 /// fix lands once; each stack keeps its own frame structs, decode loops, and state machines.
-enum HTTP2FrameWire {
+nonisolated enum HTTP2FrameWire {
 
     /// Frame header length (RFC 9113 §4.1): 24-bit length + 8-bit type + 8-bit flags + 31-bit stream id.
     static let headerSize = 9

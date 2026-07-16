@@ -22,7 +22,7 @@ nonisolated private let mitmScriptGlobalFetchCount = Atomic<Int>(0)
 /// One JSContext per rule set, functions cached by source hash. JS cannot be preempted
 /// (the execution-time-limit SPI is App Review-flagged); a hung sync span trips MITMScriptWatchdog,
 /// an unsettled promise is reverted by the idle watchdog.
-final class MITMScriptEngine {
+nonisolated final class MITMScriptEngine {
 
     typealias Message = HTTPMessage
 

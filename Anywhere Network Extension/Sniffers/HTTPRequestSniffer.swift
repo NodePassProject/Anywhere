@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct HTTPRequestSniffer {
+nonisolated struct HTTPRequestSniffer {
 
     enum State: Equatable {
         case needMore

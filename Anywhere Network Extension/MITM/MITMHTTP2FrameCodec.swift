@@ -8,7 +8,7 @@
 import Foundation
 
 /// Self-contained HTTP/2 frame primitives (RFC 9113), not a full HTTP/2 stack.
-enum MITMHTTP2FrameCodec {
+nonisolated enum MITMHTTP2FrameCodec {
 
     // MARK: Frame type codes
 

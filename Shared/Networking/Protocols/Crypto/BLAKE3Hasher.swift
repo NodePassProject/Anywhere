@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct BLAKE3Hasher {
+nonisolated struct BLAKE3Hasher {
     private var state = blake3_hasher()
 
     init() {

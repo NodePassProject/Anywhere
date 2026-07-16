@@ -20,11 +20,11 @@ nonisolated class TLSRecordConnection {
     /// ``cancel()`` is atomic against the in-flight sends/receives that read it. The transport
     /// reference is the real critical state; access it through the ``connection`` computed
     /// property or, for the atomic take-and-clear, ``connectionBox`` directly.
-    private let connectionBox = Mutex<(any AsyncByteTransport)?>(nil)
+    private let connectionBox = Mutex<(any ByteTransport)?>(nil)
 
     /// The underlying async byte transport. `nil` after ``cancel()``. Every write is serialized
     /// through ``sendMutex`` so records reach the wire in submission order.
-    var connection: (any AsyncByteTransport)? {
+    var connection: (any ByteTransport)? {
         get { connectionBox.withLock { $0 } }
         set { connectionBox.withLock { $0 = newValue } }
     }
@@ -290,7 +290,7 @@ nonisolated class TLSRecordConnection {
     // MARK: - Cancel
     
     func cancel() {
-        let transport = connectionBox.withLock { box -> (any AsyncByteTransport)? in
+        let transport = connectionBox.withLock { box -> (any ByteTransport)? in
             let transport = box
             box = nil                // in-flight and subsequent sends see nil and abort
             return transport

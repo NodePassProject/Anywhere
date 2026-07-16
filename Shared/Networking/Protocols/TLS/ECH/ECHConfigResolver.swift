@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum ECHConfigResolver {
+nonisolated enum ECHConfigResolver {
 
     /// ECHConfigList bytes the handshake seals against, or nil when no usable spec is configured.
     static func resolveImmediate(_ spec: String?) -> Data? {

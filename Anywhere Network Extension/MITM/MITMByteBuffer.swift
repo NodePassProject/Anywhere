@@ -8,7 +8,7 @@
 import Foundation
 
 /// Read offset makes prefix removal O(1) (not the O(n²) memmove of `Data.removeFirst`); the visible region is always 0-indexed.
-struct MITMByteBuffer {
+nonisolated struct MITMByteBuffer {
 
     /// Compact once the consumed prefix exceeds this; 64 KiB = 4× the upstream TLS plaintext record size.
     private static let compactAbsoluteThreshold = 64 * 1024

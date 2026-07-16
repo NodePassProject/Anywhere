@@ -9,7 +9,7 @@ import Foundation
 
 /// Parses inbound IP+UDP datagrams from the TUN interface and builds outbound
 /// ones, replacing lwIP's UDP path entirely (the vendored lwIP builds with `LWIP_UDP 0`).
-enum UDPPacket {
+nonisolated enum UDPPacket {
 
     static let ipProtocolUDP: UInt8 = 17
 

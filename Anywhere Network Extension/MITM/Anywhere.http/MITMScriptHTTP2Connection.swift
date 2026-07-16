@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2")
 
 // MARK: - Errors
 
-enum MITMScriptHTTP2Error: Error, LocalizedError {
+nonisolated enum MITMScriptHTTP2Error: Error, LocalizedError {
     case notReady
     case protocolError(String)
     case connectionClosed(String)

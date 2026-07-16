@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct CountryBypassCatalog {
+nonisolated struct CountryBypassCatalog {
     let supportedCountryCodes: [String]
     private let languageToCountry: [String: String]
 

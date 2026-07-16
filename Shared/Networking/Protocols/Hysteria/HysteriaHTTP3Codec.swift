@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum HysteriaHTTP3Codec {
+nonisolated enum HysteriaHTTP3Codec {
 
     // MARK: - Static table (RFC 9204 Appendix A — subset we care about)
 

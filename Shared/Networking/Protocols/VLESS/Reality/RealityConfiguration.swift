@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct RealityConfiguration {
+nonisolated struct RealityConfiguration {
     let serverName: String          // SNI of the website to impersonate
     let publicKey: Data             // X25519, 32 bytes
     let shortId: Data               // 0-8 bytes
@@ -95,7 +95,7 @@ extension RealityConfiguration: Equatable, Hashable {
     }
 }
 
-enum TLSFingerprint: String, Codable, CaseIterable {
+nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
     case chrome133 = "chrome_133"
     case chrome120 = "chrome_120"
     case chrome106 = "chrome_106"
@@ -141,7 +141,7 @@ enum TLSFingerprint: String, Codable, CaseIterable {
     }
 }
 
-enum RealityError: Error, LocalizedError {
+nonisolated enum RealityError: Error, LocalizedError {
     case missingParameter(String)
     case invalidPublicKey
     case handshakeFailed(String)

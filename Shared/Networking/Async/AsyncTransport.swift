@@ -8,35 +8,6 @@
 import Foundation
 import Synchronization
 
-enum TransportChunk: Sendable {
-    case bytes(Data)
-    /// End-of-stream (remote FIN / half-close). Further reads also return `.end`.
-    case end
-}
-
-protocol AsyncByteTransport: AnyObject, Sendable {
-    nonisolated var isReady: Bool { get }
-
-    nonisolated func send(_ data: Data) async throws
-
-    /// One read: `.bytes` with data, `.end` at EOF. Reads are issued serially.
-    nonisolated func receive() async throws -> TransportChunk
-
-    /// Abortive teardown. Idempotent and safe from any task/thread.
-    nonisolated func cancel()
-}
-
-protocol AsyncDatagramTransport: AnyObject, Sendable {
-    nonisolated var isReady: Bool { get }
-
-    nonisolated func send(_ datagram: Data) async throws
-
-    /// One datagram; throws on terminal failure.
-    nonisolated func receive() async throws -> Data
-
-    nonisolated func cancel()
-}
-
 nonisolated final class AsyncPromise<Value: Sendable>: Sendable {
     private enum Storage {
         case pending
@@ -132,22 +103,3 @@ nonisolated final class AsyncReadinessGate: Sendable {
     }
 }
 
-nonisolated func raceDialDeadline<T: Sendable>(
-    _ deadline: Duration,
-    onExpire: @escaping @Sendable () -> Void = {},
-    timeout: @autoclosure @escaping @Sendable () -> Error = TransportError.posixError(.connect, errno: ETIMEDOUT),
-    _ body: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await body() }
-        group.addTask {
-            try await Task.sleep(for: deadline)
-            onExpire()
-            throw timeout()
-        }
-        defer { group.cancelAll() }
-        // First task to finish wins: `body`'s value/throw, or the deadline throw.
-        guard let result = try await group.next() else { throw timeout() }
-        return result
-    }
-}

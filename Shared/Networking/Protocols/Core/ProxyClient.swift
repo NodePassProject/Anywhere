@@ -980,7 +980,7 @@ nonisolated final class ProxyClient: Sendable {
     }
 
     private enum XHTTPDialedTransport {
-        case byteStream(AsyncTransportClosures)
+        case byteStream(any ByteTransport)
         case http3(HTTP3Multiplexer)
     }
 
@@ -1030,7 +1030,7 @@ nonisolated final class ProxyClient: Sendable {
         mode: XHTTPMode,
         sessionId: String,
         role: XHTTPChannelRole,
-        uploadFactory: (() async throws -> AsyncTransportClosures)?
+        uploadFactory: (() async throws -> any ByteTransport)?
     ) async throws -> XHTTPConnection {
         // xmux: pool/multiplex direct-route XHTTP connections. XHTTP always pools — serial-reuse
         // defaults apply when xmux is omitted (see `effectiveXMUX`). Tunneled/chained routes
@@ -1134,7 +1134,7 @@ nonisolated final class ProxyClient: Sendable {
         port: UInt16,
         security: XraySecurityLayer
     ) async throws -> XHTTPH2Multiplexer {
-        func bringUp(_ transport: AsyncTransportClosures, retaining object: AnyObject?) async throws -> XHTTPH2Multiplexer {
+        func bringUp(_ transport: any ByteTransport, retaining object: AnyObject?) async throws -> XHTTPH2Multiplexer {
             let shared = XHTTPH2Multiplexer(transport: transport)
             if let object { shared.retain(object) }
             try await shared.connect()
@@ -1144,7 +1144,7 @@ nonisolated final class ProxyClient: Sendable {
         case .none:
             let transport = TCPTransport(host: host, port: port)
             try await transport.connect()
-            return try await bringUp(AsyncTransportClosures(transport), retaining: transport)
+            return try await bringUp(transport, retaining: transport)
         case .tls(let tlsConfig):
             // XHTTP rides h2; advertise it (fall back to http/1.1) regardless of the configured ALPN.
             let h2TLS = TLSConfiguration(
@@ -1153,11 +1153,11 @@ nonisolated final class ProxyClient: Sendable {
             )
             let client = TLSClient(configuration: h2TLS)
             let connection = try await client.connect(host: host, port: port)
-            return try await bringUp(AsyncTransportClosures(tls: connection), retaining: client)
+            return try await bringUp(TLSByteTransport(connection), retaining: client)
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
             let connection = try await client.connect(host: host, port: port)
-            return try await bringUp(AsyncTransportClosures(tls: connection), retaining: client)
+            return try await bringUp(TLSByteTransport(connection), retaining: client)
         }
     }
 
@@ -1197,11 +1197,11 @@ nonisolated final class ProxyClient: Sendable {
         switch security {
         case .none:
             if let tunnel = overTunnel {
-                return .byteStream(AsyncTransportClosures(proxyConnection: tunnel))
+                return .byteStream(TunneledTransport(tunnel: tunnel))
             } else {
                 let transport = TCPTransport(host: host, port: port)
                 try await transport.connect()
-                return .byteStream(AsyncTransportClosures(transport))
+                return .byteStream(transport)
             }
         case .tls(let tlsConfig):
             let client = TLSClient(configuration: sanitizedXHTTPTLSConfiguration(from: tlsConfig, httpVersion: httpVersion))
@@ -1211,7 +1211,7 @@ nonisolated final class ProxyClient: Sendable {
             } else {
                 connection = try await client.connect(host: host, port: port)
             }
-            return .byteStream(AsyncTransportClosures(tls: connection))
+            return .byteStream(TLSByteTransport(connection))
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
             let connection: TLSRecordConnection
@@ -1220,7 +1220,7 @@ nonisolated final class ProxyClient: Sendable {
             } else {
                 connection = try await client.connect(host: host, port: port)
             }
-            return .byteStream(AsyncTransportClosures(tls: connection))
+            return .byteStream(TLSByteTransport(connection))
         }
     }
 
@@ -1252,7 +1252,7 @@ nonisolated final class ProxyClient: Sendable {
         httpVersion: XHTTPHTTPVersion,
         mode: XHTTPMode,
         xmux: XHTTPXMUXMultiplexerConfiguration
-    ) -> (() async throws -> AsyncTransportClosures) {
+    ) -> (() async throws -> any ByteTransport) {
         // xmux: pool the packet-up upload socket across sessions for direct routes.
         // stream-up's upload is one indefinite POST (never reusable); chained routes can't pool.
         let hasChain = (configuration.chain?.isEmpty == false)
@@ -1277,7 +1277,7 @@ nonisolated final class ProxyClient: Sendable {
                     throw ProxyError.connectionFailed("xmux H1 upload acquisition failed")
                 }
                 connection.lease = lease
-                return connection.sessionClosures
+                return connection.sessionTransport
             }
         }
 
@@ -1308,7 +1308,7 @@ nonisolated final class ProxyClient: Sendable {
         port: UInt16,
         security: XraySecurityLayer
     ) async -> XHTTPH1Multiplexer? {
-        func wrap(_ transport: AsyncTransportClosures, retaining object: AnyObject?) -> XHTTPH1Multiplexer {
+        func wrap(_ transport: any ByteTransport, retaining object: AnyObject?) -> XHTTPH1Multiplexer {
             let connection = XHTTPH1Multiplexer(transport: transport)
             if let object { connection.retain(object) }
             return connection
@@ -1321,7 +1321,7 @@ nonisolated final class ProxyClient: Sendable {
             } catch {
                 return nil
             }
-            return wrap(AsyncTransportClosures(transport), retaining: transport)
+            return wrap(transport, retaining: transport)
         case .tls(let tlsConfig):
             let h1TLS = TLSConfiguration(
                 serverName: tlsConfig.serverName, alpn: ["http/1.1"],
@@ -1329,11 +1329,11 @@ nonisolated final class ProxyClient: Sendable {
             )
             let client = TLSClient(configuration: h1TLS)
             guard let connection = try? await client.connect(host: host, port: port) else { return nil }
-            return wrap(AsyncTransportClosures(tls: connection), retaining: client)
+            return wrap(TLSByteTransport(connection), retaining: client)
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
             guard let connection = try? await client.connect(host: host, port: port) else { return nil }
-            return wrap(AsyncTransportClosures(tls: connection), retaining: client)
+            return wrap(TLSByteTransport(connection), retaining: client)
         }
     }
 

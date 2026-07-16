@@ -10,7 +10,7 @@ import CoreData
 
 nonisolated private let logger = AnywhereLogger(category: "BlobSync")
 
-protocol SoftDeletable {
+nonisolated protocol SoftDeletable {
     var deletedAt: Date? { get }
 }
 
@@ -20,7 +20,7 @@ extension ProxyChain: SoftDeletable {}
 extension CustomRoutingRuleSet: SoftDeletable {}
 extension MITMRuleSet: SoftDeletable {}
 
-enum Tombstone {
+nonisolated enum Tombstone {
     static let lifetime: TimeInterval = 7 * 24 * 60 * 60
 
     /// Drops tombstones older than `lifetime`; live records always pass.
@@ -38,7 +38,7 @@ enum Tombstone {
     }
 }
 
-enum BlobMerge {
+nonisolated enum BlobMerge {
     static func register() {
         JSONBlobStore.mergeResolver = { key, rows in
             switch key {
@@ -129,7 +129,7 @@ enum BlobMerge {
     }
 }
 
-enum CloudBlobSync {
+nonisolated enum CloudBlobSync {
     @MainActor private static var remoteChangeObserver: (any NSObjectProtocol)?
     @MainActor private static var debounce: Task<Void, Never>?
 

@@ -12,7 +12,7 @@ import UIKit
 import AppKit
 #endif
 
-public enum DeviceCensorship {
+nonisolated public enum DeviceCensorship {
     public static let isChinaDevice: Bool = {
         let bannedCharacter = "\u{1F1F9}\u{1F1FC}" as NSString
         var imageData: Data

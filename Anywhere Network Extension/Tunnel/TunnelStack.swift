@@ -13,7 +13,7 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack")
 
 // MARK: - Traffic Accounting
 
-struct TrafficByteCounts {
+nonisolated struct TrafficByteCounts {
     struct ByteCounts: Sendable {
         var bytesIn: Int64 = 0
         var bytesOut: Int64 = 0
@@ -38,7 +38,7 @@ struct TrafficByteCounts {
 /// Coordinator for the tunnel's data plane: TCP/ICMP feed the vendored lwIP
 /// stack on ``lwipQueue``; UDP is handled entirely in Swift on ``udpQueue``
 /// (lwIP is built `LWIP_UDP 0`).
-class TunnelStack {
+nonisolated class TunnelStack {
 
     // MARK: Properties
 

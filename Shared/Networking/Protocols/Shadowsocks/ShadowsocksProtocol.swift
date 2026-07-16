@@ -9,7 +9,7 @@ import Foundation
 
 /// Address format: ATYP(1) + Address(var) + Port(2, big-endian).
 /// ATYP 0x01: IPv4 (4B), 0x03: Domain (1B length + string), 0x04: IPv6 (16B).
-enum ShadowsocksProtocol {
+nonisolated enum ShadowsocksProtocol {
 
     static func buildAddressHeader(host: String, port: UInt16) -> Data {
         var data = Data()

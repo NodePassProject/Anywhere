@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum XHTTPMode: String, Codable, CaseIterable, Hashable {
+nonisolated enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     case auto
     case streamOne = "stream-one"
     case streamUp = "stream-up"
@@ -23,7 +23,7 @@ enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     }
 }
 
-enum XHTTPPlacement: String, Codable, Equatable, Hashable {
+nonisolated enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case path
     case query
     case header
@@ -32,13 +32,13 @@ enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case body
 }
 
-enum XHTTPPaddingMethod: String, Codable, Equatable, Hashable {
+nonisolated enum XHTTPPaddingMethod: String, Codable, Equatable, Hashable {
     case repeatX = "repeat-x"
     case tokenish
 }
 
 /// A `from`/`to` integer range; a single value when `from == to`.
-struct XHTTPXMUXMultiplexerRange: Codable, Equatable, Hashable {
+nonisolated struct XHTTPXMUXMultiplexerRange: Codable, Equatable, Hashable {
     var from: Int
     var to: Int
 
@@ -76,7 +76,7 @@ struct XHTTPXMUXMultiplexerRange: Codable, Equatable, Hashable {
 }
 
 /// Connection-pool sizing and rotation for XHTTP. Ranges are `.zero` when unset (0 = no limit).
-struct XHTTPXMUXMultiplexerConfiguration: Codable, Equatable, Hashable {
+nonisolated struct XHTTPXMUXMultiplexerConfiguration: Codable, Equatable, Hashable {
     /// Max concurrent XHTTP sessions multiplexed over one connection (0 = unlimited).
     var maxConcurrency: XHTTPXMUXMultiplexerRange
     /// Underlying connections opened per destination before existing ones are reused (0 = unlimited).
@@ -139,7 +139,7 @@ struct XHTTPXMUXMultiplexerConfiguration: Codable, Equatable, Hashable {
 }
 
 /// XHTTP transport settings; advanced fields come from the `extra` JSON blob in VLESS share links.
-struct XHTTPConfiguration: Codable, Equatable, Hashable {
+nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
     let host: String
     let path: String
     let mode: XHTTPMode
@@ -670,7 +670,7 @@ extension XHTTPConfiguration {
 
 /// Separate download source: the GET leg dials this server while the POST leg
 /// stays on the main node, correlated by a shared session ID.
-struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
+nonisolated struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
     let serverAddress: String
     let serverPort: UInt16
     /// `"none"`, `"tls"`, or `"reality"`.
@@ -762,7 +762,7 @@ extension XHTTPDownloadSettings {
 
 /// Immutable reference box breaking the value-type recursion; conformances
 /// delegate to the wrapped value, so the box never appears in JSON or affects equality.
-final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
+nonisolated final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
     let value: XHTTPDownloadSettings
 
     init(_ value: XHTTPDownloadSettings) { self.value = value }
@@ -784,7 +784,7 @@ final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
     }
 }
 
-enum XHTTPError: Error, LocalizedError {
+nonisolated enum XHTTPError: Error, LocalizedError {
     case setupFailed(String)
     case httpError(String)
     case connectionClosed

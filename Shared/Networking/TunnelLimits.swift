@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum TunnelLimits {
+nonisolated enum TunnelLimits {
     /// Hard ceiling on concurrent TCP connections.
     static let tcpMaxConnections = 512
     /// Hard ceiling on concurrent UDP flows.

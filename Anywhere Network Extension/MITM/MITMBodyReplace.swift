@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
-enum MITMBodyReplace {
+nonisolated enum MITMBodyReplace {
     
     struct CompiledOperation {
         let search: Regex<AnyRegexOutput>

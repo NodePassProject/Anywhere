@@ -9,7 +9,7 @@ import Foundation
 
 /// `brutal` paces each direction at a fixed user-configured rate; `bbr` adapts
 /// and asks the server to run its own bandwidth detection.
-enum HysteriaCongestionControl: String, Codable, Hashable, CaseIterable {
+nonisolated enum HysteriaCongestionControl: String, Codable, Hashable, CaseIterable {
     case brutal
     case bbr
 

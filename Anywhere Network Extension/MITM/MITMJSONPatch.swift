@@ -8,7 +8,7 @@
 import Foundation
 
 /// Declarative JSON body editing. Fail-closed: any miss yields the body unchanged.
-enum MITMJSONPatch {
+nonisolated enum MITMJSONPatch {
 
     // MARK: - Path model
 

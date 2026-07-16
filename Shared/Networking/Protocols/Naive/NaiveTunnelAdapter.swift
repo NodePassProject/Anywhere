@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - NaiveProxyHeaders
 
-enum NaiveProxyHeaders {
+nonisolated enum NaiveProxyHeaders {
 
     /// Browser-like User-Agent; probe-resistant proxy servers may reject requests without one.
     static let userAgent = "Mozilla/5.0 (iPhone16,2; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Resorts/4.7.5"

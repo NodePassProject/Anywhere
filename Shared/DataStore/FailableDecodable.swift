@@ -8,7 +8,7 @@
 import Foundation
 
 /// Wraps a `Decodable` so one corrupt element doesn't fail the whole array.
-struct FailableDecodable<T: Decodable>: Decodable {
+nonisolated struct FailableDecodable<T: Decodable>: Decodable {
     let value: T?
     init(from decoder: Decoder) throws {
         value = try? T(from: decoder)

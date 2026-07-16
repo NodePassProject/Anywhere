@@ -12,7 +12,7 @@ nonisolated final class WebSocketConnection: Sendable {
 
     // MARK: Transport
 
-    private let transport: AsyncTransportClosures
+    private let transport: any ByteTransport
 
     // MARK: State
 
@@ -38,22 +38,18 @@ nonisolated final class WebSocketConnection: Sendable {
 
     // MARK: - Initializers
 
-    init(transport: AsyncTransportClosures, configuration: WebSocketConfiguration) {
+    init(transport: any ByteTransport, configuration: WebSocketConfiguration) {
         self.configuration = configuration
         self.transport = transport
         self.state = Mutex(ConnectionState(isConnected: true))
     }
 
-    convenience init(transport: any AsyncByteTransport, configuration: WebSocketConfiguration) {
-        self.init(transport: AsyncTransportClosures(transport), configuration: configuration)
-    }
-
     convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
-        self.init(transport: AsyncTransportClosures(tls: tlsConnection), configuration: configuration)
+        self.init(transport: TLSByteTransport(tlsConnection), configuration: configuration)
     }
 
     convenience init(tunnel: ProxyConnection, configuration: WebSocketConfiguration) {
-        self.init(transport: AsyncTransportClosures(proxyConnection: tunnel), configuration: configuration)
+        self.init(transport: TunneledTransport(tunnel: tunnel), configuration: configuration)
     }
 
     // MARK: - HTTP Upgrade Handshake

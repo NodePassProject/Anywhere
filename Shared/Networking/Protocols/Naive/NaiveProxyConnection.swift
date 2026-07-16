@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "NaiveProxyConnection"
 // MARK: - NaiveTunnel Protocol
 
 /// Abstraction over the HTTP CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3) beneath NaiveProxy padding.
-protocol NaiveTunnel: AnyObject {
+nonisolated protocol NaiveTunnel: AnyObject {
     var isConnected: Bool { get }
     var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType { get }
     func openTunnel() async throws

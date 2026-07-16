@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct GRPCConfiguration: Codable, Equatable, Hashable {
+nonisolated struct GRPCConfiguration: Codable, Equatable, Hashable {
     static let defaultServiceName = "xray.transport.internet.grpc.encoding.GRPCService"
 
     /// gRPC service name. A plain name maps to `/<name>/Tun` (or `/TunMulti`); a leading
@@ -127,7 +127,7 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
     }
 }
 
-enum GRPCError: Error, LocalizedError {
+nonisolated enum GRPCError: Error, LocalizedError {
     case setupFailed(String)
     case invalidResponse(String)
     case compressedMessageUnsupported

@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLSClientHelloParsed {
+nonisolated struct TLSClientHelloParsed {
     let serverName: String?
     let cipherSuites: [UInt16]
     let supportedVersions: [UInt16]
@@ -24,7 +24,7 @@ struct TLSClientHelloParsed {
     let handshakeMessage: Data
 }
 
-enum TLSClientHelloParserError: Error {
+nonisolated enum TLSClientHelloParserError: Error {
     case truncated
     case malformed(String)
     case notHandshake
@@ -32,7 +32,7 @@ enum TLSClientHelloParserError: Error {
     case lengthMismatch
 }
 
-enum TLSClientHelloParser {
+nonisolated enum TLSClientHelloParser {
 
     /// Parses a single ClientHello record (including the 5-byte record header); trailing records are not tolerated.
     static func parse(_ record: Data) throws -> TLSClientHelloParsed {

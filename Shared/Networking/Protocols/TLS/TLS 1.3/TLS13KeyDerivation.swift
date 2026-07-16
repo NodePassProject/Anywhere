@@ -8,7 +8,7 @@
 import Foundation
 import CryptoKit
 
-struct TLS13KeyDerivation {
+nonisolated struct TLS13KeyDerivation {
     let cipherSuite: UInt16
 
     init(cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) {

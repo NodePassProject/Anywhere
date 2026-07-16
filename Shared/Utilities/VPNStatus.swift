@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum VPNStatus: Int, Codable {
+nonisolated enum VPNStatus: Int, Codable {
     case invalid
     case disconnected
     case connecting

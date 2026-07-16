@@ -12,7 +12,7 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "JSONBlobStore")
 
 @Model
-final class JSONBlob {
+nonisolated final class JSONBlob {
     var key: String = ""
     @Attribute(.externalStorage) var data: Data = Data()
     var updatedAt: Date = Date()

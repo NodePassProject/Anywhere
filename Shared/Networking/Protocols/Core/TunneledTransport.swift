@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated final class TunneledTransport: AsyncByteTransport, Sendable {
+nonisolated final class TunneledTransport: ByteTransport, Sendable {
     private let tunnel: ProxyConnection
 
     init(tunnel: ProxyConnection) {

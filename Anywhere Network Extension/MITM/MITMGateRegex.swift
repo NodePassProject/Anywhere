@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "MITMGateRegex")
 
 /// ReDoS containment for an untrusted URL-gate regex: memoization, deadline-bounded matching
 /// on a worker queue, and quarantine after repeated timeouts — all fail-closed (no-match).
-final class MITMGateRegex: @unchecked Sendable {
+nonisolated final class MITMGateRegex: @unchecked Sendable {
 
     /// NSRegularExpression is immutable and thread-safe for concurrent matching.
     private let regex: NSRegularExpression

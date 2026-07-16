@@ -5,7 +5,7 @@
 //  Created by NodePassProject on 4/24/26.
 //
 
-class SubscriptionDomainHelper {
+nonisolated class SubscriptionDomainHelper {
     static let domainsShouldDisableProxyEditing: [String] = ["sub.example.com", "sub.cdnjst.org"]
     static let domainsRequireRemnawaveHWID: [String] = ["sub.example.com", "sub.cdnjst.org"]
     

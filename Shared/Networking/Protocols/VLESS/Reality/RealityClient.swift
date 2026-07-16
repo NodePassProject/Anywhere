@@ -14,7 +14,7 @@ nonisolated private let logger = AnywhereLogger(category: "RealityClient")
 
 nonisolated class RealityClient {
     private let configuration: RealityConfiguration
-    private var connection: (any AsyncByteTransport)?
+    private var connection: (any ByteTransport)?
 
     // Handshake state, cleared after the handshake completes.
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?

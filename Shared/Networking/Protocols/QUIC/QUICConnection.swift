@@ -13,7 +13,7 @@ nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
 // MARK: - QUICPacketObfuscator
 
-protocol QUICPacketObfuscator: AnyObject {
+nonisolated protocol QUICPacketObfuscator: AnyObject {
     /// Transforms one outgoing QUIC datagram into one or more wire datagrams (Gecko may fragment a
     /// handshake packet into several).
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data]
@@ -1367,11 +1367,11 @@ actor QUICConnection {
             }
         }
 
-        connRefStorage.user_data = BridgeContext.passUnretained(self)
+        connRefStorage.user_data = NGTCP2ConcurrencyBridge.connRefContext(self)
         connRefStorage.get_conn = { ref in
             guard let ref, let userData = ref.pointee.user_data else { return nil }
             // ngtcp2 invokes get_conn from inside its own calls, on the executor.
-            return BridgeContext.unretained(userData, as: QUICConnection.self)
+            return NGTCP2ConcurrencyBridge.connection(from: userData)
                 .assumeIsolated { $0.connectionOpaquePointer }
         }
 
@@ -1681,7 +1681,7 @@ private func qcFromUserData(_ userData: UnsafeMutableRawPointer?) -> QUICConnect
     guard let userData else { return nil }
     let ref = userData.assumingMemoryBound(to: ngtcp2_crypto_conn_ref.self)
     guard let p = ref.pointee.user_data else { return nil }
-    return BridgeContext.unretained(p, as: QUICConnection.self)
+    return NGTCP2ConcurrencyBridge.connection(from: p)
 }
 
 private let quicClientInitialCB: @convention(c) (

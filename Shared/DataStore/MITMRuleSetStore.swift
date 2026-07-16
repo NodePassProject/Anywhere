@@ -231,7 +231,7 @@ final class MITMRuleSetStore {
     }
 }
 
-enum MITMRuleSetRefreshError: LocalizedError {
+nonisolated enum MITMRuleSetRefreshError: LocalizedError {
     case missingSubscriptionURL
     case invalidStatusCode(Int)
     case undecodableBody

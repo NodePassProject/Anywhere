@@ -12,9 +12,9 @@ import Foundation
 /// `await transport.receive()`, so no push adapter or receive buffer is needed.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
-    private let transport: any AsyncDatagramTransport
+    private let transport: any DatagramTransport
 
-    init(transport: any AsyncDatagramTransport) {
+    init(transport: any DatagramTransport) {
         self.transport = transport
     }
 

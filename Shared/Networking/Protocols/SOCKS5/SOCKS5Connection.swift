@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "SOCKS5Connection")
 
 // MARK: - SOCKS5 Protocol Constants
 
-private enum SOCKS5 {
+nonisolated private enum SOCKS5 {
     static let version: UInt8 = 0x05
     static let authNone: UInt8 = 0x00
     static let authPassword: UInt8 = 0x02
@@ -27,14 +27,14 @@ private enum SOCKS5 {
 
 // MARK: - SOCKS5AsyncBuffer
 
-/// Reads framed handshake responses off an ``AsyncByteTransport``, buffering any
+/// Reads framed handshake responses off an ``ByteTransport``, buffering any
 /// bytes that arrive past the requested length so the tunneled stream keeps them.
 /// Confined to the single dialing task, so it needs no locking.
 nonisolated final class SOCKS5AsyncBuffer {
     private var data = Data()
-    private let transport: any AsyncByteTransport
+    private let transport: any ByteTransport
 
-    init(transport: any AsyncByteTransport) {
+    init(transport: any ByteTransport) {
         self.transport = transport
     }
 
@@ -64,11 +64,11 @@ nonisolated final class SOCKS5AsyncBuffer {
 
 /// Replays handshake-leftover bytes (e.g. the start of a TLS ServerHello) on the
 /// first `receive` before falling through to the underlying transport.
-nonisolated final class SOCKS5ReplayTransport: AsyncByteTransport, Sendable {
-    private let inner: any AsyncByteTransport
+nonisolated final class SOCKS5ReplayTransport: ByteTransport, Sendable {
+    private let inner: any ByteTransport
     private let pending: Mutex<Data?>
 
-    init(inner: any AsyncByteTransport, initialData: Data) {
+    init(inner: any ByteTransport, initialData: Data) {
         self.inner = inner
         self.pending = Mutex(initialData)
     }
@@ -105,7 +105,7 @@ nonisolated enum SOCKS5Handshake {
 
     static func perform(
         buffer: SOCKS5AsyncBuffer,
-        transport: any AsyncByteTransport,
+        transport: any ByteTransport,
         destinationHost: String,
         destinationPort: UInt16,
         username: String?,
@@ -124,7 +124,7 @@ nonisolated enum SOCKS5Handshake {
     /// UDP ASSOCIATE: per RFC 1928 the client sends 0.0.0.0:0 and the server replies with the relay endpoint.
     static func performUDPAssociate(
         buffer: SOCKS5AsyncBuffer,
-        transport: any AsyncByteTransport,
+        transport: any ByteTransport,
         username: String?,
         password: String?,
         serverAddress: String
@@ -146,7 +146,7 @@ nonisolated enum SOCKS5Handshake {
 
     private static func performAuth(
         buffer: SOCKS5AsyncBuffer,
-        transport: any AsyncByteTransport,
+        transport: any ByteTransport,
         username: String?,
         password: String?
     ) async throws {
@@ -177,7 +177,7 @@ nonisolated enum SOCKS5Handshake {
 
     private static func sendAuth(
         buffer: SOCKS5AsyncBuffer,
-        transport: any AsyncByteTransport,
+        transport: any ByteTransport,
         username: String,
         password: String
     ) async throws {
@@ -204,7 +204,7 @@ nonisolated enum SOCKS5Handshake {
     @discardableResult
     private static func sendCommand(
         buffer: SOCKS5AsyncBuffer,
-        transport: any AsyncByteTransport,
+        transport: any ByteTransport,
         command: UInt8,
         host: String,
         port: UInt16
@@ -319,13 +319,13 @@ nonisolated enum SOCKS5Handshake {
 /// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
 /// The TCP control connection is retained because closing it ends the UDP session.
 nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, @unchecked Sendable {
-    private let tcpTransport: any AsyncByteTransport
+    private let tcpTransport: any ByteTransport
     private let relay: ProxyConnection
     private let udpHeader: Data
     private let cancelled = Atomic<Bool>(false)
 
     init(
-        tcpTransport: any AsyncByteTransport,
+        tcpTransport: any ByteTransport,
         relay: ProxyConnection,
         destinationHost: String,
         destinationPort: UInt16

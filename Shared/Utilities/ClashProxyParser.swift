@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct ClashProxyParser {
+nonisolated struct ClashProxyParser {
     struct ParseResult {
         let configurations: [ProxyConfiguration]
         let skippedCount: Int

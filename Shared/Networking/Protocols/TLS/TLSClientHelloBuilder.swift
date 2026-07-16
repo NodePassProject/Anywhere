@@ -8,7 +8,7 @@
 import Foundation
 import CryptoKit
 
-struct TLSClientHelloBuilder {
+nonisolated struct TLSClientHelloBuilder {
 
     // MARK: - GREASE
 

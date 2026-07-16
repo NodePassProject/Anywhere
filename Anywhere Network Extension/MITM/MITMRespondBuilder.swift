@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum MITMRespondBuilder {
+nonisolated enum MITMRespondBuilder {
 
     static func response(for action: ResolvedRewriteAction) -> MITMScriptEngine.SynthesizedResponse? {
         switch action {

@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLS12HandshakeKeys {
+nonisolated struct TLS12HandshakeKeys {
     let clientMACKey: Data
     let serverMACKey: Data
     let clientKey: Data

@@ -63,7 +63,7 @@ extension XHTTPConnection {
         guard let factory = uploadConnectionFactory else {
             throw XHTTPError.setupFailed("No upload connection factory")
         }
-        let closures: AsyncTransportClosures
+        let closures: any ByteTransport
         do {
             closures = try await factory()
         } catch {
@@ -112,7 +112,7 @@ extension XHTTPConnection {
         guard let factory = uploadConnectionFactory else {
             throw XHTTPError.setupFailed("No upload connection factory")
         }
-        let closures: AsyncTransportClosures
+        let closures: any ByteTransport
         do {
             closures = try await factory()
         } catch {
@@ -149,9 +149,7 @@ extension XHTTPConnection {
     /// Its own transport *is* the upload connection, so `uploadTransport` aliases it with a no-op
     /// cancel — the download transport's own cancel already tears it down, avoiding a double cancel.
     func performUploadOnlyHTTP11Setup() async throws {
-        let upload = AsyncTransportClosures(
-            send: download.send, receive: download.receive, cancel: {}
-        )
+        let upload = NonCancelingByteTransport(download)
         state.withLock { $0.uploadTransport = upload }
 
         if mode == .streamUp {
@@ -276,7 +274,7 @@ extension XHTTPConnection {
         } while !remaining.isEmpty
     }
 
-    private func sendSinglePost(data: Data, seq: Int64, upload: AsyncTransportClosures) async throws {
+    private func sendSinglePost(data: Data, seq: Int64, upload: any ByteTransport) async throws {
         let method = configuration.uplinkHTTPMethod
         var path = configuration.normalizedPath
         var headerBlock = ""

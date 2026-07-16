@@ -10,7 +10,7 @@ import Foundation
 // MARK: - ChunkedTransferDecoder
 
 /// Chunked transfer decoder (RFC 7230 §4.1); tolerates partial reads across `feed` calls.
-struct ChunkedTransferDecoder {
+nonisolated struct ChunkedTransferDecoder {
     private var buffer = Data()
     private var _isFinished = false
 
@@ -70,7 +70,7 @@ struct ChunkedTransferDecoder {
 // MARK: - ChunkedTransferEncoder
 
 /// Chunked transfer encoder (RFC 7230 §4.1).
-enum ChunkedTransferEncoder {
+nonisolated enum ChunkedTransferEncoder {
     /// Encodes data as a single chunked-encoded chunk: `{hex-size}\r\n{data}\r\n`.
     static func encode(_ data: Data) -> Data {
         let sizeStr = String(data.count, radix: 16)

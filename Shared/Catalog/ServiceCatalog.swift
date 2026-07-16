@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct ServiceCatalog {
+nonisolated struct ServiceCatalog {
     let supportedServices: [String]
 
     func rules(for service: String) -> [RoutingRule] {

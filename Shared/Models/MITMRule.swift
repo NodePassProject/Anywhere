@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum MITMPhase: String, Codable, CaseIterable, Identifiable {
+nonisolated enum MITMPhase: String, Codable, CaseIterable, Identifiable {
     case httpRequest
     case httpResponse
 
@@ -27,7 +27,7 @@ extension MITMPhase: CustomStringConvertible {
 
 /// `path` is a JSONPath; `value`/`values` are JSON literals, but a non-JSON
 /// string is taken literally (`value = Anywhere` means `"Anywhere"`).
-enum MITMJSONOperation: Equatable {
+nonisolated enum MITMJSONOperation: Equatable {
     /// Upsert: create or overwrite the addressed member; an array index appends when index == count.
     case add(path: String, value: String)
     /// Modify-in-place: a no-op when the addressed member doesn't already exist.
@@ -164,7 +164,7 @@ extension MITMJSONOperation: Codable {
 }
 
 /// A single rewrite operation; the gating `urlPattern` lives on `MITMRule`.
-enum MITMOperation: Equatable {
+nonisolated enum MITMOperation: Equatable {
     /// Request-phase only: rewrites the request URL, redirects with a synthesized
     /// `302`, or rejects with a synthesized `200`, per the `MITMRewriteAction` sub-mode.
     case rewrite(MITMRewriteAction)
@@ -301,7 +301,7 @@ extension MITMOperation: Codable {
     }
 }
 
-struct MITMRule: Codable, Equatable, Identifiable {
+nonisolated struct MITMRule: Codable, Equatable, Identifiable {
     var id = UUID()
     var phase: MITMPhase
     /// `NSRegularExpression` over the whole request URL (`https://host/path?query`);
@@ -382,7 +382,7 @@ extension MITMRule {
 /// Cases map 1:1 to the import format's numeric ids (transparent 0 … reject200Data 4).
 /// Only `transparent` dials upstream — it rewrites the URL and `Host`/`:authority`;
 /// the rest synthesize the response locally.
-enum MITMRewriteAction: Equatable {
+nonisolated enum MITMRewriteAction: Equatable {
     case transparent(url: String)
     case redirect302(url: String)
     case reject200Text(content: String)
@@ -443,7 +443,7 @@ extension MITMRewriteAction: Codable {
     }
 }
 
-struct MITMParameter: Codable, Equatable, Identifiable {
+nonisolated struct MITMParameter: Codable, Equatable, Identifiable {
     enum InputType: Int, Codable { case input = 0, picker = 1 }
     enum DataType: Int, Codable { case string = 0 }
 
@@ -491,7 +491,7 @@ struct MITMParameter: Codable, Equatable, Identifiable {
     }
 }
 
-struct MITMRuleSet: Codable, Equatable, Identifiable {
+nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable {
     static let maxRuleCount = 10000
     static let maxParameterCount = 256
 
@@ -596,7 +596,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     }
 }
 
-struct MITMSnapshot: Codable, Equatable {
+nonisolated struct MITMSnapshot: Codable, Equatable {
     var enabled: Bool
     var ruleSets: [MITMRuleSet]
 
@@ -697,7 +697,7 @@ struct MITMSnapshot: Codable, Equatable {
 /// (type/options/default) stay app-side. `subscriptionURL`/`deletedAt` are
 /// intentionally omitted — they're sync-only and the data path never reads them.
 /// The reader accepts v1 (no parameter section) so an old payload still decodes.
-enum MITMBinaryFormat {
+nonisolated enum MITMBinaryFormat {
     static let magic: [UInt8] = [0x41, 0x4D, 0x52, 0x31]  // "AMR1"
     static let version: UInt8 = 2
 
@@ -726,7 +726,7 @@ enum MITMBinaryFormat {
 }
 
 /// Layout must stay in sync with `RoutingBinaryWriter`.
-struct MITMBinaryWriter {
+nonisolated struct MITMBinaryWriter {
     private var bytes: [UInt8] = []
 
     static func encode(enabled: Bool, ruleSets: [MITMRuleSet]) -> Data {

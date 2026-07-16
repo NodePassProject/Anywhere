@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Frame Types
 
-enum HTTP3FrameType: UInt64 {
+nonisolated enum HTTP3FrameType: UInt64 {
     case data           = 0x00
     case headers        = 0x01
     case cancelPush     = 0x03
@@ -21,7 +21,7 @@ enum HTTP3FrameType: UInt64 {
 
 // MARK: - Settings IDs
 
-enum HTTP3SettingsID: UInt64 {
+nonisolated enum HTTP3SettingsID: UInt64 {
     case qpackMaxTableCapacity  = 0x01
     case maxFieldSectionSize    = 0x06
     case qpackBlockedStreams    = 0x07
@@ -34,7 +34,7 @@ enum HTTP3SettingsID: UInt64 {
 // MARK: - Error Codes (RFC 9114 §8.1)
 
 /// Application error codes carried on QUIC CONNECTION_CLOSE / RESET_STREAM / STOP_SENDING.
-enum HTTP3ErrorCode: UInt64 {
+nonisolated enum HTTP3ErrorCode: UInt64 {
     case noError                = 0x0100
     case generalProtocolError   = 0x0101
     case internalError          = 0x0102
@@ -56,7 +56,7 @@ enum HTTP3ErrorCode: UInt64 {
 
 // MARK: - Error
 
-enum HTTP3Error: Error, LocalizedError {
+nonisolated enum HTTP3Error: Error, LocalizedError {
     case notReady
     case connectionFailed(String)
     case tunnelFailed(statusCode: String)
@@ -80,7 +80,7 @@ enum HTTP3Error: Error, LocalizedError {
 
 // MARK: - HTTP3Framer
 
-enum HTTP3Framer {
+nonisolated enum HTTP3Framer {
 
     // MARK: - Frame Construction
 

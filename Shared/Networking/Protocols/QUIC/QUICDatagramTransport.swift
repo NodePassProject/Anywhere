@@ -11,7 +11,7 @@ import Synchronization
 /// Terminal failures MUST surface through `errorHandler` so QUIC fails fast rather than idling on
 /// keep-alive PINGs; `startReceiving` delivers exactly one whole, non-empty datagram per call (use
 /// `errorHandler` for EOF). Callbacks may fire on any queue.
-protocol QUICDatagramTransport: AnyObject {
+nonisolated protocol QUICDatagramTransport: AnyObject {
     func sendDatagram(_ data: Data)
 
     /// `errorHandler` fires on terminal failure; do not `sendDatagram` after.
@@ -22,7 +22,7 @@ protocol QUICDatagramTransport: AnyObject {
     func cancel()
 }
 
-final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
+nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
     private let connection: ProxyConnection
 
     /// Guards `errorHandler` so it fires at most once across send- and receive-side failures.
@@ -33,9 +33,10 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
 
     private let failureState = Mutex(FailureState())
 
-    /// Ordered async send funnel — datagrams reach the wire in submission order (the base
-    /// `send(data:completion:)` this replaced serialized through the connection's own pump).
-    private let sendPump: AsyncSendPump
+    /// Outgoing datagrams reach the wire in submission order via a single owned writer task
+    /// draining this stream. The one consumer *is* the ordering — no lock, no queue. The
+    /// stream is `.unbounded`; the QUIC layer already bounds its own datagram backlog.
+    private let outbound: AsyncStream<Data>.Continuation
 
     /// Push handler stored here so the receive loop's `Task` captures only `self`
     /// (the raw closure isn't `Sendable`).
@@ -43,25 +44,30 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
 
     init(connection: ProxyConnection) {
         self.connection = connection
-        // Weak: the pump task must not retain the connection through this closure (the
-        // connection strongly owns this transport, hence the pump), else it can't dealloc.
-        self.sendPump = AsyncSendPump(
-            send: { [weak connection] data in
-                guard let connection else { throw CancellationError() }
-                try await connection.send(data)
-            },
-            finish: {}
-        )
+        let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
+        self.outbound = continuation
+        // The writer task's lifetime is the stream's: `cancel()` finishes `outbound` (owned by
+        // this transport), which ends the loop; a dropped transport finishes it via `outbound`'s
+        // deinit. Weak self so the task never keeps the transport — and through it the
+        // connection — alive.
+        Task { [weak self] in
+            for await data in stream {
+                guard let self else { break }
+                do {
+                    try await self.connection.send(data)
+                } catch {
+                    // Transient errors (PMTU shrink, fragmentation refusal, queue overflow) are
+                    // not terminal — outer QUIC loss recovery treats the drop as ordinary loss.
+                    if Self.isTransientDatagramError(error) { continue }
+                    self.surfaceFailure(error)
+                    break
+                }
+            }
+        }
     }
 
     func sendDatagram(_ data: Data) {
-        sendPump.enqueueSend(data) { [weak self] error in
-            guard let error, let self else { return }
-            // Transient errors (PMTU shrink, fragmentation refusal, queue overflow) are not
-            // terminal — outer QUIC loss recovery treats the drop as ordinary loss.
-            if Self.isTransientDatagramError(error) { return }
-            self.surfaceFailure(error)
-        }
+        outbound.yield(data)
     }
 
     /// True for per-datagram errors (packet didn't fit), false for terminal ones; the outer
@@ -120,7 +126,7 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
         // Swallow the teardown-driven EOF/error the receive loop will observe once the
         // connection is cancelled, so it isn't surfaced as a spurious transport failure.
         failureState.withLock { $0.failed = true; $0.handler = nil }
-        sendPump.finish()
+        outbound.finish()   // ends the writer task's drain loop
         connection.cancel()
     }
 

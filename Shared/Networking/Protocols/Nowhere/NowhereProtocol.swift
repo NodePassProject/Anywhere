@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-enum NowhereProtocol {
+nonisolated enum NowhereProtocol {
     static let maxTargetLength = 512
     
     static let closeErrCodeOK: UInt64 = 0x100

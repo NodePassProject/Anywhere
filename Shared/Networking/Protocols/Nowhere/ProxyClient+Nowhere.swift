@@ -8,13 +8,13 @@
 import Foundation
 import Synchronization
 
-private enum NowhereLogicalFailureContext {
+nonisolated private enum NowhereLogicalFailureContext {
     case quicSession
     case tcpCarrier
     case chainBuild
 }
 
-private struct NowhereLogicalOpenError: Error {
+nonisolated private struct NowhereLogicalOpenError: Error {
     let underlying: Error
     let context: NowhereLogicalFailureContext
 }

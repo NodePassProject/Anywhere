@@ -11,7 +11,7 @@ nonisolated private let logger = AnywhereLogger(category: "TLSStreamTransport")
 
 // MARK: - Error
 
-enum TLSStreamError: Error, LocalizedError {
+nonisolated enum TLSStreamError: Error, LocalizedError {
     case connectionFailed(String)
     case notConnected
 

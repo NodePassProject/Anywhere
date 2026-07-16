@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-protocol MITMByteLeg: AnyObject {
+nonisolated protocol MITMByteLeg: AnyObject {
     var negotiatedALPN: String { get }
 
     func prependToReceiveBuffer(_ data: Data)
@@ -25,7 +25,7 @@ extension TLSRecordConnection: MITMByteLeg {}
 nonisolated final class PlaintextLeg: MITMByteLeg {
     let negotiatedALPN: String = ""
 
-    private let transport: any AsyncByteTransport
+    private let transport: any ByteTransport
 
     private struct State {
         var prepended = Data()
@@ -33,7 +33,7 @@ nonisolated final class PlaintextLeg: MITMByteLeg {
     }
     private let state = Mutex(State())
 
-    init(transport: any AsyncByteTransport) {
+    init(transport: any ByteTransport) {
         self.transport = transport
     }
 

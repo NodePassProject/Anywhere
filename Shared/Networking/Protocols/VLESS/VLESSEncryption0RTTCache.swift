@@ -10,7 +10,7 @@ import Synchronization
 
 /// Process-wide cache of 0-RTT resumption tickets, keyed by
 /// `(host, port, encryption config)` so differing configs don't collide.
-final class VLESSEncryption0RTTCache {
+nonisolated final class VLESSEncryption0RTTCache {
 
     static let shared = VLESSEncryption0RTTCache()
 

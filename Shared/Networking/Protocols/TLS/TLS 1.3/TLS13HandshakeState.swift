@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLS13HandshakeState {
+nonisolated struct TLS13HandshakeState {
     /// Set when the ServerHello cipher suite is parsed.
     var keyDerivation: TLS13KeyDerivation?
 

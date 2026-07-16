@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum RoutingRuleType: Int, Codable {
+nonisolated enum RoutingRuleType: Int, Codable {
     case ipCIDR = 0
     case ipCIDR6 = 1
     case domainSuffix = 2
@@ -52,7 +52,7 @@ extension RoutingRuleType {
     }
 }
 
-struct RoutingRule: Codable, Equatable, Identifiable {
+nonisolated struct RoutingRule: Codable, Equatable, Identifiable {
     let id = UUID()
     let type: RoutingRuleType
     let value: String
@@ -89,7 +89,7 @@ struct RoutingRule: Codable, Equatable, Identifiable {
 ///   valueLen  UInt16              UTF-8 byte length
 ///   value     [valueLen]          UTF-8 domain/CIDR (folded to lowercase on read)
 /// ```
-enum RoutingBinaryFormat {
+nonisolated enum RoutingBinaryFormat {
     static let magic: [UInt8] = [0x41, 0x52, 0x42, 0x31]  // "ARB1"
 
     enum Tier: UInt8 { case user = 0, adBlock = 1, builtIn = 2, bypass = 3 }

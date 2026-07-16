@@ -8,7 +8,7 @@
 import Foundation
 
 /// Typed envelope for IPC between the main app and the network extension.
-enum TunnelMessage: Codable, Sendable {
+nonisolated enum TunnelMessage: Codable, Sendable {
     /// Key in `startVPNTunnel(options:)` carrying an encoded `setConfiguration`.
     static let optionKey = "tunnelMessage"
 
@@ -30,7 +30,7 @@ enum TunnelMessage: Codable, Sendable {
 
 // MARK: - Responses
 
-struct RouteTrafficEntry: Codable, Sendable, Identifiable, Hashable {
+nonisolated struct RouteTrafficEntry: Codable, Sendable, Identifiable, Hashable {
     var target: RouteTarget
     var bytesIn: Int64
     var bytesOut: Int64
@@ -41,7 +41,7 @@ struct RouteTrafficEntry: Codable, Sendable, Identifiable, Hashable {
 
 /// Point-in-time tunnel telemetry snapshot. Byte counters are cumulative
 /// **payload** bytes since tunnel start (no IP/transport headers), split per route.
-struct StatsResponse: Codable, Sendable {
+nonisolated struct StatsResponse: Codable, Sendable {
     var bytesIn: Int64
     var bytesOut: Int64
     /// Per-route payload split, sorted by total bytes descending.
@@ -109,15 +109,15 @@ struct StatsResponse: Codable, Sendable {
     }
 }
 
-struct LogsResponse: Codable, Sendable {
+nonisolated struct LogsResponse: Codable, Sendable {
     var logs: [TunnelLogEntry]
 }
 
-struct RequestsResponse: Codable, Sendable {
+nonisolated struct RequestsResponse: Codable, Sendable {
     var requests: [TunnelRequestEntry]
 }
 
-struct LatencyTestResponse: Codable, Sendable {
+nonisolated struct LatencyTestResponse: Codable, Sendable {
     enum Kind: String, Codable, Sendable {
         case success
         case failed
@@ -148,20 +148,20 @@ extension LatencyTestResponse {
 
 // MARK: - Shared Types
 
-struct TunnelLogEntry: Codable, Sendable, Hashable {
+nonisolated struct TunnelLogEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
     var timestamp: TimeInterval
     var level: TunnelLogLevel
     var message: String
 }
 
-enum TunnelLogLevel: String, Codable, Sendable, Hashable {
+nonisolated enum TunnelLogLevel: String, Codable, Sendable, Hashable {
     case info
     case warning
     case error
 }
 
-struct TunnelRequestEntry: Codable, Sendable, Hashable {
+nonisolated struct TunnelRequestEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
     var timestamp: TimeInterval
     var `protocol`: TunnelRequestProtocol
@@ -172,7 +172,7 @@ struct TunnelRequestEntry: Codable, Sendable, Hashable {
     var ruleSetName: String? = nil
 }
 
-enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
+nonisolated enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
     case tcp
     case udp
     case http

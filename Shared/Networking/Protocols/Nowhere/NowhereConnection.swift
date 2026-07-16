@@ -8,12 +8,12 @@
 import Foundation
 import Synchronization
 
-enum NowhereTCPRelayMode {
+nonisolated enum NowhereTCPRelayMode {
     case tcp
     case udp
 }
 
-protocol NowhereTerminationObservable: AnyObject {
+nonisolated protocol NowhereTerminationObservable: AnyObject {
     func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
 }
 

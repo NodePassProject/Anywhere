@@ -372,7 +372,7 @@ nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
 // MARK: - Chunked transfer decoder
 
 /// Incremental `Transfer-Encoding: chunked` decoder (RFC 9112 §7.1); trailers are dropped.
-private struct ChunkedDecoder {
+nonisolated private struct ChunkedDecoder {
     enum FeedResult {
         case needMore
         case done

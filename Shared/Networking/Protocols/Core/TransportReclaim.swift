@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum TransportReclaim {
+nonisolated enum TransportReclaim {
 
     /// Called from `lwipQueue` on device wake, network-path change, and tunnel stop.
     static func reclaimAll() {

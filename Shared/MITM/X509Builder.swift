@@ -10,14 +10,14 @@ import CryptoKit
 import Network
 import Security
 
-enum X509BuilderError: Error {
+nonisolated enum X509BuilderError: Error {
     case signingFailed(String)
     case publicKeyExportFailed
     case invalidPublicKey
     case asn1ParseFailed(String)
 }
 
-enum X509Builder {
+nonisolated enum X509Builder {
 
     // MARK: - Public API
 
@@ -687,7 +687,7 @@ enum X509Builder {
 
 // MARK: - ASN.1 Encoding Primitives
 
-private enum ASN1 {
+nonisolated private enum ASN1 {
 
     static func sequence(_ content: Data) -> Data {
         emit(tag: 0x30, content: content)
@@ -779,7 +779,7 @@ private enum ASN1 {
 
 // MARK: - Pre-encoded OIDs and constants
 
-private enum ASN1OID {
+nonisolated private enum ASN1OID {
     static let commonName               = Data([0x06, 0x03, 0x55, 0x04, 0x03])              // 2.5.4.3
     static let organizationName         = Data([0x06, 0x03, 0x55, 0x04, 0x0A])              // 2.5.4.10
     static let basicConstraints         = Data([0x06, 0x03, 0x55, 0x1D, 0x13])              // 2.5.29.19
@@ -816,7 +816,7 @@ private enum ASN1OID {
 
 // MARK: - Minimal ASN.1 Parser
 
-private struct ASN1Parser {
+nonisolated private struct ASN1Parser {
     let data: Data
     var offset: Int
 

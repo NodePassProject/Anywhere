@@ -10,14 +10,14 @@ import Observation
 
 nonisolated private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
 
-struct RoutingRuleSet: Identifiable, Equatable {
+nonisolated struct RoutingRuleSet: Identifiable, Equatable {
     let id: String   // built-in: name, custom: UUID string
     let name: String
     var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
     var isCustom: Bool = false
 }
 
-struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
+nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
     static let maxRuleCount = 100000
 
     let id: UUID
@@ -446,7 +446,7 @@ extension RoutingRuleSetStore {
     }
 }
 
-private struct RoutingBinaryWriter {
+nonisolated private struct RoutingBinaryWriter {
     struct Entry {
         let tier: RoutingBinaryFormat.Tier
         let action: RoutingBinaryFormat.Action
@@ -531,7 +531,7 @@ private struct RoutingBinaryWriter {
     }
 }
 
-enum CustomRoutingRuleSetRefreshError: LocalizedError {
+nonisolated enum CustomRoutingRuleSetRefreshError: LocalizedError {
     case missingSubscriptionURL
     case invalidStatusCode(Int)
     case undecodableBody

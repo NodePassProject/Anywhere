@@ -9,7 +9,7 @@ import Foundation
 
 /// Dropping UDP/443 with ICMP port-unreachable makes HTTP/3 clients fail fast and fall
 /// back to HTTP/2 over TCP, where routing and MITM can act on the connection.
-enum QUICPolicy: String, CaseIterable {
+nonisolated enum QUICPolicy: String, CaseIterable {
     /// A QUIC-based proxy's own transport (e.g. Hysteria) leaves on a kernel-excluded socket and is unaffected.
     case blocked
     case automatic

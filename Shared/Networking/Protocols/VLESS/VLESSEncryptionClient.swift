@@ -11,7 +11,7 @@ import Synchronization
 
 // MARK: - Errors
 
-enum VLESSEncryptionError: Error, LocalizedError {
+nonisolated enum VLESSEncryptionError: Error, LocalizedError {
     case unsupported(String)
     case invalidPublicKey
     case handshakeFailed(String)
@@ -31,7 +31,7 @@ enum VLESSEncryptionError: Error, LocalizedError {
 
 // MARK: - Wire constants
 
-private enum VLESSWire {
+nonisolated private enum VLESSWire {
     /// TLS 1.3 record header byte 0 (`application_data`).
     static let recordTypeApplicationData: UInt8 = 23
     /// TLS 1.3 record header bytes 1-2 (legacy version `0x0303`).
@@ -62,7 +62,7 @@ private enum VLESSWire {
 /// 12-byte big-endian-incrementing nonce; each seal/open without an explicit nonce
 /// advances the counter by one.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-private final class VLESSEncryptionAEAD {
+nonisolated private final class VLESSEncryptionAEAD {
     let key: SymmetricKey
     let useAES: Bool
     private var nonce: [UInt8] = Array(repeating: 0, count: 12)
@@ -153,7 +153,7 @@ private final class VLESSEncryptionAEAD {
 
 // MARK: - Header codec
 
-private enum VLESSHeader {
+nonisolated private enum VLESSHeader {
     static func encode(into buffer: inout Data, payloadLength: Int) {
         buffer.append(VLESSWire.recordTypeApplicationData)
         buffer.append(VLESSWire.recordVersionMajor)
@@ -180,7 +180,7 @@ private enum VLESSHeader {
 }
 
 /// Two-byte big-endian length helpers.
-private enum VLESSLength {
+nonisolated private enum VLESSLength {
     static func encode(_ value: Int) -> Data {
         Data([UInt8(value >> 8), UInt8(value & 0xFF)])
     }
@@ -192,7 +192,7 @@ private enum VLESSLength {
 // MARK: - Padding scheduler
 
 /// Padding length/gap spec parser; each segment is `prob-min-max`.
-struct VLESSEncryptionPadding {
+nonisolated struct VLESSEncryptionPadding {
     /// (probability, min, max).
     let lengths: [(Int, Int, Int)]
     /// (probability, min ms, max ms). Sleeps between fragments.
@@ -262,7 +262,7 @@ struct VLESSEncryptionPadding {
 // MARK: - NFS public key (parsed)
 
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-private enum VLESSNfsPublicKey {
+nonisolated private enum VLESSNfsPublicKey {
     case x25519(Curve25519.KeyAgreement.PublicKey, raw: Data)
     case mlkem768(MLKEM768.PublicKey, raw: Data)
 
@@ -698,7 +698,7 @@ nonisolated final class VLESSEncryptionClient {
 // MARK: - Byte reader (buffered fixed-size receive helper)
 
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-private final class VLESSEncryptionByteReader {
+nonisolated private final class VLESSEncryptionByteReader {
     let connection: ProxyConnection
     private let buffer = Mutex(Data())
 

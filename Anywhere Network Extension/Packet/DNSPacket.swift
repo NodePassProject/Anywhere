@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum DNSPacket {
+nonisolated enum DNSPacket {
 
     /// Extracts the queried domain name and QTYPE, or nil on failure.
     static func parseQuery(_ data: UnsafeBufferPointer<UInt8>) -> (domain: String, qtype: UInt16)? {

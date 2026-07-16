@@ -8,7 +8,7 @@
 import Foundation
 
 /// Scripts may only write back `body`; all other fields are read-only to them.
-struct HTTPMessage {
+nonisolated struct HTTPMessage {
     let phase: MITMPhase
     var method: String?
     var url: String?

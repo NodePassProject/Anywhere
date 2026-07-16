@@ -11,7 +11,7 @@ import Synchronization
 
 // MARK: - Constants
 
-enum VisionCommand: UInt8 {
+nonisolated enum VisionCommand: UInt8 {
     case paddingContinue = 0x00
     case paddingEnd = 0x01
     case paddingDirect = 0x02

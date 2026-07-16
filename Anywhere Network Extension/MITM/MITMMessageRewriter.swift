@@ -8,7 +8,7 @@
 import Foundation
 
 /// HTTP/1.1 and HTTP/2 both conform so the session pumps plaintext without branching on protocol.
-protocol MITMMessageRewriter: AnyObject {
+nonisolated protocol MITMMessageRewriter: AnyObject {
 
     /// Feeds decrypted plaintext, returning the rewritten bytes. Suspends across a parked script hop;
     /// the implementation is lwIP-queue-confined, so callers await on their own executor.

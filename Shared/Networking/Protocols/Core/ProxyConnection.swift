@@ -7,7 +7,7 @@
 
 import Foundation
 
-protocol ProxyConnection: AnyObject, Sendable {
+nonisolated protocol ProxyConnection: AnyObject, Sendable {
 
     /// The negotiated TLS version of the outer transport; `nil` for non-TLS transports.
     var outerTLSVersion: TLSVersion? { get }

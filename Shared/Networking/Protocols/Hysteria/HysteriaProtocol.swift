@@ -8,7 +8,7 @@
 import Foundation
 import Security
 
-enum HysteriaProtocol {
+nonisolated enum HysteriaProtocol {
 
     /// Frame type varint prefixed on every Hysteria TCP request.
     static let tcpRequestFrameType: UInt64 = 0x401

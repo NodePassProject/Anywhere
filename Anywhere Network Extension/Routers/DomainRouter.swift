@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "DomainRouter")
 
-class DomainRouter {
+nonisolated class DomainRouter {
 
     // MARK: - Tier model
     //

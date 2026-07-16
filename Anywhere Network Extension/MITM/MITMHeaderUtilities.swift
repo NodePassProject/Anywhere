@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum HTTPHeader {
+nonisolated enum HTTPHeader {
     /// Parses a status code as exactly three ASCII digits (RFC 9112 §4).
     static func parseStatusCode(_ raw: some StringProtocol) -> Int? {
         let trimmed = String(raw).trimmingCharacters(in: .whitespaces)
@@ -134,7 +134,7 @@ enum HTTPHeader {
     }
 }
 
-enum ASCII {
+nonisolated enum ASCII {
     /// Allocation-free ASCII case-insensitive equality. HTTP field-names and the tokens compared
     /// against them are all-ASCII (RFC 9110 §5.6.2).
     static func equalsIgnoringCase(_ a: String, _ b: String) -> Bool {

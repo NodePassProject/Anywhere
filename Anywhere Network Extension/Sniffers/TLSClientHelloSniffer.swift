@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct TLSClientHelloSniffer {
+nonisolated struct TLSClientHelloSniffer {
 
     enum State: Equatable {
         /// Need more bytes to decide.

@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum SudokuAEADMethod: String, CaseIterable, Codable, Hashable {
+nonisolated enum SudokuAEADMethod: String, CaseIterable, Codable, Hashable {
     case chacha20Poly1305 = "chacha20-poly1305"
     case aes128GCM = "aes-128-gcm"
     case none = "none"
@@ -24,7 +24,7 @@ enum SudokuAEADMethod: String, CaseIterable, Codable, Hashable {
     }
 }
 
-enum SudokuASCIIMode: String, CaseIterable, Codable, Hashable {
+nonisolated enum SudokuASCIIMode: String, CaseIterable, Codable, Hashable {
     case preferEntropy = "prefer_entropy"
     case preferASCII = "prefer_ascii"
     case upASCIIToDownEntropy = "up_ascii_down_entropy"
@@ -71,7 +71,7 @@ enum SudokuASCIIMode: String, CaseIterable, Codable, Hashable {
     }
 }
 
-enum SudokuHTTPMaskMode: String, CaseIterable, Codable, Hashable {
+nonisolated enum SudokuHTTPMaskMode: String, CaseIterable, Codable, Hashable {
     case legacy
     case stream
     case poll
@@ -94,7 +94,7 @@ enum SudokuHTTPMaskMode: String, CaseIterable, Codable, Hashable {
     }
 }
 
-enum SudokuMultiplex: String, CaseIterable, Codable, Hashable {
+nonisolated enum SudokuMultiplex: String, CaseIterable, Codable, Hashable {
     case off
     case auto
     case on
@@ -113,7 +113,7 @@ enum SudokuMultiplex: String, CaseIterable, Codable, Hashable {
     var displayName: String { rawValue.uppercased() }
 }
 
-struct SudokuHTTPMaskConfiguration: Codable, Hashable {
+nonisolated struct SudokuHTTPMaskConfiguration: Codable, Hashable {
     var disable: Bool
     var mode: SudokuHTTPMaskMode
     var tls: Bool
@@ -146,7 +146,7 @@ struct SudokuHTTPMaskConfiguration: Codable, Hashable {
     }
 }
 
-struct SudokuConfiguration: Codable, Hashable {
+nonisolated struct SudokuConfiguration: Codable, Hashable {
     var key: String
     var aeadMethod: SudokuAEADMethod
     var paddingMin: Int

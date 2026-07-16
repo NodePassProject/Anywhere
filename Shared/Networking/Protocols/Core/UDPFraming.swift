@@ -9,13 +9,13 @@ import Foundation
 import Synchronization
 
 /// Buffered incoming bytes for UDP framing; wrapped in `UDPFramingCapable.udpState`.
-struct UDPFramingState {
+nonisolated struct UDPFramingState {
     var buffer = Data()
     var bufferOffset = 0
 }
 
 /// UDP packets are length-prefixed with 2 bytes (big-endian).
-protocol UDPFramingCapable: AnyObject {
+nonisolated protocol UDPFramingCapable: AnyObject {
     var udpState: Mutex<UDPFramingState> { get }
 }
 

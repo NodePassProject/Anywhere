@@ -12,7 +12,7 @@ nonisolated private let logger = AnywhereLogger(category: "HysteriaSession")
 
 // MARK: - Errors
 
-enum HysteriaError: Error, LocalizedError {
+nonisolated enum HysteriaError: Error, LocalizedError {
     case notReady
     case connectionFailed(String)
     case authRejected(statusCode: Int)

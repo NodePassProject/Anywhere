@@ -9,7 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "LWIPConcurrencyBridge")
 
-protocol LWIPBridgeHost: AnyObject {
+nonisolated protocol LWIPBridgeHost: AnyObject {
 
     /// lwIP has an IP packet to write back to the TUN. `packet` aliases lwIP's own memory
     /// with a `.none` deallocator; it stays valid until `release(releaseCtx)` runs, which

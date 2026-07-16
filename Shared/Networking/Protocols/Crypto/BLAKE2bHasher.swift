@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct BLAKE2bHasher {
+nonisolated struct BLAKE2bHasher {
     private var state = blake2b_state()
     private let outputLength: Int
 

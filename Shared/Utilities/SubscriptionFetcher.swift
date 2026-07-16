@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct SubscriptionFetcher {
+nonisolated struct SubscriptionFetcher {
     struct Result {
         let configurations: [ProxyConfiguration]
         let name: String?
@@ -170,7 +170,7 @@ struct SubscriptionFetcher {
 
 // MARK: - URLSession delegate that accepts self-signed certificates (used only when Allow Insecure is enabled)
 
-private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
+nonisolated private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
            let trust = challenge.protectionSpace.serverTrust {

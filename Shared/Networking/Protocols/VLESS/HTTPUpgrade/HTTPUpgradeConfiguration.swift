@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
+nonisolated struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
     /// Host header value (defaults to server address).
     let host: String
     let path: String
@@ -42,7 +42,7 @@ struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
     }
 }
 
-enum HTTPUpgradeError: Error, LocalizedError {
+nonisolated enum HTTPUpgradeError: Error, LocalizedError {
     case upgradeFailed(String)
 
     var errorDescription: String? {

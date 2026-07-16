@@ -9,25 +9,25 @@ import Foundation
 
 // MARK: - Enums & Types
 
-enum VLESSVisionUDPFrameStatus: UInt8 {
+nonisolated enum VLESSVisionUDPFrameStatus: UInt8 {
     case new       = 0x01
     case keep      = 0x02
     case end       = 0x03
     case keepAlive = 0x04
 }
 
-struct VLESSVisionUDPFrameOption: OptionSet {
+nonisolated struct VLESSVisionUDPFrameOption: OptionSet {
     let rawValue: UInt8
     static let data  = VLESSVisionUDPFrameOption(rawValue: 0x01)
     static let error = VLESSVisionUDPFrameOption(rawValue: 0x02)
 }
 
-enum VLESSVisionUDPNetwork: UInt8 {
+nonisolated enum VLESSVisionUDPNetwork: UInt8 {
     case tcp = 0x01
     case udp = 0x02
 }
 
-private enum MuxAddressType: UInt8 {
+nonisolated private enum MuxAddressType: UInt8 {
     case ipv4   = 0x01
     case domain = 0x02
     case ipv6   = 0x03
@@ -35,7 +35,7 @@ private enum MuxAddressType: UInt8 {
 
 // MARK: - VLESSVisionUDPFrameMetadata
 
-struct VLESSVisionUDPFrameMetadata {
+nonisolated struct VLESSVisionUDPFrameMetadata {
     var sessionID: UInt16
     var status: VLESSVisionUDPFrameStatus
     var option: VLESSVisionUDPFrameOption
@@ -190,7 +190,7 @@ struct VLESSVisionUDPFrameMetadata {
 
 // MARK: - Frame Encoding
 
-enum VLESSVisionUDPFrame {
+nonisolated enum VLESSVisionUDPFrame {
     static func encode(metadata: VLESSVisionUDPFrameMetadata, payload: Data?) -> Data {
         let metaBytes = metadata.encode()
         let metaLen = UInt16(metaBytes.count)

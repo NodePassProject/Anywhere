@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum TLSServerHelloBuilder {
+nonisolated enum TLSServerHelloBuilder {
 
     // MARK: - ServerHello
 

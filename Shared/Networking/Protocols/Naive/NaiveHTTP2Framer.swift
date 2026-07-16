@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Error
 
-enum NaiveHTTP2Error: Error, LocalizedError {
+nonisolated enum NaiveHTTP2Error: Error, LocalizedError {
     case notReady
     case connectionFailed(String)
     case protocolError(String)
@@ -34,7 +34,7 @@ enum NaiveHTTP2Error: Error, LocalizedError {
 // MARK: - Frame Types and Flags
 
 /// HTTP/2 frame types (RFC 7540 §6).
-enum NaiveHTTP2FrameType: UInt8 {
+nonisolated enum NaiveHTTP2FrameType: UInt8 {
     case data         = 0x0
     case headers      = 0x1
     case rstStream    = 0x3
@@ -45,7 +45,7 @@ enum NaiveHTTP2FrameType: UInt8 {
     case continuation = 0x9
 }
 
-enum NaiveHTTP2FrameFlags {
+nonisolated enum NaiveHTTP2FrameFlags {
     /// DATA, HEADERS: last frame the endpoint will send for the stream.
     static let endStream: UInt8    = 0x1
     /// SETTINGS, PING: acknowledgment.
@@ -59,7 +59,7 @@ enum NaiveHTTP2FrameFlags {
 // MARK: - Frame
 
 /// A single HTTP/2 frame (RFC 7540 §4.1): 9-byte header + payload.
-struct NaiveHTTP2Frame {
+nonisolated struct NaiveHTTP2Frame {
     let type: NaiveHTTP2FrameType
     let flags: UInt8
     let streamID: UInt32
@@ -78,7 +78,7 @@ struct NaiveHTTP2Frame {
 
 // MARK: - Framer
 
-enum NaiveHTTP2Framer {
+nonisolated enum NaiveHTTP2Framer {
     static let headerSize = HTTP2FrameWire.headerSize
     static let maxDataPayload = 16_384  // HTTP/2 default SETTINGS_MAX_FRAME_SIZE
 

@@ -13,7 +13,7 @@ import Compression
 
 // MARK: - ServerHello Result
 
-private enum ServerHelloResult {
+nonisolated private enum ServerHelloResult {
     /// key_share carries an X25519 public key.
     case tls13(keyShare: Data, cipherSuite: UInt16)
     case tls12(cipherSuite: UInt16, serverRandom: Data, version: UInt16, extendedMasterSecret: Bool)
@@ -25,7 +25,7 @@ private enum ServerHelloResult {
 
 nonisolated class TLSClient {
     let configuration: TLSConfiguration
-    var connection: (any AsyncByteTransport)?
+    var connection: (any ByteTransport)?
 
     // Cleared after handshake.
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?

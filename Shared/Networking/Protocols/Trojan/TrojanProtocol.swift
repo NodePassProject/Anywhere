@@ -12,7 +12,7 @@ import CommonCrypto
 ///                   + cmd(1) + ATYP(1) + address(var) + port(2 BE) + CRLF
 /// UDP packet format: ATYP(1) + address(var) + port(2 BE) + length(2 BE) + CRLF + payload
 /// Address encoding matches SOCKS5 / Shadowsocks: ATYP 0x01 IPv4, 0x03 domain, 0x04 IPv6.
-enum TrojanProtocol {
+nonisolated enum TrojanProtocol {
 
     static let commandTCP: UInt8 = 0x01
     static let commandUDP: UInt8 = 0x03

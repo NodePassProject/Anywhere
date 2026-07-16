@@ -9,7 +9,7 @@ import Foundation
 
 /// `.proxy` id is the authoritative configuration/chain id — never the dialing
 /// `ProxyConfiguration` id, which gets regenerated.
-enum RouteTarget: Hashable, Sendable {
+nonisolated enum RouteTarget: Hashable, Sendable {
     case direct
     case reject
     case proxy(UUID)

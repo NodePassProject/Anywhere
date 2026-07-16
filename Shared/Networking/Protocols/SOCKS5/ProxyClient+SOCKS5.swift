@@ -19,7 +19,7 @@ extension ProxyClient {
             throw ProxyError.protocolError("SOCKS5 outbound expected")
         }
 
-        let transport: any AsyncByteTransport
+        let transport: any ByteTransport
         if let tunnel = self.tunnel {
             transport = TunneledTransport(tunnel: tunnel)
         } else {
@@ -58,7 +58,7 @@ extension ProxyClient {
                 username: username,
                 password: password
             )
-            let dataTransport: any AsyncByteTransport
+            let dataTransport: any ByteTransport
             if let excess = buffer.remaining {
                 // Handshake-leftover bytes belong to the tunneled stream; replay them first.
                 dataTransport = SOCKS5ReplayTransport(inner: transport, initialData: excess)

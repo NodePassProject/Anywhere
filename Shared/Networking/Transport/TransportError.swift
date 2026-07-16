@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum TransportError: Error, LocalizedError {
+nonisolated enum TransportError: Error, LocalizedError {
     case resolutionFailed(String)
     case connectionFailed(String)
     case notConnected

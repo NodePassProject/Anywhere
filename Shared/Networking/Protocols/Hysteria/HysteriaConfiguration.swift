@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct HysteriaConfiguration {
+nonisolated struct HysteriaConfiguration {
     let proxyHost: String
     let proxyPort: UInt16
     /// Authentication password (sent in the `Hysteria-Auth` header).

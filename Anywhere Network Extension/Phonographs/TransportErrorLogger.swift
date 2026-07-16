@@ -137,7 +137,7 @@ nonisolated enum DialDiagnostics {
 // MARK: - ConnectionFailureReporter
 
 /// Emits exactly one terminal-failure line per connection; later reports no-op.
-final class ConnectionFailureReporter {
+nonisolated final class ConnectionFailureReporter {
     private let prefix: String
     private let logger: AnywhereLogger
     private var reported = false

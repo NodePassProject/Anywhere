@@ -9,9 +9,9 @@ import Foundation
 
 nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Sendable {
 
-    private let transport: any AsyncByteTransport
+    private let transport: any ByteTransport
 
-    init(transport: any AsyncByteTransport) {
+    init(transport: any ByteTransport) {
         self.transport = transport
     }
 

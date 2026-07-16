@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum ShadowsocksCipher {
+nonisolated enum ShadowsocksCipher {
     case aes128gcm
     case aes256gcm
     case chacha20poly1305

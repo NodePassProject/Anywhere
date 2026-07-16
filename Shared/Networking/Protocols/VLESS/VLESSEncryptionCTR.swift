@@ -12,7 +12,7 @@ import Synchronization
 /// AES-256-CTR keystream for VLESS encryption's `xorpub`/`random` modes:
 /// key = BLAKE3-derive(context "VLESS", key), 16-byte IV as the initial
 /// big-endian counter. Stateful — one instance per direction.
-final class VLESSEncryptionCTR {
+nonisolated final class VLESSEncryptionCTR {
     /// The cryptor advances its keystream on every update, so access is serialized.
     private let cryptor: Mutex<CCCryptorRef?>
 

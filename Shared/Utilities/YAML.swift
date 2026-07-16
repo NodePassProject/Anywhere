@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum YAML {
+nonisolated enum YAML {
     enum NodeType: Sendable {
         case undefined
         case null
@@ -112,7 +112,7 @@ extension YAML.Node: Sequence {
 
 // MARK: - libyaml event consumer
 
-private final class Loader {
+nonisolated private final class Loader {
     private let parser: UnsafeMutablePointer<yaml_parser_t>
     private var anchors: [String: YAML.Node] = [:]
 

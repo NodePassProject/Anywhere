@@ -9,7 +9,7 @@ import Foundation
 
 /// Only the first `maxFrames` reads/writes are framed; afterwards data passes through unframed.
 /// Wire format: `[2B payload_size BE][1B padding_size][payload][padding zeros]`.
-struct NaivePaddingFramer {
+nonisolated struct NaivePaddingFramer {
     static let frameHeaderSize = 3
     static let maxPaddingSize = 255
 

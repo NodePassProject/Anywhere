@@ -9,17 +9,17 @@ import Foundation
 
 // MARK: - HPKE Identifiers (RFC 9180)
 
-enum ECHKemID {
+nonisolated enum ECHKemID {
     static let dhkemX25519HKDFSHA256: UInt16 = 0x0020
 }
 
-enum ECHKdfID {
+nonisolated enum ECHKdfID {
     static let hkdfSHA256: UInt16 = 0x0001
     static let hkdfSHA384: UInt16 = 0x0002
     static let hkdfSHA512: UInt16 = 0x0003
 }
 
-enum ECHAeadID {
+nonisolated enum ECHAeadID {
     static let aesGCM128: UInt16 = 0x0001
     static let aesGCM256: UInt16 = 0x0002
     static let chaCha20Poly1305: UInt16 = 0x0003
@@ -40,17 +40,17 @@ let echSupportedAEADs: Set<UInt16> = [
 
 // MARK: - Model
 
-struct ECHCipherSuite: Equatable {
+nonisolated struct ECHCipherSuite: Equatable {
     let kdfID: UInt16
     let aeadID: UInt16
 }
 
-struct ECHConfigExtension {
+nonisolated struct ECHConfigExtension {
     let type: UInt16
     let data: Data
 }
 
-struct ECHConfig {
+nonisolated struct ECHConfig {
     /// Full config bytes including the 2-byte version and 2-byte length header.
     /// Feeds the HPKE `info` string ("tls ech\0" || raw), so must be preserved
     /// exactly as received.
@@ -69,7 +69,7 @@ struct ECHConfig {
 
 // MARK: - Errors
 
-enum ECHConfigError: Error, LocalizedError {
+nonisolated enum ECHConfigError: Error, LocalizedError {
     case malformedConfigList
     case malformedConfig
     case noCompatibleConfig
@@ -87,7 +87,7 @@ enum ECHConfigError: Error, LocalizedError {
 
 // MARK: - Parsing
 
-enum ECHConfigParser {
+nonisolated enum ECHConfigParser {
 
     /// 2-byte total length followed by `ECHConfig` records (version, length,
     /// body). Configs with an unrecognized version are skipped, not rejected,
@@ -217,7 +217,7 @@ extension ECHConfig {
 // MARK: - Byte Reader
 
 /// Self-contained so the ECH code carries no cross-target dependencies.
-struct ECHByteReader {
+nonisolated struct ECHByteReader {
     private let bytes: [UInt8]
     private var offset: Int = 0
 

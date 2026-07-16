@@ -9,7 +9,7 @@ import Foundation
 
 /// Builders for synthesized ICMP control messages, mirroring ``UDPPacket``
 /// and ``DNSPacket``. Pure byte construction — no I/O.
-enum ICMPPacket {
+nonisolated enum ICMPPacket {
 
     /// Builds a port-unreachable reply for a UDP datagram. `srcIP`/`dstIP`
     /// are the original datagram's raw source/destination bytes (4 for IPv4,

@@ -10,7 +10,7 @@ import Foundation
 // MARK: - QUICVarInt
 
 /// RFC 9000 §16: the two high bits of the first byte select a 1/2/4/8-byte encoding; the remaining bits hold the value.
-enum QUICVarInt {
+nonisolated enum QUICVarInt {
 
     static func encode(_ value: UInt64) -> Data {
         var data = Data()

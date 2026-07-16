@@ -10,14 +10,14 @@ import Foundation
 // MARK: - QPACK Static Table (Subset)
 
 /// Indices into the QPACK static table (RFC 9204, Appendix A).
-private enum QPACKStaticIndex: Int {
+nonisolated private enum QPACKStaticIndex: Int {
     case methodConnect  = 15  // :method = CONNECT
     case status200      = 25  // :status = 200
 }
 
 // MARK: - QPACKEncoder
 
-enum QPACKEncoder {
+nonisolated enum QPACKEncoder {
 
     /// Encodes CONNECT headers: classic CONNECT (RFC 9114 §4.4) sends only `:method` and
     /// `:authority`; extended CONNECT (RFC 9220/9298) adds `:protocol`, `:scheme`, `:path`.

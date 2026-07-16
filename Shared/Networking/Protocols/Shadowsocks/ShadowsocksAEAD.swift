@@ -11,7 +11,7 @@ import CommonCrypto
 
 // MARK: - Key Derivation
 
-enum ShadowsocksKeyDerivation {
+nonisolated enum ShadowsocksKeyDerivation {
 
     /// Derives a master key from a password via EVP_BytesToKey (MD5).
     static func deriveKey(password: String, keySize: Int) -> Data {
@@ -108,7 +108,7 @@ enum ShadowsocksKeyDerivation {
 // MARK: - Nonce Generator
 
 /// Incrementing little-endian AEAD nonce: starts at all 0xFF, so the first returned nonce is all zeros.
-struct ShadowsocksNonce {
+nonisolated struct ShadowsocksNonce {
     private var bytes: [UInt8]
 
     init(size: Int) {
@@ -126,7 +126,7 @@ struct ShadowsocksNonce {
 
 // MARK: - AEAD Seal/Open
 
-enum ShadowsocksAEADCrypto {
+nonisolated enum ShadowsocksAEADCrypto {
 
     static func seal(cipher: ShadowsocksCipher, key: Data, nonce: Data, plaintext: Data) throws -> Data {
         let symmetricKey = SymmetricKey(data: key)
@@ -348,7 +348,7 @@ nonisolated class ShadowsocksAEADReader {
 
 // MARK: - UDP Crypto
 
-enum ShadowsocksUDPCrypto {
+nonisolated enum ShadowsocksUDPCrypto {
 
     /// Encrypts a UDP packet: random salt + single AEAD seal (no chunking).
     static func encrypt(cipher: ShadowsocksCipher, masterKey: Data, payload: Data) throws -> Data {
@@ -396,7 +396,7 @@ enum ShadowsocksUDPCrypto {
 
 // MARK: - Errors
 
-enum ShadowsocksError: Error, LocalizedError {
+nonisolated enum ShadowsocksError: Error, LocalizedError {
     case invalidMethod(String)
     case decryptionFailed
     case invalidAddress

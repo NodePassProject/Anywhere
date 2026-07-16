@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum OutboundProtocol: String, Codable, CaseIterable {
+nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
     case vless
     case hysteria
     case nowhere
@@ -90,7 +90,7 @@ enum OutboundProtocol: String, Codable, CaseIterable {
 
 // MARK: - Outbound Protocol Configuration
 
-enum Outbound: Hashable {
+nonisolated enum Outbound: Hashable {
     /// The only outbound with a user-selectable transport and TLS/Reality security layer.
     case vless(
         uuid: UUID,
@@ -144,7 +144,7 @@ enum Outbound: Hashable {
 
 // MARK: - Xray Transport Layer Configuration
 
-enum XrayTransportLayer: Hashable {
+nonisolated enum XrayTransportLayer: Hashable {
     case raw
     case ws(WebSocketConfiguration)
     case httpUpgrade(HTTPUpgradeConfiguration)
@@ -165,7 +165,7 @@ enum XrayTransportLayer: Hashable {
 
 // MARK: - Xray Security Layer Configuration
 
-enum XraySecurityLayer: Hashable {
+nonisolated enum XraySecurityLayer: Hashable {
     case none
     case tls(TLSConfiguration)
     case reality(RealityConfiguration)
@@ -189,7 +189,7 @@ enum XraySecurityLayer: Hashable {
 
 // MARK: - Generic Security Layer Configuration
 
-enum GenericSecurityLayer: Hashable {
+nonisolated enum GenericSecurityLayer: Hashable {
     case tls(TLSConfiguration)
     case none
     
@@ -209,7 +209,7 @@ enum GenericSecurityLayer: Hashable {
 
 // MARK: - ProxyConfiguration
 
-struct ProxyConfiguration: Identifiable, Hashable, Codable {
+nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
     let serverAddress: String
@@ -730,7 +730,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     }
 }
 
-enum ProxyError: Error, LocalizedError {
+nonisolated enum ProxyError: Error, LocalizedError {
     case invalidURL(String)
     case connectionFailed(String)
     case protocolError(String)
