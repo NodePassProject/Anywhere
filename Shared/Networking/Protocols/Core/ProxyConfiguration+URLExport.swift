@@ -122,17 +122,17 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer) = outbound,
+        guard case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = outbound,
               let tls = securityLayer.tlsConfiguration else {
             return ""
         }
-        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let usernameCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: usernameCharacters) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var parameters: [String] = ["up=\(uplink.rawValue)", "down=\(downlink.rawValue)"]
         if uplink == .tcp && downlink == .tcp {
             parameters.append("pool=\(pool)")
         }
-        parameters.append("spec=\(encodedQueryValue(NowhereProtocol.normalizedSpec(spec)))")
         if tls.serverName != serverAddress {
             parameters.append("sni=\(encodedQueryValue(tls.serverName))")
         }

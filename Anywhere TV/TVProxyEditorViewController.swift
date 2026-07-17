@@ -76,7 +76,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaSNI = ""
 
     private var nowhereKey = ""
-    private var nowhereSpec = NowhereProtocol.defaultSpec
     private var nowhereUplink: NowhereNetwork = .udp
     private var nowhereDownlink: NowhereNetwork = .udp
     private var nowherePreconnectEnabled = true
@@ -159,7 +158,7 @@ class TVProxyEditorViewController: UITableViewController {
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
         case hysteriaObfuscationType, hysteriaObfuscationPassword, hysteriaObfuscationMin, hysteriaObfuscationMax
         case hysteriaSNI
-        case nowhereKey, nowhereSpec, nowhereUplink, nowhereDownlink, nowherePreconnect, nowherePool, nowhereSNI, nowhereALPN
+        case nowhereKey, nowhereUplink, nowhereDownlink, nowherePreconnect, nowherePool, nowhereSNI, nowhereALPN
         case trojanPassword, trojanSNI, trojanALPN, trojanECHEnabled, trojanECH, trojanFingerprint
         case anytlsPassword, anytlsSNI, anytlsALPN, anytlsECHEnabled, anytlsECH, anytlsFingerprint
         case ssPassword, ssMethod
@@ -222,7 +221,6 @@ class TVProxyEditorViewController: UITableViewController {
             }
         } else if isNowhere {
             serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
-            serverRows.append(.text(label: String(localized: "Spec"), value: nowhereSpec, placeholder: NowhereProtocol.defaultSpec, key: .nowhereSpec))
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isAnyTLS {
@@ -569,7 +567,6 @@ class TVProxyEditorViewController: UITableViewController {
         if isNowhere {
             return !nowhereKey.isEmpty
                 && nowhereKey.utf8.count <= 255
-                && NowhereProtocol.normalizedSpec(nowhereSpec).utf8.count <= 255
                 && nowhereALPN.utf8.count <= 255
         }
         if isTrojan { return !trojanPassword.isEmpty }
@@ -786,7 +783,6 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteriaObfuscationMin: hysteriaObfuscationMinText = value
         case .hysteriaObfuscationMax: hysteriaObfuscationMaxText = value
         case .nowhereKey: nowhereKey = value
-        case .nowhereSpec: nowhereSpec = value
         case .nowhereUplink:
             if let network = NowhereNetwork(rawValue: value) { nowhereUplink = network }
         case .nowhereDownlink:
@@ -929,10 +925,9 @@ class TVProxyEditorViewController: UITableViewController {
                 }
             }
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer):
+        case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             nowhereKey = key
-            nowhereSpec = NowhereProtocol.normalizedSpec(spec)
             nowhereUplink = uplink
             nowhereDownlink = downlink
             nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
@@ -1137,7 +1132,6 @@ class TVProxyEditorViewController: UITableViewController {
                 sni: sni
             )
         case .nowhere:
-            let spec = NowhereProtocol.normalizedSpec(nowhereSpec)
             let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
                 ? min(
                     NowherePool.sliderRange.upperBound,
@@ -1148,7 +1142,6 @@ class TVProxyEditorViewController: UITableViewController {
             let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
             outbound = .nowhere(
                 key: nowhereKey,
-                spec: spec,
                 uplink: nowhereUplink,
                 downlink: nowhereDownlink,
                 pool: pool,

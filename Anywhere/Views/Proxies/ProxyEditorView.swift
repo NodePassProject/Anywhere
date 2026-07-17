@@ -74,7 +74,6 @@ struct ProxyEditorView: View {
     @State private var hysteriaSNI = ""
     
     @State private var nowhereKey = ""
-    @State private var nowhereSpec = NowhereProtocol.defaultSpec
     @State private var nowhereUplink: NowhereNetwork = .udp
     @State private var nowhereDownlink: NowhereNetwork = .udp
     @State private var nowherePreconnectEnabled = true
@@ -162,7 +161,6 @@ struct ProxyEditorView: View {
         if isNowhere {
             return !nowhereKey.isEmpty
             && nowhereKey.utf8.count <= 255
-            && NowhereProtocol.normalizedSpec(nowhereSpec).utf8.count <= 255
             && nowhereALPN.utf8.count <= 255
         }
         if isTrojan {
@@ -338,14 +336,6 @@ struct ProxyEditorView: View {
                         .multilineTextAlignment(.trailing)
                 } label: {
                     TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                }
-                LabeledContent {
-                    TextField(String("auto"), text: $nowhereSpec)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Spec", comment: nil, systemName: "slider.horizontal.3", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                 }
             } else if isTrojan {
                 LabeledContent {
@@ -1114,10 +1104,9 @@ struct ProxyEditorView: View {
                 }
             }
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer):
+        case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             nowhereKey = key
-            nowhereSpec = NowhereProtocol.normalizedSpec(spec)
             nowhereUplink = uplink
             nowhereDownlink = downlink
             nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
@@ -1338,7 +1327,6 @@ struct ProxyEditorView: View {
                 sni: sni
             )
         case .nowhere:
-            let spec = NowhereProtocol.normalizedSpec(nowhereSpec)
             let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
                 ? min(
                     NowherePool.sliderRange.upperBound,
@@ -1349,7 +1337,6 @@ struct ProxyEditorView: View {
             let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
             outbound = .nowhere(
                 key: nowhereKey,
-                spec: spec,
                 uplink: nowhereUplink,
                 downlink: nowhereDownlink,
                 pool: pool,
