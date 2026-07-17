@@ -37,9 +37,9 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     private var controlStreamID: Int64 = -1
     private var controlBuffer = Data()
     private var controlReadClosed = false
-    /// Resolves when the UDP flow result is demuxed (or the open fails). The waiter
-    /// continuation lives in the promise (async infra), bridging the control-stream handshake.
-    private let openPromise = AsyncPromise<Void>()
+    /// One-shot open signal, resolved by the demux/callback path; the awaiter is `openTask.value`.
+    private let openSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let openTask: Task<Void, Error>
 
     /// Reassembled inbound datagrams / EOF / error, pushed on `session.queue` (inside ngtcp2's
     /// recv_datagram) and pulled by `receiveRaw`. The session's byte budget (`reserveUDPBuffer`)
@@ -80,6 +80,9 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         self.destination = destination
         self.flowHeader = flowHeader
         self.expectsResult = flowHeader.role != .open
+        let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.openSignal = openSignal
+        self.openTask = Task { for try await _ in openStream {} }
     }
 
     var isConnected: Bool {
@@ -102,7 +105,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     }
 
     func open() async throws {
-        // Claim the flow on the ngtcp2 queue; `openPromise` resolves later in
+        // Claim the flow on the ngtcp2 queue; `openSignal` resolves later in
         // `finishOpen` (result) or `fail` (error).
         let started: Bool = await session.run { [self] in
             guard state == .idle else { return false }
@@ -124,7 +127,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
                 await self.session.run { self.fail(error) }
             }
         }
-        try await openPromise.value()
+        try await openTask.value
     }
 
     private func openControlStream() {
@@ -275,7 +278,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
     private func finishOpen() {
         guard state != .closed else { return }
         state = .ready
-        openPromise.resolve(.success(()))
+        openSignal.finish()
     }
 
     func handleFlowClose() {
@@ -411,7 +414,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         releaseControlStream(reset: !wasReady)
         session.releaseUDPSession(flowHeader.flowID)
         releaseAllBufferedData()
-        openPromise.resolve(.failure(NowhereError.streamClosed))
+        openSignal.finish(throwing: NowhereError.streamClosed)
         inbox.cancel()
         notifyTermination(error: nil)
     }
@@ -455,7 +458,7 @@ nonisolated final class NowhereUDPConnection: ProxyConnection, NowhereTerminatio
         releaseControlStream(reset: true)
         session.releaseUDPSession(flowHeader.flowID)
         releaseAllBufferedData()
-        openPromise.resolve(.failure(error))
+        openSignal.finish(throwing: error)
         // Ordered after every datagram already queued in the inbox; the error surfaces
         // on the next (or a parked) receive, replacing the old `closureError` stash.
         inbox.fail(error)

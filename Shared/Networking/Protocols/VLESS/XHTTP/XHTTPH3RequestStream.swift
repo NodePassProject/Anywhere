@@ -22,10 +22,10 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
     private var headersReceived = false
     private(set) var responseStatus: Int?
 
-    /// Resolves with the response `:status` when the HEADERS arrive, or a failure if the stream
-    /// fails first. ``awaitResponseStatus()`` awaits it; the resolving continuation lives in the
-    /// promise (async infra), bridging the multiplexer's demux loop.
-    private let responsePromise = AsyncPromise<Int>()
+    /// One-shot response-status signal; the awaiter is `responseTask.value`. Yields the HTTP
+    /// status then finishes on success, or finishes-throwing on failure.
+    private let responseSignal: AsyncThrowingStream<Int, Error>.Continuation
+    private let responseTask: Task<Int, Error>
 
     // MARK: - Receive buffering
 
@@ -45,6 +45,12 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     init(multiplexer: HTTP3Multiplexer) {
         self.multiplexer = multiplexer
+        let (responseStream, responseSignal) = AsyncThrowingStream.makeStream(of: Int.self)
+        self.responseSignal = responseSignal
+        self.responseTask = Task {
+            for try await status in responseStream { return status }
+            throw HTTP3Error.streamClosed
+        }
     }
 
     // MARK: - Request
@@ -66,7 +72,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
             }
             self.quicStreamID = sid
             // Register before the write so a fast response is recorded, then surfaced by
-            // `awaitResponseStatus()` (via `responsePromise`) — never lost.
+            // `awaitResponseStatus()` (via `responseTask`) — never lost.
             multiplexer.registerStream(self, streamID: sid)
             self.state = .requestSent
             return .success(sid)
@@ -85,7 +91,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
     /// already parsed, the promise is resolved and returns immediately.
     func awaitResponseStatus() async throws -> Int {
         guard multiplexer != nil else { throw HTTP3Error.streamClosed }
-        return try await responsePromise.value()
+        return try await responseTask.value
     }
 
     func sendBody(_ data: Data, fin: Bool) async throws {
@@ -140,7 +146,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
                 let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
                 multiplexer.shutdownStream(sid, code: code)
             }
-            responsePromise.resolve(.failure(HTTP3Error.streamClosed))
+            responseSignal.finish(throwing: HTTP3Error.streamClosed)
             inbox.cancel()
         }
     }
@@ -163,7 +169,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         // A benign QUIC connection close (NO_ERROR / H3_NO_ERROR) is a graceful end of the
         // response — surface EOF rather than a reset.
         if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
-            responsePromise.resolve(.failure(HTTP3Error.streamClosed))
+            responseSignal.finish(throwing: HTTP3Error.streamClosed)
             inbox.finish()
             return
         }
@@ -223,9 +229,10 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         state = .open
 
         if let status {
-            responsePromise.resolve(.success(status))
+            responseSignal.yield(status)
+            responseSignal.finish()
         } else {
-            responsePromise.resolve(.failure(HTTP3Error.connectionFailed("Response missing :status")))
+            responseSignal.finish(throwing: HTTP3Error.connectionFailed("Response missing :status"))
         }
     }
 
@@ -250,7 +257,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
     private func handleStreamError(_ error: Error) {
         guard state != .closed else { return }
         closeAndShutdown(code: .internalError)
-        responsePromise.resolve(.failure(error))
+        responseSignal.finish(throwing: error)
         inbox.fail(error)
     }
 

@@ -82,7 +82,10 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
     /// Readiness awaiters coalesced behind one handshake; resolves at `.ready` or on fail/close.
     /// The waiter continuations live in the gate (async infra), not the locked layer.
-    private let readyGate = AsyncReadinessGate()
+    /// Readiness latch: the ready/teardown path finishes `readySignal` (throwing on failure);
+    /// every awaiter gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
+    private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let readyTask: Task<Void, Error>
 
     /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
     var onClose: (() -> Void)?
@@ -102,7 +105,11 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
             alpn: ["h2"],
             tunnel: tunnel
         )
+        let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.readySignal = readySignal
+        self.readyTask = Task { for try await _ in readyStream {} }
         // Weak self so the pump task doesn't retain the multiplexer; it's stopped by close().
+        // Must follow the latch setup: capturing `self` requires every stored property set.
         sendPump = AsyncSendPump(
             send: { [weak self] data in
                 guard let self else { throw CancellationError() }
@@ -177,9 +184,9 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         case .beginAndPark:
             refreshPoolSnapshot()
             beginSetup()
-            try await readyGate.wait()
+            try await readyTask.value
         case .park:
-            try await readyGate.wait()
+            try await readyTask.value
         }
     }
 
@@ -607,7 +614,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     }
 
     private func completeReadyContinuations(_ error: Error?) {
-        if let error { readyGate.signalFailure(error) } else { readyGate.signalSuccess() }
+        if let error { readySignal.finish(throwing: error) } else { readySignal.finish() }
     }
 
     func close(error: Error? = nil) {

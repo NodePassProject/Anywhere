@@ -48,13 +48,18 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     private var receiveBuffer = Data()
     private var responseParsed = false
 
-    /// Resolves when the Hysteria TCP response header is demuxed (or the open fails). The waiter
-    /// continuation lives in the promise (async infra), bridging the session's ngtcp2 demux loop.
-    private let openPromise = AsyncPromise<Void>()
+    /// One-shot open signal: finished when the Hysteria TCP response header is demuxed, or
+    /// finished-throwing on failure. `open()` awaits `openTask.value` (broadcast-safe); the
+    /// session's ngtcp2 demux loop resolves it by finishing `openSignal`.
+    private let openSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let openTask: Task<Void, Error>
 
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
+        let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.openSignal = openSignal
+        self.openTask = Task { for try await _ in openStream {} }
     }
 
     var isConnected: Bool {
@@ -66,7 +71,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     // MARK: - Open (called by ProxyClient after session is ready)
 
     func open() async throws {
-        // Claim the connection on the ngtcp2 queue; `openPromise` resolves later in
+        // Claim the connection on the ngtcp2 queue; `openSignal` resolves later in
         // `tryParseResponse` (response header) or `fail` (error).
         let started: Bool = await session.run { [self] in
             guard state == .idle else { return false }
@@ -85,7 +90,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
                 await self.session.run { self.fail(error) }
             }
         }
-        try await openPromise.value()
+        try await openTask.value
     }
 
     private func sendTCPRequest() {
@@ -152,7 +157,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         }
 
         state = .ready
-        openPromise.resolve(.success(()))
+        openSignal.finish()
     }
 
     /// Hands any buffered post-header bytes to the inbox. Runs on `session.queue`.
@@ -194,7 +199,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         guard state != .closed else { return }
         state = .closed
 
-        openPromise.resolve(.failure(error))
+        openSignal.finish(throwing: error)
         inbox.fail(error)
     }
 
@@ -220,7 +225,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
-            self.openPromise.resolve(.failure(HysteriaError.streamClosed))
+            self.openSignal.finish(throwing: HysteriaError.streamClosed)
             if self.streamID >= 0 {
                 self.session.shutdownStream(self.streamID)
                 self.session.releaseTCPStream(self.streamID)

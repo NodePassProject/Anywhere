@@ -52,7 +52,9 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     /// Resolves when the CONNECT response (200) arrives, or the stream fails first. The waiter
     /// continuation lives in the promise (async infra), bridging the multiplexer's read loop.
-    private let connectPromise = AsyncPromise<Void>()
+    /// One-shot connect signal, resolved by the demux/callback path; the awaiter is `connectTask.value`.
+    private let connectSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let connectTask: Task<Void, Error>
 
     /// CONNECT response headers exposed for proxy-layer negotiation.
     var responseHeaders: [(name: String, value: String)] { lock.withLock { $0.responseHeaders } }
@@ -65,6 +67,9 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         self.streamID = streamID
         self.multiplexer = multiplexer
         self.destination = destination
+        let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.connectSignal = connectSignal
+        self.connectTask = Task { for try await _ in connectStream {} }
     }
 
     // MARK: - HTTPTunnel
@@ -78,7 +83,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
         // The peer's INITIAL_WINDOW_SIZE is known once SETTINGS is exchanged (ensureReady done);
         // reseed the multiplexer-held send window and mark the stream, then fire CONNECT HEADERS.
-        // `connectPromise` resolves later in `handleHeaders` (200) or `handleStreamError` (failure).
+        // `connectSignal` resolves later in `handleHeaders` (200) or `handleStreamError` (failure).
         multiplexer.reseedStreamSendWindow(streamID)
         lock.withLock { $0.phase = .connectSent }
 
@@ -90,7 +95,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
                 self.handleStreamError(error)
             }
         }
-        try await connectPromise.value()
+        try await connectTask.value
     }
 
     func sendData(_ data: Data) async throws {
@@ -127,7 +132,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
                 NaiveHTTP2Framer.rstStreamFrame(streamID: streamID, errorCode: 0x8 /* CANCEL */)
             )
         }
-        connectPromise.resolve(.failure(NaiveHTTP2Error.connectionFailed("Stream closed")))
+        connectSignal.finish(throwing: NaiveHTTP2Error.connectionFailed("Stream closed"))
         inbox.cancel()
     }
 
@@ -153,7 +158,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         case .ignore:
             break
         case .success:
-            connectPromise.resolve(.success(()))
+            connectSignal.finish()
         case .authRequired:
             handleStreamError(NaiveHTTP2Error.authenticationRequired)
         case .tunnelFailed(let status):
@@ -203,7 +208,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         guard proceed else { return }
 
         multiplexer?.removeStream(self)
-        connectPromise.resolve(.failure(error))
+        connectSignal.finish(throwing: error)
         inbox.fail(error)
     }
 

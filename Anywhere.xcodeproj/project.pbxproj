@@ -143,7 +143,6 @@
 				Networking/Async/AsyncByteChannel.swift,
 				Networking/Async/AsyncMutex.swift,
 				Networking/Async/AsyncSendPump.swift,
-				Networking/Async/AsyncTransport.swift,
 				Networking/ConnectionMetrics.swift,
 				Networking/DNSResolver.swift,
 				Networking/LatencyTester.swift,

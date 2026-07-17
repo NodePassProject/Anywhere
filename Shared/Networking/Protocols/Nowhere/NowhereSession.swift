@@ -55,9 +55,10 @@ nonisolated final class NowhereSession {
 
     private var authStreamID: Int64 = -1
     private var authFrameWritten = false
-    /// Awaiters coalesced behind one connect+auth; resolved when the session reaches `.ready`
-    /// or terminates. The waiter continuations live in the gate (async infra), not here.
-    private let readyGate = AsyncReadinessGate()
+    /// Readiness latch: the ready/teardown path finishes `readySignal` (throwing on failure);
+    /// every awaiter gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
+    private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let readyTask: Task<Void, Error>
 
     var onClose: (() -> Void)?
 
@@ -104,6 +105,9 @@ nonisolated final class NowhereSession {
             tuning: .nowhere,
             transport: transport
         )
+        let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.readySignal = readySignal
+        self.readyTask = Task { for try await _ in readyStream {} }
     }
 
     func ensureReady() async throws {
@@ -114,7 +118,7 @@ nonisolated final class NowhereSession {
             startConnection()
         }
         // Resolves on `.ready` (success) or teardown (`.streamClosed` retryable / real error).
-        try await readyGate.wait()
+        try await readyTask.value
     }
 
     private func startConnection() {
@@ -197,7 +201,7 @@ nonisolated final class NowhereSession {
 
         state = .ready
         quic.bidiCreditHandler = nil
-        readyGate.signalSuccess()
+        readySignal.finish()
     }
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
@@ -413,7 +417,7 @@ nonisolated final class NowhereSession {
             }
 
             // `streamClosed` (not a connect failure) so a racing acquire retries on a fresh session.
-            self.readyGate.signalFailure(NowhereError.streamClosed)
+            self.readySignal.finish(throwing: NowhereError.streamClosed)
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()
@@ -451,7 +455,7 @@ nonisolated final class NowhereSession {
                 state.udpCount = 0
             }
 
-            self.readyGate.signalFailure(error)
+            self.readySignal.finish(throwing: error)
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()

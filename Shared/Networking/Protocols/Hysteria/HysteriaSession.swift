@@ -69,9 +69,11 @@ nonisolated final class HysteriaSession {
     /// anything bigger is a misbehaving server — tear down rather than OOM.
     private static let authBufferMaxBytes = 16 * 1024
 
-    /// Awaiters coalesced behind one connect+auth; resolved when the session reaches `.ready`
-    /// or terminates. The waiter continuations live in the gate (async infra), not here.
-    private let readyGate = AsyncReadinessGate()
+    /// Readiness latch coalescing all `ensureReady()` awaiters behind one connect+auth. The
+    /// demux loop finishes `readySignal` at `.ready` (or throwing on teardown); every awaiter
+    /// gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
+    private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let readyTask: Task<Void, Error>
 
     /// Fired once when the session transitions to `.closed`.
     var onClose: (() -> Void)?
@@ -140,6 +142,9 @@ nonisolated final class HysteriaSession {
             obfuscator: obfuscator,
             transport: transport
         )
+        let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.readySignal = readySignal
+        self.readyTask = Task { for try await _ in readyStream {} }
     }
 
     // MARK: - Lifecycle
@@ -152,7 +157,7 @@ nonisolated final class HysteriaSession {
             startConnection()
         }
         // Resolves on `.ready` (success) or teardown (`.streamClosed` retryable / real error).
-        try await readyGate.wait()
+        try await readyTask.value
     }
 
     private func startConnection() {
@@ -353,7 +358,7 @@ nonisolated final class HysteriaSession {
         quic.shutdownStream(authStreamID, appErrorCode: HysteriaProtocol.closeErrCodeOK)
 
         state = .ready
-        readyGate.signalSuccess()
+        readySignal.finish()
     }
 
     private func handleStreamTermination(sid: Int64, error: Error?) {
@@ -511,7 +516,7 @@ nonisolated final class HysteriaSession {
             }
 
             // `streamClosed` (not a connect failure) so a racing acquire retries on a fresh session.
-            self.readyGate.signalFailure(HysteriaError.streamClosed)
+            self.readySignal.finish(throwing: HysteriaError.streamClosed)
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()
@@ -549,7 +554,7 @@ nonisolated final class HysteriaSession {
                 state.udpCount = 0
             }
 
-            self.readyGate.signalFailure(error)
+            self.readySignal.finish(throwing: error)
 
             let tcp = Array(self.tcpStreams.values)
             self.tcpStreams.removeAll()

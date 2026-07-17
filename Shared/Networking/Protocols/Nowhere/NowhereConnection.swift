@@ -55,9 +55,9 @@ nonisolated final class NowhereConnection: ProxyConnection {
     /// replacement for the parked `pendingReceive`. Stream credit is returned in
     /// ``receiveRaw()`` only once the app takes the bytes (backpressure preserved).
     private let inbox = AsyncByteChannel()
-    /// Resolves when the Nowhere flow result is demuxed (or the open fails). The waiter
-    /// continuation lives in the promise (async infra), bridging the session's ngtcp2 demux loop.
-    private let openPromise = AsyncPromise<Void>()
+    /// One-shot open signal, resolved by the demux/callback path; the awaiter is `openTask.value`.
+    private let openSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let openTask: Task<Void, Error>
     private var setupTerminationError: Error?
 
     init(
@@ -68,6 +68,9 @@ nonisolated final class NowhereConnection: ProxyConnection {
         self.session = session
         self.destination = destination
         self.flowHeader = flowHeader
+        let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.openSignal = openSignal
+        self.openTask = Task { for try await _ in openStream {} }
     }
 
     var isConnected: Bool {
@@ -77,7 +80,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
     var outerTLSVersion: TLSVersion? { .tls13 }
 
     func open() async throws {
-        // Claim the connection on the ngtcp2 queue; `openPromise` resolves later in
+        // Claim the connection on the ngtcp2 queue; `openSignal` resolves later in
         // `finishOpen`/`processFlowResultIfAvailable` (result) or `fail` (error).
         let started: Bool = await session.run { [self] in
             guard state == .idle else { return false }
@@ -96,7 +99,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
                 await self.session.run { self.fail(error) }
             }
         }
-        try await openPromise.value()
+        try await openTask.value
     }
 
     private func sendTCPRequest() {
@@ -227,7 +230,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
     private func finishOpen() {
         guard state != .closed else { return }
         state = .ready
-        openPromise.resolve(.success(()))
+        openSignal.finish()
         // Flush any coalesced post-result app data, then honour a buffered FIN.
         flushBufferToInbox()
         if readClosed { inbox.finish() }
@@ -287,7 +290,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
             session.releaseTCPStream(streamID)
         }
 
-        openPromise.resolve(.failure(error))
+        openSignal.finish(throwing: error)
         inbox.fail(error)
     }
 
@@ -318,7 +321,7 @@ nonisolated final class NowhereConnection: ProxyConnection {
                 self.session.releaseTCPStream(self.streamID)
             }
             self.inbox.cancel()
-            self.openPromise.resolve(.failure(NowhereError.streamClosed))
+            self.openSignal.finish(throwing: NowhereError.streamClosed)
         }
     }
 }

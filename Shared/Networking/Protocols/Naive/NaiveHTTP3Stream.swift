@@ -42,7 +42,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     /// Resolves when the CONNECT response (200) arrives, or the stream fails first. The waiter
     /// continuation lives in the promise (async infra), bridging the multiplexer's demux loop.
-    private let connectPromise = AsyncPromise<Void>()
+    /// One-shot connect signal, resolved by the demux/callback path; the awaiter is `connectTask.value`.
+    private let connectSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let connectTask: Task<Void, Error>
 
     private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
 
@@ -54,6 +56,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         self.multiplexer = multiplexer
         self.configuration = configuration
         self.destination = destination
+        let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.connectSignal = connectSignal
+        self.connectTask = Task { for try await _ in connectStream {} }
     }
 
     // MARK: - NaiveTunnel
@@ -67,17 +72,17 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
         // Claim the stream, register it, and fire the CONNECT HEADERS write on the multiplexer
         // queue; every outcome (early failure, or the eventual response / send failure) flows
-        // through `connectPromise`, resolved here or later in `processResponseHeaders` (200) /
+        // through `connectSignal`, resolved here or later in `processResponseHeaders` (200) /
         // `handleStreamError`.
         await multiplexer.run { [self] in
             guard let multiplexer = self.multiplexer else {
-                self.connectPromise.resolve(.failure(HTTP3Error.streamClosed))
+                self.connectSignal.finish(throwing: HTTP3Error.streamClosed)
                 return
             }
             guard let streamID = multiplexer.openBidiStream() else {
                 self.state = .closed
                 multiplexer.markStreamBlocked()
-                self.connectPromise.resolve(.failure(HTTP3Error.streamIdBlocked))
+                self.connectSignal.finish(throwing: HTTP3Error.streamIdBlocked)
                 return
             }
             self.quicStreamID = streamID
@@ -102,7 +107,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
             allHeaders.insert((name: ":method", value: "CONNECT"), at: 0)
             allHeaders.insert((name: ":authority", value: self.destination), at: 1)
             guard multiplexer.isWithinPeerFieldSectionLimit(allHeaders) else {
-                // handleStreamError resolves connectPromise with the failure and tears the stream down.
+                // handleStreamError resolves connectSignal with the failure and tears the stream down.
                 self.handleStreamError(HTTP3Error.connectionFailed("Request headers exceed peer MAX_FIELD_SECTION_SIZE"))
                 return
             }
@@ -121,7 +126,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
                 }
             }
         }
-        try await connectPromise.value()
+        try await connectTask.value
     }
 
     func sendData(_ data: Data) async throws {
@@ -165,7 +170,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
                 multiplexer.shutdownStream(streamID, code: code)
             }
 
-            connectPromise.resolve(.failure(HTTP3Error.streamClosed))
+            connectSignal.finish(throwing: HTTP3Error.streamClosed)
             inbox.cancel()
         }
     }
@@ -263,7 +268,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         headersReceived = true
         state = .open
 
-        connectPromise.resolve(.success(()))
+        connectSignal.finish()
     }
 
     private func deliverData(_ data: Data, quicBytes: Int) {
@@ -297,7 +302,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         }
         closeAndShutdown(code: code)
 
-        connectPromise.resolve(.failure(error))
+        connectSignal.finish(throwing: error)
         inbox.fail(error)
     }
 

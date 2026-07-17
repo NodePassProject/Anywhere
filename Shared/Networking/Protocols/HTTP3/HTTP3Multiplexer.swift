@@ -48,9 +48,10 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
     private var state: SessionState = .idle
 
     private var streams: [Int64: any HTTP3StreamHandler] = [:]
-    /// Awaiters coalesced behind one connect; resolves at `.ready` or on fail/close. The waiter
-    /// continuations live in the gate (async infra), not in this callback-driven layer.
-    private let readyGate = AsyncReadinessGate()
+    /// Readiness latch: the ready/teardown path finishes `readySignal` (throwing on failure);
+    /// every awaiter gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
+    private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let readyTask: Task<Void, Error>
     var onClose: (() -> Void)?
 
     private var serverControlStreamID: Int64?
@@ -103,6 +104,9 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
          transport: QUICDatagramTransport? = nil) {
         self.quic = QUICConnection(host: host, port: port, serverName: serverName,
                                    alpn: ["h3"], tuning: tuning, transport: transport)
+        let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.readySignal = readySignal
+        self.readyTask = Task { for try await _ in readyStream {} }
     }
 
     // MARK: - Pool Interface
@@ -188,7 +192,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             }
         }
         // Resolves on `.ready` (success) or teardown (fail/close).
-        if !alreadyReady { try await readyGate.wait() }
+        if !alreadyReady { try await readyTask.value }
     }
 
     private func startConnection() {
@@ -216,7 +220,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
                 }
 
                 self.state = .ready
-                self.readyGate.signalSuccess()
+                self.readySignal.finish()
             }
         }
     }
@@ -431,7 +435,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
                 state.reservedStreams = 0
             }
 
-            self.readyGate.signalFailure(HTTP3Error.connectionFailed("Session closed"))
+            self.readySignal.finish(throwing: HTTP3Error.connectionFailed("Session closed"))
 
             let activeStreams = Array(self.streams.values)
             self.streams.removeAll()
@@ -454,7 +458,7 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
             state.reservedStreams = 0
         }
 
-        readyGate.signalFailure(error)
+        readySignal.finish(throwing: error)
 
         let activeStreams = Array(streams.values)
         streams.removeAll()
