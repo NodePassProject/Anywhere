@@ -61,7 +61,7 @@ Every protocol, transport, and crypto layer below is implemented natively in Swi
 | --- | --- | --- |
 | **VLESS** | TCP · WebSocket · HTTP Upgrade · gRPC · XHTTP | XTLS-RPRX-Vision flow control with adaptive padding · post-quantum encryption · Mux + XUDP |
 | **Hysteria2** | QUIC | Brutal and BBR congestion control · Salamander/Gecko obfuscation |
-| **Nowhere** | TLS / TCP · QUIC / UDP | Variable frame layouts · split upload/download paths · pooled TCP relay · QUIC DATAGRAM · UDP-over-TCP|
+| **Nowhere** | TLS / TCP · QUIC / UDP | Split upload/download paths · pooled TCP relay · QUIC DATAGRAM · UDP-over-TCP|
 | **Trojan** | TLS / TCP | SHA-224 password auth · UDP-over-TCP relay |
 | **AnyTLS** | TLS / TCP | Stream multiplexing over pooled TLS sessions · server-driven padding · warm idle-session pool · UDP-over-TCP |
 | **Shadowsocks** | TCP | AEAD ciphers and Shadowsocks 2022 (BLAKE3) |
