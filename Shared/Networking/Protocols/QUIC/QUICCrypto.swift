@@ -20,7 +20,7 @@ nonisolated enum QUICCrypto {
 
 /// Writes ciphertext + 16-byte tag to `destination`. Inputs are non-owning `bytesNoCopy` views
 /// into ngtcp2's memory — safe because the callback is synchronous.
-private let aeadEncrypt: @convention(c) (
+nonisolated private let aeadEncrypt: @convention(c) (
     UnsafeMutablePointer<UInt8>?,    // destination
     UnsafePointer<UInt8>?,           // key
     Int,                              // keylen
@@ -95,7 +95,7 @@ private let aeadEncrypt: @convention(c) (
 // MARK: - AEAD Decrypt Callback
 
 /// Expects ciphertext + 16-byte tag, writes plaintext to `destination`.
-private let aeadDecrypt: @convention(c) (
+nonisolated private let aeadDecrypt: @convention(c) (
     UnsafeMutablePointer<UInt8>?,    // destination
     UnsafePointer<UInt8>?,           // key
     Int,                              // keylen

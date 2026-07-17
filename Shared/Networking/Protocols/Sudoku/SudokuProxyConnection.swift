@@ -11,13 +11,13 @@ import CryptoKit
 import Security
 import Synchronization
 
-private let sudokuLogger = AnywhereLogger(category: "SudokuProxyConnection")
-private let sudokuObfsReadChunkSize = 128 * 1024
-private let sudokuTCPReceiveChunkSize = 64 * 1024
-private let sudokuHTTPMaskMaxQueueBytes = 4 * 1024 * 1024
-private let sudokuHTTPMaskMaxPollLineBytes = 256 * 1024
-private let sudokuMuxMaxQueueBytes = 4 * 1024 * 1024
-private let sudokuHTTPMaskStreamEOFHeader = "x-sudoku-stream-eof"
+nonisolated private let sudokuLogger = AnywhereLogger(category: "SudokuProxyConnection")
+nonisolated private let sudokuObfsReadChunkSize = 128 * 1024
+nonisolated private let sudokuTCPReceiveChunkSize = 64 * 1024
+nonisolated private let sudokuHTTPMaskMaxQueueBytes = 4 * 1024 * 1024
+nonisolated private let sudokuHTTPMaskMaxPollLineBytes = 256 * 1024
+nonisolated private let sudokuMuxMaxQueueBytes = 4 * 1024 * 1024
+nonisolated private let sudokuHTTPMaskStreamEOFHeader = "x-sudoku-stream-eof"
 
 nonisolated private enum SudokuHTTPMaskAuth {
     static func token(key: String, mode: String, method: String, path: String) -> String {
@@ -302,7 +302,7 @@ nonisolated private enum SudokuNativeCrypto {
     }
 }
 
-nonisolated final class SudokuNativeConfig {
+nonisolated final class SudokuNativeConfig: Sendable {
     let serverHost: String
     let serverPort: UInt16
     let key: String
@@ -413,7 +413,7 @@ nonisolated private enum SudokuTableCache {
     }
 }
 
-nonisolated final class SudokuTables {
+nonisolated final class SudokuTables: Sendable {
     private let pair: Mutex<SudokuTablePair>
     let sendsTableHint: Bool
 
@@ -439,7 +439,7 @@ nonisolated final class SudokuTables {
 /// write, and each per-request HTTPMask stream is used by one task), so this holds no
 /// send lock. Receive is single-flight by contract, so `pending` is only touched under
 /// a short synchronous `Mutex` — never across the wire `await`.
-nonisolated final class BlockingProxyStream {
+nonisolated final class BlockingProxyStream: Sendable {
     private let connection: ProxyConnection
     private let closed = Atomic<Bool>(false)
     private let pending = Mutex(SudokuDataQueue())
@@ -585,6 +585,9 @@ nonisolated final class SudokuConnectionFactory: Sendable {
 
     /// Prepared-connection pool state. Formerly guarded by an `NSCondition` used as a plain
     /// mutex; delivery is now via the async preparation `Task`s, so no thread ever parks here.
+    /// `generation`/`waiters` implement a generation-counted async broadcast so callers waiting
+    /// on the pool sleep until a transition (a connection lands, a pending drops, or close) or
+    /// their deadline, rather than polling.
     private struct PreparedState {
         var preparedConnections: [PreparedKey: [PreparedConnection]] = [:]
         var pendingPreparations: [PreparedKey: Int] = [:]
@@ -593,8 +596,51 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         /// Pending TTL-expiry and maintenance-retry timers, so `closeAll` can cancel them.
         var scheduledTasks: [Int: Task<Void, Never>] = [:]
         var nextScheduledTaskID = 0
+        var generation: UInt64 = 0
+        var nextWaiterID: UInt64 = 0
+        var waiters: [(id: UInt64, cont: AsyncStream<Never>.Continuation)] = []
     }
     private let preparedState = Mutex(PreparedState())
+
+    /// Bumps `generation` and returns every parked waiter to resume (outside the lock).
+    private func drainPreparedWaitersLocked(_ s: inout PreparedState) -> [AsyncStream<Never>.Continuation] {
+        s.generation &+= 1
+        let conts = s.waiters.map { $0.cont }
+        s.waiters.removeAll(keepingCapacity: true)
+        return conts
+    }
+
+    /// Suspends until the next prepared-pool broadcast. `observed` is the generation read under the
+    /// lock at the caller's decision point, so a broadcast racing in before registration is not lost.
+    /// Cancellation-aware: a cancelled waiter removes itself and resumes rather than leaking.
+    private func waitPreparedSignal(observed: UInt64) async {
+        let id = preparedState.withLock { s -> UInt64 in
+            let id = s.nextWaiterID
+            s.nextWaiterID &+= 1
+            return id
+        }
+        let stream: AsyncStream<Never>? = preparedState.withLock { s -> AsyncStream<Never>? in
+            if s.generation != observed { return nil }
+            let (stream, cont) = AsyncStream.makeStream(of: Never.self)
+            s.waiters.append((id: id, cont: cont))
+            return stream
+        }
+        guard let stream else { return }
+        for await _ in stream {}
+        preparedState.withLock { s in s.waiters.removeAll { $0.id == id } }
+    }
+
+    /// Suspends until a prepared-pool broadcast or `deadline`, whichever comes first.
+    private func waitPreparedSignal(observed: UInt64, until deadline: Date) async {
+        let interval = deadline.timeIntervalSinceNow
+        guard interval > 0 else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.waitPreparedSignal(observed: observed) }
+            group.addTask { try? await Task.sleep(for: .seconds(interval)) }
+            _ = await group.next()
+            group.cancelAll()
+        }
+    }
 
     init(configuration: ProxyConfiguration, initialTunnel: ProxyConnection?, directDialHost: String) {
         self.configuration = configuration
@@ -647,7 +693,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
 
     func stopMaintainingPreparedConnection(host: String, port: UInt16, useTLS: Bool, serverName: String?) {
         let key = preparedKey(host: host, port: port, useTLS: useTLS, serverName: serverName)
-        preparedState.withLock { $0.maintainedPreparations.removeValue(forKey: key) }
+        preparedState.withLock { _ = $0.maintainedPreparations.removeValue(forKey: key) }
     }
 
     func waitForPreparedConnection(
@@ -659,18 +705,19 @@ nonisolated final class SudokuConnectionFactory: Sendable {
     ) async throws {
         let key = preparedKey(host: host, port: port, useTLS: useTLS, serverName: serverName)
         let deadline = Date().addingTimeInterval(timeout)
-        // The prepared-connection pool is fed by async preparation tasks; poll it
-        // (non-blocking) rather than parking a cooperative thread.
+        // The prepared-connection pool is fed by async preparation tasks; sleep on the pool's
+        // async broadcast until a connection lands (or close/deadline) rather than polling.
         while true {
-            let (ready, closed) = preparedState.withLock { state in
-                (!(state.preparedConnections[key]?.isEmpty ?? true), state.preparedClosed)
+            try Task.checkCancellation()
+            let (ready, closed, generation) = preparedState.withLock { state in
+                (!(state.preparedConnections[key]?.isEmpty ?? true), state.preparedClosed, state.generation)
             }
             if ready { return }
             if closed { throw SudokuNativeError.closed }
             if Date() >= deadline {
                 throw SudokuNativeError.connectionFailed("timeout waiting for prepared HTTPMask upload")
             }
-            try await Task.sleep(for: .milliseconds(10))
+            await waitPreparedSignal(observed: generation, until: deadline)
         }
     }
 
@@ -761,6 +808,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
     }
 
     func closeAll() {
+        var waitersToWake: [AsyncStream<Never>.Continuation] = []
         let scheduledTasks: [Task<Void, Never>] = preparedState.withLock { state in
             state.preparedClosed = true
             state.preparedConnections.removeAll()
@@ -768,8 +816,10 @@ nonisolated final class SudokuConnectionFactory: Sendable {
             state.maintainedPreparations.removeAll()
             let tasks = Array(state.scheduledTasks.values)
             state.scheduledTasks.removeAll()
+            waitersToWake = drainPreparedWaitersLocked(&state)
             return tasks
         }
+        for cont in waitersToWake { cont.finish() }
         for task in scheduledTasks { task.cancel() }
 
         typealias Drained = (toClose: [ProxyConnection], clients: [ProxyClient],
@@ -822,7 +872,8 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         while true {
             let taken: (connection: PreparedConnection, maintainedCount: Int?)?
             let shouldWait: Bool
-            (taken, shouldWait) = preparedState.withLock { state -> ((connection: PreparedConnection, maintainedCount: Int?)?, Bool) in
+            let generation: UInt64
+            (taken, shouldWait, generation) = preparedState.withLock { state -> ((connection: PreparedConnection, maintainedCount: Int?)?, Bool, UInt64) in
                 if var ready = state.preparedConnections[key], !ready.isEmpty {
                     let connection = ready.removeFirst()
                     if ready.isEmpty {
@@ -830,10 +881,10 @@ nonisolated final class SudokuConnectionFactory: Sendable {
                     } else {
                         state.preparedConnections[key] = ready
                     }
-                    return ((connection, state.maintainedPreparations[key]), false)
+                    return ((connection, state.maintainedPreparations[key]), false, state.generation)
                 }
                 let shouldWait = !state.preparedClosed && (state.pendingPreparations[key] ?? 0) > 0
-                return (nil, shouldWait)
+                return (nil, shouldWait, state.generation)
             }
             if let taken {
                 if let maintainedCount = taken.maintainedCount {
@@ -841,14 +892,11 @@ nonisolated final class SudokuConnectionFactory: Sendable {
                 }
                 return taken.connection
             }
-            // Briefly poll (non-blocking) for an in-flight preparation to land, rather than
-            // parking a cooperative thread; otherwise dial fresh.
+            // Sleep on the pool's async broadcast until an in-flight preparation lands (or the
+            // deadline), rather than parking a cooperative thread; otherwise dial fresh.
             guard shouldWait, Date() < deadline else { return nil }
-            do {
-                try await Task.sleep(for: .milliseconds(5))
-            } catch {
-                return nil
-            }
+            await waitPreparedSignal(observed: generation, until: deadline)
+            if Task.isCancelled { return nil }
         }
     }
 
@@ -862,13 +910,16 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         let retained = retainConnection(connection)
         let prepared = retained ? PreparedConnection(connection: connection) : nil
 
+        var waitersToWake: [AsyncStream<Never>.Continuation] = []
         let acceptedPrepared: PreparedConnection? = preparedState.withLock { state in
             decrementPendingPreparationLocked(&state, for: key)
             if let prepared, !state.preparedClosed {
                 state.preparedConnections[key, default: []].append(prepared)
             }
+            waitersToWake = drainPreparedWaitersLocked(&state)
             return state.preparedClosed ? nil : prepared
         }
+        for cont in waitersToWake { cont.finish() }
 
         guard let acceptedPrepared else {
             if retained {
@@ -881,7 +932,11 @@ nonisolated final class SudokuConnectionFactory: Sendable {
     }
 
     private func finishPendingPreparation(for key: PreparedKey) {
-        preparedState.withLock { decrementPendingPreparationLocked(&$0, for: key) }
+        let conts = preparedState.withLock { state -> [AsyncStream<Never>.Continuation] in
+            decrementPendingPreparationLocked(&state, for: key)
+            return drainPreparedWaitersLocked(&state)
+        }
+        for cont in conts { cont.finish() }
     }
 
     private func decrementPendingPreparationLocked(_ state: inout PreparedState, for key: PreparedKey) {
@@ -1197,22 +1252,24 @@ nonisolated private final class SudokuHTTPBodyReader {
     }
 }
 
-nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
+nonisolated final class SudokuHTTPMaskTransport: Sendable {
     private let config: SudokuNativeConfig
     private let factory: SudokuConnectionFactory
     private let mode: SudokuHTTPMaskMode
     private let earlyRequestPayload: Data?
-    private(set) var earlyResponsePayload = Data()
 
-    /// Set once by `authorize()` (awaited in `init` before the loops start); read-only after.
-    private var token = ""
-    private var pullPath = ""
-    private var pushPath = ""
-    private var finPath = ""
-    private var closePath = ""
+    /// Request paths built once by `authorize()` (awaited in `init` before the loops start), so
+    /// set-once is compiler-checked rather than a bare-var contract.
+    private struct Paths {
+        let pullPath: String
+        let pushPath: String
+        let finPath: String
+        let closePath: String
+    }
+    private let paths: Paths
 
-    private var pullTask: Task<Void, Never>?
-    private var pushTask: Task<Void, Never>?
+    /// The early-handshake payload observed during `authorize()`; read by the record layer.
+    var earlyResponsePayload: Data { state.withLock { $0.earlyResponsePayload } }
 
     private enum Step<T> {
         case done(T)
@@ -1236,6 +1293,9 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         var pullReady = false
         var pushReady = false
         var stoppedPreparedMaintenance = false
+        var earlyResponsePayload = Data()
+        var pullTask: Task<Void, Never>?
+        var pushTask: Task<Void, Never>?
         var generation: UInt64 = 0
         var nextWaiterID: UInt64 = 0
         var waiters: [(id: UInt64, cont: AsyncStream<Never>.Continuation)] = []
@@ -1243,10 +1303,11 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     private let state = Mutex(State())
 
     init(config: SudokuNativeConfig, factory: SudokuConnectionFactory, mode: SudokuHTTPMaskMode, earlyRequestPayload: Data? = nil) async throws {
+        let earlyRequest = earlyRequestPayload?.isEmpty == false ? earlyRequestPayload : nil
         self.config = config
         self.factory = factory
         self.mode = mode
-        self.earlyRequestPayload = earlyRequestPayload?.isEmpty == false ? earlyRequestPayload : nil
+        self.earlyRequestPayload = earlyRequest
         let serverName = config.httpMask.host.isEmpty ? config.serverHost : config.httpMask.host
         factory.prepare(
             host: config.serverHost,
@@ -1263,9 +1324,18 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 serverName: serverName
             )
         }
-        try await authorize()
-        pullTask = Task { [weak self] in await self?.pullLoop() }
-        pushTask = Task { [weak self] in await self?.pushLoop() }
+        let auth = try await Self.authorize(config: config, factory: factory, mode: mode, earlyRequestPayload: earlyRequest)
+        self.paths = auth.paths
+        state.withLock { $0.earlyResponsePayload = auth.earlyResponse }
+        // Strong self: the loops own the connection for their lifetime. `markClosed` cancels both
+        // tasks and nils `pullTask`/`pushTask`, breaking the state → task → self cycle so ARC
+        // reclaims once each loop returns — no `[weak self]` retain-cycle guard needed.
+        let pull = Task { await self.pullLoop() }
+        let push = Task { await self.pushLoop() }
+        state.withLock { s in
+            s.pullTask = pull
+            s.pushTask = push
+        }
     }
 
     // MARK: Async broadcast (replaces the single NSCondition)
@@ -1366,7 +1436,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     func close() {
         markClosed(fatal: false)
         // Best-effort session-control close frame; the connection is already down for callers.
-        let path = closePath
+        let path = paths.closePath
         Task { [weak self] in try? await self?.sendSessionControl(path: path) }
     }
 
@@ -1399,31 +1469,36 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         )
     }
 
-    private var hostHeader: String {
+    private static func hostHeader(config: SudokuNativeConfig) -> String {
         let host = config.httpMask.host.isEmpty ? config.serverHost : config.httpMask.host
         if (config.httpMask.tls && config.serverPort == 443) || (!config.httpMask.tls && config.serverPort == 80) { return host }
         return "\(host):\(config.serverPort)"
     }
 
-    private func applyPathRoot(_ path: String) -> String {
+    private static func applyPathRoot(config: SudokuNativeConfig, _ path: String) -> String {
         SudokuHTTPMaskPathRoot.apply(config.httpMask.pathRoot, to: path)
     }
 
-    private func authToken(mode: String, method: String, path: String) -> String {
+    private static func authToken(config: SudokuNativeConfig, mode: String, method: String, path: String) -> String {
         SudokuHTTPMaskAuth.token(key: config.key, mode: mode, method: method, path: path)
     }
 
-    private func appendAuth(_ path: String, token: String) -> String {
+    private static func appendAuth(_ path: String, token: String) -> String {
         path + (path.contains("?") ? "&" : "?") + "auth=\(token)"
     }
 
-    private func appendEarlyData(_ path: String, payload: Data?) -> String {
+    private static func appendEarlyData(_ path: String, payload: Data?) -> String {
         guard let payload, !payload.isEmpty else { return path }
         let encoded = payload.base64URLEncodedString()
         return path + (path.contains("?") ? "&" : "?") + "ed=\(encoded)"
     }
 
-    private func request(
+    /// Static because `authorize()` must run before `self` is fully initialized; it depends only
+    /// on the immutable config/factory/mode, and the loops call it the same way.
+    private static func request(
+        config: SudokuNativeConfig,
+        factory: SudokuConnectionFactory,
+        mode: SudokuHTTPMaskMode,
         method: String,
         requestPath: String,
         authPath: String,
@@ -1432,9 +1507,9 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     ) async throws -> SudokuHTTPBodyReader {
         let stream = try await factory.open(host: config.serverHost, port: config.serverPort, useTLS: config.httpMask.tls, serverName: config.httpMask.host.isEmpty ? config.serverHost : config.httpMask.host)
         let modeName = mode == .poll ? "poll" : "stream"
-        let auth = authToken(mode: modeName, method: method, path: authPath)
+        let auth = authToken(config: config, mode: modeName, method: method, path: authPath)
         let path = appendAuth(requestPath, token: auth)
-        var requestHead = "\(method) \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: \(ProxyUserAgent.chrome)\r\nAccept: */*\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nX-Sudoku-Tunnel: \(modeName)\r\nAuthorization: Bearer \(auth)\r\n"
+        var requestHead = "\(method) \(path) HTTP/1.1\r\nHost: \(hostHeader(config: config))\r\nUser-Agent: \(ProxyUserAgent.chrome)\r\nAccept: */*\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nX-Sudoku-Tunnel: \(modeName)\r\nAuthorization: Bearer \(auth)\r\n"
         if let contentType { requestHead += "Content-Type: \(contentType)\r\n" }
         requestHead += "Content-Length: \(body.count)\r\n\r\n"
         var data = Data(requestHead.utf8)
@@ -1450,7 +1525,10 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         var lastError: Error = SudokuNativeError.connectionFailed("HTTPMask session control failed")
         for attempt in 0..<3 {
             do {
-                let opened = try await request(
+                let opened = try await Self.request(
+                    config: config,
+                    factory: factory,
+                    mode: mode,
                     method: "POST",
                     requestPath: path,
                     authPath: "/api/v1/upload",
@@ -1473,7 +1551,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         throw lastError
     }
 
-    private func readHeaders(stream: BlockingProxyStream) async throws -> SudokuHTTPBodyReader {
+    private static func readHeaders(stream: BlockingProxyStream) async throws -> SudokuHTTPBodyReader {
         let statusLine = try await sudokuReadHTTPLine(from: stream)
         let parts = statusLine.split(separator: " ")
         guard parts.count >= 2, let status = Int(parts[1]) else { throw SudokuNativeError.protocolError("bad HTTP response") }
@@ -1489,32 +1567,44 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         return SudokuHTTPBodyReader(stream: stream, status: status, chunked: chunked, contentLength: contentLength)
     }
 
-    private func authorize() async throws {
-        let sessionPath = applyPathRoot("/session")
-        let opened = try await request(method: "GET", requestPath: appendEarlyData(sessionPath, payload: earlyRequestPayload), authPath: "/session", body: Data())
+    /// Runs the `/session` handshake and returns the derived request paths plus any early-handshake
+    /// response payload. Static so `init` can assign the set-once `paths` `let` from its result.
+    private static func authorize(
+        config: SudokuNativeConfig,
+        factory: SudokuConnectionFactory,
+        mode: SudokuHTTPMaskMode,
+        earlyRequestPayload: Data?
+    ) async throws -> (paths: Paths, earlyResponse: Data) {
+        let sessionPath = applyPathRoot(config: config, "/session")
+        let opened = try await request(config: config, factory: factory, mode: mode, method: "GET", requestPath: appendEarlyData(sessionPath, payload: earlyRequestPayload), authPath: "/session", body: Data())
         guard opened.status == 200 else { throw SudokuNativeError.connectionFailed("HTTPMask authorize status \(opened.status)") }
         let body = try await opened.readAll(limit: 4096)
         guard let text = String(data: body, encoding: .utf8), let range = text.range(of: "token=") else {
             throw SudokuNativeError.connectionFailed("HTTPMask authorize missing token")
         }
         let tail = text[range.upperBound...]
-        token = String(tail.prefix { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+        let token = String(tail.prefix { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
         guard !token.isEmpty else { throw SudokuNativeError.connectionFailed("HTTPMask empty token") }
+        var earlyResponse = Data()
         for line in text.split(whereSeparator: \.isNewline) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.hasPrefix("ed=") else { continue }
             let encoded = String(trimmed.dropFirst(3))
             if let decoded = Data(base64URLEncoded: encoded) {
-                earlyResponsePayload = decoded
+                earlyResponse = decoded
             }
             break
         }
-        let streamPath = applyPathRoot("/stream")
-        let uploadPath = applyPathRoot("/api/v1/upload")
-        pullPath = "\(streamPath)?token=\(token)"
-        pushPath = "\(uploadPath)?token=\(token)"
-        finPath = "\(pushPath)&fin=1"
-        closePath = "\(pushPath)&close=1"
+        let streamPath = applyPathRoot(config: config, "/stream")
+        let uploadPath = applyPathRoot(config: config, "/api/v1/upload")
+        let pushPath = "\(uploadPath)?token=\(token)"
+        let paths = Paths(
+            pullPath: "\(streamPath)?token=\(token)",
+            pushPath: pushPath,
+            finPath: "\(pushPath)&fin=1",
+            closePath: "\(pushPath)&close=1"
+        )
+        return (paths, earlyResponse)
     }
 
     private func markReadEOF() {
@@ -1538,6 +1628,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
 
     private func markClosed(fatal: Bool) {
         var stopPreparedMaintenance = false
+        var tasksToCancel: [Task<Void, Never>] = []
         let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
             s.fatal = s.fatal || fatal
             s.closed = true
@@ -1545,12 +1636,14 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 s.stoppedPreparedMaintenance = true
                 stopPreparedMaintenance = true
             }
+            tasksToCancel = [s.pullTask, s.pushTask].compactMap { $0 }
+            s.pullTask = nil
+            s.pushTask = nil
             return drainWaitersLocked(&s)
         }
         // Wake every waiter (send/receive/waitReady/the loops), then stop the loops.
         for cont in conts { cont.finish() }
-        pullTask?.cancel()
-        pushTask?.cancel()
+        for task in tasksToCancel { task.cancel() }
         if stopPreparedMaintenance {
             factory.stopMaintainingPreparedConnection(
                 host: config.serverHost,
@@ -1569,7 +1662,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
 
             let opened: SudokuHTTPBodyReader
             do {
-                opened = try await request(method: "GET", requestPath: pullPath, authPath: "/stream", body: Data())
+                opened = try await Self.request(config: config, factory: factory, mode: mode, method: "GET", requestPath: paths.pullPath, authPath: "/stream", body: Data())
             } catch {
                 if state.withLock({ $0.closed }) || retryCount >= 12 {
                     markClosed(fatal: true)
@@ -1697,7 +1790,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
 
             if shouldFinishWrite {
                 do {
-                    try await sendSessionControl(path: finPath)
+                    try await sendSessionControl(path: paths.finPath)
                     completeWrite(nil)
                 } catch {
                     completeWrite(error)
@@ -1719,7 +1812,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                     body = batch
                     contentType = "application/octet-stream"
                 }
-                let opened = try await request(method: "POST", requestPath: pushPath, authPath: "/api/v1/upload", contentType: contentType, body: body)
+                let opened = try await Self.request(config: config, factory: factory, mode: mode, method: "POST", requestPath: paths.pushPath, authPath: "/api/v1/upload", contentType: contentType, body: body)
                 _ = try await opened.readAll(limit: 256)
                 guard opened.status == 200 else { throw SudokuNativeError.connectionFailed("HTTPMask push status \(opened.status)") }
                 let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
@@ -1735,7 +1828,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     }
 }
 
-nonisolated final class SudokuObfsTransport {
+nonisolated final class SudokuObfsTransport: Sendable {
     enum Wire {
         case stream(BlockingProxyStream)
         case httpMask(SudokuHTTPMaskTransport)
@@ -1743,13 +1836,16 @@ nonisolated final class SudokuObfsTransport {
 
     private let wire: Wire
     private let tables: SudokuTables
-    private var rng: SudokuXorshift64Star
-    private var threshold: UInt64 = 0
+    private let threshold: UInt64
     private let pureDownlink: Bool
+    /// Send-side RNG for uplink padding. Send is serialized by the record-layer send chain, so this
+    /// short synchronous critical section is uncontended and never held across the wire `await`.
+    private struct SendState {
+        var rng: SudokuXorshift64Star
+    }
+    private let sendState: Mutex<SendState>
     /// Short synchronous critical section around the decoder state — receive is single-flight
-    /// by contract, so this is never held across the wire `await`. Send serialization is
-    /// provided by the record-layer send chain (obfs `send` only ever run
-    /// under it), so no send lock lives here.
+    /// by contract, so this is never held across the wire `await`.
     private struct State {
         var pureDecoder = SudokuPureDecoder()
         var packedDecoder: SudokuPackedDecoder
@@ -1763,13 +1859,15 @@ nonisolated final class SudokuObfsTransport {
         let seedBytes = [UInt8](try SudokuNativeCrypto.randomData(count: 8))
         let seed = Int64(bitPattern: seedBytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) })
         var seeded = SudokuXorshift64Star(seed: seed)
-        threshold = seeded.pickPaddingThreshold(min: config.paddingMin, max: config.paddingMax)
-        rng = seeded
-        state = Mutex(State(packedDecoder: tables.withDownlink { SudokuPackedDecoder(table: $0) }))
+        self.threshold = seeded.pickPaddingThreshold(min: config.paddingMin, max: config.paddingMax)
+        self.sendState = Mutex(SendState(rng: seeded))
+        self.state = Mutex(State(packedDecoder: tables.withDownlink { SudokuPackedDecoder(table: $0) }))
     }
 
     func send(_ data: Data) async throws {
-        let encoded = tables.withUplink { $0.encode(data, rng: &rng, paddingThreshold: threshold) }
+        let encoded = sendState.withLock { sendState in
+            tables.withUplink { $0.encode(data, rng: &sendState.rng, paddingThreshold: threshold) }
+        }
         try await sendWire(encoded)
     }
 
@@ -1851,14 +1949,21 @@ nonisolated final class SudokuObfsTransport {
 
 }
 
-nonisolated final class SudokuRecordStream {
+nonisolated final class SudokuRecordStream: Sendable {
     private let transport: SudokuObfsTransport
-    private var method: SudokuAEADMethod
-    private var baseSend: Data
-    private var sendEpoch: UInt32
-    private var sendSeq: UInt64
-    private var sendBytes: Int64 = 0
-    private var sendEpochUpdates: UInt32 = 0
+    /// Set once at init; read from both the send and receive paths.
+    private let method: SudokuAEADMethod
+    /// Short synchronous critical section around the *send* state (epoch/seq/base + byte counters).
+    /// Every mutation runs inside a `chainedSend {}` body, so the lock is uncontended and never
+    /// held across the wire `await`.
+    private struct SendState {
+        var baseSend: Data
+        var sendEpoch: UInt32
+        var sendSeq: UInt64
+        var sendBytes: Int64 = 0
+        var sendEpochUpdates: UInt32 = 0
+    }
+    private let sendState: Mutex<SendState>
     /// Short synchronous critical section around the *receive* state (`readBuffer`, `recvSeq`,
     /// decryptor) — receive is single-flight, so this is never held across the wire `await`.
     private struct State {
@@ -1872,7 +1977,7 @@ nonisolated final class SudokuRecordStream {
     /// Tail of the send chain (mux frames from N streams + the keepalive timer converge here). Each
     /// chained body — the epoch/seq assignment plus the wire write — runs only once the previous
     /// finished, so record order matches wire order without a lock held across the `await`.
-    private let sendChain = SerialSendChain()
+    private let sendChain = SerialSender()
 
     /// Links `body` after all prior chained sends and awaits it (ordering + backpressure + errors).
     private func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
@@ -1882,19 +1987,23 @@ nonisolated final class SudokuRecordStream {
     init(transport: SudokuObfsTransport, method: SudokuAEADMethod, baseSend: Data, baseRecv: Data) throws {
         self.transport = transport
         self.method = method
-        self.baseSend = baseSend
-        self.sendEpoch = try SudokuNativeCrypto.randomNonZeroUInt32()
-        self.sendSeq = try SudokuNativeCrypto.randomNonZeroUInt64()
+        self.sendState = Mutex(SendState(
+            baseSend: baseSend,
+            sendEpoch: try SudokuNativeCrypto.randomNonZeroUInt32(),
+            sendSeq: try SudokuNativeCrypto.randomNonZeroUInt64()
+        ))
         self.state = Mutex(State(baseRecv: baseRecv))
     }
 
     func rekey(send: Data, recv: Data) async throws {
         try await chainedSend { [self] in
-            baseSend = send
-            sendEpoch = try SudokuNativeCrypto.randomNonZeroUInt32()
-            sendSeq = try SudokuNativeCrypto.randomNonZeroUInt64()
-            sendBytes = 0
-            sendEpochUpdates = 0
+            try sendState.withLock { s in
+                s.baseSend = send
+                s.sendEpoch = try SudokuNativeCrypto.randomNonZeroUInt32()
+                s.sendSeq = try SudokuNativeCrypto.randomNonZeroUInt64()
+                s.sendBytes = 0
+                s.sendEpochUpdates = 0
+            }
             state.withLock { state in
                 state.baseRecv = recv
                 state.recvEpoch = 0
@@ -1917,18 +2026,21 @@ nonisolated final class SudokuRecordStream {
                 let maxPlain = 65535 - 12 - 16
                 let count = min(maxPlain, data.count - offset)
                 let chunk = data.rangeData(offset: offset, count: count)
-                var header = Data()
-                var epochBE = sendEpoch.bigEndian
-                var seqBE = sendSeq.bigEndian
-                header.append(Data(bytes: &epochBE, count: 4))
-                header.append(Data(bytes: &seqBE, count: 8))
-                sendSeq &+= 1
-                let key = SudokuNativeCrypto.recordEpochKey(base: baseSend, method: method, epoch: sendEpoch)
-                let cipher = try SudokuNativeCrypto.seal(method: method, key: key, nonce: header, plaintext: chunk, aad: header)
-                var bodyLen = UInt16(header.count + cipher.count).bigEndian
-                var frame = Data(bytes: &bodyLen, count: 2)
-                frame.append(header)
-                frame.append(cipher)
+                let frame = try sendState.withLock { s -> Data in
+                    var header = Data()
+                    var epochBE = s.sendEpoch.bigEndian
+                    var seqBE = s.sendSeq.bigEndian
+                    header.append(Data(bytes: &epochBE, count: 4))
+                    header.append(Data(bytes: &seqBE, count: 8))
+                    s.sendSeq &+= 1
+                    let key = SudokuNativeCrypto.recordEpochKey(base: s.baseSend, method: method, epoch: s.sendEpoch)
+                    let cipher = try SudokuNativeCrypto.seal(method: method, key: key, nonce: header, plaintext: chunk, aad: header)
+                    var bodyLen = UInt16(header.count + cipher.count).bigEndian
+                    var frame = Data(bytes: &bodyLen, count: 2)
+                    frame.append(header)
+                    frame.append(cipher)
+                    return frame
+                }
                 try await transport.send(frame)
                 offset += count
                 try maybeBumpSendEpoch(added: count)
@@ -2005,12 +2117,14 @@ nonisolated final class SudokuRecordStream {
 
     private func maybeBumpSendEpoch(added: Int) throws {
         guard method != .none else { return }
-        sendBytes += Int64(added)
-        let threshold = Int64(32 << 20) * Int64(sendEpochUpdates + 1)
-        guard sendBytes >= threshold else { return }
-        sendEpoch &+= 1
-        sendEpochUpdates &+= 1
-        sendSeq = try SudokuNativeCrypto.randomNonZeroUInt64()
+        try sendState.withLock { s in
+            s.sendBytes += Int64(added)
+            let threshold = Int64(32 << 20) * Int64(s.sendEpochUpdates + 1)
+            guard s.sendBytes >= threshold else { return }
+            s.sendEpoch &+= 1
+            s.sendEpochUpdates &+= 1
+            s.sendSeq = try SudokuNativeCrypto.randomNonZeroUInt64()
+        }
     }
 }
 
@@ -2313,7 +2427,7 @@ nonisolated private enum SudokuAddress {
     }
 }
 
-nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
+nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
     private static let keepaliveInterval: TimeInterval = 15
     private let record: SudokuRecordStream
     /// Non-nil when the session owns its transport (pooled sessions); torn down on close.
@@ -2326,11 +2440,10 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
         var closed = false
         /// Called once when the session becomes permanently unusable so the pool can evict it.
         var onClose: (() -> Void)?
+        /// The 15s keepalive loop; cancelled on close.
+        var keepaliveTask: Task<Void, Never>?
     }
     private let state = Mutex(State())
-
-    /// The 15s keepalive loop; cancelled on close.
-    private var keepaliveTask: Task<Void, Never>?
 
     /// Called once when the session becomes permanently unusable so the pool can evict it.
     var onClose: (() -> Void)? {
@@ -2350,13 +2463,14 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
     init(record: SudokuRecordStream, factory: SudokuConnectionFactory? = nil) {
         self.record = record
         self.factory = factory
-        keepaliveTask = Task { [weak self] in
+        let keepaliveTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.keepaliveInterval))
                 if Task.isCancelled { return }
                 self?.sendKeepaliveIfIdle()
             }
         }
+        state.withLock { $0.keepaliveTask = keepaliveTask }
         Task { [weak self] in await self?.readerLoop() }
     }
 
@@ -2371,7 +2485,7 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
         do {
             try await sendFrame(type: 0x01, streamID: stream.id, payload: SudokuAddress.encode(host: host, port: port))
         } catch {
-            state.withLock { $0.streams.removeValue(forKey: stream.id) }
+            state.withLock { _ = $0.streams.removeValue(forKey: stream.id) }
             stream.markClosed(discardQueuedData: true, error: error)
             throw error
         }
@@ -2398,22 +2512,24 @@ nonisolated final class SudokuMuxClient: Multiplexer, @unchecked Sendable {
     }
 
     func removeStream(id: UInt32) {
-        state.withLock { $0.streams.removeValue(forKey: id) }
+        state.withLock { _ = $0.streams.removeValue(forKey: id) }
     }
 
     /// `error` non-nil for transport failure, nil for clean close.
     func close(error: Error? = nil) {
-        let drained: (streams: [SudokuMuxStream], callback: (() -> Void)?)? = state.withLock { state in
+        let drained: (streams: [SudokuMuxStream], callback: (() -> Void)?, keepalive: Task<Void, Never>?)? = state.withLock { state in
             if state.closed { return nil }
             state.closed = true
             let streamsToClose = Array(state.streams.values)
             state.streams.removeAll()
             let closeCallback = state.onClose
             state.onClose = nil
-            return (streamsToClose, closeCallback)
+            let keepalive = state.keepaliveTask
+            state.keepaliveTask = nil
+            return (streamsToClose, closeCallback, keepalive)
         }
         guard let drained else { return }
-        keepaliveTask?.cancel()
+        drained.keepalive?.cancel()
         for stream in drained.streams {
             stream.markClosed(discardQueuedData: true)
         }
@@ -2508,7 +2624,7 @@ nonisolated final class SudokuMuxStream: Sendable {
     /// Tail of this stream's send chain: each frame (data chunk or the FIN) links after the previous
     /// and runs only once it finishes, so no data frame is ever emitted after the close frame — no
     /// lock held across the `await`.
-    private let sendChain = SerialSendChain()
+    private let sendChain = SerialSender()
 
     /// Links `body` after all prior chained sends and awaits it (ordering + backpressure + errors).
     private func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
@@ -2694,7 +2810,7 @@ nonisolated final class SudokuMuxStream: Sendable {
 
 nonisolated final class SudokuTCPProxyConnection:
     ProxyConnection,
-    @unchecked Sendable
+    Sendable
 {
     private let closed = Atomic<Bool>(false)
     private let stream: SudokuRecordStream
@@ -2789,7 +2905,7 @@ nonisolated final class SudokuMuxTCPProxyConnection:
     }
 }
 
-nonisolated final class SudokuUDPProxyConnection: ProxyConnection, @unchecked Sendable {
+nonisolated final class SudokuUDPProxyConnection: ProxyConnection, Sendable {
     private let closed = Atomic<Bool>(false)
     private let stream: SudokuRecordStream
     private let destinationHost: String

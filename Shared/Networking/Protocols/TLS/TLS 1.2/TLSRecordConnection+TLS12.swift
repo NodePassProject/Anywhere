@@ -10,37 +10,39 @@ import CryptoKit
 import CommonCrypto
 import Synchronization
 
-extension TLSRecordConnection {
+nonisolated extension TLSRecordConnection {
 
     // MARK: - TLS 1.2 Record Crypto
 
     func encryptTLS12Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        let seqNum = nextEgressSeqNum()
+        // One atomic fetch pairs this record's sequence number with its key generation.
+        let egress = nextEgressState()
 
         let version = tlsVersion
 
         if TLSCipherSuite.isAEAD(cipherSuite) {
-            return try encryptTLS12AEAD(plaintext: plaintext, contentType: contentType, seqNum: seqNum, version: version)
+            return try encryptTLS12AEAD(plaintext: plaintext, contentType: contentType, egress: egress, version: version)
         } else {
-            return try encryptTLS12CBC(plaintext: plaintext, contentType: contentType, seqNum: seqNum, version: version)
+            return try encryptTLS12CBC(plaintext: plaintext, contentType: contentType, egress: egress, version: version)
         }
     }
 
-    private func encryptTLS12AEAD(plaintext: Data, contentType: UInt8, seqNum: UInt64, version: UInt16) throws -> Data {
+    private func encryptTLS12AEAD(plaintext: Data, contentType: UInt8, egress: DirectionState, version: UInt16) throws -> Data {
+        let seqNum = egress.seqNum
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
 
         let nonce: Data
         let explicitNonce: Data
         if isChaCha {
-            var n = egressIV
+            var n = egress.iv
             xorSeqIntoNonce(&n, seqNum: seqNum)
             nonce = n
             explicitNonce = Data()
         } else {
             var seqBytes = Data(count: 8)
             for i in 0..<8 { seqBytes[i] = UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
-            var n = egressIV
+            var n = egress.iv
             n.append(seqBytes)
             nonce = n
             explicitNonce = seqBytes
@@ -54,7 +56,7 @@ extension TLSRecordConnection {
         aad.append(UInt8((plaintext.count >> 8) & 0xFF))
         aad.append(UInt8(plaintext.count & 0xFF))
 
-        let (ct, tag) = try sealAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: egressSymmetricKey)
+        let (ct, tag) = try sealAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: egress.symmetricKey)
 
         let recordPayloadLen = explicitNonceLen + ct.count + tag.count
         var record = Data(capacity: 5 + recordPayloadLen)
@@ -69,7 +71,8 @@ extension TLSRecordConnection {
         return record
     }
 
-    private func encryptTLS12CBC(plaintext: Data, contentType: UInt8, seqNum: UInt64, version: UInt16) throws -> Data {
+    private func encryptTLS12CBC(plaintext: Data, contentType: UInt8, egress: DirectionState, version: UInt16) throws -> Data {
+        let seqNum = egress.seqNum
         let useSHA384 = TLSCipherSuite.usesSHA384(cipherSuite)
         let useSHA256: Bool
         switch cipherSuite {
@@ -103,7 +106,7 @@ extension TLSRecordConnection {
 
         var encrypted = Data(count: data.count)
         var numBytesEncrypted = 0
-        let cbcKey = egressKey
+        let cbcKey = egress.key
         let status = encrypted.withUnsafeMutableBytes { outPtr in
             data.withUnsafeBytes { inPtr in
                 cbcKey.withUnsafeBytes { keyPtr in
@@ -139,15 +142,18 @@ extension TLSRecordConnection {
         return record
     }
 
-    func decryptTLS12Record(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
+    /// Opens one record with the `ingress` snapshot (keys + sequence number, fetched atomically
+    /// by the caller).
+    func decryptTLS12Record(ciphertext: Data, header: Data, ingress: DirectionState) throws -> Data {
         if TLSCipherSuite.isAEAD(cipherSuite) {
-            return try decryptTLS12AEAD(ciphertext: ciphertext, header: header, seqNum: seqNum)
+            return try decryptTLS12AEAD(ciphertext: ciphertext, header: header, ingress: ingress)
         } else {
-            return try decryptTLS12CBC(ciphertext: ciphertext, header: header, seqNum: seqNum)
+            return try decryptTLS12CBC(ciphertext: ciphertext, header: header, ingress: ingress)
         }
     }
 
-    private func decryptTLS12AEAD(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
+    private func decryptTLS12AEAD(ciphertext: Data, header: Data, ingress: DirectionState) throws -> Data {
+        let seqNum = ingress.seqNum
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
         let version = tlsVersion
@@ -162,11 +168,11 @@ extension TLSRecordConnection {
 
         let nonce: Data
         if isChaCha {
-            var n = ingressIV
+            var n = ingress.iv
             xorSeqIntoNonce(&n, seqNum: seqNum)
             nonce = n
         } else {
-            var n = ingressIV
+            var n = ingress.iv
             n.append(explicitNonce)
             nonce = n
         }
@@ -183,10 +189,11 @@ extension TLSRecordConnection {
         let ct = Data(payload.prefix(payload.count - 16))
         let tag = Data(payload.suffix(16))
 
-        return try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: aad, key: ingressSymmetricKey)
+        return try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: aad, key: ingress.symmetricKey)
     }
 
-    private func decryptTLS12CBC(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
+    private func decryptTLS12CBC(ciphertext: Data, header: Data, ingress: DirectionState) throws -> Data {
+        let seqNum = ingress.seqNum
         let blockSize = 16
         let version = tlsVersion
         let contentType = header.first ?? TLSContentType.applicationData
@@ -204,7 +211,7 @@ extension TLSRecordConnection {
 
         var decrypted = Data(count: encrypted.count)
         var numBytesDecrypted = 0
-        let cbcKey = ingressKey
+        let cbcKey = ingress.key
         let status = decrypted.withUnsafeMutableBytes { outPtr in
             encrypted.withUnsafeBytes { inPtr in
                 cbcKey.withUnsafeBytes { keyPtr in

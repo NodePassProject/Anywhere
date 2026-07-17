@@ -40,19 +40,17 @@ nonisolated enum HysteriaError: Error, LocalizedError {
 
 // MARK: - HysteriaSession
 
-nonisolated final class HysteriaSession: Sendable {
+/// One authenticated Hysteria (HTTP/3-shaped) session over a `QUICConnection`. An actor on
+/// the QUIC connection's serial executor, so the demux path, the auth state machine, and
+/// ngtcp2 share a single isolation domain with no cross-queue dispatch.
+actor HysteriaSession {
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor { quic.unownedExecutor }
 
     enum State { case idle, connecting, authenticating, ready, closed }
 
     private let quic: QUICConnection
     private let configuration: HysteriaConfiguration
-
-    var isOnQueue: Bool { quic.isOnQueue }
-
-    /// Runs `body` on the ngtcp2 queue and awaits its result (forwards the bridge hop), so
-    /// this session's connections stay free of raw `queue.async`+continuation.
-    func run<T>(_ body: @escaping () -> T) async -> T { await quic.run(body) }
-    func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T { try await quic.run(body) }
 
     private var state: State = .idle
 
@@ -74,9 +72,6 @@ nonisolated final class HysteriaSession: Sendable {
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
 
-    /// Fired once when the session transitions to `.closed`.
-    var onClose: (() -> Void)?
-
     private var tcpStreams: [Int64: HysteriaConnection] = [:]
 
     /// Server-initiated streams already rejected via STOP_SENDING/RESET_STREAM,
@@ -88,16 +83,16 @@ nonisolated final class HysteriaSession: Sendable {
 
     /// Pending idle close; without it the QUIC connection (socket, ngtcp2
     /// state, keep-alive PING) stays resident forever after the last consumer
-    /// goes away. Accessed only on `queue`.
+    /// goes away.
     private var idleCloseTask: Task<Void, Never>?
     /// Idle window before self-close; 60 s frees resources promptly yet
     /// survives back-to-back UDP queries.
     private static let idleCloseDelay: TimeInterval = 60
 
-    private(set) var udpSupported = false
-    private(set) var serverRxBytesPerSec: UInt64 = 0
+    private var udpSupported = false
+    private var serverRxBytesPerSec: UInt64 = 0
 
-    // MARK: Pool-visible state (accessed without the queue)
+    // MARK: Pool-visible state (read without entering the actor)
 
     /// Read and written only inside `_poolState.withLock`; a lock-free read
     /// of a locked `Bool` write is a data race under Swift's memory model.
@@ -105,15 +100,22 @@ nonisolated final class HysteriaSession: Sendable {
         var isClosed = false
         var tcpCount = 0
         var udpCount = 0
+        /// Registry eviction hook, fired exactly once on close.
+        var onClose: (@Sendable () -> Void)?
     }
     private let _poolState = Mutex(PoolState())
 
-    var isClosed: Bool {
+    nonisolated var isClosed: Bool {
         _poolState.withLock { $0.isClosed }
     }
 
-    var hasActiveConnections: Bool {
+    nonisolated var hasActiveConnections: Bool {
         _poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
+    }
+
+    /// Installs the registry's eviction hook; fired exactly once when the session closes.
+    nonisolated func setOnClose(_ hook: @escaping @Sendable () -> Void) {
+        _poolState.withLock { $0.onClose = hook }
     }
 
     // MARK: - Init
@@ -149,9 +151,8 @@ nonisolated final class HysteriaSession: Sendable {
     // MARK: - Lifecycle
 
     func ensureReady() async throws {
-        // Kick off connect+auth exactly once, on the ngtcp2 queue; the gate resolves it.
-        await quic.run { [self] in
-            guard state == .idle else { return }
+        // Kick off connect+auth exactly once; the gate resolves it.
+        if state == .idle {
             state = .connecting
             startConnection()
         }
@@ -162,33 +163,37 @@ nonisolated final class HysteriaSession: Sendable {
     private func startConnection() {
         QUICCrypto.registerCallbacks()
 
-        quic.connectionClosedHandler = { [weak self] error in
-            self?.failSession(error)
+        quic.handlers.withLock { handlers in
+            handlers.connectionClosed = { [weak self] error in
+                self?.assumeIsolated { $0.failSession(error) }
+            }
         }
-        
-        Task { [weak self] in
-            guard let self else { return }
+
+        // Strong `self`: the connect task owns the session until auth kicks off, so it
+        // can't deallocate mid-handshake and leak the ngtcp2 state. Explicit `[self]` so the
+        // deliberately-weak captures in the stored QUIC handlers below read as intentional.
+        Task { [self] in
             do {
                 try await quic.connect()
             } catch {
-                await quic.run { self.failSession(error) }
+                failSession(error)
                 return
             }
-            await quic.run { [self] in
-                self.quic.streamDataHandler = { [weak self] sid, data, fin in
-                    self?.handleStreamData(sid: sid, data: data, fin: fin)
+            quic.handlers.withLock { handlers in
+                handlers.streamData = { [weak self] sid, data, fin in
+                    self?.assumeIsolated { $0.handleStreamData(sid: sid, data: data, fin: fin) }
                 }
-                self.quic.streamTerminationHandler = { [weak self] sid, error in
-                    self?.handleStreamTermination(sid: sid, error: error)
+                handlers.streamTermination = { [weak self] sid, error in
+                    self?.assumeIsolated { $0.handleStreamTermination(sid: sid, error: error) }
                 }
-                self.quic.datagramHandler = { [weak self] data in
-                    self?.handleDatagram(data)
+                handlers.datagram = { [weak self] data in
+                    self?.assumeIsolated { $0.handleDatagram(data) }
                 }
-
-                self.openHTTP3Control()
-                self.sendAuthRequest()
-                self.state = .authenticating
             }
+
+            openHTTP3Control()
+            sendAuthRequest()
+            state = .authenticating
         }
     }
 
@@ -252,7 +257,7 @@ nonisolated final class HysteriaSession: Sendable {
         let frame = HysteriaHTTP3Codec.encodeAuthRequestFrame(
             authority: "hysteria", path: "/auth", extraHeaders: extraHeaders
         )
-        
+
         quic.writeStreamOnQueue(sid, data: frame)
     }
 
@@ -376,7 +381,6 @@ nonisolated final class HysteriaSession: Sendable {
         guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
         _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
         updateIdleCloseTimer()
-        // On the ngtcp2 executor, which the connection actor shares — enter it directly.
         connection.handleStreamTermination(error: error)
     }
 
@@ -392,75 +396,77 @@ nonisolated final class HysteriaSession: Sendable {
 
     // MARK: - TCP stream API (called by HysteriaConnection)
 
-    func openTCPStream(for connection: HysteriaConnection) async throws -> Int64 {
-        try await quic.run { [self] () -> Result<Int64, Error> in
-            guard state == .ready else { return .failure(HysteriaError.notReady) }
-            guard let sid = quic.openBidiStream() else {
-                return .failure(HysteriaError.connectionFailed("Failed to open TCP stream"))
-            }
-            tcpStreams[sid] = connection
-            _poolState.withLock { $0.tcpCount += 1 }
-            updateIdleCloseTimer()
-            return .success(sid)
+    func openTCPStream(for connection: HysteriaConnection) throws -> Int64 {
+        guard state == .ready else { throw HysteriaError.notReady }
+        guard let sid = quic.openBidiStream() else {
+            throw HysteriaError.connectionFailed("Failed to open TCP stream")
         }
+        tcpStreams[sid] = connection
+        _poolState.withLock { $0.tcpCount += 1 }
+        updateIdleCloseTimer()
+        return sid
     }
 
     /// Async stream write, over the QUIC ngtcp2-boundary continuation.
-    func writeStream(_ sid: Int64, data: Data) async throws {
+    nonisolated func writeStream(_ sid: Int64, data: Data) async throws {
         try await quic.writeStream(sid, data: data)
     }
 
-    func extendStreamOffset(_ sid: Int64, count: Int) {
+    nonisolated func extendStreamOffset(_ sid: Int64, count: Int) {
         quic.extendStreamOffset(sid, count: count)
     }
 
-    func shutdownStream(_ sid: Int64, appErrorCode: UInt64 = HysteriaProtocol.closeErrCodeOK) {
+    nonisolated func shutdownStream(_ sid: Int64, appErrorCode: UInt64 = HysteriaProtocol.closeErrCodeOK) {
         quic.shutdownStream(sid, appErrorCode: appErrorCode)
     }
 
-    func releaseTCPStream(_ sid: Int64) {
-        quic.enqueue { [weak self] in
-            guard let self else { return }
-            if self.tcpStreams.removeValue(forKey: sid) != nil {
-                self._poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
-                self.updateIdleCloseTimer()
-            }
+    nonisolated func releaseTCPStream(_ sid: Int64) {
+        Task {
+            await self.performReleaseTCPStream(sid)
+        }
+    }
+
+    private func performReleaseTCPStream(_ sid: Int64) {
+        if tcpStreams.removeValue(forKey: sid) != nil {
+            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
+            updateIdleCloseTimer()
         }
     }
 
     // MARK: - UDP session API (called by HysteriaUDPConnection)
 
-    func registerUDPSession(_ conn: HysteriaUDPConnection) async throws -> UInt32 {
-        try await quic.run { [self] () -> Result<UInt32, Error> in
-            guard state == .ready else { return .failure(HysteriaError.notReady) }
-            guard udpSupported else { return .failure(HysteriaError.udpNotSupported) }
-            guard udpSessions.count < Int(UInt32.max) else {
-                return .failure(HysteriaError.connectionFailed("UDP session pool exhausted"))
-            }
-            var sid = nextUDPSessionID
-            while udpSessions[sid] != nil {
-                sid = sid == UInt32.max ? 1 : sid + 1
-            }
-            nextUDPSessionID = sid == UInt32.max ? 1 : sid + 1
-            udpSessions[sid] = conn
-            _poolState.withLock { $0.udpCount += 1 }
+    func registerUDPSession(_ conn: HysteriaUDPConnection) throws -> UInt32 {
+        guard state == .ready else { throw HysteriaError.notReady }
+        guard udpSupported else { throw HysteriaError.udpNotSupported }
+        guard udpSessions.count < Int(UInt32.max) else {
+            throw HysteriaError.connectionFailed("UDP session pool exhausted")
+        }
+        var sid = nextUDPSessionID
+        while udpSessions[sid] != nil {
+            sid = sid == UInt32.max ? 1 : sid + 1
+        }
+        nextUDPSessionID = sid == UInt32.max ? 1 : sid + 1
+        udpSessions[sid] = conn
+        _poolState.withLock { $0.udpCount += 1 }
+        updateIdleCloseTimer()
+        return sid
+    }
+
+    nonisolated func releaseUDPSession(_ sessionID: UInt32) {
+        Task {
+            await self.performReleaseUDPSession(sessionID)
+        }
+    }
+
+    private func performReleaseUDPSession(_ sessionID: UInt32) {
+        if udpSessions.removeValue(forKey: sessionID) != nil {
+            _poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
             updateIdleCloseTimer()
-            return .success(sid)
         }
     }
 
-    func releaseUDPSession(_ sessionID: UInt32) {
-        quic.enqueue { [weak self] in
-            guard let self else { return }
-            if self.udpSessions.removeValue(forKey: sessionID) != nil {
-                self._poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
-                self.updateIdleCloseTimer()
-            }
-        }
-    }
-
-    /// Called on `queue`. Re-checks counts at fire time so a rapid
-    /// release-then-open cycle doesn't tear the connection down.
+    /// Re-checks counts at fire time so a rapid release-then-open cycle doesn't
+    /// tear the connection down.
     private func updateIdleCloseTimer() {
         idleCloseTask?.cancel()
         idleCloseTask = nil
@@ -469,106 +475,84 @@ nonisolated final class HysteriaSession: Sendable {
         let total = _poolState.withLock { $0.tcpCount + $0.udpCount }
         guard total == 0 else { return }
 
-        // Fires on `queue` (hopped back on) so the re-check and close stay serialized with session state.
+        // Weak: the idle timer observes its owner; it must not keep an otherwise
+        // dropped session alive for the whole idle window.
         idleCloseTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.idleCloseDelay))
             guard !Task.isCancelled, let self else { return }
-            self.quic.enqueue {
-                let liveCount = self._poolState.withLock { $0.tcpCount + $0.udpCount }
-                guard liveCount == 0, self.state == .ready else { return }
-                self.close()
-            }
+            await self.closeIfStillIdle()
         }
     }
 
+    private func closeIfStillIdle() {
+        let liveCount = _poolState.withLock { $0.tcpCount + $0.udpCount }
+        guard liveCount == 0, state == .ready else { return }
+        performTeardown(readyError: HysteriaError.streamClosed,
+                        connectionError: HysteriaError.connectionFailed("Session closed"))
+    }
+
     /// Async DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
-    func writeDatagrams(_ datagrams: [Data]) async throws {
+    nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
         try await quic.writeDatagrams(datagrams)
     }
 
-    var maxDatagramPayloadSize: Int {
-        quic.maxDatagramPayloadSize
-    }
-
-    /// Async reader for the path-MTU-bounded datagram payload size (hops onto `queue`).
-    func currentMaxDatagramPayloadSize() async -> Int {
+    /// Async reader for the path-MTU-bounded datagram payload size.
+    nonisolated func currentMaxDatagramPayloadSize() async -> Int {
         await quic.currentMaxDatagramPayloadSize()
     }
 
     // MARK: - Close
 
-    func close() {
-        // Strong `self`: an off-queue caller may hold the last reference;
-        // weak could dealloc before the block runs, leaking the socket.
-        let work = {
-            guard !self.closed else { return }
-            self.closed = true
-            self.state = .closed
-
-            self.idleCloseTask?.cancel()
-            self.idleCloseTask = nil
-
-            // Zero counters atomically with isClosed so hasActiveConnections
-            // never reads true on a closed session.
-            self._poolState.withLock { state in
-                state.isClosed = true
-                state.tcpCount = 0
-                state.udpCount = 0
+    nonisolated func close() {
+        // Strong `self`: an off-actor caller may hold the last reference; the enqueued
+        // teardown must still run so the socket and ngtcp2 state are released.
+        quic.enqueue {
+            self.assumeIsolated {
+                $0.performTeardown(readyError: HysteriaError.streamClosed,
+                                   connectionError: HysteriaError.connectionFailed("Session closed"))
             }
-
-            // `streamClosed` (not a connect failure) so a racing acquire retries on a fresh session.
-            self.readySignal.finish(throwing: HysteriaError.streamClosed)
-
-            let tcp = Array(self.tcpStreams.values)
-            self.tcpStreams.removeAll()
-            for c in tcp { c.handleSessionError(HysteriaError.connectionFailed("Session closed")) }
-
-            let udp = Array(self.udpSessions.values)
-            self.udpSessions.removeAll()
-            for c in udp { c.handleSessionError(HysteriaError.connectionFailed("Session closed")) }
-
-            self.rejectedServerStreams.removeAll()
-
-            self.quic.close()
-            self.onClose?()
-        }
-        if isOnQueue {
-            work()
-        } else {
-            quic.enqueue(work)
         }
     }
 
     private func failSession(_ error: Error) {
-        // Strong `self` and shared `closed` flag as in close(); first enqueue wins.
-        quic.enqueue {
-            guard !self.closed else { return }
-            self.closed = true
-            self.state = .closed
+        performTeardown(readyError: error, connectionError: error)
+    }
 
-            self.idleCloseTask?.cancel()
-            self.idleCloseTask = nil
+    /// Terminal teardown; the `closed` gate makes it run exactly once. `readyError` resolves
+    /// pending `ensureReady()` awaiters (`.streamClosed` marks a retryable eviction);
+    /// `connectionError` fans out to live TCP/UDP consumers.
+    private func performTeardown(readyError: Error, connectionError: Error) {
+        guard !closed else { return }
+        closed = true
+        state = .closed
 
-            self._poolState.withLock { state in
-                state.isClosed = true
-                state.tcpCount = 0
-                state.udpCount = 0
-            }
+        idleCloseTask?.cancel()
+        idleCloseTask = nil
 
-            self.readySignal.finish(throwing: error)
-
-            let tcp = Array(self.tcpStreams.values)
-            self.tcpStreams.removeAll()
-            for c in tcp { c.handleSessionError(error) }
-
-            let udp = Array(self.udpSessions.values)
-            self.udpSessions.removeAll()
-            for c in udp { c.handleSessionError(error) }
-
-            self.rejectedServerStreams.removeAll()
-
-            self.quic.close()
-            self.onClose?()
+        // Zero counters atomically with isClosed so hasActiveConnections
+        // never reads true on a closed session.
+        let onClose = _poolState.withLock { state in
+            state.isClosed = true
+            state.tcpCount = 0
+            state.udpCount = 0
+            let hook = state.onClose
+            state.onClose = nil
+            return hook
         }
+
+        readySignal.finish(throwing: readyError)
+
+        let tcp = Array(tcpStreams.values)
+        tcpStreams.removeAll()
+        for c in tcp { c.handleSessionError(connectionError) }
+
+        let udp = Array(udpSessions.values)
+        udpSessions.removeAll()
+        for c in udp { c.handleSessionError(connectionError) }
+
+        rejectedServerStreams.removeAll()
+
+        quic.close()
+        onClose?()
     }
 }

@@ -19,7 +19,7 @@ nonisolated protocol UDPFramingCapable: AnyObject {
     var udpState: Mutex<UDPFramingState> { get }
 }
 
-extension UDPFramingCapable {
+nonisolated extension UDPFramingCapable {
     func frameUDPPacket(_ data: Data) -> Data {
         var framedData = Data(capacity: 2 + data.count)
         let length = UInt16(data.count)

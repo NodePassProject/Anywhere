@@ -10,18 +10,19 @@ import CryptoKit
 import CommonCrypto
 import Synchronization
 
-extension TLSRecordConnection {
+nonisolated extension TLSRecordConnection {
 
     // MARK: - TLS 1.3 Record Crypto
 
-    nonisolated func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
-        let seqNum = nextEgressSeqNum()
+    func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
+        // One atomic fetch pairs this record's sequence number with its key generation.
+        let egress = nextEgressState()
 
         let innerLen = plaintext.count + 1
         let encryptedLen = innerLen + 16
 
-        var nonce = egressIV
-        xorSeqIntoNonce(&nonce, seqNum: seqNum)
+        var nonce = egress.iv
+        xorSeqIntoNonce(&nonce, seqNum: egress.seqNum)
 
         var innerPlaintext = Data(count: innerLen)
         innerPlaintext.withUnsafeMutableBytes { buffer in
@@ -31,7 +32,7 @@ extension TLSRecordConnection {
 
         let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 
-        let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egressSymmetricKey)
+        let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egress.symmetricKey)
 
         var record = Data(capacity: 5 + encryptedLen)
         record.append(aad)
@@ -40,18 +41,21 @@ extension TLSRecordConnection {
         return record
     }
 
-    func decryptTLS13Record(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
+    /// Opens one record with the `ingress` snapshot (keys + sequence number, fetched atomically
+    /// by the caller); latches close-notify/KeyUpdate flags through `state`, which the caller
+    /// holds under the `receiveState` lock.
+    func decryptTLS13Record(ciphertext: Data, header: Data, ingress: DirectionState, receive state: inout ReceiveState) throws -> Data {
         guard ciphertext.count >= 16 else {
             throw TLSRecordError.ciphertextTooShort
         }
 
-        var nonce = ingressIV
-        xorSeqIntoNonce(&nonce, seqNum: seqNum)
+        var nonce = ingress.iv
+        xorSeqIntoNonce(&nonce, seqNum: ingress.seqNum)
 
         let ct = ciphertext.prefix(ciphertext.count - 16)
         let tag = ciphertext.suffix(16)
 
-        let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: header, key: ingressSymmetricKey)
+        let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: header, key: ingress.symmetricKey)
 
         guard !decrypted.isEmpty else {
             throw TLSRecordError.emptyDecryptedData
@@ -74,7 +78,7 @@ extension TLSRecordConnection {
         // A KeyUpdate must rekey the read side here or every subsequent record fails AEAD
         // authentication (RFC 8446 §7.2).
         if innerContentType == TLSContentType.handshake {
-            handlePostHandshakeTLS13(Data(decrypted.prefix(Int(contentLen))))
+            handlePostHandshakeTLS13(Data(decrypted.prefix(Int(contentLen))), receive: &state)
             return Data()
         }
 
@@ -83,7 +87,7 @@ extension TLSRecordConnection {
             let level = body.first ?? 0
             let description = body.count >= 2 ? body[body.startIndex + 1] : 0
             if description == TLSAlertDescription.closeNotify {
-                receivedCloseNotify = true
+                state.receivedCloseNotify = true
                 return Data()
             }
             throw TLSRecordError.tlsAlert(level: level, description: description)
@@ -94,8 +98,9 @@ extension TLSRecordConnection {
 
     // MARK: - TLS 1.3 KeyUpdate (RFC 8446 §7.2)
 
-    /// Runs on the receive path with the `receiveBuffer` lock held.
-    private func handlePostHandshakeTLS13(_ messages: Data) {
+    /// Runs on the receive path with the `receiveState` lock held; flags are latched through
+    /// `state` rather than re-locking.
+    private func handlePostHandshakeTLS13(_ messages: Data, receive state: inout ReceiveState) {
         var i = messages.startIndex
         let end = messages.endIndex
         while i + 4 <= end {
@@ -111,41 +116,32 @@ extension TLSRecordConnection {
                 // request_update == 1 ("update_requested") obliges us to KeyUpdate back.
                 let requestUpdate = length >= 1 ? messages[bodyStart] : 0
                 if requestUpdate == 1 {
-                    keyUpdateResponsePending = true
+                    state.keyUpdateResponsePending = true
                 }
             }
             i = bodyEnd
         }
     }
 
-    /// Ingress is the server keys for a client and the client keys for a server. No-op when the
-    /// traffic secret is unavailable (e.g. TLS 1.2).
+    /// Advances the ingress key generation. No-op when the traffic secret is unavailable
+    /// (e.g. TLS 1.2). The key swap and the sequence-counter reset commit under one
+    /// ingress-state lock hold, so no record can pair the new generation with a stale counter.
     private func rekeyIngress() {
-        // The ingress key material is only read on the receive path (which holds the `receiveBuffer` lock
-        // while this runs), so the epoch swap needs no extra lock; only the shared seq counter
-        // is mutex-guarded.
         let keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
-        if direction == .server {
-            guard let current = clientAppSecret else { return }
+        mutateIngressState { state in
+            guard let current = state.appSecret else { return }
             let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
-            clientAppSecret = next.secret
-            clientKey = next.key
-            clientIV = next.iv
-            clientSymmetricKey = SymmetricKey(data: next.key)
-        } else {
-            guard let current = serverAppSecret else { return }
-            let next = keyDerivation.nextApplicationGeneration(trafficSecret: current)
-            serverAppSecret = next.secret
-            serverKey = next.key
-            serverIV = next.iv
-            serverSymmetricKey = SymmetricKey(data: next.key)
+            state.appSecret = next.secret
+            state.key = next.key
+            state.iv = next.iv
+            state.symmetricKey = SymmetricKey(data: next.key)
+            state.seqNum = 0
         }
-        resetIngressSeqNum()
     }
 
     /// Sends our KeyUpdate using the *current* write keys, then advances egress. The whole
     /// method runs under the send chain so the build → send → key-switch sequence is atomic with
-    /// respect to application sends; called only after `receiveBuffer`'s lock has been released.
+    /// respect to application sends; called only after `receiveState`'s lock has been released.
     func sendKeyUpdateResponseAndRekeyEgress() async {
         try? await chainedSend { [self] in
             // Build the KeyUpdate with the CURRENT egress keys, put it on the wire, then advance
@@ -164,22 +160,15 @@ extension TLSRecordConnection {
             }
 
             let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
-            if direction == .server {
-                guard let current = serverAppSecret else { return }
+            mutateEgressState { state in
+                guard let current = state.appSecret else { return }
                 let next = kd.nextApplicationGeneration(trafficSecret: current)
-                serverAppSecret = next.secret
-                serverKey = next.key
-                serverIV = next.iv
-                serverSymmetricKey = SymmetricKey(data: next.key)
-            } else {
-                guard let current = clientAppSecret else { return }
-                let next = kd.nextApplicationGeneration(trafficSecret: current)
-                clientAppSecret = next.secret
-                clientKey = next.key
-                clientIV = next.iv
-                clientSymmetricKey = SymmetricKey(data: next.key)
+                state.appSecret = next.secret
+                state.key = next.key
+                state.iv = next.iv
+                state.symmetricKey = SymmetricKey(data: next.key)
+                state.seqNum = 0
             }
-            resetEgressSeqNum()
         }
     }
 }

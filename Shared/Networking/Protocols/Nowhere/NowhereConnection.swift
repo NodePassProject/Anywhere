@@ -17,7 +17,7 @@ protocol NowhereTerminationObservable: AnyObject {
     nonisolated func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
 }
 
-actor NowhereConnection: ProxyConnection {
+actor NowhereConnection {
 
     private let session: NowhereSession
     private let destination: String
@@ -1217,3 +1217,5 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 }
+
+extension NowhereConnection: ProxyConnection {}

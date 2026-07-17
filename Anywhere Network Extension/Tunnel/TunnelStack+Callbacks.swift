@@ -192,13 +192,13 @@ extension TunnelStack: LWIPBridgeHost {
             // again, so alternating domain/raw-IP SYNs can't flap it.
             if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
                 flowShedWarned = false
-                logger.info("[TCP] flow budget recovered; admitting SYNs [\(DialDiagnostics.snapshot())]")
+                logger.info("[TCP] flow budget recovered; admitting SYNs [\(DialDiagnostics.snapshot(bridge: lwipBridge))]")
             }
             return Int32(LWIP_BRIDGE_SYN_PASS)
         }
         if !flowShedWarned {
             flowShedWarned = true
-            logger.warning("[TCP] dropping new SYNs: flow budget exhausted [\(DialDiagnostics.snapshot())]")
+            logger.warning("[TCP] dropping new SYNs: flow budget exhausted [\(DialDiagnostics.snapshot(bridge: lwipBridge))]")
         }
         return Int32(LWIP_BRIDGE_SYN_DROP)
     }

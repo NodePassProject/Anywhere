@@ -273,7 +273,7 @@ nonisolated final class NowhereClient {
         case .transportSpent:
             throw NowhereError.streamClosed
         case .fresh(let newSession):
-            newSession.onClose = { [weak self, weak newSession] in
+            newSession.setOnClose { [weak self, weak newSession] in
                 guard let self, let newSession else { return }
                 self.handleSessionClose(newSession)
             }
@@ -434,7 +434,7 @@ nonisolated final class NowhereClient {
     }
 }
 
-extension NowhereClient {
+nonisolated extension NowhereClient {
     static let pool: TransportPool = Pool()
     private final class Pool: TransportPool {
         func reclaim() {

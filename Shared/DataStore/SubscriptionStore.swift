@@ -57,7 +57,10 @@ class SubscriptionStore {
         }
     }
 
-    func delete(_ subscription: Subscription, configurationStore: ConfigurationStore = .shared) {
+    /// `configurationStore` defaults to `.shared`, resolved in the method body because a
+    /// default-argument expression is evaluated outside this type's MainActor isolation.
+    func delete(_ subscription: Subscription, configurationStore: ConfigurationStore? = nil) {
+        let configurationStore = configurationStore ?? .shared
         configurationStore.deleteConfigurations(for: subscription.id)
         subscriptions.removeAll { $0.id == subscription.id }
         recordTombstone(subscription)

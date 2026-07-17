@@ -14,12 +14,15 @@ import os.log
 nonisolated struct AnywhereLogger {
     private let osLogger: Logger
 
+    /// The user-facing viewer sink, guarded because it is installed on one thread and read from
+    /// every logging thread. Not exposed as a synchronous `var`: writers call ``installLogSink``
+    /// and ``emit`` snapshots it under the lock, then invokes the closure off-lock.
     private static let _logSink = Mutex<((String, Level) -> Void)?>(nil)
 
-    /// Set by the Network Extension at startup; nil in the main app.
-    static var logSink: ((String, Level) -> Void)? {
-        get { _logSink.withLock { $0 } }
-        set { _logSink.withLock { $0 = newValue } }
+    /// Installs (or, with `nil`, removes) the log sink. Set by the Network Extension at
+    /// startup; the main app never installs one.
+    static func installLogSink(_ sink: ((String, Level) -> Void)?) {
+        _logSink.withLock { $0 = sink }
     }
 
     /// Floor for `logSink` only; os.log receives every level regardless.
@@ -67,7 +70,8 @@ nonisolated struct AnywhereLogger {
         }
 
         if level >= Self.minimumSinkLevel {
-            Self.logSink?(message, level)
+            let sink = Self._logSink.withLock { $0 }
+            sink?(message, level)
         }
     }
 }

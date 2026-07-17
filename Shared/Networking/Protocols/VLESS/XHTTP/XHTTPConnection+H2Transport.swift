@@ -115,6 +115,8 @@ extension XHTTPConnection {
     /// Reads frames until the server's SETTINGS is received and ACKed; does not
     /// wait for the 200 OK, and early HEADERS complete the setup.
     private func processInitialServerFrames() async throws {
+        // Fixed after setup; snapshot once rather than re-lock the `state`-backed property per frame.
+        let downloadStreamId = h2DownloadStreamId
         while true {
             let frame: H2Framing.Frame
             do {
@@ -134,7 +136,7 @@ extension XHTTPConnection {
                 continue
 
             case Self.h2FrameHeaders:
-                let isDownload = frame.streamId == 0 || frame.streamId == h2DownloadStreamId
+                let isDownload = frame.streamId == 0 || frame.streamId == downloadStreamId
                 if isDownload {
                     if let rejection = checkH2ResponseStatus(frame.payload) {
                         throw XHTTPError.setupFailed("H2 response rejected: \(rejection)")
@@ -250,7 +252,7 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends a packet-up batch as a new HTTP/2 stream. Called under `packetUpMutex`.
+    /// Sends a packet-up batch as a new HTTP/2 stream. Called on the `packetUpChain` serializer.
     func sendH2PacketUp(data: Data) async throws {
         enum Build {
             case closed
@@ -405,6 +407,8 @@ extension XHTTPConnection {
         if let buffered { return buffered }
         if state.withLock({ $0.h2StreamClosed }) { return nil }
 
+        // Fixed after setup; snapshot once rather than re-lock the `state`-backed property per frame.
+        let downloadStreamId = h2DownloadStreamId
         while true {
             let frame: H2Framing.Frame
             do {
@@ -418,7 +422,7 @@ extension XHTTPConnection {
                 throw error
             }
 
-            let isDownloadStream = frame.streamId == 0 || frame.streamId == h2DownloadStreamId
+            let isDownloadStream = frame.streamId == 0 || frame.streamId == downloadStreamId
 
             switch frame.type {
             case Self.h2FrameData:
@@ -587,7 +591,7 @@ extension XHTTPConnection {
     }
 
     /// Sends one packet-up batch as its own shared-H2 stream; the response only acks receipt.
-    /// Called under `packetUpMutex`.
+    /// Called on the `packetUpChain` serializer.
     func sendSharedH2PacketUp(data: Data) async throws {
         guard let shared = sharedH2 else { throw XHTTPError.connectionClosed }
         let seq = state.withLock { state -> Int64 in let s = state.nextSeq; state.nextSeq += 1; return s }

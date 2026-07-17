@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP2Multiplexer")
 
-nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
+nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
 
     // MARK: - Phase
 
@@ -34,19 +34,19 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     let sni: String
 
     private let transport: TLSStreamTransport
-    /// Tail of the ordered wire-send chain over the TLS transport. Each frame links after the
-    /// previous and runs only once it finishes, so frames reach the wire in submission order
-    /// without a lock held across the write.
-    private let sendChain = SerialSendChain()
+    /// Ordered wire-send pipeline over the TLS transport. Each frame takes its FIFO slot on submit and
+    /// runs only once the previous finished, so frames reach the wire in submission order without a
+    /// lock held across the write.
+    private let sendChain = SerialSender()
 
-    /// Links a wire send onto the ordered chain; the returned task's `value` carries backpressure
-    /// and the send's error to whoever awaits it.
-    private func chainSend(_ data: Data) -> Task<Void, Error> {
+    /// Submits a wire send onto the ordered pipeline, fixing its FIFO slot synchronously; the returned
+    /// handle's `value()` carries backpressure and the send's error to whoever awaits it (at most once).
+    private func chainSend(_ data: Data) -> SerialSender.Pending {
         let transport = self.transport
-        return sendChain.enqueue { try await transport.send(data) }
+        return sendChain.submit { try await transport.send(data) }
     }
     /// Invoked once per stream so randomized values (auth, padding) differ per request.
-    private let connectHeaders: () -> [(name: String, value: String)]
+    private let connectHeaders: @Sendable () -> [(name: String, value: String)]
 
     /// Guards all mutable multiplexer + per-stream *send*-window state. Never held across a call
     /// into a stream, a chained send, or a continuation resume; effects are computed under the
@@ -71,12 +71,11 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         /// Send-side parks waiting on a WINDOW_UPDATE that re-opens flow control. Replaces the old
         /// 50 ms flow-control retry poll.
         var flowGate = H2FlowGate()
+
+        /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
+        var onClose: (() -> Void)?
     }
     private let lock = Mutex(State())
-
-    /// Connection-scoped HPACK decoder; the dynamic table is shared across all streams (RFC 7541 §2.2).
-    /// Touched only by the single read-loop task, so it needs no separate lock.
-    let hpackDecoder = HPACKDecoder()
 
     private static let maxReceiveBufferSize = 2_097_152
 
@@ -96,12 +95,15 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     private let readyTask: Task<Void, Error>
 
     /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
-    var onClose: (() -> Void)?
+    var onClose: (() -> Void)? {
+        get { lock.withLock { $0.onClose } }
+        set { lock.withLock { $0.onClose = newValue } }
+    }
 
     // MARK: - Initialization
 
     init(host: String, port: UInt16, sni: String, tunnel: ProxyConnection?,
-         connectHeaders: @escaping () -> [(name: String, value: String)]) {
+         connectHeaders: @escaping @Sendable () -> [(name: String, value: String)]) {
         self.host = host
         self.port = port
         self.sni = sni
@@ -275,11 +277,11 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         )
         data.append(windowUpdate.serialized)
 
-        let prefaceTask = chainSend(data)
+        let prefaceSend = chainSend(data)
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await prefaceTask.value
+                try await prefaceSend.value()
             } catch {
                 let failed: Bool = self.lock.withLock { state in
                     guard state.phase != .closed else { return false }
@@ -311,6 +313,10 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     /// recursive `Task` + `queue.async`).
     private func startReadLoop() {
         Task { [weak self] in
+            // Connection-scoped HPACK decoder; the dynamic table is shared across all HEADERS frames on
+            // this connection (RFC 7541 §2.2). Owned by this single read-loop task as a local, so it is
+            // touched from exactly one place and needs no lock.
+            let hpackDecoder = HPACKDecoder()
             while true {
                 guard let self else { return }
                 if self.lock.withLock({ $0.phase == .closed }) { return }
@@ -338,29 +344,30 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
                     return
                 }
 
-                self.drainFrames()
+                self.drainFrames(hpackDecoder: hpackDecoder)
             }
         }
     }
 
     /// Pops and routes each complete frame from the receive buffer. Runs on the read-loop task, so
     /// frames are processed strictly one at a time; each `routeFrame` does its state work under
-    /// `lock` and performs stream/send effects with the lock released.
-    private func drainFrames() {
+    /// `lock` and performs stream/send effects with the lock released. The read loop's `hpackDecoder`
+    /// is threaded through for HEADERS decoding.
+    private func drainFrames(hpackDecoder: HPACKDecoder) {
         while true {
             let frame: NaiveHTTP2Frame? = lock.withLock { state in
                 guard state.phase != .closed else { return nil }
                 return NaiveHTTP2Framer.deserialize(from: &state.receiveBuffer)
             }
             guard let frame else { break }
-            routeFrame(frame)
+            routeFrame(frame, hpackDecoder: hpackDecoder)
         }
         lock.withLock { state in
             if state.receiveBuffer.isEmpty { state.receiveBuffer = Data() }  // Release backing store
         }
     }
 
-    private func routeFrame(_ frame: NaiveHTTP2Frame) {
+    private func routeFrame(_ frame: NaiveHTTP2Frame, hpackDecoder: HPACKDecoder) {
         switch frame.type {
         case .settings:
             handleSettings(frame)
@@ -584,17 +591,17 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         }
     }
 
-    /// Links one ordered send onto the chain and awaits it (submission order preserved).
+    /// Submits one ordered send onto the pipeline and awaits it (submission order preserved).
     private func enqueueOrdered(_ data: Data) async throws {
-        try await chainSend(data).value
+        try await chainSend(data).value()
     }
 
     /// Sends a control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE). Fire-and-forget.
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
-        let task = chainSend(frame.serialized)
+        let pending = chainSend(frame.serialized)
         Task {
             do {
-                try await task.value
+                try await pending.value()
             } catch {
                 logger.warning("[NaiveHTTP2Multiplexer] Failed to send control frame: \(error.localizedDescription)")
             }
@@ -619,21 +626,23 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     /// waiter, park, and live stream. Idempotent.
     private func teardown(reason: Error) {
         var victims: [NaiveHTTP2Stream] = []
-        let proceed: Bool = lock.withLock { state in
-            guard state.phase != .closed else { return false }
+        let closeCallback: (() -> Void)? = lock.withLock { state in
+            guard state.phase != .closed else { return nil }
             state.phase = .closed
             state.flowGate.wakeAll()
             victims = Array(state.streams.values)
             state.streams.removeAll()
             state.sendWindows.removeAll()
-            return true
+            let callback = state.onClose
+            state.onClose = nil
+            return callback ?? {}
         }
-        guard proceed else { return }
+        guard let closeCallback else { return }
 
         transport.cancel()
         completeReadyContinuations(reason)
         for stream in victims { stream.handleSessionError(reason) }
         refreshPoolSnapshot()
-        onClose?()
+        closeCallback()
     }
 }

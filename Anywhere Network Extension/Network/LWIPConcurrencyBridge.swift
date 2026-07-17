@@ -39,9 +39,8 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         self.executor = BridgeExecutor(label: label)
     }
 
-    /// The lwIP serial queue. Everything touching lwIP hops here; it is the bridge's
-    /// executor's queue, so work scheduled on it shares the actor isolation domain.
-    var queue: DispatchQueue { executor.queue }
+    /// The lwIP serial queue — bridge-internal; callers enter the domain via ``enqueue``/``run``.
+    private var queue: DispatchQueue { executor.queue }
 
     /// Fire-and-forget hop onto the lwIP queue with a `Sendable`-checked closure — the sanctioned
     /// way for the bridge's clients to enter its isolation domain, so callers never reach for

@@ -26,7 +26,7 @@ nonisolated struct QUICSessionTicket {
 
 extension QUICSessionTicket {
     /// The maximum cache lifetime allowed by RFC 8446.
-    static let maxLifetime = UInt32(604800)
+    nonisolated static let maxLifetime = UInt32(604800)
 }
 
 nonisolated enum QUICSessionTicketCache {

@@ -63,7 +63,7 @@ nonisolated struct QUICTuning {
     var disableActiveMigration: Bool
 }
 
-extension QUICTuning {
+nonisolated extension QUICTuning {
 
     /// Naive (HTTP/3 CONNECT) preset: CUBIC matches the Naive server stack; windows target
     /// 2× BDP for 125 Mbps × 256 ms links, with a 16 MB initial stream window so the first RTT

@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSStream")
 
-actor AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
+actor AnyTLSStream {
 
     nonisolated let sid: UInt32
     private weak var multiplexer: AnyTLSMultiplexer?
@@ -116,3 +116,5 @@ actor AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
         hook?()
     }
 }
+
+extension AnyTLSStream: ProxyConnection, MultiplexerStreamSink {}

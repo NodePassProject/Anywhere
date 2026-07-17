@@ -46,15 +46,12 @@ nonisolated struct PayloadTable<Payload: Hashable> {
 
 // MARK: - Keyword automaton
 
-/// Aho–Corasick automaton for `domainKeyword`: longest substring match in one
-/// O(D) walk. `finalize()` flattens the build tree into BFS-ordered flat columns
-/// plus CSR edges; inserting after it traps.
-///
-/// `@unchecked Sendable`: immutable once finalized (the build tree is dropped
-/// and `insert` traps); finalize before crossing isolation domains.
-nonisolated final class KeywordAutomaton: @unchecked Sendable {
-
-    // MARK: Build state (dropped on finalize)
+/// Build side of the ``KeywordAutomaton``: a byte-keyed pattern tree collected
+/// via `insert`. `finalize()` flattens it into the frozen automaton and drops
+/// the tree, so inserting afterwards traps and a drained builder finalizes to
+/// the empty automaton. The builder is single-isolation-domain by construction
+/// (not Sendable); only the frozen automaton is shared.
+nonisolated final class KeywordAutomatonBuilder {
 
     private final class BuildNode {
         var children: [UInt8: BuildNode] = [:]
@@ -70,24 +67,6 @@ nonisolated final class KeywordAutomaton: @unchecked Sendable {
 
     private var buildRoot: BuildNode? = BuildNode()
     private var insertionCounter: Int32 = 0
-    private var finalized = false
-
-    // MARK: Frozen state (populated by finalize)
-
-    /// Per-node columns. Indexed by `0..<failure.count`; root is index 0.
-    /// `dictSuffix[i] == -1` means "no accepting ancestor".
-    private var failure: ContiguousArray<Int32> = []
-    private var dictSuffix: ContiguousArray<Int32> = []
-    private var actionID: ContiguousArray<Int16> = []
-    private var patternLength: ContiguousArray<UInt16> = []
-    private var insertionOrder: ContiguousArray<Int32> = []
-
-    /// CSR edges: node `i`'s edges live at `[edgeStart[i], edgeStart[i + 1])`, sorted by byte.
-    private var edgeStart: ContiguousArray<Int32> = []
-    private var edgeByte: ContiguousArray<UInt8> = []
-    private var edgeTarget: ContiguousArray<Int32> = []
-
-    // MARK: Build API
 
     func insert(_ pattern: String, actionID: Int16) {
         guard !pattern.isEmpty else { return }
@@ -111,16 +90,10 @@ nonisolated final class KeywordAutomaton: @unchecked Sendable {
         node.insertionOrder = insertionCounter
     }
 
-    // MARK: Finalize
-
-    /// Builds failure/dictSuffix links and freezes the flat columns.
-    /// Idempotent; subsequent inserts trap.
-    func finalize() {
-        guard !finalized else { return }
-        guard let root = buildRoot else {
-            finalized = true
-            return
-        }
+    /// Builds failure/dictSuffix links and flattens the tree into the frozen
+    /// automaton's flat columns, dropping the tree.
+    func finalize() -> KeywordAutomaton {
+        guard let root = buildRoot else { return KeywordAutomaton() }
 
         // Failure links point at strictly shallower depth, so BFS order lays out a
         // child's failure target first; sorted-byte children keep CSR rows sorted.
@@ -175,17 +148,67 @@ nonisolated final class KeywordAutomaton: @unchecked Sendable {
             edgeStarts.append(Int32(edgeBytes.count))
         }
 
-        failure = ContiguousArray(nFailure)
-        dictSuffix = ContiguousArray(nDictSuffix)
-        actionID = ContiguousArray(nActionID)
-        patternLength = ContiguousArray(nPatternLength)
-        insertionOrder = ContiguousArray(nInsertionOrder)
-        edgeStart = ContiguousArray(edgeStarts)
-        edgeByte = ContiguousArray(edgeBytes)
-        edgeTarget = ContiguousArray(edgeTargets)
-
         buildRoot = nil
-        finalized = true
+        return KeywordAutomaton(
+            failure: ContiguousArray(nFailure),
+            dictSuffix: ContiguousArray(nDictSuffix),
+            actionID: ContiguousArray(nActionID),
+            patternLength: ContiguousArray(nPatternLength),
+            insertionOrder: ContiguousArray(nInsertionOrder),
+            edgeStart: ContiguousArray(edgeStarts),
+            edgeByte: ContiguousArray(edgeBytes),
+            edgeTarget: ContiguousArray(edgeTargets)
+        )
+    }
+}
+
+/// Frozen Aho–Corasick automaton for `domainKeyword`: longest substring match
+/// in one O(D) walk over BFS-ordered flat columns plus CSR edges, produced by
+/// ``KeywordAutomatonBuilder``. Every column is a `let` of Sendable scalars,
+/// so immutability — and sharing across isolation domains — is compiler-checked.
+nonisolated struct KeywordAutomaton: Sendable {
+
+    /// Per-node columns. Indexed by `0..<failure.count`; root is index 0.
+    /// `dictSuffix[i] == -1` means "no accepting ancestor".
+    private let failure: ContiguousArray<Int32>
+    private let dictSuffix: ContiguousArray<Int32>
+    private let actionID: ContiguousArray<Int16>
+    private let patternLength: ContiguousArray<UInt16>
+    private let insertionOrder: ContiguousArray<Int32>
+
+    /// CSR edges: node `i`'s edges live at `[edgeStart[i], edgeStart[i + 1])`, sorted by byte.
+    private let edgeStart: ContiguousArray<Int32>
+    private let edgeByte: ContiguousArray<UInt8>
+    private let edgeTarget: ContiguousArray<Int32>
+
+    /// The empty automaton: matches nothing.
+    init() {
+        failure = []
+        dictSuffix = []
+        actionID = []
+        patternLength = []
+        insertionOrder = []
+        edgeStart = []
+        edgeByte = []
+        edgeTarget = []
+    }
+
+    fileprivate init(failure: ContiguousArray<Int32>,
+                     dictSuffix: ContiguousArray<Int32>,
+                     actionID: ContiguousArray<Int16>,
+                     patternLength: ContiguousArray<UInt16>,
+                     insertionOrder: ContiguousArray<Int32>,
+                     edgeStart: ContiguousArray<Int32>,
+                     edgeByte: ContiguousArray<UInt8>,
+                     edgeTarget: ContiguousArray<Int32>) {
+        self.failure = failure
+        self.dictSuffix = dictSuffix
+        self.actionID = actionID
+        self.patternLength = patternLength
+        self.insertionOrder = insertionOrder
+        self.edgeStart = edgeStart
+        self.edgeByte = edgeByte
+        self.edgeTarget = edgeTarget
     }
 
     // MARK: Read API
@@ -193,7 +216,7 @@ nonisolated final class KeywordAutomaton: @unchecked Sendable {
     /// Best-matching action ID, or `MatcherID.none` when no pattern matches.
     func lookup(_ domain: UnsafeBufferPointer<UInt8>) -> Int16 {
         // Empty edge table means nothing was inserted; skip the walk for keyword-free tiers.
-        guard finalized, !edgeByte.isEmpty else { return MatcherID.none }
+        guard !edgeByte.isEmpty else { return MatcherID.none }
 
         var bestID: Int16 = MatcherID.none
         var bestLength: UInt16 = 0
@@ -250,6 +273,8 @@ nonisolated struct TierMatchers<Payload: Hashable> {
 
     var suffixTrie = FlatLabelTrie<Int16>()
     var keywordAutomaton = KeywordAutomaton()
+    /// Keyword build state; `finalize` flattens it into `keywordAutomaton`.
+    var keywordBuilder = KeywordAutomatonBuilder()
     var ipv4Trie = CIDRv4Trie()
     var ipv6Trie = CIDRv6Trie()
     var domainRuleCount = 0
@@ -257,7 +282,7 @@ nonisolated struct TierMatchers<Payload: Hashable> {
 
     /// Suffix rules are buffered as `(byte range into the caller's base buffer,
     /// interned payload)`. This skips the scratch node tree and its per-node dictionary.
-    var suffixRecords: [FlatLabelTrie<Int16>.BulkEntry] = []
+    var suffixRecords: [FlatLabelTrieBuilder<Int16>.BulkEntry] = []
 
     var isEmpty: Bool { domainRuleCount == 0 && ipRuleCount == 0 }
 
@@ -271,7 +296,7 @@ nonisolated struct TierMatchers<Payload: Hashable> {
 
     mutating func insertKeyword(_ pattern: String, payload: Payload) {
         guard !pattern.isEmpty else { return }
-        keywordAutomaton.insert(pattern, actionID: payloadTable.intern(payload))
+        keywordBuilder.insert(pattern, actionID: payloadTable.intern(payload))
         domainRuleCount += 1
     }
 
@@ -289,8 +314,8 @@ nonisolated struct TierMatchers<Payload: Hashable> {
     }
 
     mutating func finalize(base: UnsafeBufferPointer<UInt8>) {
-        keywordAutomaton.finalize()
-        suffixTrie.buildBulk(base: base, entries: &suffixRecords)
+        keywordAutomaton = keywordBuilder.finalize()
+        suffixTrie = FlatLabelTrieBuilder<Int16>.buildBulk(base: base, entries: &suffixRecords)
         suffixRecords = []
     }
 

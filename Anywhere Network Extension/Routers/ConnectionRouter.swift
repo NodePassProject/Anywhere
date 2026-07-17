@@ -44,8 +44,9 @@ nonisolated final class ConnectionRouter {
     let fakeIPPool: FakeIPPool
     let domainRouter: DomainRouter
 
-    /// Cross-queue copy of the Prevent DNS Leak setting.
-    private let _preventDNSLeak = Mutex(false)
+    /// Cross-queue copy of the Prevent DNS Leak setting. A lone Bool flag, so it is an
+    /// `Atomic` rather than a `Mutex` (which would be a lock guarding no compound state).
+    private let _preventDNSLeak = Atomic(false)
 
     init(fakeIPPool: FakeIPPool, domainRouter: DomainRouter) {
         self.fakeIPPool = fakeIPPool
@@ -54,7 +55,7 @@ nonisolated final class ConnectionRouter {
 
     /// Publishes the Prevent DNS Leak setting; callable from any queue.
     func setPreventDNSLeak(_ enabled: Bool) {
-        _preventDNSLeak.withLock { $0 = enabled }
+        _preventDNSLeak.store(enabled, ordering: .relaxed)
     }
 
     /// Routes a destination IP. `proto` tags log lines only ("TCP"/"UDP").
@@ -83,7 +84,7 @@ nonisolated final class ConnectionRouter {
         // the domain locally and give it a second chance against IP-CIDR
         // rules. The resolved IP feeds matching only — the connection still
         // dials the domain.
-        if !_preventDNSLeak.withLock({ $0 }) {
+        if !_preventDNSLeak.load(ordering: .relaxed) {
             if let resolvedIP = RuleResolver.shared.cachedIPv4(for: domain) {
                 if let match = domainRouter.matchIP(resolvedIP) {
                     return RouteDecision(host: domain, hostIsResolvedDomain: true,

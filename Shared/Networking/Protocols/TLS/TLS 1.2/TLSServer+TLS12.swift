@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-extension TLSServer {
+nonisolated extension TLSServer {
 
     // MARK: - TLS 1.2 ECDHE Key
 

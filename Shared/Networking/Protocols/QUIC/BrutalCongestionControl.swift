@@ -10,7 +10,7 @@ import Synchronization
 
 // MARK: - BrutalCongestionControl
 
-nonisolated final class BrutalCongestionControl {
+nonisolated final class BrutalCongestionControl: Sendable {
 
     /// Seconds of per-second ack/loss slots over which the loss rate is computed.
     private static let slotCount = 5
@@ -31,50 +31,63 @@ nonisolated final class BrutalCongestionControl {
         var lossCount: UInt64 = 0
     }
 
-    /// Target send rate in bytes/sec. Updated post-auth.
-    private var targetBps: UInt64
-    private var slots: [Slot] = Array(repeating: Slot(), count: slotCount)
+    /// Rate/loss accounting, updated from the ngtcp2 CC trampolines and (for the target
+    /// rate) from the session's post-auth bandwidth update — one value, one lock.
+    private struct State {
+        /// Target send rate in bytes/sec. Updated post-auth.
+        var targetBps: UInt64
+        var slots: [Slot]
+    }
+
+    private let state: Mutex<State>
 
     init(initialBps: UInt64) {
-        self.targetBps = initialBps
+        state = Mutex(State(targetBps: initialBps,
+                            slots: Array(repeating: Slot(), count: Self.slotCount)))
     }
 
     func setTargetBandwidth(_ bps: UInt64) {
-        targetBps = bps
+        state.withLock { $0.targetBps = bps }
     }
 
     // MARK: - Callbacks (invoked from the ngtcp2 CC trampolines)
 
     func onPacketAcked(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        let index = slotIndex(for: ts)
-        slots[index].ackCount &+= 1
-        updateCwnd(cstat: cstat, ts: ts)
+        state.withLock { s in
+            let index = Self.slotIndex(for: ts, slots: &s.slots)
+            s.slots[index].ackCount &+= 1
+            Self.updateCwnd(cstat: cstat, ts: ts, state: s)
+        }
     }
 
     func onPacketLost(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        let index = slotIndex(for: ts)
-        slots[index].lossCount &+= 1
-        updateCwnd(cstat: cstat, ts: ts)
+        state.withLock { s in
+            let index = Self.slotIndex(for: ts, slots: &s.slots)
+            s.slots[index].lossCount &+= 1
+            Self.updateCwnd(cstat: cstat, ts: ts, state: s)
+        }
     }
 
     func onAckReceived(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        updateCwnd(cstat: cstat, ts: ts)
+        state.withLock { Self.updateCwnd(cstat: cstat, ts: ts, state: $0) }
     }
 
     func onPacketSent(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        updateCwnd(cstat: cstat, ts: ts)
+        state.withLock { Self.updateCwnd(cstat: cstat, ts: ts, state: $0) }
     }
 
     func reset(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        for i in 0..<slots.count {
-            slots[i] = Slot()
+        state.withLock { s in
+            for i in 0..<s.slots.count {
+                s.slots[i] = Slot()
+            }
+            Self.updateCwnd(cstat: cstat, ts: ts, state: s)
         }
-        updateCwnd(cstat: cstat, ts: ts)
     }
 
     // MARK: - Internals
 
-    private func slotIndex(for ts: UInt64) -> Int {
+    private static func slotIndex(for ts: UInt64, slots: inout [Slot]) -> Int {
         let second = ts / 1_000_000_000
         let index = Int(second % UInt64(slots.count))
         if slots[index].secondMark != second {
@@ -86,7 +99,7 @@ nonisolated final class BrutalCongestionControl {
 
     /// Loss rate over the last `slotCount` seconds including the in-progress one;
     /// excluding it pins `ackRate` at 1.0 during bursty-loss startups.
-    private func observedLossRate(at ts: UInt64) -> Double {
+    private static func observedLossRate(at ts: UInt64, slots: [Slot]) -> Double {
         let now = ts / 1_000_000_000
         var totalAck: UInt64 = 0
         var totalLoss: UInt64 = 0
@@ -103,13 +116,15 @@ nonisolated final class BrutalCongestionControl {
         return Double(totalLoss) / Double(total)
     }
 
-    private func updateCwnd(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
+    private static func updateCwnd(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64,
+                                   state: State) {
+        let targetBps = state.targetBps
         guard targetBps > 0 else { return }
 
         let smoothedRtt = cstat.pointee.smoothed_rtt
         let mss = UInt64(cstat.pointee.max_tx_udp_payload_size)
 
-        var lossRate = observedLossRate(at: ts)
+        var lossRate = observedLossRate(at: ts, slots: state.slots)
         if lossRate < 0 { lossRate = 0 }
         if lossRate > Self.maxLossRate { lossRate = Self.maxLossRate }
 
@@ -154,22 +169,24 @@ nonisolated final class BrutalCongestionControl {
 
 // MARK: - Registry keyed by the `ngtcp2_cc *` the trampolines receive
 
-private let brutalRegistry = Mutex<[OpaquePointer: BrutalCongestionControl]>([:])
+// Keyed by the pointer's bit pattern: the raw `ngtcp2_cc *` is an identity token here,
+// and `UInt` (unlike a pointer type) can live in a `Sendable` registry value.
+nonisolated private let brutalRegistry = Mutex<[UInt: BrutalCongestionControl]>([:])
 
-extension BrutalCongestionControl {
+nonisolated extension BrutalCongestionControl {
     /// Call once per connection.
     static func register(_ brutal: BrutalCongestionControl, for cc: OpaquePointer) {
-        brutalRegistry.withLock { $0[cc] = brutal }
+        brutalRegistry.withLock { $0[UInt(bitPattern: cc)] = brutal }
     }
 
     static func unregister(cc: OpaquePointer) {
-        brutalRegistry.withLock { _ = $0.removeValue(forKey: cc) }
+        brutalRegistry.withLock { _ = $0.removeValue(forKey: UInt(bitPattern: cc)) }
     }
 }
 
-private func brutalForCC(_ cc: OpaquePointer?) -> BrutalCongestionControl? {
+nonisolated private func brutalForCC(_ cc: OpaquePointer?) -> BrutalCongestionControl? {
     guard let cc else { return nil }
-    return brutalRegistry.withLock { $0[cc] }
+    return brutalRegistry.withLock { $0[UInt(bitPattern: cc)] }
 }
 
 // MARK: - @_cdecl trampolines (called by ngtcp2 via the CC callback table)

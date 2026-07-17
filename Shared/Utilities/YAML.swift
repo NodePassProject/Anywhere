@@ -92,7 +92,7 @@ nonisolated enum YAML {
 
 // MARK: - Sequence conformance
 
-extension YAML.Node: Sequence {
+nonisolated extension YAML.Node: Sequence {
     func makeIterator() -> AnyIterator<YAML.Node> {
         switch storage {
         case .sequence(let elements):

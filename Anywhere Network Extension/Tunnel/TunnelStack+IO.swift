@@ -54,8 +54,9 @@ extension TunnelStack {
             // writePackets copies into the kernel synchronously, so the buffers
             // are already unreferenced.
             if !releases.isEmpty {
+                let toRelease = releases
                 lwipBridge.enqueue {
-                    for r in releases {
+                    for r in toRelease {
                         r.fn(r.ctx)
                     }
                 }
@@ -82,6 +83,10 @@ extension TunnelStack {
     
     func startReadingPackets() {
         guard let packetFlow else { return }
+        // Weak self is deliberate here (unlike the stack's other lifetime tasks, which capture
+        // strongly): `readPackets` parks until the next packet with no cancellation seam, so a strong
+        // capture would pin the stack across an idle read after `stop()`. Weak self lets it deinit
+        // while parked; the promoted `self` is dropped each iteration.
         readTask = Task { [weak self, packetFlow] in
             while !Task.isCancelled {
                 let (packets, _) = await PacketFlowConcurrencyBridge.read(from: packetFlow)

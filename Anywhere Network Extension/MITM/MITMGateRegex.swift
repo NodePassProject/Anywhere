@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMGateRegex")
 
-nonisolated final class MITMGateRegex: @unchecked Sendable {
+nonisolated final class MITMGateRegex: Sendable {
 
     /// NSRegularExpression is immutable and thread-safe for concurrent matching.
     private let regex: NSRegularExpression

@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - URL Parsing
 
-extension ProxyConfiguration {
+nonisolated extension ProxyConfiguration {
 
     static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "nowhere://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://"]
 

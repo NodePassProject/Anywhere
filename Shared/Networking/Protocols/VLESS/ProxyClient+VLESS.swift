@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension ProxyClient {
+nonisolated extension ProxyClient {
 
     // MARK: - Vision flow
 

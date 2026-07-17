@@ -1030,7 +1030,7 @@ nonisolated final class ProxyClient: Sendable {
         mode: XHTTPMode,
         sessionId: String,
         role: XHTTPChannelRole,
-        uploadFactory: (() async throws -> any ByteTransport)?
+        uploadFactory: (@Sendable () async throws -> any ByteTransport)?
     ) async throws -> XHTTPConnection {
         // xmux: pool/multiplex direct-route XHTTP connections. XHTTP always pools — serial-reuse
         // defaults apply when xmux is omitted (see `effectiveXMUX`). Tunneled/chained routes
@@ -1252,7 +1252,7 @@ nonisolated final class ProxyClient: Sendable {
         httpVersion: XHTTPHTTPVersion,
         mode: XHTTPMode,
         xmux: XHTTPXMUXMultiplexerConfiguration
-    ) -> (() async throws -> any ByteTransport) {
+    ) -> (@Sendable () async throws -> any ByteTransport) {
         // xmux: pool the packet-up upload socket across sessions for direct routes.
         // stream-up's upload is one indefinite POST (never reusable); chained routes can't pool.
         let hasChain = (configuration.chain?.isEmpty == false)

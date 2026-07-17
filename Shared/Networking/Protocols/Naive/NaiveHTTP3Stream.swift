@@ -8,9 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP3Stream")
-
-nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
+actor NaiveHTTP3Stream {
 
     // MARK: - State
 
@@ -20,7 +18,15 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     // MARK: - Properties
 
-    let destination: String
+    nonisolated let destination: String
+
+    /// The ngtcp2 boundary whose executor this stream adopts; held strongly so the
+    /// executor outlives the stream even after the pooled multiplexer is evicted.
+    private nonisolated let bridge: NGTCP2ConcurrencyBridge
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        bridge.executor.asUnownedSerialExecutor()
+    }
+
     private(set) var quicStreamID: Int64?
 
     private weak var multiplexer: HTTP3Multiplexer?
@@ -29,33 +35,39 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
     private var state: StreamState = .idle
     private var headersReceived = false
 
-    /// Inbound DATA payloads / EOF / error from the multiplexer's demux loop. Producer side (`inbox`)
-    /// is `Sendable` and driven on the multiplexer queue; the single consumer pulls `inboxIterator`
-    /// from ``receiveData()``. The `Mutex` guards the iterator *value* (this stream is a queue-confined
-    /// class, not an actor). QUIC flow control counts every stream byte (HTTP/3 frame header +
-    /// payload), so the per-chunk `quicBytes` accounting is split: `deliverData` credits the
-    /// frame-header octets on the multiplexer queue as chunks arrive, and ``receiveData()`` credits
-    /// the payload octets only once the app takes them — total credit stays exact, backpressure preserved.
+    /// Mirrors `state == .open` for the synchronous `NaiveTunnel` surface.
+    private nonisolated let _isConnected = Atomic<Bool>(false)
+    nonisolated var isConnected: Bool { _isConnected.load(ordering: .relaxed) }
+
+    /// Inbound DATA payloads / EOF / error from the multiplexer's demux events. The producer
+    /// side (`inbox`) runs on the shared executor; the single consumer pulls `inboxIterator`
+    /// from ``receiveData()`` as plain isolated state. QUIC flow control counts every stream
+    /// byte (HTTP/3 frame header + payload), so the per-chunk `quicBytes` accounting is split:
+    /// the demux path credits the frame-header octets as chunks arrive, and ``receiveData()``
+    /// credits the payload octets only once the app takes them — total credit stays exact,
+    /// backpressure preserved.
     private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
+    private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
 
     /// Partial HTTP/3 frame buffer; frames may span QUIC deliveries.
     private var frameBuffer = Data()
     private var frameBufferOffset = 0
 
-    /// Resolves when the CONNECT response (200) arrives, or the stream fails first. The waiter
-    /// continuation lives in the promise (async infra), bridging the multiplexer's demux loop.
-    /// One-shot connect signal, resolved by the demux/callback path; the awaiter is `connectTask.value`.
+    /// Resolves when the CONNECT response (200) arrives, or the stream fails first.
+    /// One-shot connect signal, resolved by the demux path; the awaiter is `connectTask.value`.
     private let connectSignal: AsyncThrowingStream<Never, Error>.Continuation
     private let connectTask: Task<Void, Error>
 
-    private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
-
-    var isConnected: Bool { state == .open }
+    /// Handshake-produced value, mirrored for the synchronous `NaiveTunnel` surface.
+    private nonisolated let _negotiatedPaddingType = Mutex(NaivePaddingNegotiator.PaddingType.none)
+    nonisolated var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType {
+        _negotiatedPaddingType.withLock { $0 }
+    }
 
     // MARK: - Init
 
     init(multiplexer: HTTP3Multiplexer, configuration: NaiveConfiguration, destination: String) {
+        self.bridge = multiplexer.sharedBridge
         self.multiplexer = multiplexer
         self.configuration = configuration
         self.destination = destination
@@ -64,81 +76,73 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         self.connectTask = Task { for try await _ in connectStream {} }
         let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
         self.inbox = inbox
-        self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
-    }
-
-    /// Single-consumer pull over `inbox`: takes the stored iterator, awaits one element, stores it
-    /// back. Serial by ``receiveData()``'s single-consumer contract.
-    private func nextInboxChunk() async throws -> Data? {
-        var iterator = inboxIterator.withLock { $0 }
-        let next = try await iterator.next()
-        inboxIterator.withLock { $0 = iterator }
-        return next
+        self.inboxIterator = inboxStream.makeAsyncIterator()
     }
 
     // MARK: - NaiveTunnel
-
-    // The HTTP/3 QUIC multiplexer pushes stream data on its own queue and resolves the parked
-    // continuations there; the async surface awaits them (state machine preserved).
 
     func openTunnel() async throws {
         guard let multiplexer else { throw HTTP3Error.connectionFailed("No multiplexer") }
         try await multiplexer.ensureReady()
 
-        // Claim the stream, register it, and fire the CONNECT HEADERS write on the multiplexer
-        // queue; every outcome (early failure, or the eventual response / send failure) flows
-        // through `connectSignal`, resolved here or later in `processResponseHeaders` (200) /
-        // `handleStreamError`.
-        await multiplexer.run { [self] in
-            guard let multiplexer = self.multiplexer else {
-                self.connectSignal.finish(throwing: HTTP3Error.streamClosed)
-                return
+        // Demux event sinks; they fire on the shared executor and enter this actor's
+        // isolation synchronously (verified against the executor at runtime).
+        let events = HTTP3Multiplexer.StreamEvents(
+            data: { [weak self] data, fin in
+                self?.assumeIsolated { $0.handleStreamData(data, fin: fin) }
+            },
+            error: { [weak self] error in
+                self?.assumeIsolated { $0.handleSessionError(error) }
             }
-            guard let streamID = multiplexer.openBidiStream() else {
-                self.state = .closed
-                multiplexer.markStreamBlocked()
-                self.connectSignal.finish(throwing: HTTP3Error.streamIdBlocked)
-                return
-            }
-            self.quicStreamID = streamID
-            multiplexer.registerStream(self, streamID: streamID)
-            self.state = .connectSent
+        )
 
-            var extraHeaders: [(name: String, value: String)] = []
-            extraHeaders.append((name: "user-agent", value: "Chrome/128.0.0.0"))
-            if let auth = self.configuration.basicAuth {
-                extraHeaders.append((name: "proxy-authorization", value: "Basic \(auth)"))
-            }
-            let cachedType = NaivePaddingNegotiator.cachedPaddingType(
-                host: self.configuration.proxyHost,
-                port: self.configuration.proxyPort,
-                sni: self.configuration.effectiveSNI
-            )
-            extraHeaders.append(contentsOf: NaivePaddingNegotiator.requestHeaders(
-                fastOpen: cachedType != nil
-            ))
+        // The open and the sink registration are one isolated step on the multiplexer, so
+        // no demuxed byte can race the registration.
+        guard let streamID = await multiplexer.openStream(events: events) else {
+            state = .closed
+            connectSignal.finish(throwing: HTTP3Error.streamIdBlocked)
+            try await connectTask.value
+            return
+        }
+        quicStreamID = streamID
+        state = .connectSent
 
-            var allHeaders = extraHeaders
-            allHeaders.insert((name: ":method", value: "CONNECT"), at: 0)
-            allHeaders.insert((name: ":authority", value: self.destination), at: 1)
-            guard multiplexer.isWithinPeerFieldSectionLimit(allHeaders) else {
-                // handleStreamError resolves connectSignal with the failure and tears the stream down.
-                self.handleStreamError(HTTP3Error.connectionFailed("Request headers exceed peer MAX_FIELD_SECTION_SIZE"))
-                return
-            }
+        var extraHeaders: [(name: String, value: String)] = []
+        extraHeaders.append((name: "user-agent", value: "Chrome/128.0.0.0"))
+        if let auth = configuration.basicAuth {
+            extraHeaders.append((name: "proxy-authorization", value: "Basic \(auth)"))
+        }
+        let cachedType = NaivePaddingNegotiator.cachedPaddingType(
+            host: configuration.proxyHost,
+            port: configuration.proxyPort,
+            sni: configuration.effectiveSNI
+        )
+        extraHeaders.append(contentsOf: NaivePaddingNegotiator.requestHeaders(
+            fastOpen: cachedType != nil
+        ))
 
-            let headerBlock = QPACKEncoder.encodeConnectHeaders(
-                authority: self.destination, extraHeaders: extraHeaders
-            )
-            let headersFrame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
+        var allHeaders = extraHeaders
+        allHeaders.insert((name: ":method", value: "CONNECT"), at: 0)
+        allHeaders.insert((name: ":authority", value: destination), at: 1)
+        guard await multiplexer.isWithinPeerFieldSectionLimit(allHeaders) else {
+            // handleStreamError resolves connectSignal with the failure and tears the stream down.
+            handleStreamError(HTTP3Error.connectionFailed("Request headers exceed peer MAX_FIELD_SECTION_SIZE"))
+            try await connectTask.value
+            return
+        }
 
-            Task { [weak self] in
-                guard let self, let multiplexer = self.multiplexer else { return }
-                do {
-                    try await multiplexer.writeStream(streamID, data: headersFrame)
-                } catch {
-                    multiplexer.enqueue { self.handleStreamError(error) }
-                }
+        let headerBlock = QPACKEncoder.encodeConnectHeaders(
+            authority: destination, extraHeaders: extraHeaders
+        )
+        let headersFrame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
+
+        // Strong captures: the write task owns the stream until the HEADERS reach ngtcp2;
+        // every outcome (response, send failure) flows through `connectSignal`.
+        Task {
+            do {
+                try await multiplexer.writeStream(streamID, data: headersFrame)
+            } catch {
+                handleStreamError(error)
             }
         }
         try await connectTask.value
@@ -146,53 +150,53 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     func sendData(_ data: Data) async throws {
         guard let multiplexer else { throw HTTP3Error.streamClosed }
-        // Guard `state == .open` and read the (once-set) stream ID on the multiplexer queue.
-        let streamID: Int64 = try await multiplexer.run { [self] () -> Result<Int64, Error> in
-            guard state == .open, let sid = quicStreamID else {
-                return .failure(state == .closed ? HTTP3Error.streamClosed : HTTP3Error.notReady)
-            }
-            return .success(sid)
+        guard state == .open, let sid = quicStreamID else {
+            throw state == .closed ? HTTP3Error.streamClosed : HTTP3Error.notReady
         }
         let frame = HTTP3Framer.dataFrame(payload: data)
-        try await multiplexer.writeStream(streamID, data: frame)
+        try await multiplexer.writeStream(sid, data: frame)
     }
 
     func receiveData() async throws -> Data? {
-        guard let multiplexer else { throw HTTP3Error.streamClosed }
+        guard multiplexer != nil else { throw HTTP3Error.streamClosed }
         let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
-            multiplexer.enqueue { [weak self] in self?.closeAndShutdown() }
+            closeAndShutdown()
             return nil
         }
         // Credit the payload bytes now the app has taken them (backpressure preserved). The
-        // frame-header octets were already credited on the queue in `deliverData`.
-        multiplexer.enqueue { [weak self] in self?.ackQuicBytes(data.count) }
+        // frame-header octets were already credited by the demux path in `deliverData`.
+        ackQuicBytes(data.count)
         return data
     }
 
-    func close() {
-        guard let multiplexer else { return }
-        multiplexer.enqueue { [self] in
-            guard state != .closed else { return }
-            state = .closed
-            multiplexer.removeStream(self)
-
-            // Shutdown lets the server reclaim the slot via MAX_STREAMS; a
-            // pre-completion close signals H3_REQUEST_CANCELLED.
-            if let streamID = quicStreamID {
-                let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
-                multiplexer.shutdownStream(streamID, code: code)
-            }
-
-            connectSignal.finish(throwing: HTTP3Error.streamClosed)
-            inbox.finish()
-        }
+    nonisolated func close() {
+        Task { await self.performClose() }
     }
 
-    // MARK: - Session Callbacks (called on multiplexer.queue)
+    /// Single-consumer pull over `inbox`. Takes a local copy of the iterator for the mutating
+    /// async `next()` (both share the stream's backing storage) and stores it back. Serial by
+    /// ``receiveData()``'s single-consumer contract.
+    private func nextInboxChunk() async throws -> Data? {
+        var iterator = inboxIterator
+        let next = try await iterator.next()
+        inboxIterator = iterator
+        return next
+    }
 
-    func handleStreamData(_ data: Data, fin: Bool) {
+    private func performClose() {
+        guard state != .closed else { return }
+        state = .closed
+        _isConnected.store(false, ordering: .relaxed)
+        detachFromMultiplexer(code: headersReceived ? .noError : .requestCancelled)
+        connectSignal.finish(throwing: HTTP3Error.streamClosed)
+        inbox.finish()
+    }
+
+    // MARK: - Demux events (delivered on the shared executor)
+
+    private func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {
             frameBuffer.append(data)
             processFrameBuffer()
@@ -205,7 +209,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         }
     }
 
-    func handleSessionError(_ error: Error) {
+    private func handleSessionError(_ error: Error) {
         handleStreamError(error)
     }
 
@@ -271,10 +275,11 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         }
 
         let paddingTuples = headers.map { (name: $0.name, value: $0.value) }
-        negotiatedPaddingType = NaivePaddingNegotiator.parseResponse(headers: paddingTuples)
+        let negotiated = NaivePaddingNegotiator.parseResponse(headers: paddingTuples)
+        _negotiatedPaddingType.withLock { $0 = negotiated }
 
         NaivePaddingNegotiator.cachePaddingType(
-            negotiatedPaddingType,
+            negotiated,
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             sni: configuration.effectiveSNI
@@ -282,6 +287,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
         headersReceived = true
         state = .open
+        _isConnected.store(true, ordering: .relaxed)
 
         connectSignal.finish()
     }
@@ -315,7 +321,9 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         } else {
             code = .internalError
         }
-        closeAndShutdown(code: code)
+        state = .closed
+        _isConnected.store(false, ordering: .relaxed)
+        detachFromMultiplexer(code: code)
 
         connectSignal.finish(throwing: error)
         inbox.finish(throwing: error)
@@ -325,9 +333,17 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
     private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {
         guard state != .closed else { return }
         state = .closed
-        multiplexer?.removeStream(self)
-        if let streamID = quicStreamID {
-            multiplexer?.shutdownStream(streamID, code: code)
-        }
+        _isConnected.store(false, ordering: .relaxed)
+        detachFromMultiplexer(code: code)
+    }
+
+    /// Releases the mux registration + slot and shuts the QUIC stream down. The multiplexer
+    /// shares this actor's executor, so its isolation is entered synchronously here.
+    private func detachFromMultiplexer(code: HTTP3ErrorCode) {
+        guard let multiplexer, let sid = quicStreamID else { return }
+        multiplexer.assumeIsolated { $0.removeStream(sid) }
+        multiplexer.shutdownStream(sid, code: code)
     }
 }
+
+extension NaiveHTTP3Stream: NaiveTunnel {}

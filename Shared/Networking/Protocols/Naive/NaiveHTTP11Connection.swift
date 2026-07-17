@@ -13,7 +13,7 @@ nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP11Connection
 // MARK: - NaiveHTTP11Connection
 
 /// Parses only the status line, so `responseHeaders` is always empty.
-nonisolated class NaiveHTTP11Connection: HTTPTunnel {
+nonisolated final class NaiveHTTP11Connection: HTTPTunnel, Sendable {
 
     // MARK: - Properties
 
@@ -127,7 +127,7 @@ nonisolated class NaiveHTTP11Connection: HTTPTunnel {
 
 extension Data {
     /// Returns the index of the leading `\r` of the `\r\n\r\n` header terminator, or `nil` if not yet present.
-    func findNaiveHTTP11HeaderEnd() -> Int? {
+    nonisolated func findNaiveHTTP11HeaderEnd() -> Int? {
         let marker: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
         guard count >= 4 else { return nil }
         for i in 0...(count - 4) {

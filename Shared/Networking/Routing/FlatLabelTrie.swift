@@ -15,12 +15,12 @@ import Foundation
 // of overhead per stored bit). `lookup` only needs `rank1` and `select0`; both
 // are O(log words) here (a binary search over the rank index plus an in-word
 // scan), which is more than fast enough at this scale and keeps the structure
-// tiny. Value type with COW arrays, so a frozen trie is safe for concurrent reads.
+// tiny. Bits are appended on the builder; `build()` computes the rank index
+// once and freezes words + index into the all-`let` read form.
 
-nonisolated fileprivate struct LOUDSBitVector {
-    private(set) var words: ContiguousArray<UInt64> = []
-    private(set) var rank: ContiguousArray<UInt32> = []      // rank[w] = #ones in words[0..<w]
-    private(set) var nbits: Int = 0
+nonisolated fileprivate struct LOUDSBitVectorBuilder {
+    private var words: ContiguousArray<UInt64> = []
+    private var nbits: Int = 0
 
     mutating func append(_ bit: Bool) {
         let w = nbits >> 6
@@ -29,16 +29,24 @@ nonisolated fileprivate struct LOUDSBitVector {
         nbits += 1
     }
 
-    /// Builds the cumulative-popcount index. Call once after all `append`s.
-    mutating func build() {
-        rank = ContiguousArray(repeating: 0, count: words.count + 1)
+    /// Computes the cumulative-popcount index and freezes the vector. Call once
+    /// after all `append`s.
+    func build() -> LOUDSBitVector {
+        var rank = ContiguousArray<UInt32>(repeating: 0, count: words.count + 1)
         var acc: UInt32 = 0
         for i in 0..<words.count {
             rank[i] = acc
             acc &+= UInt32(words[i].nonzeroBitCount)
         }
         rank[words.count] = acc
+        return LOUDSBitVector(words: words, rank: rank, nbits: nbits)
     }
+}
+
+nonisolated fileprivate struct LOUDSBitVector {
+    let words: ContiguousArray<UInt64>
+    let rank: ContiguousArray<UInt32>      // rank[w] = #ones in words[0..<w]
+    let nbits: Int
 
     /// Number of set bits in `[0, i)`. `i` may equal `nbits`.
     @inline(__always)
@@ -79,11 +87,12 @@ nonisolated fileprivate struct LOUDSBitVector {
 
 // MARK: - FlatLabelTrie
 //
-// A reversed-label domain-suffix trie. `freeze()`/`buildBulk()` flatten the
-// scratch tree into a LOUDS succinct representation so lookup never allocates;
-// inserting after freeze traps, and the frozen state is safe for concurrent reads.
+// A reversed-label domain-suffix trie in its frozen form, produced by
+// `FlatLabelTrieBuilder` (`insert`/`freeze` or `buildBulk`). Every stored
+// column is `let`, so lookup never allocates and immutability is
+// compiler-checked; with a Sendable payload the trie is `Sendable`.
 //
-// The frozen form is a Level-Order Unary Degree Sequence (LOUDS) trie:
+// The layout is a Level-Order Unary Degree Sequence (LOUDS) trie:
 //   • `louds`  — the structure. "10" for a virtual super-root, then for each
 //                node in BFS order ("1" per child) + "0". Node `i` is the
 //                `(i+1)`-th set bit; a node's children occupy a contiguous BFS-id
@@ -99,109 +108,52 @@ nonisolated fileprivate struct LOUDSBitVector {
 // fast at high fan-out (e.g. many `*.com` rules).
 nonisolated struct FlatLabelTrie<Payload> {
 
-    // MARK: - Build state (dropped on freeze)
-
-    private final class BuildNode {
-        var children: [String: BuildNode] = [:]
-        var payload: Payload?
-    }
-
-    private var buildRoot: BuildNode? = BuildNode()
-
-    // MARK: - Frozen state (populated by freeze / buildBulk)
-
-    fileprivate var louds = LOUDSBitVector()
-    fileprivate var term  = LOUDSBitVector()
+    fileprivate let louds: LOUDSBitVector
+    fileprivate let term: LOUDSBitVector
 
     /// Node `i`'s incoming label is `labelBytes[labelOff[i] ..< labelOff[i + 1]]`.
     /// `labelOff.count == nodeCount + 1`; the root (node 0) has an empty label.
-    fileprivate var labelOff: ContiguousArray<Int32> = []
-    fileprivate var labelBytes: ContiguousArray<UInt8> = []
+    fileprivate let labelOff: ContiguousArray<Int32>
+    fileprivate let labelBytes: ContiguousArray<UInt8>
 
     /// Payloads for terminal nodes only, in ascending node order. The payload of
     /// terminal node `i` is `payloadTable[term.rank1(i)]`.
-    fileprivate var payloadTable: ContiguousArray<Payload> = []
+    fileprivate let payloadTable: ContiguousArray<Payload>
 
-    fileprivate var nodeCount = 0
+    fileprivate let nodeCount: Int
 
-    // MARK: - State
+    let isEmpty: Bool
 
-    private var frozen = false
-    private(set) var isEmpty: Bool = true
-
-    // MARK: - Build API
-
-    /// Inserts a payload at the terminal for `suffix` (pre-normalized: lowercased,
-    /// dot-separated). Returns `true` iff a new terminal was created.
-    @discardableResult
-    mutating func insert(suffix: String, payload: Payload) -> Bool {
-        var node = buildRoot!
-        for labelSub in suffix.split(separator: ".").reversed() {
-            let label = String(labelSub)
-            if let child = node.children[label] {
-                node = child
-            } else {
-                let child = BuildNode()
-                node.children[label] = child
-                node = child
-            }
-        }
-        let wasNewTerminal = node.payload == nil
-        node.payload = payload
-        isEmpty = false
-        return wasNewTerminal
+    /// The empty trie: matches nothing.
+    init() {
+        let empty = LOUDSBitVectorBuilder().build()
+        louds = empty
+        term = empty
+        labelOff = []
+        labelBytes = []
+        payloadTable = []
+        nodeCount = 0
+        isEmpty = true
     }
 
-    /// Flattens the scratch tree into the LOUDS arrays. Subsequent inserts trap;
-    /// repeat freezes are no-ops.
-    mutating func freeze() {
-        guard !frozen else { return }
-        guard let root = buildRoot else { frozen = true; return }
-
-        var queue: [BuildNode] = []
-        queue.reserveCapacity(64)
-        queue.append(root)
-
-        louds.append(true); louds.append(false)         // virtual super-root "10"
-        var labelOffsets: [Int32] = [0, 0]              // node 0 (root) has an empty label
-        var bytes: [UInt8] = []
-        var termFlags: [Bool] = [false]                 // the root never matches
-        var payloads: [Payload] = []
-
-        var head = 0
-        while head < queue.count {
-            let node = queue[head]; head += 1
-            // Byte-order child sort so the binary-search comparator always agrees,
-            // and so this path matches buildBulk's ordering for ASCII/punycode labels.
-            let sortedChildren = node.children.sorted { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }
-            for (label, child) in sortedChildren {
-                louds.append(true)
-                queue.append(child)
-                bytes.append(contentsOf: label.utf8)
-                labelOffsets.append(Int32(bytes.count))
-                if let p = child.payload { termFlags.append(true); payloads.append(p) }
-                else { termFlags.append(false) }
-            }
-            louds.append(false)
-        }
-
-        nodeCount = queue.count
-        for f in termFlags { term.append(f) }
-        louds.build(); term.build()
-        labelOff = ContiguousArray(labelOffsets)
-        labelBytes = ContiguousArray(bytes)
-        payloadTable = ContiguousArray(payloads)
-
-        buildRoot = nil
-        frozen = true
+    fileprivate init(louds: LOUDSBitVector, term: LOUDSBitVector,
+                     labelOff: ContiguousArray<Int32>, labelBytes: ContiguousArray<UInt8>,
+                     payloadTable: ContiguousArray<Payload>, nodeCount: Int, isEmpty: Bool) {
+        self.louds = louds
+        self.term = term
+        self.labelOff = labelOff
+        self.labelBytes = labelBytes
+        self.payloadTable = payloadTable
+        self.nodeCount = nodeCount
+        self.isEmpty = isEmpty
     }
 
     // MARK: - Read API
 
     /// Payload at the deepest matching node for `host` (raw UTF-8, pre-lowercased),
-    /// or nil; nil before freeze(). The root's payload is intentionally never a match.
+    /// or nil. The root's payload is intentionally never a match.
     func lookup(_ host: UnsafeBufferPointer<UInt8>) -> Payload? {
-        guard frozen, nodeCount > 0 else { return nil }
+        guard nodeCount > 0 else { return nil }
 
         var deepest: Payload? = nil
         var node = 0
@@ -252,6 +204,94 @@ nonisolated struct FlatLabelTrie<Payload> {
     }
 }
 
+// Every stored column is `let` over Sendable elements (given a Sendable
+// payload), so the conformance is structural: the compiler guarantees a shared
+// trie can never be written.
+nonisolated extension FlatLabelTrie: Sendable where Payload: Sendable {}
+
+// MARK: - Builder
+//
+// Scratch side of the trie. `insert` grows a pointer-based node tree; `freeze()`
+// flattens it into the frozen LOUDS trie and drops the tree, so inserting
+// afterwards traps and a drained builder freezes to the empty trie. The builder
+// is single-isolation-domain by construction (not Sendable); only the frozen
+// trie is shared.
+nonisolated final class FlatLabelTrieBuilder<Payload> {
+
+    private final class BuildNode {
+        var children: [String: BuildNode] = [:]
+        var payload: Payload?
+    }
+
+    private var buildRoot: BuildNode? = BuildNode()
+    private var isEmpty = true
+
+    init() {}
+
+    /// Inserts a payload at the terminal for `suffix` (pre-normalized: lowercased,
+    /// dot-separated). Returns `true` iff a new terminal was created.
+    @discardableResult
+    func insert(suffix: String, payload: Payload) -> Bool {
+        var node = buildRoot!
+        for labelSub in suffix.split(separator: ".").reversed() {
+            let label = String(labelSub)
+            if let child = node.children[label] {
+                node = child
+            } else {
+                let child = BuildNode()
+                node.children[label] = child
+                node = child
+            }
+        }
+        let wasNewTerminal = node.payload == nil
+        node.payload = payload
+        isEmpty = false
+        return wasNewTerminal
+    }
+
+    /// Flattens the scratch tree into the frozen LOUDS trie, dropping the tree.
+    func freeze() -> FlatLabelTrie<Payload> {
+        guard let root = buildRoot else { return FlatLabelTrie() }
+
+        var queue: [BuildNode] = []
+        queue.reserveCapacity(64)
+        queue.append(root)
+
+        var louds = LOUDSBitVectorBuilder()
+        var term = LOUDSBitVectorBuilder()
+        louds.append(true); louds.append(false)         // virtual super-root "10"
+        var labelOffsets: [Int32] = [0, 0]              // node 0 (root) has an empty label
+        var bytes: [UInt8] = []
+        var termFlags: [Bool] = [false]                 // the root never matches
+        var payloads: [Payload] = []
+
+        var head = 0
+        while head < queue.count {
+            let node = queue[head]; head += 1
+            // Byte-order child sort so the binary-search comparator always agrees,
+            // and so this path matches buildBulk's ordering for ASCII/punycode labels.
+            let sortedChildren = node.children.sorted { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }
+            for (label, child) in sortedChildren {
+                louds.append(true)
+                queue.append(child)
+                bytes.append(contentsOf: label.utf8)
+                labelOffsets.append(Int32(bytes.count))
+                if let p = child.payload { termFlags.append(true); payloads.append(p) }
+                else { termFlags.append(false) }
+            }
+            louds.append(false)
+        }
+
+        for f in termFlags { term.append(f) }
+        buildRoot = nil
+        return FlatLabelTrie(
+            louds: louds.build(), term: term.build(),
+            labelOff: ContiguousArray(labelOffsets), labelBytes: ContiguousArray(bytes),
+            payloadTable: ContiguousArray(payloads), nodeCount: queue.count, isEmpty: isEmpty
+        )
+    }
+}
+
 // MARK: - Bulk construction
 //
 // `buildBulk` avoids the `insert`/`freeze` `BuildNode` scratch tree, whose
@@ -260,9 +300,9 @@ nonisolated struct FlatLabelTrie<Payload> {
 // Extension memory limit. It sorts entries into reversed-label order, builds a
 // compact parallel-array node arena (labels referenced by offset, not copied),
 // then BFS-flattens that arena into the LOUDS arrays. Peak memory tracks output,
-// not input. A given trie uses one build path or the other; MITM uses `insert`/`freeze`.
+// not input. A given trie is built by one path or the other; MITM uses `insert`/`freeze`.
 
-nonisolated extension FlatLabelTrie {
+nonisolated extension FlatLabelTrieBuilder {
     /// `offset`/`length` delimit the suffix's lowercased UTF-8 bytes in the
     /// `buildBulk` buffer; `order` (collection index) breaks ties between identical
     /// suffixes so the last-collected one wins, matching `insert`'s overwrite.
@@ -276,12 +316,7 @@ nonisolated extension FlatLabelTrie {
     /// Builds the frozen trie from `entries` (sorted in place). `base` must remain
     /// valid for the call; matched label bytes are copied into the trie before it
     /// returns, so `base` need not outlive it.
-    mutating func buildBulk(base: UnsafeBufferPointer<UInt8>, entries: inout [BulkEntry]) {
-        guard !frozen else { return }
-        frozen = true
-        buildRoot = nil
-        isEmpty = entries.isEmpty
-
+    static func buildBulk(base: UnsafeBufferPointer<UInt8>, entries: inout [BulkEntry]) -> FlatLabelTrie<Payload> {
         let dot = UInt8(ascii: ".")
 
         // Reversed-label order (TLD first), ties broken by collection order so a
@@ -375,6 +410,8 @@ nonisolated extension FlatLabelTrie {
         order.reserveCapacity(n)
         order.append(0)
 
+        var louds = LOUDSBitVectorBuilder()
+        var term = LOUDSBitVectorBuilder()
         louds.append(true); louds.append(false)             // virtual super-root
         var labelOffsets: [Int32] = [0, 0]
         var bytes: [UInt8] = []
@@ -399,12 +436,12 @@ nonisolated extension FlatLabelTrie {
             louds.append(false)
         }
 
-        nodeCount = order.count
         for f in termFlags { term.append(f) }
-        louds.build(); term.build()
-        labelOff = ContiguousArray(labelOffsets)
-        labelBytes = ContiguousArray(bytes)
-        payloadTable = ContiguousArray(payloadsOut)
+        return FlatLabelTrie(
+            louds: louds.build(), term: term.build(),
+            labelOff: ContiguousArray(labelOffsets), labelBytes: ContiguousArray(bytes),
+            payloadTable: ContiguousArray(payloadsOut), nodeCount: order.count, isEmpty: entries.isEmpty
+        )
     }
 
     /// Next label scanning right-to-left from `end` (exclusive) down to `low`,
@@ -455,8 +492,3 @@ nonisolated extension FlatLabelTrie {
         }
     }
 }
-
-// A frozen trie is immutable (`insert`/`buildBulk` trap or no-op after
-// `frozen` flips) and its scratch `BuildNode` tree is dropped, so sharing it
-// across isolation domains is safe; freeze before crossing.
-nonisolated extension FlatLabelTrie: @unchecked Sendable where Payload: Sendable {}

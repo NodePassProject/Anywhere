@@ -8,7 +8,7 @@
 import CryptoKit
 import Foundation
 
-extension UUID {
+nonisolated extension UUID {
     /// Parses a UUID using the VLESS user-ID convention:
     /// length 32–36 is hex-decoded; length 1–30 is derived as
     /// `SHA1(zero_uuid || input)[0..<16]` with RFC 4122 v5 + variant bits stamped.

@@ -360,7 +360,7 @@ class RoutingRuleSetStore {
 
             let countryCode = AWCore.getBypassCountryCode()
             if !countryCode.isEmpty {
-                let bypass = await CountryBypassCatalog.shared.rules(for: countryCode)
+                let bypass = CountryBypassCatalog.shared.rules(for: countryCode)
                 if !bypass.isEmpty {
                     entries.append(.init(tier: .bypass, action: .direct, configId: nil,
                                          name: String(localized: "Country Bypass"), rules: bypass))

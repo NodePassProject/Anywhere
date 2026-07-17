@@ -742,7 +742,7 @@ private nonisolated func aesECBEncrypt(key: Data, block: Data) throws -> Data {
     return Data(outBytes.prefix(16))
 }
 
-private func aesECBDecrypt(key: Data, block: Data) throws -> Data {
+private nonisolated func aesECBDecrypt(key: Data, block: Data) throws -> Data {
     guard block.count == 16 else { throw ShadowsocksError.decryptionFailed }
     var outBytes = [UInt8](repeating: 0, count: 16 + kCCBlockSizeAES128)
     var outLen: Int = 0

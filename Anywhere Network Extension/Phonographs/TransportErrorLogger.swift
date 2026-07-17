@@ -126,11 +126,13 @@ nonisolated enum TransportErrorLogger {
 nonisolated enum DialDiagnostics {
 
     /// E.g. `flows=312/384 pending=6 udp=96 lwip=205`. Must run on
-    /// lwipQueue (the PCB count is lwipQueue-confined).
-    static func snapshot() -> String {
+    /// lwipQueue (the PCB count is lwipQueue-confined). The active-pcb count is
+    /// read through the bridge's wrapper so the raw `lwip_bridge_*` C symbol
+    /// stays inside ``LWIPConcurrencyBridge``.
+    static func snapshot(bridge: LWIPConcurrencyBridge) -> String {
         "flows=\(FlowGauge.live)/\(TunnelLimits.flowBudget) "
             + "pending=\(FlowGauge.pendingTCP) udp=\(FlowGauge.liveUDP) "
-            + "lwip=\(Int(lwip_bridge_active_tcp_count()))"
+            + "lwip=\(bridge.activeTCPCount())"
     }
 }
 

@@ -40,7 +40,7 @@ nonisolated enum Tombstone {
 
 nonisolated enum BlobMerge {
     static func register() {
-        JSONBlobStore.mergeResolver = { key, rows in
+        JSONBlobStore.installMergeResolver { key, rows in
             switch key {
             case .configurations: return mergeArray(ProxyConfiguration.self, rows)
             case .subscriptions:  return mergeArray(Subscription.self, rows)

@@ -28,13 +28,12 @@ nonisolated final class MITMSession {
     /// Client→session bytes arrive via ``feedFromClient(_:)``/``endOfClient()`` and drain through an
     /// `AsyncThrowingStream`; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
     /// lwIP write buffers and gives no backpressure signal).
-    final class InnerTransport: ByteTransport, @unchecked Sendable {
+    final class InnerTransport: ByteTransport, Sendable {
         let lwipBridge: LWIPConcurrencyBridge
-        var onSendToClient: ((Data) -> Void)?
 
         /// Client→session bytes. Producer side (`inbox`) is `Sendable` (fed from the lwIP queue);
         /// the single consumer pulls `inboxIterator` from ``receive()``. The `Mutex` guards the
-        /// iterator *value* (this transport is an `@unchecked Sendable` class, not an actor).
+        /// iterator *value* so this transport is honestly `Sendable`.
         private let inbox: AsyncThrowingStream<Data, Error>.Continuation
         private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
         private struct State {
@@ -43,10 +42,18 @@ nonisolated final class MITMSession {
             /// the client stay open so an in-flight response still drains — matching the non-MITM path,
             /// which keeps pumping downlink after a client FIN. `closed` (cancel) blocks both sides.
             var receiveClosed = false
+            /// Downlink sink to the lwIP client leg; set once before the pumps start and invoked on
+            /// the lwIP queue. Held in `State` (not a bare `var`) so the transport stays `Sendable`.
+            var onSendToClient: ((Data) -> Void)?
         }
         private let state = Mutex(State())
 
         var isReady: Bool { state.withLock { !$0.closed } }
+
+        /// Installs the downlink sink; called once before the session's pumps begin.
+        func setOnSendToClient(_ handler: ((Data) -> Void)?) {
+            state.withLock { $0.onSendToClient = handler }
+        }
 
         init(lwipBridge: LWIPConcurrencyBridge) {
             self.lwipBridge = lwipBridge
@@ -62,8 +69,8 @@ nonisolated final class MITMSession {
             // Ordered onto the lwIP queue (the confinement for onSendToClient/writeToLWIP); the lwIP
             // write buffers, so there is no completion to await — enqueueing preserves send order.
             lwipBridge.enqueue { [self] in
-                guard !state.withLock({ $0.closed }) else { return }
-                onSendToClient?(data)
+                let handler = state.withLock { $0.closed ? nil : $0.onSendToClient }
+                handler?(data)
             }
         }
 
@@ -279,7 +286,7 @@ nonisolated final class MITMSession {
 
     /// Set by the lwIP-side caller to write inner-leg bytes back to the client (fire-and-forget).
     var onSendToClient: ((Data) -> Void)? {
-        didSet { innerTransport.onSendToClient = onSendToClient }
+        didSet { innerTransport.setOnSendToClient(onSendToClient) }
     }
 
     /// Called on teardown; `error` is nil for a clean close.
@@ -369,16 +376,19 @@ nonisolated final class MITMSession {
         // avoid re-entrant teardown). The request direction can't cleanly answer the client so it just
         // closes; the response direction answers a 502 first.
         requestStream.onFatalClose = { [weak self] in
-            self?.lwipBridge.enqueue { self?.cancel(error: nil) }
+            guard let self else { return }
+            self.lwipBridge.enqueue { self.cancel(error: nil) }
         }
         responseStream.onFatalClose = { [weak self] in
-            self?.lwipBridge.enqueue { self?.failInnerLegWith502("rejected a malformed or oversized upstream response") }
+            guard let self else { return }
+            self.lwipBridge.enqueue { self.failInnerLegWith502("rejected a malformed or oversized upstream response") }
         }
         // Mid-body chunked framing breakage (head already on the wire): tear down both legs. A 502
         // can't be written over an in-flight response, and a synthesized terminator would frame a
         // truncated body as complete and desync the peer.
-        let hardClose: () -> Void = { [weak self] in
-            self?.lwipBridge.enqueue { self?.cancel(error: nil) }
+        let hardClose: @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            self.lwipBridge.enqueue { self.cancel(error: nil) }
         }
         requestStream.onHardClose = hardClose
         responseStream.onHardClose = hardClose
@@ -691,8 +701,8 @@ nonisolated final class MITMSession {
     /// Serializes per-leg sends (concurrent callers can't interleave bytes mid-frame) and chunks each
     /// blob so no single `send` exceeds `chunkSize`. A single consumer task drains the job stream FIFO,
     /// completing one blob fully before the next.
-    private final class LegWriter: @unchecked Sendable {
-        private struct Job { let data: Data; let resume: (Error?) -> Void }
+    private final class LegWriter: Sendable {
+        private struct Job: Sendable { let data: Data; let resume: @Sendable (Error?) -> Void }
         private let continuation: AsyncStream<Job>.Continuation
 
         init(record: any MITMByteLeg, chunkSize: Int) {
@@ -717,7 +727,7 @@ nonisolated final class MITMSession {
 
         /// Enqueues `data` (FIFO; call on lwipQueue to preserve order across concurrent callers).
         /// `completion` fires once the blob has fully drained, a send failed, or the writer was finished.
-        func enqueue(_ data: Data, completion: @escaping (Error?) -> Void) {
+        func enqueue(_ data: Data, completion: @escaping @Sendable (Error?) -> Void) {
             if case .terminated = continuation.yield(Job(data: data, resume: completion)) {
                 completion(TransportError.notConnected)
             }
@@ -1305,7 +1315,10 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             guard let self, !self.torn, !bytes.isEmpty else { return }
             self.sendChunkedCancellingOnError(bytes, via: record)
         }
-        leg.onFatalError = { [weak self] _ in self?.lwipBridge.enqueue { self?.cancel(error: nil) } }
+        leg.onFatalError = { [weak self] _ in
+            guard let self else { return }
+            self.lwipBridge.enqueue { self.cancel(error: nil) }
+        }
         // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST, not
         // this connection-level frame) so it redials new streams while in-flight ones finish here.
         leg.onDraining = { [weak self] in
@@ -1388,9 +1401,10 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         // A malformed / oversized upstream response fails just this stream (RST), not the whole
         // multiplexed h2 connection.
         responseStream.onFatalClose = { [weak self] in
-            self?.lwipBridge.enqueue {
-                self?.bridgeAbortStream(streamID)
-                self?.bridgeClient?.acceptResponseAborted(streamID: streamID)
+            guard let self else { return }
+            self.lwipBridge.enqueue {
+                self.bridgeAbortStream(streamID)
+                self.bridgeClient?.acceptResponseAborted(streamID: streamID)
             }
         }
         let bs = BridgeStream(clientStreamID: streamID, responseStream: responseStream, responseLog: responseLog)

@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension ProxyClient {
+nonisolated extension ProxyClient {
 
     var isShadowsocks: Bool {
         configuration.outboundProtocol == .shadowsocks

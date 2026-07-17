@@ -14,10 +14,10 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     let udpState = Mutex(UDPFramingState())
 
-    /// Tail of the send chain: each framed datagram links after the previous and runs only once it
-    /// finishes, so a datagram's length-prefixed frame never interleaves another's on the stream
-    /// transport. UDP tolerates whole-datagram reordering; only intra-frame interleaving is fatal.
-    private let sendChain = SerialSendChain()
+    /// Ordered send pipeline: each framed datagram reaches the stream transport in submission
+    /// order, so a datagram's length-prefixed frame never interleaves another's. UDP tolerates
+    /// whole-datagram reordering; only intra-frame interleaving is fatal.
+    private let sendChain = SerialSender()
 
     init(inner: ProxyConnection) {
         self.inner = inner

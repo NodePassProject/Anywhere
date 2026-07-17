@@ -16,8 +16,8 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
         self.executor = BridgeExecutor(label: "com.argsment.Anywhere.NGTCP2ConcurrencyBridge")
     }
 
-    /// The ngtcp2 serial queue, vended by ``executor``. Timers and the carrier target it.
-    var queue: DispatchQueue { executor.queue }
+    /// The ngtcp2 serial queue — bridge-internal; callers enter the domain via ``enqueue``/``run``.
+    private var queue: DispatchQueue { executor.queue }
 
     /// Fire-and-forget hop onto the ngtcp2 queue with a `Sendable`-checked closure — the sanctioned
     /// way for clients to enter the isolation domain instead of reaching for `queue.async` (and the

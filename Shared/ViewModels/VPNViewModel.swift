@@ -153,7 +153,7 @@ class VPNViewModel {
 
     @ObservationIgnored private var latencyTask: Task<Void, Never>?
 
-    private static let maxConcurrentLatencyTests = 4
+    nonisolated private static let maxConcurrentLatencyTests = 4
 
     func testLatency(for configuration: ProxyConfiguration) {
         latencyTask?.cancel()

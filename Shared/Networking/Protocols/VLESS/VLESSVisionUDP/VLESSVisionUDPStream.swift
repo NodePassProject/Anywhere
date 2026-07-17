@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPStream")
 
-actor VLESSVisionUDPStream: MultiplexerStreamSink {
+actor VLESSVisionUDPStream {
     nonisolated let sessionID: UInt16
     nonisolated let network: VLESSVisionUDPNetwork
     nonisolated let targetHost: String
@@ -149,3 +149,5 @@ actor VLESSVisionUDPStream: MultiplexerStreamSink {
         }
     }
 }
+
+extension VLESSVisionUDPStream: MultiplexerStreamSink {}

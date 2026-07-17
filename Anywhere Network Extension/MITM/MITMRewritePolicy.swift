@@ -168,16 +168,17 @@ nonisolated final class MITMRewritePolicy {
         state.withLock { state in
             let previousGates = state.gateCache
             state = PolicyState()
+            let trie = FlatLabelTrieBuilder<Int16>()
             var newGates: [String: MITMGateRegex] = [:]
             for set in ruleSets {
                 // Disabled sets stay in activeIDs so toggling off preserves the script-store bucket.
                 guard set.enabled else { continue }
-                if let compiled = insert(set, into: &state, previousGates: previousGates, newGates: &newGates) {
+                if let compiled = insert(set, into: &state, trie: trie, previousGates: previousGates, newGates: &newGates) {
                     scopedRules.append((scope: set.id, rules: compiled))
                 }
             }
             state.gateCache = newGates
-            state.trie.freeze()
+            state.trie = trie.freeze()
         }
         // Purge JS engine state for deleted sets; edited sets (stable id) keep theirs.
         let activeIDs = Set(ruleSets.map { $0.id })
@@ -194,12 +195,14 @@ nonisolated final class MITMRewritePolicy {
         }
     }
 
-    /// Inserts one rule set into `state` and returns its compiled rules, or nil without a usable suffix.
-    /// Runs inside `load`'s withLock. Reuses a gate from `newGates` (this reload) or `previousGates`
-    /// (last reload) before compiling, so each distinct pattern is compiled at most once.
+    /// Inserts one rule set into `state` (its suffixes into `trie`) and returns its compiled rules,
+    /// or nil without a usable suffix. Runs inside `load`'s withLock. Reuses a gate from `newGates`
+    /// (this reload) or `previousGates` (last reload) before compiling, so each distinct pattern is
+    /// compiled at most once.
     private func insert(
         _ set: MITMRuleSet,
         into state: inout PolicyState,
+        trie: FlatLabelTrieBuilder<Int16>,
         previousGates: [String: MITMGateRegex],
         newGates: inout [String: MITMGateRegex]
     ) -> [CompiledMITMRule]? {
@@ -236,7 +239,7 @@ nonisolated final class MITMRewritePolicy {
             )
             let payloadID = Int16(state.compiledSets.count)
             state.compiledSets.append(payload)
-            if state.trie.insert(suffix: suffix, payload: payloadID) {
+            if trie.insert(suffix: suffix, payload: payloadID) {
                 state.setCount += 1
             } else {
                 // Later set (user-list order) wins; log so the override is never silent.

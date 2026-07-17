@@ -15,30 +15,40 @@ nonisolated private let logger = AnywhereLogger(category: "ShadowsocksConnection
 /// Address header is prepended to the first send, encrypted as part of the AEAD stream.
 nonisolated final class ShadowsocksConnection: ProxyConnection {
     private let inner: ProxyConnection
-    private let writer: ShadowsocksAEADWriter
-    private let reader: ShadowsocksAEADReader
-    private let addressHeader: Mutex<Data?>
+
+    /// Send-path state: the one-shot address header plus the AEAD writer (salt, nonce).
+    /// The connection is what crosses concurrency domains; one Mutex makes the header
+    /// hand-off and the writer's nonce advance a single atomic step per send.
+    private struct SendState {
+        var addressHeader: Data?
+        var writer: ShadowsocksAEADWriter
+    }
+    private let sendState: Mutex<SendState>
+
+    /// Receive-path AEAD + reassembly state, guarded at the sharing boundary.
+    private let reader: Mutex<ShadowsocksAEADReader>
 
     init(inner: ProxyConnection, cipher: ShadowsocksCipher, masterKey: Data, addressHeader: Data) {
         self.inner = inner
-        self.writer = ShadowsocksAEADWriter(cipher: cipher, masterKey: masterKey)
-        self.reader = ShadowsocksAEADReader(cipher: cipher, masterKey: masterKey)
-        self.addressHeader = Mutex(addressHeader)
+        self.sendState = Mutex(SendState(
+            addressHeader: addressHeader,
+            writer: ShadowsocksAEADWriter(cipher: cipher, masterKey: masterKey)
+        ))
+        self.reader = Mutex(ShadowsocksAEADReader(cipher: cipher, masterKey: masterKey))
     }
 
     var isConnected: Bool { inner.isConnected }
 
     func sendRaw(_ data: Data) async throws {
-        var plaintext = Data()
-        addressHeader.withLock { header in
-            if let h = header {
-                plaintext.append(h)
-                header = nil
+        let encrypted = try sendState.withLock { state in
+            var plaintext = Data()
+            if let header = state.addressHeader {
+                plaintext.append(header)
+                state.addressHeader = nil
             }
+            plaintext.append(data)
+            return try state.writer.seal(plaintext: plaintext)
         }
-        plaintext.append(data)
-
-        let encrypted = try writer.seal(plaintext: plaintext)
         try await inner.sendRaw(encrypted)
     }
 
@@ -47,7 +57,7 @@ nonisolated final class ShadowsocksConnection: ProxyConnection {
             guard let data = try await inner.receiveRaw(), !data.isEmpty else {
                 return nil
             }
-            let plaintext = try reader.open(ciphertext: data)
+            let plaintext = try reader.withLock { try $0.open(ciphertext: data) }
             if plaintext.isEmpty {
                 continue
             }

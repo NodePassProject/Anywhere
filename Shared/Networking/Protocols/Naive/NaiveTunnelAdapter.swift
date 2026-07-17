@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 // MARK: - NaiveProxyHeaders
 
@@ -40,10 +41,14 @@ nonisolated enum NaiveProxyHeaders {
 // MARK: - NaiveTunnelAdapter
 
 /// Derives the negotiated padding type from CONNECT response headers.
-nonisolated final class NaiveTunnelAdapter: NaiveTunnel {
+nonisolated final class NaiveTunnelAdapter: NaiveTunnel, Sendable {
 
     private let tunnel: HTTPTunnel
-    private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
+    /// Set once in ``openTunnel()`` and read afterwards (possibly from another task), so it is
+    /// mutex-guarded rather than a bare `var`.
+    private let paddingType = Mutex(NaivePaddingNegotiator.PaddingType.none)
+
+    var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType { paddingType.withLock { $0 } }
 
     init(_ tunnel: HTTPTunnel) {
         self.tunnel = tunnel
@@ -53,7 +58,7 @@ nonisolated final class NaiveTunnelAdapter: NaiveTunnel {
 
     func openTunnel() async throws {
         try await tunnel.openTunnel()
-        negotiatedPaddingType = NaivePaddingNegotiator.parseResponse(headers: tunnel.responseHeaders)
+        paddingType.withLock { $0 = NaivePaddingNegotiator.parseResponse(headers: tunnel.responseHeaders) }
     }
 
     func sendData(_ data: Data) async throws {

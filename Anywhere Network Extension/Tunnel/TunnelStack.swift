@@ -69,6 +69,10 @@ nonisolated class TunnelStack {
     /// The single plane-command driver; owned by the stack, cancelled in ``stop()``.
     var planeCommandTask: Task<Void, Never>?
 
+    /// Consumes the Darwin settings/routing/MITM notification stream; owned by the stack, cancelled
+    /// in ``stop()`` (which tears down the underlying `CFNotificationCenter` observers).
+    var settingsObserverTask: Task<Void, Never>?
+
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
     

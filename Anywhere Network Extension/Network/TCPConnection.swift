@@ -190,7 +190,7 @@ actor TCPConnection {
             operation: "Handshake",
             endpoint: endpointDescription,
             error: HandshakeTimeoutError(phase: phase),
-            context: DialDiagnostics.snapshot()
+            context: DialDiagnostics.snapshot(bridge: bridge)
         )
         abort()
     }
@@ -337,12 +337,15 @@ actor TCPConnection {
     private func startRelay(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) {
         if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
         if uplinkDone { stream.assumeIsolated { $0.deliverUploadEOF() } }
-        relayTask = Task { [weak self] in
+        // Strong self: the relay group owns the connection while copying. `releaseProxy` terminates
+        // the stream and cancels the proxy leg, so both loops unwind promptly and the task finishes,
+        // letting ARC reclaim — the holder drives teardown, no `[weak self]` cycle-guard needed.
+        relayTask = Task {
             await withTaskGroup(of: Void.self) { group in
-                group.addTask { await self?.runUploadRelay(connection, stream) }
-                group.addTask { await self?.runDownloadRelay(connection, stream) }
+                group.addTask { await self.runUploadRelay(connection, stream) }
+                group.addTask { await self.runDownloadRelay(connection, stream) }
             }
-            await self?.relayFinished()
+            self.relayFinished()
         }
     }
 
@@ -494,7 +497,7 @@ actor TCPConnection {
 
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
         failureReporter.report(operation: "Connect", endpoint: endpointDescription,
-                               error: error, context: DialDiagnostics.snapshot())
+                               error: error, context: DialDiagnostics.snapshot(bridge: bridge))
         guard case TransportError.resolutionFailed = error else {
             abort()
             return

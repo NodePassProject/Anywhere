@@ -10,21 +10,9 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HTTP3Multiplexer")
 
-// MARK: - HTTP3StreamHandler
+actor HTTP3Multiplexer {
 
-nonisolated protocol HTTP3StreamHandler: AnyObject {
-    // Requirements are nonisolated: handlers run on the QUICConnection's serial
-    // queue, never the main actor (the project default isolation).
-
-    /// nil before a stream has been opened.
-    nonisolated var quicStreamID: Int64? { get }
-    /// Delivers raw HTTP/3 frame payload. Called on the multiplexer queue.
-    nonisolated func handleStreamData(_ data: Data, fin: Bool)
-    /// Called on the multiplexer queue.
-    nonisolated func handleSessionError(_ error: Error)
-}
-
-nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
+    nonisolated var unownedExecutor: UnownedSerialExecutor { quic.unownedExecutor }
 
     // MARK: - State
 
@@ -32,30 +20,31 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
         case idle, connecting, ready, draining, closed
     }
 
+    /// Per-stream event sinks, registered with ``openStream(events:)``. Invoked
+    /// synchronously on the multiplexer's executor from the QUIC demux path; a stream
+    /// actor on the same executor enters its isolation via `assumeIsolated` inside these.
+    struct StreamEvents: Sendable {
+        /// Raw HTTP/3 stream payload; `fin` marks the read-side EOF.
+        let data: @Sendable (Data, Bool) -> Void
+        /// Terminal stream/session failure.
+        let error: @Sendable (Error) -> Void
+    }
+
     // MARK: - Properties
 
     private let quic: QUICConnection
 
-    /// Fire-and-forget hop onto the shared ngtcp2 queue with a `Sendable`-checked closure — the
-    /// sanctioned way for the queue-confined stream/pool consumers to enter the isolation domain
-    /// (shares the connection's serial queue to avoid cross-queue dispatch on the hot receive path).
-    func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) { quic.enqueue(work) }
-
-    var isOnQueue: Bool { quic.isOnQueue }
-
-    /// Runs `body` on the ngtcp2 queue and awaits its result (forwards the bridge hop), so the
-    /// queue-confined stream/pool consumers stay free of raw `enqueue`+continuation.
-    func run<T>(_ body: @escaping () -> T) async -> T { await quic.run(body) }
-    func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T { try await quic.run(body) }
+    /// The ngtcp2 boundary object whose executor this multiplexer (and its streams) adopt.
+    /// Vended so per-request stream actors can join the same isolation domain.
+    nonisolated var sharedBridge: NGTCP2ConcurrencyBridge { quic.bridge }
 
     private var state: SessionState = .idle
 
-    private var streams: [Int64: any HTTP3StreamHandler] = [:]
+    private var streams: [Int64: StreamEvents] = [:]
     /// Readiness latch: the ready/teardown path finishes `readySignal` (throwing on failure);
     /// every awaiter gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
-    var onClose: (() -> Void)?
 
     private var serverControlStreamID: Int64?
     private var serverControlBuffer = Data()
@@ -73,29 +62,31 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     /// RFC 9297: true when the peer enables H3_DATAGRAM (required for CONNECT-UDP).
     private(set) var peerSupportsH3Datagram = false
 
-    // Pool-visible state, accessed under `_poolState` from arbitrary threads; must not
-    // touch `streams` or other queue-protected state.
+    // Pool-visible state, read under `_poolState` from arbitrary threads; must not
+    // touch `streams` or other executor-protected state.
     private struct PoolState {
         var isClosed = false
         /// True when ngtcp2 signals STREAM_ID_BLOCKED; the pool creates a new multiplexer instead.
         var isStreamBlocked = false
         var streamCount = 0
         var reservedStreams = 0
+        /// Pool eviction hook, fired exactly once on close.
+        var onClose: (@Sendable () -> Void)?
     }
     private let _poolState = Mutex(PoolState())
     /// Must match `QUICTuning.naive.initialMaxStreamsBidi`; undersizing forces premature multiplexer churn.
     private let maxConcurrentStreams = 512
 
-    var isClosed: Bool {
+    nonisolated var isClosed: Bool {
         _poolState.withLock { $0.isClosed }
     }
 
     /// True when ngtcp2 signals STREAM_ID_BLOCKED; the pool creates a new multiplexer instead.
-    var poolIsStreamBlocked: Bool {
+    nonisolated var poolIsStreamBlocked: Bool {
         _poolState.withLock { $0.isStreamBlocked }
     }
 
-    var hasActiveStreams: Bool {
+    nonisolated var hasActiveStreams: Bool {
         _poolState.withLock { $0.streamCount > 0 || $0.reservedStreams > 0 }
     }
 
@@ -114,7 +105,12 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     // MARK: - Pool Interface
 
-    func tryReserveStream() -> Bool {
+    /// Installs the pool's eviction hook; fired exactly once when the session closes.
+    nonisolated func setOnClose(_ hook: @escaping @Sendable () -> Void) {
+        _poolState.withLock { $0.onClose = hook }
+    }
+
+    nonisolated func tryReserveStream() -> Bool {
         _poolState.withLock { state in
             guard !state.isClosed && !state.isStreamBlocked else { return false }
             let count = state.streamCount + state.reservedStreams
@@ -126,7 +122,7 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     /// Reserves a slot bypassing `maxConcurrentStreams` when the pool is at its hard
     /// cap; ngtcp2's STREAM_ID_BLOCKED and the caller's retry path handle backpressure.
-    func forceReserveStream() -> Bool {
+    nonisolated func forceReserveStream() -> Bool {
         _poolState.withLock { state in
             guard !state.isClosed && !state.isStreamBlocked else { return false }
             state.reservedStreams += 1
@@ -134,30 +130,35 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
         }
     }
 
-    var activeStreamCount: Int {
+    nonisolated var activeStreamCount: Int {
         _poolState.withLock { $0.streamCount + $0.reservedStreams }
     }
 
-    // MARK: - Stream Creation
-
     /// Converts a reserved slot into an active stream. Non-pooled callers skip this.
-    func noteStreamStarted() {
-        // Called on queue
+    nonisolated func noteStreamStarted() {
         _poolState.withLock { state in
             state.reservedStreams = max(0, state.reservedStreams - 1)
             state.streamCount += 1
         }
     }
 
-    func registerStream(_ stream: any HTTP3StreamHandler, streamID: Int64) {
-        streams[streamID] = stream
+    // MARK: - Stream Creation
+
+    /// Opens a bidirectional QUIC stream and registers its event sinks in one isolated step,
+    /// so no demuxed byte can fall between the open and the registration. Returns `nil` —
+    /// after recording the STREAM_ID_BLOCKED pool signal — when ngtcp2 has no stream credit.
+    func openStream(events: StreamEvents) -> Int64? {
+        guard let sid = quic.openBidiStream() else {
+            markStreamBlocked()
+            return nil
+        }
+        streams[sid] = events
+        return sid
     }
 
-    func removeStream(_ stream: any HTTP3StreamHandler) {
-        if let sid = stream.quicStreamID {
-            if streams.removeValue(forKey: sid) != nil {
-                _poolState.withLock { $0.streamCount = max(0, $0.streamCount - 1) }
-            }
+    func removeStream(_ streamID: Int64) {
+        if streams.removeValue(forKey: streamID) != nil {
+            _poolState.withLock { $0.streamCount = max(0, $0.streamCount - 1) }
         }
 
         if state == .draining && streams.isEmpty {
@@ -166,7 +167,7 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     }
 
     /// Called when openBidiStream fails (STREAM_ID_BLOCKED).
-    func markStreamBlocked() {
+    nonisolated func markStreamBlocked() {
         _poolState.withLock { state in
             state.isStreamBlocked = true
             state.streamCount = max(0, state.streamCount - 1)
@@ -175,56 +176,55 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     // MARK: - Connection Lifecycle
 
-    /// Coalesces awaiters behind one connect; resolves at `.ready` or on fail/close. Kicks the
-    /// state machine on `queue`, then parks on the gate — callable from any async context.
+    /// Coalesces awaiters behind one connect; resolves at `.ready` or on fail/close.
     func ensureReady() async throws {
-        let alreadyReady: Bool = try await run { [self] () -> Result<Bool, Error> in
-            switch state {
-            case .ready:
-                return .success(true)
-            case .draining:
-                return .failure(HTTP3Error.connectionFailed("Session draining (GOAWAY)"))
-            case .closed:
-                return .failure(HTTP3Error.connectionFailed("Session closed"))
-            case .connecting:
-                return .success(false)
-            case .idle:
-                state = .connecting
-                startConnection()
-                return .success(false)
-            }
+        switch state {
+        case .ready:
+            return
+        case .draining:
+            throw HTTP3Error.connectionFailed("Session draining (GOAWAY)")
+        case .closed:
+            throw HTTP3Error.connectionFailed("Session closed")
+        case .connecting:
+            break
+        case .idle:
+            state = .connecting
+            startConnection()
         }
         // Resolves on `.ready` (success) or teardown (fail/close).
-        if !alreadyReady { try await readyTask.value }
+        try await readyTask.value
     }
 
     private func startConnection() {
         QUICCrypto.registerCallbacks()
 
         // Drain pool entries eagerly on close so no new streams go to a dead multiplexer.
-        quic.connectionClosedHandler = { [weak self] error in
-            guard let self else { return }
-            self.failSession(error)
+        quic.handlers.withLock { handlers in
+            handlers.connectionClosed = { [weak self] error in
+                self?.assumeIsolated { $0.failSession(error) }
+            }
         }
-        
-        Task { [weak self] in
-            guard let self else { return }
+
+        // Strong `self`: the connect task owns the multiplexer until it resolves, so a
+        // pooled instance can't deallocate mid-handshake and leak the ngtcp2 state. Explicit
+        // `[self]` so the deliberately-weak capture in the stored QUIC handler below reads as intentional.
+        Task { [self] in
             do {
                 try await quic.connect()
             } catch {
-                await quic.run { self.failSession(error) }
+                failSession(error)
                 return
             }
-            await quic.run { [self] in
-                self.openControlStreams()
-                
-                self.quic.streamDataHandler = { [weak self] streamID, data, fin in
-                    self?.handleStreamData(streamID: streamID, data: data, fin: fin)
-                }
+            openControlStreams()
 
-                self.state = .ready
-                self.readySignal.finish()
+            quic.handlers.withLock { handlers in
+                handlers.streamData = { [weak self] streamID, data, fin in
+                    self?.assumeIsolated { $0.handleStreamData(streamID: streamID, data: data, fin: fin) }
+                }
             }
+
+            state = .ready
+            readySignal.finish()
         }
     }
 
@@ -245,22 +245,20 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
         }
     }
 
-    // MARK: - Stream Operations (called on queue)
+    // MARK: - Stream Operations
 
-    func openBidiStream() -> Int64? {
-        quic.openBidiStream()
-    }
-
-    /// Async stream write, forwarding to the QUIC ngtcp2-boundary continuation (async twin).
-    func writeStream(_ streamID: Int64, data: Data, fin: Bool = false) async throws {
+    /// Async stream write, forwarding to the QUIC ngtcp2-boundary continuation.
+    nonisolated func writeStream(_ streamID: Int64, data: Data, fin: Bool = false) async throws {
         try await quic.writeStream(streamID, data: data, fin: fin)
     }
 
-    func extendStreamOffset(_ streamID: Int64, count: Int) {
+    /// Extends flow control once the app consumes data; safe from any context (hops internally).
+    nonisolated func extendStreamOffset(_ streamID: Int64, count: Int) {
         quic.extendStreamOffset(streamID, count: count)
     }
 
-    func shutdownStream(_ streamID: Int64, code: HTTP3ErrorCode = .noError) {
+    /// Sends RESET_STREAM + STOP_SENDING; safe from any context (hops internally).
+    nonisolated func shutdownStream(_ streamID: Int64, code: HTTP3ErrorCode = .noError) {
         quic.shutdownStream(streamID, appErrorCode: code.rawValue)
     }
 
@@ -268,7 +266,7 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     private func handleStreamData(streamID: Int64, data: Data, fin: Bool) {
         if let stream = streams[streamID] {
-            stream.handleStreamData(data, fin: fin)
+            stream.data(data, fin)
             return
         }
 
@@ -425,40 +423,24 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     // MARK: - Close
 
-    func close(error: Error? = nil) {
+    nonisolated func close(error: Error? = nil) {
         // Strong `self`: a weakly-captured pooled multiplexer could deallocate before
         // this runs, skipping `quic.close()` and leaking the socket + ngtcp2 state.
-        enqueue {
-            guard self.state != .closed else { return }
-            self.state = .closed
-
-            self._poolState.withLock { state in
-                state.isClosed = true
-                state.streamCount = 0
-                state.reservedStreams = 0
-            }
-
-            self.readySignal.finish(throwing: HTTP3Error.connectionFailed("Session closed"))
-
-            let activeStreams = Array(self.streams.values)
-            self.streams.removeAll()
-            for stream in activeStreams {
-                stream.handleSessionError(HTTP3Error.connectionFailed("Session closed"))
-            }
-
-            self.quic.close()
-            self.onClose?()
-        }
+        // Synchronous on the executor so pool state updates before new streams are handed out.
+        quic.enqueue { self.assumeIsolated { $0.failSession(error ?? HTTP3Error.connectionFailed("Session closed")) } }
     }
 
     private func failSession(_ error: Error) {
         guard state != .closed else { return }
         state = .closed
 
-        _poolState.withLock { state in
+        let onClose = _poolState.withLock { state in
             state.isClosed = true
             state.streamCount = 0
             state.reservedStreams = 0
+            let hook = state.onClose
+            state.onClose = nil
+            return hook
         }
 
         readySignal.finish(throwing: error)
@@ -466,10 +448,12 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
         let activeStreams = Array(streams.values)
         streams.removeAll()
         for stream in activeStreams {
-            stream.handleSessionError(error)
+            stream.error(error)
         }
-        
+
         quic.close()
         onClose?()
     }
 }
+
+extension HTTP3Multiplexer: Multiplexer {}

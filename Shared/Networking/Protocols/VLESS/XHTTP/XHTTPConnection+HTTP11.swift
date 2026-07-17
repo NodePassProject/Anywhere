@@ -259,7 +259,7 @@ extension XHTTPConnection {
     }
 
     /// Sends the packet-up payload as one POST, re-splitting an oversized payload into
-    /// back-to-back POSTs (each with its own seq). Called under `packetUpMutex`.
+    /// back-to-back POSTs (each with its own seq). Called on the `packetUpChain` serializer.
     func sendPacketUpHTTP11(data: Data) async throws {
         guard let upload = state.withLock({ $0.uploadTransport }) else {
             throw XHTTPError.setupFailed("Upload connection not established")

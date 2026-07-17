@@ -21,10 +21,8 @@ nonisolated final class JSCConcurrencyBridge: @unchecked Sendable {
         self.executor = BridgeExecutor(label: "com.argsment.Anywhere.JSCConcurrencyBridge")
     }
 
-    /// The JSC serial (home) queue — everything touching a `JSContext`/`JSValue` hops here.
-    /// Vended so the script engine/transform can schedule their fire-and-forget confinement hops
-    /// (compile, deinit release, settle) onto the same domain.
-    var queue: DispatchQueue { executor.queue }
+    /// The JSC serial (home) queue — bridge-internal; callers enter the domain via ``enqueue``/``run``.
+    private var queue: DispatchQueue { executor.queue }
 
     /// Fire-and-forget hop onto the JSC queue with a `Sendable`-checked closure — the sanctioned way
     /// to enter the isolation domain instead of reaching for `queue.async` directly.

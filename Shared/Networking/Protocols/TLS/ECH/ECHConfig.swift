@@ -26,15 +26,15 @@ nonisolated enum ECHAeadID {
 }
 
 /// The ECH extension codepoint, also the ECHConfig version we understand.
-let echExtensionCodepoint: UInt16 = 0xFE0D
+nonisolated let echExtensionCodepoint: UInt16 = 0xFE0D
 
-let echSupportedKEMs: Set<UInt16> = [ECHKemID.dhkemX25519HKDFSHA256]
+nonisolated let echSupportedKEMs: Set<UInt16> = [ECHKemID.dhkemX25519HKDFSHA256]
 
-let echSupportedKDFs: Set<UInt16> = [
+nonisolated let echSupportedKDFs: Set<UInt16> = [
     ECHKdfID.hkdfSHA256, ECHKdfID.hkdfSHA384, ECHKdfID.hkdfSHA512,
 ]
 
-let echSupportedAEADs: Set<UInt16> = [
+nonisolated let echSupportedAEADs: Set<UInt16> = [
     ECHAeadID.aesGCM128, ECHAeadID.aesGCM256, ECHAeadID.chaCha20Poly1305,
 ]
 
@@ -173,7 +173,7 @@ nonisolated enum ECHConfigParser {
 
 // MARK: - Selection
 
-extension ECHConfig {
+nonisolated extension ECHConfig {
 
     /// First usable config: supported KEM, at least one supported cipher suite,
     /// DNS-like public_name, and no mandatory extension (high bit of type set).

@@ -16,7 +16,7 @@ extension TunnelStack {
     // MARK: - Lifecycle
 
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
-        AnywhereLogger.logSink = { [weak self] message, level in
+        AnywhereLogger.installLogSink { [weak self] message, level in
             let logLevel: TunnelLogLevel
             switch level {
             // `debug` never reaches the sink; mapped defensively.
@@ -29,22 +29,23 @@ extension TunnelStack {
         self.packetFlow = packetFlow
         self.configuration = configuration
 
-        // Single output-drain consumer for the stack's lifetime. Weak self + per-iteration
-        // promotion so the loop never keeps the stack alive; `stop()` cancels it, ending the
-        // `for await` and releasing the captured stream.
+        // Single output-drain consumer for the stack's lifetime. Strong self: `stop()` cancels this
+        // task, which ends the `for await` and releases the stack — the holder owns the lifecycle,
+        // the task owns the stack while draining.
         let outputKick = self.outputKick
-        outputDrainTask = Task { [weak self, outputKick] in
+        outputDrainTask = Task { [outputKick] in
             for await _ in outputKick {
-                self?.drainOutputLoop()
+                self.drainOutputLoop()
             }
         }
 
         // Single ordered driver for UDP plane mux/reclaim commands. Started before the runtime is
         // configured so the initial `setMultiplexerPool` command (yielded below) is applied.
+        // Strong self: `stop()` finishes `planeCommands` and awaits this task, so the loop ends and
+        // ARC reclaims — the holder drives teardown, the task just owns the stack while it runs.
         let planeCommands = self.planeCommands
-        planeCommandTask = Task { [weak self, planeCommands] in
+        planeCommandTask = Task { [planeCommands] in
             for await command in planeCommands {
-                guard let self else { return }
                 await self.udpPlane.apply(command)
             }
         }
@@ -95,7 +96,7 @@ extension TunnelStack {
         await planeCommandTask?.value
         planeCommandTask = nil
 
-        AnywhereLogger.logSink = nil
+        AnywhereLogger.installLogSink(nil)
         // `packetFlow` is deliberately kept: the output-drain loop and the
         // packet-read callback read it unsynchronized, so dropping it here
         // would race a late transport completion. The reference dies with the
@@ -289,51 +290,32 @@ extension TunnelStack {
     // deliberately keep their old rules until they close.
 
     private func startObservingSettings() {
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            Unmanaged.passUnretained(self).toOpaque(),
-            { _, observer, _, _, _ in
-                guard let observer else { return }
-                let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
-                stack.handleSettingsChanged()
-            },
-            AWNotificationCenter.Notification.tunnelSettingsChanged,
-            nil,
-            .deliverImmediately
-        )
-
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            Unmanaged.passUnretained(self).toOpaque(),
-            { _, observer, _, _, _ in
-                guard let observer else { return }
-                let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
-                stack.handleRoutingChanged()
-            },
-            AWNotificationCenter.Notification.routingChanged,
-            nil,
-            .deliverImmediately
-        )
-
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            Unmanaged.passUnretained(self).toOpaque(),
-            { _, observer, _, _, _ in
-                guard let observer else { return }
-                let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
-                stack.handleMITMChanged()
-            },
-            AWNotificationCenter.Notification.mitmChanged,
-            nil,
-            .deliverImmediately
-        )
+        // Names precomputed once for the switch; `DarwinNotificationConcurrencyBridge` yields the
+        // posted name and keeps the CFNotificationCenter/`Unmanaged` glue inside the bridge.
+        let settings = AWNotificationCenter.Notification.tunnelSettingsChanged as String
+        let routing = AWNotificationCenter.Notification.routingChanged as String
+        let mitm = AWNotificationCenter.Notification.mitmChanged as String
+        // Strong self: `stopObservingSettings()` cancels this task, ending the stream (whose
+        // `onTermination` unregisters the observers) and releasing the stack.
+        settingsObserverTask = Task { [settings, routing, mitm] in
+            for await name in DarwinNotificationConcurrencyBridge.names([
+                AWNotificationCenter.Notification.tunnelSettingsChanged,
+                AWNotificationCenter.Notification.routingChanged,
+                AWNotificationCenter.Notification.mitmChanged
+            ]) {
+                switch name {
+                case settings: self.handleSettingsChanged()
+                case routing: self.handleRoutingChanged()
+                case mitm: self.handleMITMChanged()
+                default: break
+                }
+            }
+        }
     }
 
     private func stopObservingSettings() {
-        CFNotificationCenterRemoveEveryObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            Unmanaged.passUnretained(self).toOpaque()
-        )
+        settingsObserverTask?.cancel()
+        settingsObserverTask = nil
     }
 
     /// Reloads the settings snapshot and applies the diff. Flags consumed

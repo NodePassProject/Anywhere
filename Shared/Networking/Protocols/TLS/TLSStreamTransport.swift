@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TLSStreamTransport")
 
@@ -25,7 +26,7 @@ nonisolated enum TLSStreamError: Error, LocalizedError {
 
 // MARK: - TLSStreamTransport
 
-nonisolated class TLSStreamTransport {
+nonisolated final class TLSStreamTransport: Sendable {
 
     private let host: String
     private let port: UInt16
@@ -33,10 +34,17 @@ nonisolated class TLSStreamTransport {
     private let alpn: [String]
     private let tunnel: ProxyConnection?
 
-    private var tlsClient: TLSClient?
-    private var tlsConnection: TLSRecordConnection?
-
-    private(set) var isReady = false
+    /// TLS session state established by ``connect()``: the handshake client (dropped once the record
+    /// connection is live) and the live record connection, plus readiness. Held in a mutex so the
+    /// abortive nil-swap in ``cancel()`` is atomic against the in-flight send/receive that read it.
+    /// Consumers drive send/receive serially, so the connection reference is only ever taken out and
+    /// awaited off-lock — the record connection serializes its own writes internally.
+    private struct State {
+        var tlsClient: TLSClient?
+        var tlsConnection: TLSRecordConnection?
+        var isReady = false
+    }
+    private let state = Mutex(State())
 
     // MARK: Initialization
 
@@ -57,7 +65,7 @@ nonisolated class TLSStreamTransport {
             alpn: alpn
         )
         let client = TLSClient(configuration: configuration)
-        self.tlsClient = client
+        state.withLock { $0.tlsClient = client }
 
         do {
             let connection: TLSRecordConnection
@@ -66,12 +74,18 @@ nonisolated class TLSStreamTransport {
             } else {
                 connection = try await client.connect(host: host, port: port)
             }
-            self.tlsConnection = connection
-            self.tlsClient = nil
-            self.isReady = true
+            state.withLock { state in
+                state.tlsConnection = connection
+                state.tlsClient = nil
+                state.isReady = true
+            }
         } catch {
-            self.tlsClient?.cancel()
-            self.tlsClient = nil
+            let client = state.withLock { state -> TLSClient? in
+                let client = state.tlsClient
+                state.tlsClient = nil
+                return client
+            }
+            client?.cancel()
             throw error
         }
     }
@@ -79,7 +93,7 @@ nonisolated class TLSStreamTransport {
     // MARK: - Send
 
     func send(_ data: Data) async throws {
-        guard let tlsConnection, isReady else {
+        guard let tlsConnection = state.withLock({ $0.isReady ? $0.tlsConnection : nil }) else {
             throw TLSStreamError.notConnected
         }
         try await tlsConnection.send(data)
@@ -88,7 +102,7 @@ nonisolated class TLSStreamTransport {
     // MARK: - Receive
 
     func receive() async throws -> Data? {
-        guard let tlsConnection, isReady else {
+        guard let tlsConnection = state.withLock({ $0.isReady ? $0.tlsConnection : nil }) else {
             throw TLSStreamError.notConnected
         }
         return try await tlsConnection.receive()
@@ -97,10 +111,15 @@ nonisolated class TLSStreamTransport {
     // MARK: - Cancel
 
     func cancel() {
-        isReady = false
-        tlsClient?.cancel()
-        tlsClient = nil
-        tlsConnection?.cancel()
-        tlsConnection = nil
+        let (client, connection) = state.withLock { state -> (TLSClient?, TLSRecordConnection?) in
+            state.isReady = false
+            let client = state.tlsClient
+            let connection = state.tlsConnection
+            state.tlsClient = nil
+            state.tlsConnection = nil
+            return (client, connection)
+        }
+        client?.cancel()
+        connection?.cancel()
     }
 }

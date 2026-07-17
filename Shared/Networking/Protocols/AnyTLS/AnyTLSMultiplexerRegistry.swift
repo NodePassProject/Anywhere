@@ -77,6 +77,6 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
     }
 }
 
-extension AnyTLSMultiplexerRegistry: TransportPool {
+nonisolated extension AnyTLSMultiplexerRegistry: TransportPool {
     func reclaim() { closeAll() }
 }

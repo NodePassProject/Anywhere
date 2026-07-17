@@ -75,7 +75,7 @@ nonisolated final class SudokuMultiplexerRegistry: Sendable {
     }
 }
 
-extension SudokuMultiplexerRegistry: TransportPool {
+nonisolated extension SudokuMultiplexerRegistry: TransportPool {
     func reclaim() { closeAll() }
 }
 

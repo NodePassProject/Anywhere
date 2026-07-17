@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaConnection")
 
-actor HysteriaConnection: ProxyConnection {
+actor HysteriaConnection {
 
     private let session: HysteriaSession
     private let destination: String
@@ -149,3 +149,5 @@ actor HysteriaConnection: ProxyConnection {
         }
     }
 }
+
+extension HysteriaConnection: ProxyConnection {}

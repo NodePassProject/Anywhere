@@ -33,12 +33,20 @@ enum TunneledHTTP3Client {
     }
 }
 
-private final class HTTP3GetRequest: HTTP3StreamHandler {
+/// One GET exchange over the multiplexer. An actor on the multiplexer's executor, so the
+/// demux events it registers enter its isolated state synchronously — the same shape as
+/// the production `XHTTPH3RequestStream`/`NaiveHTTP3Stream` consumers.
+private actor HTTP3GetRequest {
+    private nonisolated let bridge: NGTCP2ConcurrencyBridge
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        bridge.executor.asUnownedSerialExecutor()
+    }
+
     private let multiplexer: HTTP3Multiplexer
     private let authority: String
     private let path: String
 
-    private(set) var quicStreamID: Int64?
+    private var quicStreamID: Int64?
     private var headersReceived = false
     private var status: Int?
     private var responseHeaders: [(name: String, value: String)] = []
@@ -46,32 +54,39 @@ private final class HTTP3GetRequest: HTTP3StreamHandler {
     private var frameBuffer = Data()
     private var frameBufferOffset = 0
     private var finished = false
-    private var continuation: CheckedContinuation<HTTPResponse, Error>?
+
+    /// One-shot result latch; `run()` awaits `resultTask.value`.
+    private let resultSignal: AsyncThrowingStream<HTTPResponse, Error>.Continuation
+    private let resultTask: Task<HTTPResponse, Error>
 
     init(multiplexer: HTTP3Multiplexer, authorityHost: String, port: UInt16, path: String) {
+        self.bridge = multiplexer.sharedBridge
         self.multiplexer = multiplexer
         self.authority = port == 443 ? authorityHost : "\(authorityHost):\(port)"
         self.path = path
+        let (resultStream, resultSignal) = AsyncThrowingStream.makeStream(of: HTTPResponse.self)
+        self.resultSignal = resultSignal
+        self.resultTask = Task {
+            for try await response in resultStream { return response }
+            throw HTTP3Error.streamClosed
+        }
     }
 
     func run() async throws -> HTTPResponse {
         try await multiplexer.ensureReady()
-        return try await withCheckedThrowingContinuation { continuation in
-            multiplexer.queue.async { [self] in
-                self.continuation = continuation
-                self.sendRequest()
-            }
-        }
-    }
 
-    private func sendRequest() {
-        guard let streamID = multiplexer.openBidiStream() else {
-            multiplexer.markStreamBlocked()
-            complete(.failure(HTTP3Error.streamIdBlocked))
-            return
+        let events = HTTP3Multiplexer.StreamEvents(
+            data: { [weak self] data, fin in
+                self?.assumeIsolated { $0.handleStreamData(data, fin: fin) }
+            },
+            error: { [weak self] error in
+                self?.assumeIsolated { $0.complete(.failure(error)) }
+            }
+        )
+        guard let streamID = await multiplexer.openStream(events: events) else {
+            throw HTTP3Error.streamIdBlocked
         }
         quicStreamID = streamID
-        multiplexer.registerStream(self, streamID: streamID)
 
         let headerBlock = QPACKEncoder.encodeRequestHeaders(
             method: "GET",
@@ -80,28 +95,24 @@ private final class HTTP3GetRequest: HTTP3StreamHandler {
             extraHeaders: [(name: "user-agent", value: "Anywhere")]
         )
         let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
-        Task { [weak self] in
-            guard let self else { return }
+        Task {
             do {
-                try await self.multiplexer.writeStream(streamID, data: frame, fin: true)
+                try await multiplexer.writeStream(streamID, data: frame, fin: true)
             } catch {
-                self.multiplexer.queue.async { self.handleSessionError(error) }
+                complete(.failure(error))
             }
         }
+        return try await resultTask.value
     }
 
-    // MARK: - HTTP3StreamHandler (multiplexer queue)
+    // MARK: - Demux events (delivered on the shared executor)
 
-    func handleStreamData(_ data: Data, fin: Bool) {
+    private func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {
             frameBuffer.append(data)
             processFrames()
         }
         if fin { finishOnEnd() }
-    }
-
-    func handleSessionError(_ error: Error) {
-        complete(.failure(error))
     }
 
     // MARK: - Frame processing
@@ -159,11 +170,15 @@ private final class HTTP3GetRequest: HTTP3StreamHandler {
         guard !finished else { return }
         finished = true
         if let streamID = quicStreamID {
-            multiplexer.removeStream(self)
+            multiplexer.assumeIsolated { $0.removeStream(streamID) }
             multiplexer.shutdownStream(streamID, code: .noError)
         }
-        let continuation = self.continuation
-        self.continuation = nil
-        continuation?.resume(with: result)
+        switch result {
+        case .success(let response):
+            resultSignal.yield(response)
+            resultSignal.finish()
+        case .failure(let error):
+            resultSignal.finish(throwing: error)
+        }
     }
 }

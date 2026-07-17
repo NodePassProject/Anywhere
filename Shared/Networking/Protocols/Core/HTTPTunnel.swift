@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - HTTPTunnel
 
-nonisolated protocol HTTPTunnel: AnyObject {
+nonisolated protocol HTTPTunnel: AnyObject, Sendable {
 
     var isConnected: Bool { get }
 

@@ -47,10 +47,16 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     /// Inbound DATA payloads / EOF / error from the multiplexer's read loop. Producer side (`inbox`)
     /// is `Sendable` and driven by the read loop; the single consumer pulls `inboxIterator` from
-    /// ``receiveData()``. The `Mutex` guards the iterator *value* (this stream is a Sendable class
-    /// with nonisolated read-loop callbacks, not an actor). Backpressure is preserved: flow-control
-    /// credit is returned only once the app takes the bytes. H2 flow control counts DATA payload
-    /// octets (RFC 7540 §6.9.1), so `data.count` is the exact amount to credit.
+    /// ``receiveData()``. The `Mutex` guards the iterator *value*: this stream stays a Mutex-guarded
+    /// `Sendable` class rather than an actor because its phase state machine is driven by the
+    /// multiplexer's *nonisolated* read-loop callbacks (`handleData`/`handleHeaders`/…) and by the
+    /// synchronous ``HTTPTunnel`` requirements (`isConnected`/`close()`), all of which would force
+    /// `phase` back into a nonisolated `Mutex` even under an actor. The iterator-in-`Mutex` is honest
+    /// because ``receiveData()`` is the *sole* consumer — never called concurrently — so the
+    /// take-mutate-store in ``nextInboxChunk()`` can't race a second reader (the same single-consumer
+    /// contract an actor would rely on across `next()`'s suspension). Backpressure is preserved:
+    /// flow-control credit is returned only once the app takes the bytes. H2 flow control counts DATA
+    /// payload octets (RFC 7540 §6.9.1), so `data.count` is the exact amount to credit.
     private let inbox: AsyncThrowingStream<Data, Error>.Continuation
     private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
 

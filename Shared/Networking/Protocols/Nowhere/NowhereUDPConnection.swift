@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-actor NowhereUDPConnection: ProxyConnection, NowhereTerminationObservable {
+actor NowhereUDPConnection {
 
     private let session: NowhereSession
     private let destination: String
@@ -403,3 +403,5 @@ actor NowhereUDPConnection: ProxyConnection, NowhereTerminationObservable {
         return packetID
     }
 }
+
+extension NowhereUDPConnection: ProxyConnection, NowhereTerminationObservable {}

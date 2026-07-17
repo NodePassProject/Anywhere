@@ -6,13 +6,8 @@
 //
 
 import Foundation
-import Synchronization
 
-nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
-
-    // MARK: Active-exchange registry (keeps the exchange alive across async I/O)
-
-    private static let active = Mutex<[ObjectIdentifier: TunneledHTTP1Exchange]>([:])
+actor TunneledHTTP1Exchange {
 
     // MARK: Inputs
 
@@ -22,7 +17,7 @@ nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
     private let maxBytes: Int
     private let resourceTimeout: TimeInterval
 
-    // MARK: State (touched only inside the single `runExchange` task)
+    // MARK: State (actor-isolated; mutated only by the `runExchange` child task)
 
     private var inbound = Data()
     private var headParsed = false
@@ -34,7 +29,7 @@ nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
     private var chunked = ChunkedDecoder()
 
     /// The inactivity deadline, refreshed as inbound bytes arrive; read by the idle-watchdog task.
-    private let idleDeadline = Mutex<ContinuousClock.Instant>(ContinuousClock().now)
+    private var idleDeadline = ContinuousClock().now
 
     /// The response head cannot exceed this; guards against an unbounded header stream.
     private static let maxHeadBytes = 64 * 1024
@@ -67,9 +62,7 @@ nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
     /// in `MITMScriptHTTPClient`); on a deadline/idle expiry we cancel the connection to unblock
     /// the pending I/O so the exchange task unwinds promptly.
     func run() async throws -> MITMScriptHTTPClient.Response {
-        Self.active.withLock { $0[ObjectIdentifier(self)] = self }
         defer {
-            Self.active.withLock { $0[ObjectIdentifier(self)] = nil }
             MITMScriptHTTPClient.releaseInFlight(reservedBytes)
             reservedBytes = 0
         }
@@ -104,7 +97,7 @@ nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
     private func resetIdle() {
         let interval = request.timeoutInterval
         guard interval > 0 else { return }
-        idleDeadline.withLock { $0 = ContinuousClock().now.advanced(by: .seconds(interval)) }
+        idleDeadline = ContinuousClock().now.advanced(by: .seconds(interval))
     }
 
     /// Fails the exchange after `request.timeoutInterval` of no inbound progress. Never returns
@@ -112,7 +105,7 @@ nonisolated final class TunneledHTTP1Exchange: @unchecked Sendable {
     private func idleWatchdog() async throws -> MITMScriptHTTPClient.Response {
         let interval = request.timeoutInterval
         while true {
-            let deadline = idleDeadline.withLock { $0 }
+            let deadline = idleDeadline
             if ContinuousClock().now >= deadline {
                 throw TransportError.connectionFailed("request idle for \(Int(interval))s")
             }

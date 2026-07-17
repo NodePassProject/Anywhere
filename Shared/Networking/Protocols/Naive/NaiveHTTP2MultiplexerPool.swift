@@ -35,7 +35,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool:
         port: UInt16,
         sni: String,
         tunnel: ProxyConnection?,
-        connectHeaders: @escaping () -> [(name: String, value: String)],
+        connectHeaders: @escaping @Sendable () -> [(name: String, value: String)],
         destination: String
     ) async throws -> NaiveHTTP2Stream {
         if tunnel != nil {
@@ -47,7 +47,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool:
             state.withLock { $0.extra[multiplexerID] = multiplexer }
             multiplexer.onClose = { [weak self] in
                 guard let self else { return }
-                self.state.withLock { $0.extra.removeValue(forKey: multiplexerID) }
+                self.state.withLock { _ = $0.extra.removeValue(forKey: multiplexerID) }
                 logger.debug("[NaiveHTTP2Pool] Evicted dedicated multiplexer")
             }
             return openStream(on: multiplexer, destination: destination)
@@ -85,7 +85,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool:
             }
         }
 
-        return await openStream(on: multiplexer, destination: destination)
+        return openStream(on: multiplexer, destination: destination)
     }
 
     /// Creates a stream on the multiplexer (off the pool gate) and returns it. `openStream` now
@@ -98,7 +98,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool:
 
     override func removeMultiplexer(_ multiplexer: NaiveHTTP2Multiplexer, key: String) {
         super.removeMultiplexer(multiplexer, key: key)
-        state.withLock { $0.extra.removeValue(forKey: ObjectIdentifier(multiplexer)) }
+        state.withLock { _ = $0.extra.removeValue(forKey: ObjectIdentifier(multiplexer)) }
         logger.debug("[NaiveHTTP2Pool] Evicted multiplexer for \(key)")
     }
 

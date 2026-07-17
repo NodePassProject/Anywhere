@@ -146,6 +146,6 @@ nonisolated class MultiplexerPool<S: Multiplexer, Extra> {
     }
 }
 
-extension MultiplexerPool: TransportPool {
+nonisolated extension MultiplexerPool: TransportPool {
     func reclaim() { closeAll() }
 }

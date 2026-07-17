@@ -71,7 +71,7 @@ nonisolated enum H2Framing {
 /// Read buffer is independent of connection state and guarded by its own mutex, so both the
 /// 1:1 and shared-multiplexing H2 paths can drive one. The straight-line `async` read loop
 /// replaces the callback recursion, so the old stack-overflow trampoline is unnecessary.
-nonisolated final class H2FrameReader {
+nonisolated final class H2FrameReader: Sendable {
     private let receive: @Sendable () async throws -> TransportChunk
     private let maxBufferSize: Int
 

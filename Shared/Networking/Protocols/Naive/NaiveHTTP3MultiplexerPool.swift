@@ -76,17 +76,14 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
             }
         }
 
-        // The async open runs after the pool gate is released (never hold `lock` across `await`).
-        return await multiplexer.run {
-            multiplexer.noteStreamStarted()
-            return NaiveHTTP3Stream(multiplexer: multiplexer, configuration: configuration, destination: destination)
-        }
+        multiplexer.noteStreamStarted()
+        return NaiveHTTP3Stream(multiplexer: multiplexer, configuration: configuration, destination: destination)
     }
 
     /// Builds a fresh multiplexer, wires its self-eviction, and registers it. Must hold ``state``.
     private func makeAndRegisterMultiplexer(key: String, host: String, port: UInt16, sni: String, _ st: inout PoolState) -> HTTP3Multiplexer {
         let new = HTTP3Multiplexer(host: host, port: port, serverName: sni)
-        new.onClose = { [weak self, weak new] in
+        new.setOnClose { [weak self, weak new] in
             guard let self, let new else { return }
             self.removeMultiplexer(new, key: key)
         }

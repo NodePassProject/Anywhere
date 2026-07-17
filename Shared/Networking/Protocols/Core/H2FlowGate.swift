@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct H2FlowGate {
+nonisolated struct H2FlowGate {
 
     /// One finishing `AsyncStream<Never>` per parked sender: finishing it is the wakeup.
     private var waiters: [AsyncStream<Never>.Continuation] = []

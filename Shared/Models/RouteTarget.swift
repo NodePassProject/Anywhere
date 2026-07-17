@@ -22,7 +22,7 @@ nonisolated enum RouteTarget: Hashable, Sendable {
 
 // MARK: - Codable (compact string form)
 
-extension RouteTarget: Codable {
+nonisolated extension RouteTarget: Codable {
     init(from decoder: any Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         switch raw {

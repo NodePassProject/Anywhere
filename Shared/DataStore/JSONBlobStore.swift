@@ -42,11 +42,17 @@ nonisolated final class JSONBlobStore: Sendable {
 
     typealias MergeResolver = @Sendable (Key, [(data: Data, updatedAt: Date)]) -> Data
     
-    private static let mergeResolverBox = Mutex<MergeResolver?>(nil)
-    static var mergeResolver: MergeResolver? {
-        get { mergeResolverBox.withLock { $0 } }
-        set { mergeResolverBox.withLock { $0 = newValue } }
+    /// The CloudKit multi-writer merge resolver, guarded because it is installed once on the host
+    /// app and read from every load/compact. Not a synchronous `var`: installed via
+    /// ``installMergeResolver`` and snapshotted under the lock at each read site.
+    private static let _mergeResolver = Mutex<MergeResolver?>(nil)
+
+    /// Installs the CloudKit merge resolver. Called once by `BlobSync` on the host app.
+    static func installMergeResolver(_ resolver: MergeResolver?) {
+        _mergeResolver.withLock { $0 = resolver }
     }
+
+    private static var mergeResolver: MergeResolver? { _mergeResolver.withLock { $0 } }
 
     private init() {
         let wantsCloudKit = AWCore.isHostApp && AWCore.getICloudSyncEnabled()

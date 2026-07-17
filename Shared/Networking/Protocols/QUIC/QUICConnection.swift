@@ -8,6 +8,7 @@
 import Foundation
 import Network
 import CryptoKit
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
@@ -88,9 +89,6 @@ actor QUICConnection {
     /// This connection's concurrency boundary: owns the serial executor everything
     /// ngtcp2-touching runs on, the async hop, and the conn-held reentrancy guard.
     let bridge: NGTCP2ConcurrencyBridge
-    /// The ngtcp2 serial queue, vended by ``bridge``'s custom executor. Nonisolated so the
-    /// timers/carrier that must target this exact queue can read it.
-    nonisolated var queue: DispatchQueue { bridge.queue }
 
     /// Fire-and-forget hop onto the ngtcp2 queue with a `Sendable`-checked closure — the sanctioned
     /// way for this connection's consumers (H3/Hysteria/Nowhere sessions) and its C callbacks to
@@ -162,22 +160,26 @@ actor QUICConnection {
     private var scid = ngtcp2_cid()
 
     fileprivate var connectCompletion: ((Error?) -> Void)?
-    // The output handlers below are `nonisolated(unsafe)`: they are set once by the owning
-    // session and read from the ngtcp2 callbacks, all on ``queue`` (this connection's
-    // executor). Marking them lets the sessions — which share that queue — assign them
-    // without a hop; the queue confinement is the invariant the `unsafe` trusts.
-    /// Receives a zero-copy view into ngtcp2's buffer, valid only for the synchronous call —
-    /// dispatching without copying is a use-after-free.
-    nonisolated(unsafe) var streamDataHandler: ((Int64, Data, Bool) -> Void)?
-    /// Fires on stream termination (`error == nil` for a clean close). A stream can
-    /// trigger reset then close, so handling must be idempotent.
-    nonisolated(unsafe) var streamTerminationHandler: ((Int64, Error?) -> Void)?
-    nonisolated(unsafe) var datagramHandler: ((Data) -> Void)?
-    nonisolated(unsafe) var connectionClosedHandler: ((Error) -> Void)?
-    /// Fires after the peer increases the cumulative number of locally initiated
-    /// bidirectional streams. Delivery is deferred until ngtcp2 finishes the
-    /// current packet-processing batch, so handlers may safely open streams.
-    nonisolated(unsafe) var bidiCreditHandler: ((UInt64) -> Void)?
+
+    /// Output-event handlers, set by the owning session (HTTP3/Hysteria/Nowhere) and invoked
+    /// synchronously from the ngtcp2 callbacks on the bridge queue. The `Mutex` protects the
+    /// closure set as a value: sessions assign via `withLock` from their own isolation, and the
+    /// callbacks snapshot the closure under the lock and invoke it outside it.
+    struct Handlers: Sendable {
+        /// Receives a zero-copy view into ngtcp2's buffer, valid only for the synchronous call —
+        /// dispatching without copying is a use-after-free.
+        var streamData: (@Sendable (Int64, Data, Bool) -> Void)?
+        /// Fires on stream termination (`error == nil` for a clean close). A stream can
+        /// trigger reset then close, so handling must be idempotent.
+        var streamTermination: (@Sendable (Int64, Error?) -> Void)?
+        var datagram: (@Sendable (Data) -> Void)?
+        var connectionClosed: (@Sendable (Error) -> Void)?
+        /// Fires after the peer increases the cumulative number of locally initiated
+        /// bidirectional streams. Delivery is deferred until ngtcp2 finishes the
+        /// current packet-processing batch, so handlers may safely open streams.
+        var bidiCredit: (@Sendable (UInt64) -> Void)?
+    }
+    let handlers = Mutex(Handlers())
 
     private var brutalCC: BrutalCongestionControl?
     /// Registry key (`ngtcp2_cc *`) for the `@_cdecl` trampolines.
@@ -690,7 +692,7 @@ actor QUICConnection {
         }
         // Strong-capture `self` so teardown runs even when close() is the last reference;
         // synchronous on `queue` so pool state updates before new streams are handed out.
-        let teardown: () -> Void = { self.assumeIsolated { $0.performTeardown(error: error) } }
+        let teardown: @Sendable () -> Void = { self.assumeIsolated { $0.performTeardown(error: error) } }
         if isOnQueue {
             teardown()
         } else {
@@ -737,12 +739,13 @@ actor QUICConnection {
             }
             for pendingWrite in writes { pendingWrite.completion(closeError) }
             for d in datagrams { d.completion?(closeError) }
-            self.connectionClosedHandler?(closeError)
-            self.connectionClosedHandler = nil
-            self.streamDataHandler = nil
-            self.streamTerminationHandler = nil
-            self.datagramHandler = nil
-            self.bidiCreditHandler = nil
+            // Detach every handler before announcing the close, so nothing fires after it.
+            let closedHandler = self.handlers.withLock { current in
+                let closed = current.connectionClosed
+                current = Handlers()
+                return closed
+            }
+            closedHandler?(closeError)
     }
 
     // MARK: UDP
@@ -796,13 +799,14 @@ actor QUICConnection {
             state = .handshaking
             let placeholderLocal = localAddr
             transport.startReceiving { [weak self] data in
-                self?.enqueue {
-                    self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: placeholderLocal) }
+                guard let self else { return }
+                self.enqueue {
+                    self.assumeIsolated { $0.handleReceivedPacket(data, localAddr: placeholderLocal) }
                 }
             } errorHandler: { [weak self] error in
-                self?.enqueue {
-                    guard let self else { return }
-                    let err = error ?? QUICError.closed
+                guard let self else { return }
+                let err = error ?? QUICError.closed
+                self.enqueue {
                     self.assumeIsolated { me in
                         if let callback = me.connectCompletion {
                             me.connectCompletion = nil
@@ -1378,9 +1382,12 @@ actor QUICConnection {
         connRefStorage.user_data = NGTCP2ConcurrencyBridge.connRefContext(self)
         connRefStorage.get_conn = { ref in
             guard let ref, let userData = ref.pointee.user_data else { return nil }
-            // ngtcp2 invokes get_conn from inside its own calls, on the executor.
-            return NGTCP2ConcurrencyBridge.connection(from: userData)
-                .assumeIsolated { $0.connectionOpaquePointer }
+            // ngtcp2 invokes get_conn from inside its own calls, on the executor. The pointer
+            // crosses out of `assumeIsolated` as a plain address (`UInt` is `Sendable`; the raw
+            // pointer type is not) — same thread, no ownership transfer.
+            let raw = NGTCP2ConcurrencyBridge.connection(from: userData)
+                .assumeIsolated { $0.connectionOpaquePointer.map { UInt(bitPattern: $0) } ?? 0 }
+            return OpaquePointer(bitPattern: raw)
         }
 
         // PMTUD only over the direct carrier: chained probes don't reflect the
@@ -1683,14 +1690,14 @@ actor QUICConnection {
 
 // MARK: - ngtcp2 Callbacks
 
-private func qcFromUserData(_ userData: UnsafeMutableRawPointer?) -> QUICConnection? {
+nonisolated private func qcFromUserData(_ userData: UnsafeMutableRawPointer?) -> QUICConnection? {
     guard let userData else { return nil }
     let ref = userData.assumingMemoryBound(to: ngtcp2_crypto_conn_ref.self)
     guard let p = ref.pointee.user_data else { return nil }
     return NGTCP2ConcurrencyBridge.connection(from: p)
 }
 
-private let quicClientInitialCB: @convention(c) (
+nonisolated private let quicClientInitialCB: @convention(c) (
     OpaquePointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { conn, userData in
     guard let conn else { return NGTCP2_ERR_CALLBACK_FAILURE }
@@ -1720,7 +1727,7 @@ private let quicClientInitialCB: @convention(c) (
     }
 }
 
-private let quicRecvCryptoDataCB: @convention(c) (
+nonisolated private let quicRecvCryptoDataCB: @convention(c) (
     OpaquePointer?, ngtcp2_encryption_level, UInt64,
     UnsafePointer<UInt8>?, Int, UnsafeMutableRawPointer?
 ) -> Int32 = { conn, level, _, data, datalen, userData in
@@ -1736,7 +1743,7 @@ private let quicRecvCryptoDataCB: @convention(c) (
     }
 }
 
-private let quicRecvStreamDataCB: @convention(c) (
+nonisolated private let quicRecvStreamDataCB: @convention(c) (
     OpaquePointer?, UInt32, Int64, UInt64,
     UnsafePointer<UInt8>?, Int,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
@@ -1745,6 +1752,7 @@ private let quicRecvStreamDataCB: @convention(c) (
     _ = conn
     let fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0
     connection.assumeIsolated { me in
+        let handler = me.handlers.withLock { $0.streamData }
         if let data, datalen > 0 {
             // Zero-copy view into ngtcp2's buffer; the handler must copy before returning.
             let view = Data(
@@ -1752,9 +1760,9 @@ private let quicRecvStreamDataCB: @convention(c) (
                 count: datalen,
                 deallocator: .none
             )
-            me.streamDataHandler?(sid, view, fin)
+            handler?(sid, view, fin)
         } else if fin {
-            me.streamDataHandler?(sid, Data(), true)
+            handler?(sid, Data(), true)
         }
     }
     // FC window is extended only when the app consumes data (backpressure).
@@ -1763,7 +1771,7 @@ private let quicRecvStreamDataCB: @convention(c) (
 
 /// Releases retained heap copies once a contiguous prefix of sent data is acked
 /// (`offset + datalen` is the new acked end). Runs on `queue`.
-private let quicAckedCB: @convention(c) (
+nonisolated private let quicAckedCB: @convention(c) (
     OpaquePointer?, Int64, UInt64, UInt64,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, streamId, offset, datalen, userData, _ in
@@ -1774,17 +1782,17 @@ private let quicAckedCB: @convention(c) (
 
 /// Mirrors `NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET` from ngtcp2.h —
 /// the bare `#define` isn't imported into Swift.
-private let ngtcp2StreamCloseFlagAppErrorCodeSet: UInt32 = 0x01
+nonisolated private let ngtcp2StreamCloseFlagAppErrorCodeSet: UInt32 = 0x01
 
 /// QUIC application close codes that signal a graceful end-of-stream rather than a
 /// failure: 0 (QUIC "no error") and 0x100 (HTTP/3 H3_NO_ERROR).
-private func isBenignQUICCloseCode(_ code: UInt64) -> Bool {
+nonisolated private func isBenignQUICCloseCode(_ code: UInt64) -> Bool {
     code == 0x00 || code == 0x100
 }
 
 /// Fires after both directions of a stream terminate. `recv_stream_data` doesn't
 /// fire for RESET_STREAM, so this is the app's only signal the stream is gone.
-private let quicStreamCloseCB: @convention(c) (
+nonisolated private let quicStreamCloseCB: @convention(c) (
     OpaquePointer?, UInt32, Int64, UInt64,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, flags, sid, appErrorCode, userData, _ in
@@ -1798,13 +1806,13 @@ private let quicStreamCloseCB: @convention(c) (
     connection.assumeIsolated { me in
         me.failPendingWrites(streamId: sid, error: error ?? QUICConnection.QUICError.closed)
         me.releaseStreamSendState(streamId: sid)
-        me.streamTerminationHandler?(sid, error)
+        me.handlers.withLock { $0.streamTermination }?(sid, error)
     }
     return 0
 }
 
 /// Fires on peer RESET_STREAM, before `stream_close`, so pending receives fail fast.
-private let quicStreamResetCB: @convention(c) (
+nonisolated private let quicStreamResetCB: @convention(c) (
     OpaquePointer?, Int64, UInt64, UInt64,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, sid, _, appErrorCode, userData, _ in
@@ -1814,29 +1822,29 @@ private let quicStreamResetCB: @convention(c) (
         : QUICConnection.QUICError.streamReset(appErrorCode: appErrorCode)
     connection.assumeIsolated { me in
         me.failPendingWrites(streamId: sid, error: error ?? QUICConnection.QUICError.closed)
-        me.streamTerminationHandler?(sid, error)
+        me.handlers.withLock { $0.streamTermination }?(sid, error)
     }
     return 0
 }
 
-private let quicBidiCreditCB: @convention(c) (
+nonisolated private let quicBidiCreditCB: @convention(c) (
     OpaquePointer?, UInt64, UnsafeMutableRawPointer?
 ) -> Int32 = { _, maxStreams, userData in
     guard let connection = qcFromUserData(userData) else { return 0 }
     connection.enqueue { [weak connection] in
-        connection?.assumeIsolated { $0.bidiCreditHandler?(maxStreams) }
+        connection?.handlers.withLock { $0.bidiCredit }?(maxStreams)
     }
     return 0
 }
 
-private let quicRandCB: @convention(c) (
+nonisolated private let quicRandCB: @convention(c) (
     UnsafeMutablePointer<UInt8>?, Int, UnsafePointer<ngtcp2_rand_ctx>?
 ) -> Void = { destination, length, _ in
     guard let destination else { return }
     _ = SecRandomCopyBytes(kSecRandomDefault, length, destination)
 }
 
-private let quicGetNewCIDCB: @convention(c) (
+nonisolated private let quicGetNewCIDCB: @convention(c) (
     OpaquePointer?, UnsafeMutablePointer<ngtcp2_cid>?,
     UnsafeMutablePointer<ngtcp2_stateless_reset_token>?,
     Int, UnsafeMutableRawPointer?
@@ -1859,7 +1867,7 @@ private let quicGetNewCIDCB: @convention(c) (
     return 0
 }
 
-private let quicHandshakeCompletedCB: @convention(c) (
+nonisolated private let quicHandshakeCompletedCB: @convention(c) (
     OpaquePointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, userData in
     guard let connection = qcFromUserData(userData) else { return 0 }
@@ -1876,7 +1884,7 @@ private let quicHandshakeCompletedCB: @convention(c) (
 /// Fires when a migration path finishes — or is abandoned during — validation. Defers
 /// off the ngtcp2 batch (like the handshake callback) so promotion/close can re-enter
 /// ngtcp2 safely. ABORTED is mapped distinctly (see `handlePathValidation`).
-private let quicPathValidationCB: @convention(c) (
+nonisolated private let quicPathValidationCB: @convention(c) (
     OpaquePointer?, UInt32, UnsafePointer<ngtcp2_path>?, UnsafePointer<ngtcp2_path>?,
     ngtcp2_path_validation_result, UnsafeMutableRawPointer?
 ) -> Int32 = { _, _, _, _, res, userData in
@@ -1893,7 +1901,7 @@ private let quicPathValidationCB: @convention(c) (
     return 0
 }
 
-private let quicRecvDatagramCB: @convention(c) (
+nonisolated private let quicRecvDatagramCB: @convention(c) (
     OpaquePointer?, UInt32, UnsafePointer<UInt8>?, Int, UnsafeMutableRawPointer?
 ) -> Int32 = { _, _, data, datalen, userData in
     guard let data, datalen > 0, let connection = qcFromUserData(userData) else { return 0 }
@@ -1903,6 +1911,6 @@ private let quicRecvDatagramCB: @convention(c) (
         count: datalen,
         deallocator: .none
     )
-    connection.assumeIsolated { $0.datagramHandler?(view) }
+    connection.handlers.withLock { $0.datagram }?(view)
     return 0
 }

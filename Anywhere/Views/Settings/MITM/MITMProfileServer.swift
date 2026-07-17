@@ -47,7 +47,7 @@ actor MITMProfileServer {
         }
         
         runTask = Task { [weak self] in
-            try? await configured.run { connection in
+            try? await configured.run { [weak self] connection in
                 await self?.handle(connection: connection)
             }
         }

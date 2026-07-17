@@ -127,7 +127,7 @@ nonisolated struct LatencyTestResponse: Codable, Sendable {
     var ms: Int?
 }
 
-extension LatencyTestResponse {
+nonisolated extension LatencyTestResponse {
     /// `.testing` collapses to `.failed`; it's a UI-only state that shouldn't appear over the wire.
     init(_ result: LatencyResult) {
         switch result {
