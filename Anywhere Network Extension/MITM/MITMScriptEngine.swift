@@ -19,10 +19,11 @@ nonisolated private let mitmScriptSuspendedBodyBytes = Atomic<Int>(0)
 /// In-flight Anywhere.http fetches across all engines, bounded by httpMaxConcurrentGlobal.
 nonisolated private let mitmScriptGlobalFetchCount = Atomic<Int>(0)
 
-/// One JSContext per rule set, functions cached by source hash. JS cannot be preempted
-/// (the execution-time-limit SPI is App Review-flagged); a hung sync span trips MITMScriptWatchdog,
-/// an unsettled promise is reverted by the idle watchdog.
-nonisolated final class MITMScriptEngine: Sendable {
+actor MITMScriptEngine {
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        JSCConcurrencyBridge.shared.executor.asUnownedSerialExecutor()
+    }
 
     typealias Message = HTTPMessage
 
@@ -141,8 +142,10 @@ nonisolated final class MITMScriptEngine: Sendable {
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
     /// The span whose JS is executing right now, read (re-entrantly) by the Anywhere.* blocks.
-    private var activeInvocation: Invocation? { stateLock.withLock { $0.currentInvocation } }
-    private func setActiveInvocation(_ invocation: Invocation?) {
+    /// `nonisolated`: backed by `stateLock`, not actor state, so JSC's synchronous native callbacks
+    /// read/set it without re-entering the actor.
+    nonisolated private var activeInvocation: Invocation? { stateLock.withLock { $0.currentInvocation } }
+    nonisolated private func setActiveInvocation(_ invocation: Invocation?) {
         stateLock.withLock { $0.currentInvocation = invocation }
     }
 
@@ -165,31 +168,35 @@ nonisolated final class MITMScriptEngine: Sendable {
 
     /// Re-entrancy guard: formatting a thrown value runs JS ToString, which a script can
     /// override to throw and recurse the exception handler until the NE stack-overflows.
-    private var isFormattingException = false
+    /// `nonisolated` `Atomic` so JSC's exception handler (on the actor's queue) reads/sets it
+    /// without re-entering the actor.
+    nonisolated private let isFormattingException = Atomic(false)
 
     init() {
         self.context = JSContext(virtualMachine: Self.sharedVM)
-        configureContext()
+        configureContext(context)
     }
 
-    /// Wires the exception handler and installs the `Anywhere` globals onto the current `context`.
-    private func configureContext() {
+    /// Wires the exception handler and installs the `Anywhere` globals onto `context`. `nonisolated`
+    /// (like the whole install chain): JSContext setup is serialized by the shared VM's lock, so it
+    /// needn't run on the actor and the `init` can configure it directly.
+    nonisolated private func configureContext(_ context: JSContext) {
         // Reinstate JSC's default write to context.exception or downstream checks never fire.
         context.exceptionHandler = { [weak self] context, exception in
             defer { context?.exception = exception }
-            if let self, self.isFormattingException {
+            if self?.isFormattingException.load(ordering: .relaxed) == true {
                 logger.warning("[MITM][JS] uncaught (nested throw while formatting exception)")
                 return
             }
-            self?.isFormattingException = true
-            defer { self?.isFormattingException = false }
+            self?.isFormattingException.store(true, ordering: .relaxed)
+            defer { self?.isFormattingException.store(false, ordering: .relaxed) }
             if let exception {
                 logger.warning("[MITM][JS] uncaught: \(String(describing: exception))")
             } else {
                 logger.warning("[MITM][JS] uncaught: <unknown>")
             }
         }
-        installAnywhereGlobals()
+        installAnywhereGlobals(context: context)
     }
 
     /// Wraps one synchronous JSC span with the ``MITMScriptWatchdog`` hard cap.
@@ -305,11 +312,12 @@ nonisolated final class MITMScriptEngine: Sendable {
     private func attachSettleHandlers(to promise: JSValue, for inv: Invocation) {
         let onFulfilled: @convention(block) (JSValue) -> Void = { [weak self, weak inv] _ in
             guard let self, let inv else { return }
-            self.finishSuccess(inv)
+            // JSC runs the promise reactions on the actor's queue.
+            self.assumeIsolated { $0.finishSuccess(inv) }
         }
         let onRejected: @convention(block) (JSValue) -> Void = { [weak self, weak inv] reason in
             guard let self, let inv else { return }
-            self.finishRejected(inv, reason: reason)
+            self.assumeIsolated { $0.finishRejected(inv, reason: reason) }
         }
         promise.invokeMethod("then", withArguments: [onFulfilled, onRejected])
         // A throw from inside `then` lands on the context; clear so it can't leak into the next span.
@@ -366,9 +374,12 @@ nonisolated final class MITMScriptEngine: Sendable {
             try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled, let self, let inv else { return }
             JSCConcurrencyBridge.shared.enqueue {
-                guard !inv.delivered, let original = inv.original else { return }
-                logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
-                self.deliver(.modified(original), for: inv)
+                // The enqueue body runs on the JSC queue = this actor's executor.
+                self.assumeIsolated { engine in
+                    guard !inv.delivered, let original = inv.original else { return }
+                    logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
+                    engine.deliver(.modified(original), for: inv)
+                }
             }
         }
     }
@@ -456,7 +467,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         }
         stateLock.withLock { $0.compiled.removeAll() }
         context = JSContext(virtualMachine: Self.sharedVM)
-        configureContext()
+        configureContext(context)
     }
 
     /// Script-queue only. Never holds `stateLock` across `evaluateScript` — a script's top-level code
@@ -621,25 +632,25 @@ nonisolated final class MITMScriptEngine: Sendable {
 
     // MARK: - Anywhere globals
 
-    private func installAnywhereGlobals() {
+    nonisolated private func installAnywhereGlobals(context: JSContext) {
         let anywhere = JSValue(newObjectIn: context)!
-        installCodecGlobals(on: anywhere)
-        installCryptoGlobals(on: anywhere)
-        installJWTGlobals(on: anywhere)
-        installJSONGlobals(on: anywhere)
-        installStoreGlobals(on: anywhere)
-        installParamsGlobals(on: anywhere)
-        installLogGlobals(on: anywhere)
-        installControlGlobals(on: anywhere)
-        installHTTPGlobals(on: anywhere)
+        installCodecGlobals(on: anywhere, context: context)
+        installCryptoGlobals(on: anywhere, context: context)
+        installJWTGlobals(on: anywhere, context: context)
+        installJSONGlobals(on: anywhere, context: context)
+        installStoreGlobals(on: anywhere, context: context)
+        installParamsGlobals(on: anywhere, context: context)
+        installLogGlobals(on: anywhere, context: context)
+        installControlGlobals(on: anywhere, context: context)
+        installHTTPGlobals(on: anywhere, context: context)
         context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
         // Must follow Anywhere install: the shim captures Anywhere.codec.utf8.
-        installTextCodecGlobals()
+        installTextCodecGlobals(context: context)
     }
 
     /// Installs native TextEncoder/TextDecoder (JSC has none) to pre-empt scripts' slow polyfills.
     /// decode must be lossy (invalid UTF-8 → U+FFFD) and respect byteOffset on typed-array sub-views.
-    private func installTextCodecGlobals() {
+    nonisolated private func installTextCodecGlobals(context: JSContext) {
         let installed = context.evaluateScript(#"""
         (function (g) {
           if (!g.Anywhere || !g.Anywhere.codec || !g.Anywhere.codec.utf8) return false;
@@ -670,7 +681,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         }
     }
 
-    private func installCodecGlobals(on anywhere: JSValue) {
+    nonisolated private func installCodecGlobals(on anywhere: JSValue, context: JSContext) {
         let codec = JSValue(newObjectIn: context)!
 
         let utf8 = JSValue(newObjectIn: context)!
@@ -822,16 +833,16 @@ nonisolated final class MITMScriptEngine: Sendable {
         protobuf.setObject(pbDecodeVarintBlock, forKeyedSubscript: "decodeVarint" as NSString)
         codec.setObject(protobuf, forKeyedSubscript: "protobuf" as NSString)
 
-        installCompressionCodec(on: codec, named: "gzip", codec: .gzip)
-        installCompressionCodec(on: codec, named: "deflate", codec: .deflate)
-        installCompressionCodec(on: codec, named: "brotli", codec: .brotli)
+        installCompressionCodec(on: codec, named: "gzip", codec: .gzip, context: context)
+        installCompressionCodec(on: codec, named: "deflate", codec: .deflate, context: context)
+        installCompressionCodec(on: codec, named: "brotli", codec: .brotli, context: context)
 
         anywhere.setObject(codec, forKeyedSubscript: "codec" as NSString)
     }
 
     /// Handles nested compression the auto-decoding pipeline never sees (e.g. a gzipped
     /// JSON field); decode throws on malformed input or past the decompression-bomb cap.
-    private func installCompressionCodec(on codecNamespace: JSValue, named name: String, codec codecKind: MITMBodyCodec.Codec) {
+    nonisolated private func installCompressionCodec(on codecNamespace: JSValue, named name: String, codec codecKind: MITMBodyCodec.Codec, context: JSContext) {
         let object = JSValue(newObjectIn: context)!
         let encodeBlock: @convention(block) (JSValue) -> JSValue = { val in
             let context = JSContext.current()!
@@ -871,7 +882,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         codecNamespace.setObject(object, forKeyedSubscript: name as NSString)
     }
 
-    private func installCryptoGlobals(on anywhere: JSValue) {
+    nonisolated private func installCryptoGlobals(on anywhere: JSValue, context: JSContext) {
         let crypto = JSValue(newObjectIn: context)!
         let md5Block: @convention(block) (JSValue) -> JSValue = { val in
             let context = JSContext.current()!
@@ -1095,7 +1106,7 @@ nonisolated final class MITMScriptEngine: Sendable {
 
     /// Anywhere.jwt — JWT compact serialization (RFC 7519/7515); pure codec, no signature verification.
     /// decode returns signingInput (RFC 7515 §5.1) so the script can verify without re-encoding.
-    private func installJWTGlobals(on anywhere: JSValue) {
+    nonisolated private func installJWTGlobals(on anywhere: JSValue, context: JSContext) {
         let jwt = JSValue(newObjectIn: context)!
         let jwtDecodeBlock: @convention(block) (String) -> JSValue = { token in
             let context = JSContext.current()!
@@ -1193,7 +1204,7 @@ nonisolated final class MITMScriptEngine: Sendable {
 
     /// Anywhere.json — bytes-in/bytes-out JSON editing. All methods are total (failure returns the
     /// body unchanged); paths are JSONPath (`$.a.b[0]`), recursive methods take a bare key name.
-    private func installJSONGlobals(on anywhere: JSValue) {
+    nonisolated private func installJSONGlobals(on anywhere: JSValue, context: JSContext) {
         let json = JSValue(newObjectIn: context)!
 
         // add: upsert — creates or overwrites; appends to arrays at index==length.
@@ -1340,7 +1351,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         return []
     }
 
-    private func installStoreGlobals(on anywhere: JSValue) {
+    nonisolated private func installStoreGlobals(on anywhere: JSValue, context: JSContext) {
         let store = JSValue(newObjectIn: context)!
         let storeGet: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let context = JSContext.current()!
@@ -1395,7 +1406,7 @@ nonisolated final class MITMScriptEngine: Sendable {
     }
 
     /// Installs read-only `Anywhere.params` (no setter), scoped to the running rule set.
-    private func installParamsGlobals(on anywhere: JSValue) {
+    nonisolated private func installParamsGlobals(on anywhere: JSValue, context: JSContext) {
         let params = JSValue(newObjectIn: context)!
         let paramsGet: @convention(block) (String) -> JSValue = { [weak self] key in
             let context = JSContext.current()!
@@ -1418,7 +1429,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         anywhere.setObject(params, forKeyedSubscript: "params" as NSString)
     }
 
-    private func installLogGlobals(on anywhere: JSValue) {
+    nonisolated private func installLogGlobals(on anywhere: JSValue, context: JSContext) {
         let log = JSValue(newObjectIn: context)!
         let logInfo: @convention(block) (String) -> Void = { msg in
             logger.info("[MITM][JS] \(msg)")
@@ -1439,7 +1450,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         anywhere.setObject(log, forKeyedSubscript: "log" as NSString)
     }
 
-    private func installControlGlobals(on anywhere: JSValue) {
+    nonisolated private func installControlGlobals(on anywhere: JSValue, context: JSContext) {
         let doneBlock: @convention(block) () -> Void = { [weak self] in
             self?.activeInvocation?.directive = .done
         }
@@ -1482,7 +1493,8 @@ nonisolated final class MITMScriptEngine: Sendable {
             let body: Data
             if let bodyVal = spec.objectForKeyedSubscript("body"),
                !bodyVal.isUndefined, !bodyVal.isNull {
-                let context = JSContext.current() ?? self.context
+                // A native callback always has a current JSContext (matches the http blocks below).
+                let context = JSContext.current()!
                 body = Self.bytesFromValue(bodyVal, in: context) ?? Data()
             } else {
                 body = Data()
@@ -1498,23 +1510,24 @@ nonisolated final class MITMScriptEngine: Sendable {
 
     /// Anywhere.http — `get/post/request` returning a Promise of `{ status, headers, body, url }`.
     /// Available only in async buffered scripts; rejects in stream-script.
-    private func installHTTPGlobals(on anywhere: JSValue) {
+    nonisolated private func installHTTPGlobals(on anywhere: JSValue, context: JSContext) {
         let http = JSValue(newObjectIn: context)!
         let getBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
             let context = JSContext.current()!
             guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
-            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal, in: context)
+            // The block runs on the actor's JSC queue.
+            return self.assumeIsolated { $0.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal, in: context) }
         }
         let postBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
             let context = JSContext.current()!
             guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
-            return self.startHTTP(defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal, in: context)
+            return self.assumeIsolated { $0.startHTTP(defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal, in: context) }
         }
         let requestBlock: @convention(block) (JSValue) -> JSValue = { [weak self] specVal in
             let context = JSContext.current()!
             guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
             let urlVal: JSValue = specVal.objectForKeyedSubscript("url") ?? JSValue(undefinedIn: context)
-            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: specVal, in: context)
+            return self.assumeIsolated { $0.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: specVal, in: context) }
         }
         http.setObject(getBlock, forKeyedSubscript: "get" as NSString)
         http.setObject(postBlock, forKeyedSubscript: "post" as NSString)
@@ -1587,40 +1600,68 @@ nonisolated final class MITMScriptEngine: Sendable {
                 reject?.call(withArguments: [Self.error("Anywhere.http: engine released", in: ctx)])
                 return
             }
-            // Executor runs synchronously, so inv is alive here; the completion's weak
-            // capture drops a delivered/torn-down invocation and undoes the counters.
-            guard let liveInv = inv else {
-                reject?.call(withArguments: [Self.error("Anywhere.http: invocation released", in: ctx)])
-                return
-            }
-            liveInv.inFlightFetches += 1
-            liveInv.totalFetches += 1
-            Self.reserveGlobalFetchSlot()
-            // The JSC promise executor is synchronous, so bridge the async client through a Task,
-            // then settle back on the script queue exactly as the completion path did.
-            Task {
-                let result: Result<MITMScriptHTTPClient.Response, Error>
-                do {
-                    let response = try await MITMScriptHTTPClient.shared.send(
-                        request,
-                        followRedirects: followRedirects,
-                        insecure: insecure,
-                        maxBytes: maxBytes,
-                        // timeoutInterval bounds inactivity; resourceTimeout is the wall-clock cap.
-                        resourceTimeout: Self.invocationIdleTimeout
-                    )
-                    result = .success(response)
-                } catch {
-                    result = .failure(error)
+            // The promise executor runs synchronously on the actor's JSC queue.
+            self.assumeIsolated { engine in
+                // Executor runs synchronously, so inv is alive here; the completion's weak
+                // capture drops a delivered/torn-down invocation and undoes the counters.
+                guard let liveInv = inv else {
+                    reject?.call(withArguments: [Self.error("Anywhere.http: invocation released", in: ctx)])
+                    return
                 }
-                JSCConcurrencyBridge.shared.enqueue {
-                    Self.releaseGlobalFetchSlot()
-                    guard let inv else { return }   // delivered/torn down — drop
-                    self.resumeFetch(inv: inv, resolve: resolve, reject: reject, result: result)
+                liveInv.inFlightFetches += 1
+                liveInv.totalFetches += 1
+                Self.reserveGlobalFetchSlot()
+                // Stash the (non-Sendable) JSC settle callbacks in actor state keyed by a Sendable id,
+                // so the async Task carries only that id across its await — never a JSValue/Invocation
+                // through a `@Sendable` boundary — then settles back on the queue via `completeFetch`.
+                let fetchID = engine.registerPendingFetch(inv: liveInv, resolve: resolve, reject: reject)
+                Task {
+                    let result: Result<MITMScriptHTTPClient.Response, Error>
+                    do {
+                        let response = try await MITMScriptHTTPClient.shared.send(
+                            request,
+                            followRedirects: followRedirects,
+                            insecure: insecure,
+                            maxBytes: maxBytes,
+                            // timeoutInterval bounds inactivity; resourceTimeout is the wall-clock cap.
+                            resourceTimeout: Self.invocationIdleTimeout
+                        )
+                        result = .success(response)
+                    } catch {
+                        result = .failure(error)
+                    }
+                    // The Task inherits `engine`'s isolation, so this is a same-actor call; only the
+                    // network `send` above actually suspends (off-actor, so JSC isn't blocked).
+                    engine.completeFetch(id: fetchID, result: result)
                 }
             }
         })
         return promise ?? Self.rejected("Anywhere.http: could not create Promise", in: ctx)
+    }
+
+    /// In-flight `Anywhere.http` fetches, keyed by a Sendable id. Holds the JSC settle callbacks so
+    /// the async send Task never carries a non-Sendable `JSValue`/`Invocation` across its await.
+    private struct PendingFetch {
+        weak var inv: Invocation?
+        let resolve: JSValue?
+        let reject: JSValue?
+    }
+    private var pendingFetches: [Int: PendingFetch] = [:]
+    private var nextFetchID = 0
+
+    private func registerPendingFetch(inv: Invocation, resolve: JSValue?, reject: JSValue?) -> Int {
+        nextFetchID += 1
+        pendingFetches[nextFetchID] = PendingFetch(inv: inv, resolve: resolve, reject: reject)
+        return nextFetchID
+    }
+
+    /// Settles a completed fetch's Promise on the JSC queue. Weak `inv`: a delivered/torn-down
+    /// invocation is dropped, exactly as the former completion's weak capture did.
+    private func completeFetch(id: Int, result: Result<MITMScriptHTTPClient.Response, Error>) {
+        Self.releaseGlobalFetchSlot()
+        guard let pending = pendingFetches.removeValue(forKey: id) else { return }
+        guard let inv = pending.inv else { return }
+        resumeFetch(inv: inv, resolve: pending.resolve, reject: pending.reject, result: result)
     }
 
     /// Settling the Promise runs the `await` continuation synchronously.
@@ -2146,8 +2187,9 @@ extension MITMScriptEngine {
             let snapshot: [(engine: MITMScriptEngine, keep: Set<Int>)] = registry.withLock { registry in
                 registry.engines.map { (engine: $0.value, keep: keepByScope[$0.key] ?? []) }
             }
+            // All engines share this JSC executor, so being on the queue is being on each engine's.
             for item in snapshot {
-                item.engine.resetOnReload(keepingCompiled: item.keep)
+                item.engine.assumeIsolated { $0.resetOnReload(keepingCompiled: item.keep) }
             }
         }
     }

@@ -441,7 +441,7 @@ nonisolated final class MITMSession {
         responseStream.markTorn()
         bridgeClient?.markTorn()
         bridgeClient = nil
-        h2Upstream?.markTorn()
+        h2Upstream?.assumeIsolated { $0.markTorn() }
         h2Upstream = nil
         for bridgeStream in bridgeStreams.values {
             bridgeStream.tlsClient?.cancel()
@@ -1136,7 +1136,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         switch upstreamProtocol {
         case .h2:
             h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url, originalUrl: head.originalURL)
-            h2Upstream?.sendRequestHead(head, endStream: endStream)
+            h2Upstream?.assumeIsolated { $0.sendRequestHead(head, endStream: endStream) }
         case .h1:
             openH1Stream(head, url: url)
         case .undetermined:
@@ -1149,7 +1149,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard !torn else { return }
         switch upstreamProtocol {
         case .h2:
-            h2Upstream?.sendRequestData(streamID: streamID, data, endStream: endStream)
+            h2Upstream?.assumeIsolated { $0.sendRequestData(streamID: streamID, data, endStream: endStream) }
         case .h1:
             appendH1RequestData(streamID: streamID, data, endStream: endStream)
         case .undetermined:
@@ -1161,7 +1161,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard !torn else { return }
         switch upstreamProtocol {
         case .h2:
-            h2Upstream?.sendRequestTrailers(streamID: streamID, trailers)
+            h2Upstream?.assumeIsolated { $0.sendRequestTrailers(streamID: streamID, trailers) }
         case .h1:
             // h1 request trailers require chunked framing and are seldom honored upstream; end the body
             // without them rather than risk a malformed chunked trailer section.
@@ -1175,7 +1175,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     func clientLegAbortRequest(streamID: UInt32) {
         guard !torn else { return }
         switch upstreamProtocol {
-        case .h2: h2Upstream?.abortRequest(streamID: streamID)
+        case .h2: h2Upstream?.assumeIsolated { $0.abortRequest(streamID: streamID) }
         case .h1: bridgeAbortStream(streamID)
         case .undetermined: pendingRequestEvents.append(.abort(streamID: streamID))
         }
@@ -1298,46 +1298,51 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     private func bindH2Upstream(record: TLSRecordConnection) {
         upstreamProtocol = .h2
         let leg = MITMHTTP2UpstreamLeg(host: dstHost, rewriter: h2Rewriter, flowController: h2FlowController, lwipBridge: lwipBridge)
-        leg.sink = bridgeClient
+        h2Upstream = leg
         // Drain-coupled backpressure: as response bytes reach the client, credit the upstream's
         // per-stream receive window so a slow client throttles the origin (h2 only).
         bridgeClient?.onResponseDrainedToClient = { [weak self] clientStreamID, n in
-            self?.h2Upstream?.creditDrainedResponse(clientID: clientStreamID, n)
+            // Runs on the lwIP queue (the client leg drains there) = the leg actor's executor.
+            self?.h2Upstream?.assumeIsolated { $0.creditDrainedResponse(clientID: clientStreamID, n) }
         }
         // Upload mirror of the response drain-coupling above: as the origin accepts request DATA,
         // credit the client's upload window by the same amount so a slow origin backpressures the
         // client. Streams opened from here on are drain-coupled; the first (probe) request stays eager.
         bridgeClient?.uploadDrainCoupled = true
-        leg.onRequestDrainedToUpstream = { [weak self] clientStreamID, n in
-            self?.bridgeClient?.creditUploadDrained(clientStreamID, n)
-        }
-        leg.onUpstreamBytes = { [weak self] bytes in
-            guard let self, !self.torn, !bytes.isEmpty else { return }
-            self.sendChunkedCancellingOnError(bytes, via: record)
-        }
-        leg.onFatalError = { [weak self] _ in
-            guard let self else { return }
-            self.lwipBridge.enqueue { self.cancel(error: nil) }
-        }
-        // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST, not
-        // this connection-level frame) so it redials new streams while in-flight ones finish here.
-        leg.onDraining = { [weak self] in
-            self?.bridgeClient?.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.noError)
-        }
-        h2Upstream = leg
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
-        for event in events {
-            switch event {
-            case .head(let head, let url, let endStream):
-                h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url, originalUrl: head.originalURL)
-                leg.sendRequestHead(head, endStream: endStream)
-            case .data(let streamID, let data, let endStream):
-                leg.sendRequestData(streamID: streamID, data, endStream: endStream)
-            case .trailers(let streamID, let trailers):
-                leg.sendRequestTrailers(streamID: streamID, trailers)
-            case .abort(let streamID):
-                leg.abortRequest(streamID: streamID)
+        // The leg is an actor on this same lwIP executor and we are already on the queue, so enter
+        // its isolation synchronously to wire up its sink/callbacks and replay the buffered events.
+        leg.assumeIsolated { legSelf in
+            legSelf.sink = bridgeClient
+            legSelf.onRequestDrainedToUpstream = { [weak self] clientStreamID, n in
+                self?.bridgeClient?.creditUploadDrained(clientStreamID, n)
+            }
+            legSelf.onUpstreamBytes = { [weak self] bytes in
+                guard let self, !self.torn, !bytes.isEmpty else { return }
+                self.sendChunkedCancellingOnError(bytes, via: record)
+            }
+            legSelf.onFatalError = { [weak self] _ in
+                guard let self else { return }
+                self.lwipBridge.enqueue { self.cancel(error: nil) }
+            }
+            // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST,
+            // not this connection-level frame) so it redials new streams while in-flight ones finish.
+            legSelf.onDraining = { [weak self] in
+                self?.bridgeClient?.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.noError)
+            }
+            for event in events {
+                switch event {
+                case .head(let head, let url, let endStream):
+                    h2Rewriter.requestLog.recordHTTP2(streamID: head.clientStreamID, method: head.method, url: url, originalUrl: head.originalURL)
+                    legSelf.sendRequestHead(head, endStream: endStream)
+                case .data(let streamID, let data, let endStream):
+                    legSelf.sendRequestData(streamID: streamID, data, endStream: endStream)
+                case .trailers(let streamID, let trailers):
+                    legSelf.sendRequestTrailers(streamID: streamID, trailers)
+                case .abort(let streamID):
+                    legSelf.abortRequest(streamID: streamID)
+                }
             }
         }
         startH2UpstreamPump(record: record)

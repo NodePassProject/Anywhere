@@ -33,9 +33,10 @@ nonisolated enum MITMScriptTransform {
         // Precompile per scope.
         for (scope, scripts) in scriptsByScope {
             JSCConcurrencyBridge.shared.enqueue {
+                // The enqueue body runs on the JSC queue = the engine's actor executor.
                 let engine = MITMScriptEngine.sharedEngine(forScope: scope)
                 for script in scripts {
-                    engine.precompile(source: script.source, sourceKey: script.sourceKey)
+                    engine.assumeIsolated { $0.precompile(source: script.source, sourceKey: script.sourceKey) }
                 }
             }
         }
@@ -240,13 +241,12 @@ nonisolated enum MITMScriptTransform {
         }
         guard let match = resolved, let engineProvider
         else { return StreamFrameResult(body: frame, bypass: false) }
-        let outcome = engineProvider.get().applyFrame(
-            frame,
-            source: match.source,
-            sourceKey: match.sourceKey,
-            frameContext: frameContext,
-            state: cursor.state
-        )
+        // Runs inside `JSCConcurrencyBridge.shared.run` (the async counterpart below) — on the
+        // engine's JSC executor — so enter its isolation synchronously.
+        let outcome = engineProvider.get().assumeIsolated {
+            $0.applyFrame(frame, source: match.source, sourceKey: match.sourceKey,
+                          frameContext: frameContext, state: cursor.state)
+        }
         switch outcome {
         case .modified(let body, let state):
             cursor.state = state
