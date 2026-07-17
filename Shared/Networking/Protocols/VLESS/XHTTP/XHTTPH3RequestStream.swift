@@ -98,7 +98,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler, Sendable {
         do {
             try await multiplexer.writeStream(streamID, data: frame, fin: endStream)
         } catch {
-            multiplexer.queue.async { [weak self] in self?.handleStreamError(error) }
+            multiplexer.enqueue { [weak self] in self?.handleStreamError(error) }
             throw error
         }
     }
@@ -129,12 +129,12 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler, Sendable {
         let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
-            multiplexer.queue.async { [weak self] in self?.closeAndShutdown() }
+            multiplexer.enqueue { [weak self] in self?.closeAndShutdown() }
             return nil
         }
         // Credit the payload octets now the app has consumed them (backpressure preserved). The
         // frame-header octets were already credited on the queue in `deliverData`.
-        multiplexer.queue.async { [weak self] in self?.ackQuicBytes(data.count) }
+        multiplexer.enqueue { [weak self] in self?.ackQuicBytes(data.count) }
         return data
     }
 
@@ -152,7 +152,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler, Sendable {
 
     func close() {
         guard let multiplexer else { return }
-        multiplexer.queue.async { [self] in
+        multiplexer.enqueue { [self] in
             guard state != .closed else { return }
             state = .closed
             multiplexer.removeStream(self)

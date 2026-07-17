@@ -32,7 +32,6 @@ actor TCPConnection {
     /// The lwIP concurrency boundary: the connection's serial executor, every `tcp_*`
     /// call, and this connection's PCB-token lifetime all go through it.
     let bridge: LWIPConcurrencyBridge
-    let lwipQueue: DispatchQueue
 
     /// Dial destination, fixed at accept time; an SNI re-route deliberately
     /// keeps the caller's own DNS choice.
@@ -151,7 +150,6 @@ actor TCPConnection {
         self.dstPort = dstPort
         self.configuration = configuration
         self.bridge = bridge
-        self.lwipQueue = bridge.queue
         self.routeTarget = routeTarget
         self.acceptedViaDefault = viaDefault
         self.ruleSetName = ruleSetName
@@ -840,7 +838,7 @@ actor TCPConnection {
             leafCache: cache,
             policy: stack.mitmPolicy,
             dialer: makeMITMDialer(),
-            lwipQueue: lwipQueue,
+            lwipBridge: bridge,
             isPlaintext: mitmPlaintext
         )
         // Downlink bridge: inner-leg output (TLS records or cleartext) rides the per-connection
@@ -849,7 +847,7 @@ actor TCPConnection {
         self.stream = stream
         session.onSendToClient = { [weak self] data in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.bridge.enqueue {
                 self.assumeIsolated { me in
                     guard !me.closed, let stream = me.stream else { return }
                     me.markActivity()
@@ -859,7 +857,7 @@ actor TCPConnection {
         }
         session.onTeardown = { [weak self] error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.bridge.enqueue {
                 self.assumeIsolated { me in
                     guard !me.closed else { return }
                     if let error {

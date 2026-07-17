@@ -35,13 +35,16 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     // MARK: - Properties
 
     private let quic: QUICConnection
-    /// Shares the QUICConnection's serial queue to avoid cross-queue dispatch on the hot receive path.
-    var queue: DispatchQueue { quic.queue }
+
+    /// Fire-and-forget hop onto the shared ngtcp2 queue with a `Sendable`-checked closure — the
+    /// sanctioned way for the queue-confined stream/pool consumers to enter the isolation domain
+    /// (shares the connection's serial queue to avoid cross-queue dispatch on the hot receive path).
+    func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) { quic.enqueue(work) }
 
     var isOnQueue: Bool { quic.isOnQueue }
 
     /// Runs `body` on the ngtcp2 queue and awaits its result (forwards the bridge hop), so the
-    /// queue-confined stream/pool consumers stay free of raw `queue.async`+continuation.
+    /// queue-confined stream/pool consumers stay free of raw `enqueue`+continuation.
     func run<T>(_ body: @escaping () -> T) async -> T { await quic.run(body) }
     func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T { try await quic.run(body) }
 
@@ -425,7 +428,7 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     func close(error: Error? = nil) {
         // Strong `self`: a weakly-captured pooled multiplexer could deallocate before
         // this runs, skipping `quic.close()` and leaking the socket + ngtcp2 state.
-        queue.async {
+        enqueue {
             guard self.state != .closed else { return }
             self.state = .closed
 

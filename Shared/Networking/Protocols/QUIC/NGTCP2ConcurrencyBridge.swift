@@ -19,6 +19,13 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
     /// The ngtcp2 serial queue, vended by ``executor``. Timers and the carrier target it.
     var queue: DispatchQueue { executor.queue }
 
+    /// Fire-and-forget hop onto the ngtcp2 queue with a `Sendable`-checked closure — the sanctioned
+    /// way for clients to enter the isolation domain instead of reaching for `queue.async` (and the
+    /// raw queue's unguarded `.sync`/`.suspend`) directly.
+    func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
+        queue.async(execute: work)
+    }
+
     /// True when the caller already runs on ``queue`` — the on-queue fast paths and the
     /// deferred-teardown guard both branch on it.
     var isOnQueue: Bool { executor.isOnQueue }
@@ -30,6 +37,19 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
     func run<T>(_ body: @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// Bridges a single-shot ngtcp2 completion callback into async. The connection stores the
+    /// completion `body` receives and a C callback resolves it later on ``queue``, so this is the
+    /// irreducible continuation at the ngtcp2 C boundary (connect / stream write / datagram batch);
+    /// the completion fires exactly once, so it can't double-resume. `body` hands the completion to
+    /// the connection's own callback-form driver.
+    func awaitingCompletion(_ body: (@escaping @Sendable (Error?) -> Void) -> Void) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            body { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
         }
     }
 

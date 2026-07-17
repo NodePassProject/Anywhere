@@ -49,15 +49,7 @@ class RequestsModel {
         guard let session = await resolveSession() else { return }
         guard let data = try? JSONEncoder().encode(TunnelMessage.fetchRequests) else { return }
 
-        let response: Data? = await withCheckedContinuation { continuation in
-            do {
-                try session.sendProviderMessage(data) { response in
-                    continuation.resume(returning: response)
-                }
-            } catch {
-                continuation.resume(returning: nil)
-            }
-        }
+        let response = await ProviderMessageConcurrencyBridge.send(data, over: session)
 
         guard !Task.isCancelled else { return }
 

@@ -365,7 +365,7 @@ nonisolated final class MITMScriptEngine: Sendable {
         inv.watchdog = Task { [weak self, weak inv] in
             try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled, let self, let inv else { return }
-            MITMScriptTransform.scriptQueue.async {
+            JSCConcurrencyBridge.shared.enqueue {
                 guard !inv.delivered, let original = inv.original else { return }
                 logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
                 self.deliver(.modified(original), for: inv)
@@ -1613,7 +1613,7 @@ nonisolated final class MITMScriptEngine: Sendable {
                 } catch {
                     result = .failure(error)
                 }
-                MITMScriptTransform.scriptQueue.async {
+                JSCConcurrencyBridge.shared.enqueue {
                     Self.releaseGlobalFetchSlot()
                     guard let inv else { return }   // delivered/torn down — drop
                     self.resumeFetch(inv: inv, resolve: resolve, reject: reject, result: result)
@@ -2137,12 +2137,12 @@ extension MITMScriptEngine {
         guard !dropped.isEmpty else { return }
         // Hold the dropped engines until the queue drains them so their final release lands on the
         // VM-owning queue.
-        MITMScriptTransform.scriptQueue.async { withExtendedLifetime(dropped) {} }
+        JSCConcurrencyBridge.shared.enqueue { withExtendedLifetime(dropped) {} }
     }
 
     /// Reload reset for the engines that survive ``purgeEngines``.
     static func resetCachesOnReload(keepByScope: [UUID: Set<Int>]) {
-        MITMScriptTransform.scriptQueue.async {
+        JSCConcurrencyBridge.shared.enqueue {
             let snapshot: [(engine: MITMScriptEngine, keep: Set<Int>)] = registry.withLock { registry in
                 registry.engines.map { (engine: $0.value, keep: keepByScope[$0.key] ?? []) }
             }

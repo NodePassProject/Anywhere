@@ -29,7 +29,8 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
     private let host: String
     private let rewriter: MITMHTTP2Rewriter
     private let flowController: MITMHTTP2FlowController
-    private let lwipQueue: DispatchQueue
+    /// The lwIP concurrency boundary; every queue hop and continuation seam routes through it.
+    private let lwipBridge: LWIPConcurrencyBridge
     private let decoder = HPACKDecoder()
 
     private typealias Codec = MITMHTTP2FrameCodec
@@ -263,12 +264,12 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
         host: String,
         rewriter: MITMHTTP2Rewriter,
         flowController: MITMHTTP2FlowController,
-        lwipQueue: DispatchQueue
+        lwipBridge: LWIPConcurrencyBridge
     ) {
         self.host = host
         self.rewriter = rewriter
         self.flowController = flowController
-        self.lwipQueue = lwipQueue
+        self.lwipBridge = lwipBridge
     }
 
     func markTorn() {
@@ -546,12 +547,10 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
     // MARK: - Upstream h2 → response IR
 
     /// Parked lwIP-queue seam: hands the continuation to `body` on the lwIP queue; `body` resumes it
-    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. Only the
-    /// `lwipQueue.async` + continuation scaffolding lives here.
+    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. The continuation
+    /// itself lives in ``LWIPConcurrencyBridge``.
     private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            lwipQueue.async { body(continuation) }
-        }
+        await lwipBridge.runParked(body)
     }
 
     /// Feeds one inbound chunk; suspends across a streaming-script (per-frame) hop. lwIP-queue-confined,
@@ -1114,7 +1113,7 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
         Task { [weak self] in
             let outcome = await rewriter.applyScripts(message, phase: .httpResponse)
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 guard !self.torn else { return }
                 let regular = scriptedHeaders.filter { !$0.name.hasPrefix(":") }
                 switch outcome {
@@ -1178,7 +1177,7 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
                 engineProvider: rewriter.scriptEngineProvider
             )
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 // Torn resumes the parked feed via markTorn; here just don't touch stream state.
                 guard !self.torn else { return }
                 self.advanceStreaming(streamID, growth: result.body.count - body.count)

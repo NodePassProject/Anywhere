@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated final class DirectProxyConnection: ProxyConnection, @unchecked Sendable {
+nonisolated final class DirectProxyConnection: ProxyConnection, Sendable {
 
     private let transport: any ByteTransport
 

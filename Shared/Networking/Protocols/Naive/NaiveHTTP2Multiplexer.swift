@@ -37,21 +37,13 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     /// Tail of the ordered wire-send chain over the TLS transport. Each frame links after the
     /// previous and runs only once it finishes, so frames reach the wire in submission order
     /// without a lock held across the write.
-    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+    private let sendChain = SerialSendChain()
 
     /// Links a wire send onto the ordered chain; the returned task's `value` carries backpressure
     /// and the send's error to whoever awaits it.
     private func chainSend(_ data: Data) -> Task<Void, Error> {
         let transport = self.transport
-        return sendChain.withLock { tail in
-            let previous = tail
-            let task = Task<Void, Error> {
-                _ = try? await previous?.value
-                try await transport.send(data)
-            }
-            tail = task
-            return task
-        }
+        return sendChain.enqueue { try await transport.send(data) }
     }
     /// Invoked once per stream so randomized values (auth, padding) differ per request.
     private let connectHeaders: () -> [(name: String, value: String)]

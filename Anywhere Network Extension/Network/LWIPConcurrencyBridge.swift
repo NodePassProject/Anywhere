@@ -43,6 +43,13 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
     /// executor's queue, so work scheduled on it shares the actor isolation domain.
     var queue: DispatchQueue { executor.queue }
 
+    /// Fire-and-forget hop onto the lwIP queue with a `Sendable`-checked closure — the sanctioned
+    /// way for the bridge's clients to enter its isolation domain, so callers never reach for
+    /// `queue.async` (and the raw queue's unguarded `.sync`/`.suspend`) directly.
+    func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
+        queue.async(execute: work)
+    }
+
     // MARK: - Async hop
 
     /// Runs `body` on the lwIP queue and resumes the caller with its result — the async
@@ -53,6 +60,23 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
     func run<T>(_ body: @escaping () -> T) async -> T {
         await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
             queue.async { continuation.resume(returning: body()) }
+        }
+    }
+
+    /// Parked hop: runs `body` on the lwIP queue, handing it the `continuation` to resolve later —
+    /// `body` resumes it inline or stashes it (e.g. across a script transform hop) and resumes it
+    /// when that completes. Resumed exactly once. The continuation scaffolding lives here so the
+    /// lwIP-queue-confined callers (MITM legs/streams) never open one themselves.
+    func runParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { body(continuation) }
+        }
+    }
+
+    /// Throwing counterpart of ``runParked``: `body` may resume the continuation by throwing.
+    func runParkedThrowing<T>(_ body: @escaping (CheckedContinuation<T, Error>) -> Void) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            queue.async { body(continuation) }
         }
     }
 

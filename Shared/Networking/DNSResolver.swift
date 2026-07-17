@@ -58,16 +58,9 @@ nonisolated final class DNSResolver: Sendable {
     }
 
     private let state = Mutex(State())
-
-    /// The resolver's concurrency boundary: every blocking resolver syscall
-    /// (`getaddrinfo`, the `dns_sd` poll loop) runs on this queue, never on the
-    /// width-limited cooperative pool — `Task.detached` does NOT leave that pool.
-    /// Concurrent so parallel lookups don't serialize behind one slow resolver call;
-    /// each block is independent (all shared state lives behind ``state``).
-    private static let blockingResolveQueue = DispatchQueue(
-        label: AWCore.Identifier.dnsResolveQueue,
-        qos: .userInitiated,
-        attributes: .concurrent
+    
+    private static let blockingBridge = BlockingSyscallConcurrencyBridge(
+        label: AWCore.Identifier.dnsResolveQueue
     )
 
     private init() {}
@@ -77,10 +70,8 @@ nonisolated final class DNSResolver: Sendable {
     /// Async counterpart of ``resolveAll(_:forceFresh:)``: the potentially blocking
     /// lookup runs on the resolver's worker queue and resumes the caller with the result.
     func resolveAll(_ host: String, forceFresh: Bool = false) async -> [String] {
-        await withCheckedContinuation { continuation in
-            Self.blockingResolveQueue.async {
-                continuation.resume(returning: self.resolveAll(host, forceFresh: forceFresh))
-            }
+        await Self.blockingBridge.run {
+            self.resolveAll(host, forceFresh: forceFresh)
         }
     }
 
@@ -99,10 +90,6 @@ nonisolated final class DNSResolver: Sendable {
     /// Resolves a hostname to IP strings. A fresh hit returns immediately; a
     /// stale hit returns the old IPs and refreshes in the background unless
     /// `forceFresh` forces a synchronous lookup. Returns empty on failure.
-    ///
-    /// Blocking: a cache miss runs `getaddrinfo` on the calling thread. Callable
-    /// only from contexts that may block (GCD queues); async contexts pick the
-    /// async overload, which hops to ``blockingResolveQueue``.
     func resolveAll(_ host: String, forceFresh: Bool = false) -> [String] {
         let bare = Self.stripBrackets(host)
 
@@ -182,8 +169,8 @@ nonisolated final class DNSResolver: Sendable {
             return (true, state.generation)
         }
         guard shouldFire else { return }
-        Self.blockingResolveQueue.async { [self] in
-            let ips = Self.resolveViaGetaddrinfo(host)
+        Task { [self] in
+            let ips = await Self.blockingBridge.run { Self.resolveViaGetaddrinfo(host) }
             state.withLock { state in
                 // Flushed mid-lookup; flush already cleared this key, so leave the set be.
                 guard scheduledGeneration == state.generation else { return }
@@ -288,14 +275,7 @@ nonisolated final class DNSResolver: Sendable {
     }
 
     // MARK: - ECH (HTTPS record) resolution
-
-    /// Resolves the ECHConfigList for `host` from its DNS HTTPS record (RFC 9460
-    /// SvcParamKey 5, `ech`). The query goes through the system resolver — the
-    /// same mDNSResponder path as `getaddrinfo`, so it inherits the same
-    /// tunnel-bypass behavior. Results are cached by the record's TTL and misses
-    /// are negatively cached briefly. Returns the ECHConfigList bytes, or nil when
-    /// no usable record is published. Concurrent callers for the same host share
-    /// one lookup.
+    
     func resolveECHConfigList(for host: String) async -> Data? {
         let bare = Self.stripBrackets(host)
         // An IP literal has no domain that could carry an HTTPS record.
@@ -327,15 +307,10 @@ nonisolated final class DNSResolver: Sendable {
             return await task.value
         }
     }
-
-    /// Runs the blocking HTTPS-record query on ``blockingResolveQueue`` (a detached
-    /// task would still occupy a cooperative-pool thread), caches the result under
-    /// the generation guard, and clears the in-flight slot.
+    
     private func lookupECH(bare: String, key: String, scheduledGeneration: UInt64) async -> Data? {
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<(config: Data, ttl: UInt32)?, Never>) in
-            Self.blockingResolveQueue.async {
-                continuation.resume(returning: Self.queryHTTPSRecordECH(host: bare))
-            }
+        let result = await Self.blockingBridge.run {
+            Self.queryHTTPSRecordECH(host: bare)
         }
 
         return state.withLock { state in
@@ -354,10 +329,7 @@ nonisolated final class DNSResolver: Sendable {
             return result?.config
         }
     }
-
-    /// Blocking system-resolver query for `host`'s HTTPS record, returning the
-    /// `ech` SvcParam bytes and the record's TTL, or nil on miss/timeout. Drives
-    /// the dns_sd request to completion on the calling (background) queue.
+    
     private static func queryHTTPSRecordECH(host: String) -> (config: Data, ttl: UInt32)? {
         final class QueryResult { var config: Data?; var ttl: UInt32 = 0; var answered = false }
         let result = QueryResult()

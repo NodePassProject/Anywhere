@@ -44,7 +44,7 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
     // Packet-up: one POST at a time, no more often than `scMinPostsIntervalMs` apart. Each POST
     // links after the previous on this chain, so they run strictly one at a time (rate-limit wait
     // included) without a lock held across the `await`.
-    let packetUpChain = Mutex<Task<Void, Error>?>(nil)
+    let packetUpChain = SerialSendChain()
 
     // HTTP/2 state
     let useHTTP2: Bool
@@ -488,31 +488,24 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
     /// single-writer, so payloads already arrive one at a time — the callback path's coalescing
     /// queue is unnecessary. HTTP/1.1 re-splits an oversized payload into back-to-back POSTs.
     private func sendPacketUp(_ data: Data) async throws {
-        let task: Task<Void, Error> = packetUpChain.withLock { tail in
-            let previous = tail
-            let task = Task<Void, Error> { [self] in
-                _ = try? await previous?.value
-                let closed = state.withLock { state in
-                    !state._isConnected || (useHTTP2 && state.h2StreamClosed) || (useHTTP3 && state.h3Closed)
-                }
-                if closed { throw XHTTPError.connectionClosed }
-
-                try await rateLimitPacketUp()
-
-                if usesSharedH2 {
-                    try await sendSharedH2PacketUp(data: data)
-                } else if useHTTP3 {
-                    try await sendH3PacketUp(data: data)
-                } else if useHTTP2 {
-                    try await sendH2PacketUp(data: data)
-                } else {
-                    try await sendPacketUpHTTP11(data: data)
-                }
+        try await packetUpChain.run { [self] in
+            let closed = state.withLock { state in
+                !state._isConnected || (useHTTP2 && state.h2StreamClosed) || (useHTTP3 && state.h3Closed)
             }
-            tail = task
-            return task
+            if closed { throw XHTTPError.connectionClosed }
+
+            try await rateLimitPacketUp()
+
+            if usesSharedH2 {
+                try await sendSharedH2PacketUp(data: data)
+            } else if useHTTP3 {
+                try await sendH3PacketUp(data: data)
+            } else if useHTTP2 {
+                try await sendH2PacketUp(data: data)
+            } else {
+                try await sendPacketUpHTTP11(data: data)
+            }
         }
-        try await task.value
     }
 
     /// Waits out the remainder of `scMinPostsIntervalMs` since the last POST, then stamps the clock.

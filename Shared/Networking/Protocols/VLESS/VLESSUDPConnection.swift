@@ -17,7 +17,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
     /// Tail of the send chain: each framed datagram links after the previous and runs only once it
     /// finishes, so a datagram's length-prefixed frame never interleaves another's on the stream
     /// transport. UDP tolerates whole-datagram reordering; only intra-frame interleaving is fatal.
-    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+    private let sendChain = SerialSendChain()
 
     init(inner: ProxyConnection) {
         self.inner = inner
@@ -32,16 +32,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
     func sendRaw(_ data: Data) async throws {
         let frame = frameUDPPacket(data)
         let inner = self.inner
-        let task: Task<Void, Error> = sendChain.withLock { tail in
-            let previous = tail
-            let task = Task<Void, Error> {
-                _ = try? await previous?.value
-                try await inner.sendRaw(frame)
-            }
-            tail = task
-            return task
-        }
-        try await task.value
+        try await sendChain.run { try await inner.sendRaw(frame) }
     }
 
     // MARK: - Receive: pull one framed packet at a time.

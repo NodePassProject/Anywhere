@@ -90,8 +90,9 @@ nonisolated final class MITMHTTP1Stream {
     /// Request stream records method/URL; response stream pops them for script ctx.
     private let requestLog: MITMRequestLog
 
-    /// Serial lwIP queue all stream state is confined to; script hops resume here.
-    private let lwipQueue: DispatchQueue
+    /// The lwIP concurrency boundary: all stream state is confined to its serial executor's queue,
+    /// and every queue hop and continuation seam routes through the bridge.
+    private let lwipBridge: LWIPConcurrencyBridge
 
     init(
         host: String,
@@ -101,7 +102,7 @@ nonisolated final class MITMHTTP1Stream {
         effectiveAuthority: String?,
         scriptEngineProvider: MITMScriptEngine.Provider,
         requestLog: MITMRequestLog,
-        lwipQueue: DispatchQueue
+        lwipBridge: LWIPConcurrencyBridge
     ) {
         self.host = host
         self.scheme = scheme
@@ -115,7 +116,7 @@ nonisolated final class MITMHTTP1Stream {
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
-        self.lwipQueue = lwipQueue
+        self.lwipBridge = lwipBridge
     }
 
     // MARK: - State
@@ -252,20 +253,16 @@ nonisolated final class MITMHTTP1Stream {
     // MARK: - Public API
 
     /// Hops onto the lwIP queue, runs `body`, and resumes with its result — the async seam between the
-    /// session pump (pure async/await) and this stream's lwIP-queue-confined state machine.
+    /// session pump (pure async/await) and this stream's lwIP-queue-confined state machine. The
+    /// continuation itself lives in ``LWIPConcurrencyBridge``.
     private func onLwip<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            lwipQueue.async { continuation.resume(returning: body()) }
-        }
+        await lwipBridge.run(body)
     }
 
     /// Parked counterpart: hands the continuation to `body` on the lwIP queue; `body` resumes it inline
-    /// or stashes it (`parkedContinuation`) for a later script hop to resolve. Only the `lwipQueue.async`
-    /// + continuation scaffolding lives here.
+    /// or stashes it (`parkedContinuation`) for a later script hop to resolve.
     private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            lwipQueue.async { body(continuation) }
-        }
+        await lwipBridge.runParked(body)
     }
 
     /// Feeds `data` through the rewrite pipeline, returning the rewritten bytes. Suspends across a
@@ -696,7 +693,7 @@ nonisolated final class MITMHTTP1Stream {
                 Task { [weak self] in
                     let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
                     guard let self else { return }
-                    self.lwipQueue.async {
+                    self.lwipBridge.enqueue {
                         self.resumeHeadNoBody(
                             outcome: outcome,
                             fallbackStartLine: fallback,
@@ -1239,7 +1236,7 @@ nonisolated final class MITMHTTP1Stream {
                 engineProvider: engineProvider
             )
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 self.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame)
             }
         }
@@ -1414,7 +1411,7 @@ nonisolated final class MITMHTTP1Stream {
         Task { [weak self] in
             let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 self.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode)
             }
         }

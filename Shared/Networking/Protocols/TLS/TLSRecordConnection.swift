@@ -33,21 +33,12 @@ nonisolated class TLSRecordConnection {
     /// TLS 1.3 KeyUpdate response. Each ``chainedSend`` body runs only once the previous finished,
     /// so record building (sequence-number assignment) and the key-switch never interleave a send —
     /// submission order is wire order — without a lock held across the `await`.
-    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+    private let sendChain = SerialSendChain()
 
     /// Links `body` after all prior chained sends and awaits it (backpressure + errors). Internal so
     /// the +TLS13 KeyUpdate response (a different file) drains through the same chain.
     func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
-        let task: Task<Void, Error> = sendChain.withLock { tail in
-            let previous = tail
-            let task = Task<Void, Error> {
-                _ = try? await previous?.value
-                try await body()
-            }
-            tail = task
-            return task
-        }
-        try await task.value
+        try await sendChain.run(body)
     }
 
     let tlsVersion: UInt16

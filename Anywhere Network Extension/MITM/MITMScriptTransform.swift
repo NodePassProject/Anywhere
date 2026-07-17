@@ -10,13 +10,7 @@ import JavaScriptCore
 
 nonisolated enum MITMScriptTransform {
 
-    /// Serial queue carrying every script invocation (off the lwIP queue, so a slow process(ctx)
-    /// parks only its connection). Serial ordering keeps FrameCursor from concurrent touches.
-    /// Owned by ``JSCConcurrencyBridge`` — the JSC vendored-boundary bridge; this alias keeps the
-    /// fire-and-forget confinement hops (compile, deinit release) reading naturally.
-    static var scriptQueue: DispatchQueue { JSCConcurrencyBridge.shared.queue }
-
-    /// Compiles every script rule on scriptQueue at (re)configuration time so cold-start cost doesn't
+    /// Compiles every script rule on the JSC queue at (re)configuration time so cold-start cost doesn't
     /// land on the first intercepted flow. One async dispatch per scope so real calls can interleave.
     static func prewarm(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
         // scope → its deduped script/streamScript sources (the same source on multiple rules compiles once).
@@ -38,7 +32,7 @@ nonisolated enum MITMScriptTransform {
         MITMScriptEngine.resetCachesOnReload(keepByScope: keepByScope)
         // Precompile per scope.
         for (scope, scripts) in scriptsByScope {
-            scriptQueue.async {
+            JSCConcurrencyBridge.shared.enqueue {
                 let engine = MITMScriptEngine.sharedEngine(forScope: scope)
                 for script in scripts {
                     engine.precompile(source: script.source, sourceKey: script.sourceKey)
@@ -219,7 +213,7 @@ nonisolated enum MITMScriptTransform {
             // state's final release runs JSValueUnprotect, which mutates VM bookkeeping; off
             // scriptQueue that would race in-flight scripts and corrupt the VM heap.
             guard let state else { return }
-            MITMScriptTransform.scriptQueue.async { withExtendedLifetime(state) {} }
+            JSCConcurrencyBridge.shared.enqueue { withExtendedLifetime(state) {} }
         }
     }
 

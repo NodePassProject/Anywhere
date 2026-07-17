@@ -23,8 +23,9 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     private typealias QUICError = QUICConnection.QUICError
 
-    /// Owner-provided serial queue; every method and callback runs on it.
-    private let queue: DispatchQueue
+    /// The ngtcp2 concurrency boundary; every method and callback hops onto its serial queue via
+    /// `bridge.enqueue`, so the raw queue never leaks for unguarded access.
+    private let bridge: NGTCP2ConcurrencyBridge
 
     /// Owns the `NetworkConnection` for its whole lifetime; cancelling it tears
     /// the connection down. `queue`-confined.
@@ -65,8 +66,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     /// Bounds the pre-handler datagram buffer.
     private static let maxPendingPackets = 1024
 
-    init(queue: DispatchQueue) {
-        self.queue = queue
+    init(bridge: NGTCP2ConcurrencyBridge) {
+        self.bridge = bridge
     }
 
     deinit {
@@ -102,8 +103,8 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         sendContinuation = sendCont
         
         let carrier = WeakCarrier(value: self)
-        driverTask = Task { [queue] in
-            await Self.runDriver(endpoint: endpoint, sendStream: sendStream, queue: queue, carrier: carrier)
+        driverTask = Task { [bridge] in
+            await Self.runDriver(endpoint: endpoint, sendStream: sendStream, bridge: bridge, carrier: carrier)
         }
     }
 
@@ -172,7 +173,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     private static func runDriver(
         endpoint: NWEndpoint,
         sendStream: AsyncStream<Data>,
-        queue: DispatchQueue,
+        bridge: NGTCP2ConcurrencyBridge,
         carrier: WeakCarrier
     ) async {
         do {
@@ -183,13 +184,13 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                         // Capture the interface here so it's cached before `onReady`
                         // fires (proactive migration reads it immediately).
                         let interfaceType = connection.currentPath?.availableInterfaces.first?.type
-                        queue.async { carrier.value?.handleReady(interfaceType: interfaceType) }
+                        bridge.enqueue { carrier.value?.handleReady(interfaceType: interfaceType) }
                     case .failed(let error):
                         let code = TransportError.errnoCode(from: error)
-                        queue.async { carrier.value?.deliverError(code) }
+                        bridge.enqueue { carrier.value?.deliverError(code) }
                     case .waiting(let error):
                         let code = TransportError.errnoCode(from: error)
-                        queue.async { carrier.value?.handleWaiting(code) }
+                        bridge.enqueue { carrier.value?.handleWaiting(code) }
                     default:
                         break  // .setup, .preparing, .cancelled
                     }
@@ -199,22 +200,22 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 // tears down instead of waiting on its PTO/idle timers.
                 connection.onViabilityUpdate { _, viable in
                     guard !viable else { return }
-                    queue.async { carrier.value?.handleViabilityLost() }
+                    bridge.enqueue { carrier.value?.handleViabilityLost() }
                 }
                 // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
                 // proactive migration before the current path degrades.
                 connection.onBetterPathUpdate { _, better in
                     guard better else { return }
-                    queue.async { carrier.value?.handleBetterPath() }
+                    bridge.enqueue { carrier.value?.handleBetterPath() }
                 }
                 connection.onPathUpdate { _, path in
                     let interfaceType = path.availableInterfaces.first?.type
-                    queue.async { carrier.value?.cachedInterfaceType = interfaceType }
+                    bridge.enqueue { carrier.value?.cachedInterfaceType = interfaceType }
                 }
 
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     group.addTask { try await Self.runSendLoop(connection, stream: sendStream) }
-                    group.addTask { try await Self.runReceiveLoop(connection, queue: queue, carrier: carrier) }
+                    group.addTask { try await Self.runReceiveLoop(connection, bridge: bridge, carrier: carrier) }
                     _ = try await group.next()
                     group.cancelAll()
                 }
@@ -222,7 +223,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         } catch {
             // Connection ended (cancelled or failed).
         }
-        queue.async { carrier.value?.releaseFlowCount() }
+        bridge.enqueue { carrier.value?.releaseFlowCount() }
     }
 
     /// Drains ordered datagram sends; errors drop the packet (ngtcp2 retransmits).
@@ -237,7 +238,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     /// A receive failure is terminal. Runs off `queue`.
     private static func runReceiveLoop(
         _ connection: NetworkConnection<UDP>,
-        queue: DispatchQueue,
+        bridge: NGTCP2ConcurrencyBridge,
         carrier: WeakCarrier
     ) async throws {
         do {
@@ -245,12 +246,12 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 let message = try await connection.receive()
                 let data = message.content
                 if !data.isEmpty {
-                    queue.async { carrier.value?.deliverPacket(data) }
+                    bridge.enqueue { carrier.value?.deliverPacket(data) }
                 }
             }
         } catch {
             let code = TransportError.errnoCode(from: error)
-            queue.async { carrier.value?.deliverError(code) }
+            bridge.enqueue { carrier.value?.deliverError(code) }
             throw error
         }
     }

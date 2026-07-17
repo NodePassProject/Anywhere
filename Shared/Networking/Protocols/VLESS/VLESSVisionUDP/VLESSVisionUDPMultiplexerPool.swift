@@ -10,12 +10,10 @@ import Synchronization
 
 nonisolated final class VLESSVisionUDPMultiplexerPool {
     let configuration: ProxyConfiguration
-    let flowQueue: DispatchQueue
     private let multiplexers = Mutex<[VLESSVisionUDPMultiplexer]>([])
 
-    init(configuration: ProxyConfiguration, flowQueue: DispatchQueue) {
+    init(configuration: ProxyConfiguration) {
         self.configuration = configuration
-        self.flowQueue = flowQueue
     }
 
     /// Reuses a mux with spare capacity or dials a fresh one, then opens a stream.

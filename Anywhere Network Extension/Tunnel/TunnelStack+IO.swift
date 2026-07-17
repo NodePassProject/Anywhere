@@ -64,7 +64,7 @@ extension TunnelStack {
             // writePackets copies into the kernel synchronously, so the buffers
             // are already unreferenced.
             if !releases.isEmpty {
-                lwipQueue.async {
+                lwipBridge.enqueue {
                     for r in releases {
                         r.fn(r.ctx)
                     }
@@ -123,7 +123,7 @@ extension TunnelStack {
                 // Empty or all-reflected batch — re-arm so the loop can't stall.
                 self.startReadingPackets()
             case (false, true):
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     self.feedLwip(lwipBatch)
                     self.startReadingPackets()
                 }
@@ -135,7 +135,7 @@ extension TunnelStack {
             case (false, false):
                 let group = DispatchGroup()
                 group.enter()
-                self.lwipQueue.async { self.feedLwip(lwipBatch); group.leave() }
+                self.lwipBridge.enqueue { self.feedLwip(lwipBatch); group.leave() }
                 group.enter()
                 self.udpQueue.async { self.feedUDP(udpBatch); group.leave() }
                 // Re-arm off the data-plane queues so the next read waits only

@@ -137,7 +137,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
                 do {
                     try await multiplexer.writeStream(streamID, data: headersFrame)
                 } catch {
-                    multiplexer.queue.async { self.handleStreamError(error) }
+                    multiplexer.enqueue { self.handleStreamError(error) }
                 }
             }
         }
@@ -162,18 +162,18 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
-            multiplexer.queue.async { [weak self] in self?.closeAndShutdown() }
+            multiplexer.enqueue { [weak self] in self?.closeAndShutdown() }
             return nil
         }
         // Credit the payload bytes now the app has taken them (backpressure preserved). The
         // frame-header octets were already credited on the queue in `deliverData`.
-        multiplexer.queue.async { [weak self] in self?.ackQuicBytes(data.count) }
+        multiplexer.enqueue { [weak self] in self?.ackQuicBytes(data.count) }
         return data
     }
 
     func close() {
         guard let multiplexer else { return }
-        multiplexer.queue.async { [self] in
+        multiplexer.enqueue { [self] in
             guard state != .closed else { return }
             state = .closed
             multiplexer.removeStream(self)

@@ -429,7 +429,7 @@ nonisolated class TunnelStack {
 
         udpQueue.async { [self] in
             if configuration.outboundProtocol == .vless {
-                udpMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
+                udpMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration)
             } else {
                 udpMultiplexerPool = nil
             }

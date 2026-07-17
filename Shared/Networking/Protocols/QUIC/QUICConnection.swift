@@ -89,11 +89,18 @@ actor QUICConnection {
     /// ngtcp2-touching runs on, the async hop, and the conn-held reentrancy guard.
     let bridge: NGTCP2ConcurrencyBridge
     /// The ngtcp2 serial queue, vended by ``bridge``'s custom executor. Nonisolated so the
-    /// consumers that share this queue can read it and the C callbacks can hop onto it.
+    /// timers/carrier that must target this exact queue can read it.
     nonisolated var queue: DispatchQueue { bridge.queue }
 
+    /// Fire-and-forget hop onto the ngtcp2 queue with a `Sendable`-checked closure — the sanctioned
+    /// way for this connection's consumers (H3/Hysteria/Nowhere sessions) and its C callbacks to
+    /// enter the isolation domain, instead of reaching for `queue.async` directly.
+    nonisolated func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
+        bridge.enqueue(work)
+    }
+
     /// Runs `body` on the ngtcp2 serial queue and awaits its result — the sanctioned async hop
-    /// for queue-confined consumers (sessions/multiplexers), so the `queue.async`+continuation
+    /// for queue-confined consumers (sessions/multiplexers), so the `bridge.enqueue`+continuation
     /// stays inside the bridge instead of leaking into their pure-async code.
     nonisolated func run<T>(_ body: @escaping () -> T) async -> T {
         await bridge.run(body)
@@ -256,7 +263,7 @@ actor QUICConnection {
     // MARK: Connect
     
     private nonisolated func connect(completion: @escaping (Error?) -> Void) {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             guard let self else { completion(QUICError.connectionFailed("Invalid state")); return }
             self.assumeIsolated { me in
                 guard me.state == .idle else {
@@ -271,13 +278,10 @@ actor QUICConnection {
         }
     }
 
-    /// Async connect — wraps the single-shot ngtcp2 connect completion at the C boundary.
+    /// Async connect — the single-shot ngtcp2 connect completion is bridged in
+    /// ``NGTCP2ConcurrencyBridge``.
     nonisolated func connect() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connect { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await bridge.awaitingCompletion { connect(completion: $0) }
     }
 
     // MARK: Streams
@@ -311,7 +315,7 @@ actor QUICConnection {
         if isOnQueue {
             assumeIsolated { $0.extendStreamOffsetOnQueue(streamId, count: count) }
         } else {
-            queue.async { [weak self] in
+            bridge.enqueue { [weak self] in
                 self?.assumeIsolated { $0.extendStreamOffsetOnQueue(streamId, count: count) }
             }
         }
@@ -329,18 +333,19 @@ actor QUICConnection {
     private func scheduleFlush() {
         if flushScheduled { return }
         flushScheduled = true
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.flushScheduled = false
-            self.writeToUDP()
-            self.flushPendingWrites()
+        bridge.enqueue { [weak self] in
+            self?.assumeIsolated { me in
+                me.flushScheduled = false
+                me.writeToUDP()
+                me.flushPendingWrites()
+            }
         }
     }
 
     /// Sends RESET_STREAM + STOP_SENDING, freeing the stream ID slot. The caller supplies the
     /// application error code; each app protocol (HTTP/3, Hysteria, Nowhere) defines its own.
     nonisolated func shutdownStream(_ streamId: Int64, appErrorCode: UInt64) {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             self?.assumeIsolated { me in
                 guard let conn = me.connectionOpaquePointer else { return }
                 me.bridge.shutdownStream(conn, stream: streamId, appErrorCode: appErrorCode)
@@ -351,7 +356,7 @@ actor QUICConnection {
 
     private nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
                                          completion: @escaping (Error?) -> Void) {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
             self.assumeIsolated { me in
@@ -365,14 +370,10 @@ actor QUICConnection {
         }
     }
 
-    /// Async stream write — the one irreducible continuation at the ngtcp2 C boundary
-    /// (the callback `writeStream` completion is single-shot, so this can't double-resume).
+    /// Async stream write — the single-shot ngtcp2 write completion is bridged in
+    /// ``NGTCP2ConcurrencyBridge``.
     nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            writeStream(streamId, data: data, fin: fin) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await bridge.awaitingCompletion { writeStream(streamId, data: data, fin: fin, completion: $0) }
     }
 
     /// Fire-and-forget stream write for callers already on ``queue`` (asserted by
@@ -388,20 +389,16 @@ actor QUICConnection {
 
     // MARK: Datagrams
 
-    /// Async DATAGRAM batch write (localized ngtcp2-boundary continuation; the callback
-    /// fires exactly once after every frame reaches a terminal state).
+    /// Async DATAGRAM batch write — the ngtcp2-boundary completion (fired once after every frame
+    /// reaches a terminal state) is bridged in ``NGTCP2ConcurrencyBridge``.
     nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            writeDatagrams(datagrams) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await bridge.awaitingCompletion { writeDatagrams(datagrams, completion: $0) }
     }
 
     /// Queues multiple DATAGRAM frames; `completion` fires once all reach a terminal
     /// state, with the first error or `nil`.
     private nonisolated func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
             self.assumeIsolated { me in
@@ -430,13 +427,10 @@ actor QUICConnection {
         }
     }
 
-    /// Async atomic DATAGRAM batch write (localized ngtcp2-boundary continuation).
+    /// Async atomic DATAGRAM batch write — the ngtcp2-boundary completion is bridged in
+    /// ``NGTCP2ConcurrencyBridge``.
     nonisolated func writeDatagramsAtomically(_ datagrams: [Data]) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            writeDatagramsAtomically(datagrams) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await bridge.awaitingCompletion { writeDatagramsAtomically(datagrams, completion: $0) }
     }
 
     /// Queues one logical packet's DATAGRAM fragments as an indivisible batch.
@@ -445,7 +439,7 @@ actor QUICConnection {
         _ datagrams: [Data],
         completion: @escaping (Error?) -> Void
     ) {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             guard let self else { completion(QUICError.closed); return }
             self.assumeIsolated { me in
                 guard me.connectionOpaquePointer != nil, me.state == .connected else {
@@ -689,7 +683,7 @@ actor QUICConnection {
     nonisolated func close(error: Error? = nil) {
         // Defer while a ngtcp2 batch still holds the conn pointer on the stack.
         if bridge.connHeld && isOnQueue {
-            queue.async { self.close(error: error) }
+            bridge.enqueue { self.close(error: error) }
             return
         }
         // Strong-capture `self` so teardown runs even when close() is the last reference;
@@ -698,7 +692,7 @@ actor QUICConnection {
         if isOnQueue {
             teardown()
         } else {
-            queue.async(execute: teardown)
+            bridge.enqueue(teardown)
         }
     }
 
@@ -765,7 +759,7 @@ actor QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
-            let carrier = QUICDatagramCarrier(queue: queue)
+            let carrier = QUICDatagramCarrier(bridge: bridge)
             try carrier.connect(remoteAddr: remoteAddr, localAddr: &localAddr)
             self.carrier = carrier
             try initializeNgtcp2()
@@ -794,11 +788,11 @@ actor QUICConnection {
             state = .handshaking
             let placeholderLocal = localAddr
             transport.startReceiving { [weak self] data in
-                self?.queue.async {
+                self?.enqueue {
                     self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: placeholderLocal) }
                 }
             } errorHandler: { [weak self] error in
-                self?.queue.async {
+                self?.enqueue {
                     guard let self else { return }
                     let err = error ?? QUICError.closed
                     self.assumeIsolated { me in
@@ -1059,7 +1053,7 @@ actor QUICConnection {
             return
         }
 
-        let newCarrier = QUICDatagramCarrier(queue: queue)
+        let newCarrier = QUICDatagramCarrier(bridge: bridge)
         var placeholder = sockaddr_storage()
         do {
             try newCarrier.connect(remoteAddr: remoteAddr, localAddr: &placeholder)
@@ -1106,7 +1100,7 @@ actor QUICConnection {
               connectionOpaquePointer != nil,
               let oldType = carrier?.currentInterfaceType else { return }
 
-        let target = QUICDatagramCarrier(queue: queue)
+        let target = QUICDatagramCarrier(bridge: bridge)
         var placeholder = sockaddr_storage()
         do {
             try target.connect(remoteAddr: remoteAddr, localAddr: &placeholder)
@@ -1133,7 +1127,7 @@ actor QUICConnection {
         proactiveDeadlineTask = Task { [weak self, weak target] in
             try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
             guard !Task.isCancelled, let self, let target else { return }
-            self.queue.async {
+            self.bridge.enqueue {
                 self.assumeIsolated { me in
                     guard me.migratingCarrier === target, !me.proactiveValidating else { return }
                     logger.warning("[QUIC] Proactive migration target not ready in \(Int(Self.proactiveReadyTimeout))s; staying put")
@@ -1414,7 +1408,7 @@ actor QUICConnection {
 
     /// Updates the Brutal target send rate (bytes/sec); no-op if Brutal isn't installed. Safe off-queue.
     nonisolated func setBrutalBandwidth(_ bps: UInt64) {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             self?.assumeIsolated { $0.brutalCC?.setTargetBandwidth(bps) }
         }
     }
@@ -1422,7 +1416,7 @@ actor QUICConnection {
     /// Reverts to CUBIC (`Hysteria-CC-RX: auto`); safe off-queue. Unregisters BEFORE rewiring
     /// the CC table so a racing trampoline no-ops rather than touching a half-initialized CUBIC struct.
     nonisolated func uninstallBrutalCC() {
-        queue.async { [weak self] in
+        bridge.enqueue { [weak self] in
             self?.assumeIsolated { me in
                 guard let connectionOpaquePointer = me.connectionOpaquePointer else { return }
                 if let key = me.brutalCCKey {
@@ -1817,7 +1811,7 @@ private let quicBidiCreditCB: @convention(c) (
     OpaquePointer?, UInt64, UnsafeMutableRawPointer?
 ) -> Int32 = { _, maxStreams, userData in
     guard let connection = qcFromUserData(userData) else { return 0 }
-    connection.queue.async { [weak connection] in
+    connection.enqueue { [weak connection] in
         connection?.assumeIsolated { $0.bidiCreditHandler?(maxStreams) }
     }
     return 0
@@ -1857,7 +1851,7 @@ private let quicHandshakeCompletedCB: @convention(c) (
     OpaquePointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, userData in
     guard let connection = qcFromUserData(userData) else { return 0 }
-    connection.queue.async {
+    connection.enqueue {
         connection.assumeIsolated { me in
             me.state = .connected
             me.connectCompletion?(nil)
@@ -1883,7 +1877,7 @@ private let quicPathValidationCB: @convention(c) (
     } else {
         result = .aborted
     }
-    connection.queue.async { connection.assumeIsolated { $0.handlePathValidation(result: result) } }
+    connection.enqueue { connection.assumeIsolated { $0.handlePathValidation(result: result) } }
     return 0
 }
 

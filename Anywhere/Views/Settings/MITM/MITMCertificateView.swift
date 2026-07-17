@@ -178,7 +178,7 @@ struct MITMCertificateView: View {
             controller.refresh()
         }
         .onDisappear {
-            MITMProfileServer.shared.stop()
+            Task { await MITMProfileServer.shared.stop() }
         }
         .onChange(of: scenePhase) { _, newValue in
             if newValue == .active {

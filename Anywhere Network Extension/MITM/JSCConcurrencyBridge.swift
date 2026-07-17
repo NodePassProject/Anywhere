@@ -26,6 +26,12 @@ nonisolated final class JSCConcurrencyBridge: @unchecked Sendable {
     /// (compile, deinit release, settle) onto the same domain.
     var queue: DispatchQueue { executor.queue }
 
+    /// Fire-and-forget hop onto the JSC queue with a `Sendable`-checked closure — the sanctioned way
+    /// to enter the isolation domain instead of reaching for `queue.async` directly.
+    func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
+        queue.async(execute: work)
+    }
+
     /// True when the caller already runs on the JSC queue.
     var isOnQueue: Bool { executor.isOnQueue }
 

@@ -41,7 +41,8 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
     private let host: String
     private let rewriter: MITMHTTP2Rewriter
     private let flowController: MITMHTTP2FlowController
-    private let lwipQueue: DispatchQueue
+    /// The lwIP concurrency boundary; every queue hop and continuation seam routes through it.
+    private let lwipBridge: LWIPConcurrencyBridge
     private let decoder = HPACKDecoder()
 
     private typealias Codec = MITMHTTP2FrameCodec
@@ -157,12 +158,12 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
         host: String,
         rewriter: MITMHTTP2Rewriter,
         flowController: MITMHTTP2FlowController,
-        lwipQueue: DispatchQueue
+        lwipBridge: LWIPConcurrencyBridge
     ) {
         self.host = host
         self.rewriter = rewriter
         self.flowController = flowController
-        self.lwipQueue = lwipQueue
+        self.lwipBridge = lwipBridge
     }
 
     func markTorn() {
@@ -203,12 +204,10 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
     // MARK: - Client → MITM
 
     /// Parked lwIP-queue seam: hands the continuation to `body` on the lwIP queue; `body` resumes it
-    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. Only the
-    /// `lwipQueue.async` + continuation scaffolding lives here.
+    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. The continuation
+    /// itself lives in ``LWIPConcurrencyBridge``.
     private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            lwipQueue.async { body(continuation) }
-        }
+        await lwipBridge.runParked(body)
     }
 
     /// Feeds one inbound chunk; suspends across a parking script hop. lwIP-queue-confined, so it
@@ -861,7 +860,7 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
         Task { [weak self] in
             let outcome = await rewriter.applyScripts(message, phase: .httpRequest)
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 guard !self.torn else { return }
                 // The client can RST the stream while the script runs; only `streamMethods` still
                 // tracks it here. If it's gone, drop the result — forwarding would open an origin

@@ -29,7 +29,7 @@ extension TunnelStack {
         self.packetFlow = packetFlow
         self.configuration = configuration
 
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             running = true
 
             configureRuntime(for: configuration)
@@ -72,7 +72,7 @@ extension TunnelStack {
 
     /// Restarts the stack on the existing packet flow under the new configuration.
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             logger.info("[VPN] Configuration switched")
             restartStack(configuration: newConfiguration)
         }
@@ -82,7 +82,7 @@ extension TunnelStack {
     /// down our outbound sockets across sleep, but in-process lwIP state survives.
     func handleWake() {
         scheduler.reconcile()
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running, let configuration else { return }
             logger.info("[VPN] Device wake")
             invalidateOutboundState(configuration: configuration)
@@ -93,7 +93,7 @@ extension TunnelStack {
     /// their sockets, so holding them just pins FDs. No mux rebuild (no path to
     /// dial over) and no force-close of app-facing TCP legs.
     func suspendOutbound() {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running else { return }
             logger.info("[VPN] Path offline/sleep")
 
@@ -106,7 +106,7 @@ extension TunnelStack {
     /// stale DNS, once the path returns. Pooled and app-facing legs are left to their
     /// viability handlers; pooled transports rebuild on the next dial.
     func resumeOutbound() {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running, configuration != nil else { return }
             logger.info("[VPN] Path restored")
             DNSResolver.shared.flush()
@@ -117,7 +117,7 @@ extension TunnelStack {
     /// Caches the egress identity and re-derives the effective mode. A change in
     /// effective mode restarts the stack so new connections use the new outbound.
     func updateNetworkContext(isWiFi: Bool, isCellular: Bool, ssid: String?) {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running, let configuration else { return }
 
             let context = NetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: ssid)
@@ -160,7 +160,7 @@ extension TunnelStack {
         // Build the replacement mux on lwipQueue, which owns `configuration`.
         let rebuiltMultiplexerPool: VLESSVisionUDPMultiplexerPool?
         if rebuildMultiplexerPool, let configuration, configuration.outboundProtocol == .vless {
-            rebuiltMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
+            rebuiltMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration)
         } else {
             rebuiltMultiplexerPool = nil
         }
@@ -230,7 +230,7 @@ extension TunnelStack {
             deferredRestartTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(delay))
                 guard !Task.isCancelled, let self else { return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     self.deferredRestartTask = nil
                     guard self.running else { return }
                     // The egress (and effective mode) may have reverted within the
@@ -326,7 +326,7 @@ extension TunnelStack {
     /// reapply the tunnel network settings; an effective-mode, VPN-icon, or
     /// IPv6 change restarts the stack.
     private func handleSettingsChanged() {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running, let configuration else { return }
 
             let old = settings
@@ -388,7 +388,7 @@ extension TunnelStack {
     /// connection accept, so active flows stay valid. No-op unless in rule mode
     /// (global and trusted-network direct reset the router and ignore rules).
     private func handleRoutingChanged() {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running else { return }
             guard proxyMode == .rule else { return }
             logger.info("[VPN] Routing changed")
@@ -399,7 +399,7 @@ extension TunnelStack {
     /// Rebuilds the MITM matcher in place on `lwipQueue` — no restart; sessions
     /// snapshot their rules at connection open, so only new connections see the change.
     fileprivate func handleMITMChanged() {
-        lwipQueue.async { [self] in
+        lwipBridge.enqueue { [self] in
             guard running else { return }
             logger.info("[VPN] MITM settings changed")
             loadMITMSetting()

@@ -10,74 +10,67 @@ import Network
 
 nonisolated private let logger = AnywhereLogger(category: "MITMProfileServer")
 
-final class MITMProfileServer {
+actor MITMProfileServer {
     static let shared = MITMProfileServer()
 
-    private var listener: NWListener?
-    private var port: NWEndpoint.Port?
     private var payload: Data?
-    
-    private static let lifetime: TimeInterval = 120
-
+    private var runTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
 
+    private static let lifetime: TimeInterval = 120
+
     private init() {}
-    
+
     func start(payload: Data) async throws -> URL {
         stop()
-
-        let parameters = NWParameters.tcp
-        let listener = try NWListener(using: parameters, on: .any)
-
-        self.listener = listener
+        
+        let listener = try NetworkListener(for: nil, using: { TCP() })
         self.payload = payload
-
-        listener.newConnectionHandler = { [weak self] connection in
-            Task {
+        
+        let (portStream, portSignal) = AsyncThrowingStream.makeStream(of: NWEndpoint.Port.self)
+        let configured = listener.onStateUpdate { listener, state in
+            switch state {
+            case .ready:
+                if let port = listener.port {
+                    portSignal.yield(port)
+                    portSignal.finish()
+                } else {
+                    portSignal.finish(throwing: ProfileServerError.bindFailed)
+                }
+            case .failed(let error):
+                portSignal.finish(throwing: error)
+            case .cancelled:
+                portSignal.finish(throwing: ProfileServerError.bindFailed)
+            default:
+                break
+            }
+        }
+        
+        runTask = Task { [weak self] in
+            try? await configured.run { connection in
                 await self?.handle(connection: connection)
             }
         }
 
-        var hasResumed: Bool = false
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            listener.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    if !hasResumed {
-                        continuation.resume()
-                        hasResumed = true
-                    }
-                case .failed(let error):
-                    if !hasResumed {
-                        continuation.resume(throwing: error)
-                        hasResumed = true
-                    }
-                case .cancelled:
-                    if !hasResumed {
-                        continuation.resume(throwing: ProfileServerError.bindFailed)
-                        hasResumed = true
-                    }
-                default:
-                    break
-                }
-            }
-            listener.start(queue: .main)
-        }
-
-        guard let resolvedPort = listener.port else {
+        var boundPort: NWEndpoint.Port?
+        do {
+            for try await port in portStream { boundPort = port }
+        } catch {
             stop()
             throw ProfileServerError.bindFailed
         }
-        self.port = resolvedPort
+        guard let boundPort else {
+            stop()
+            throw ProfileServerError.bindFailed
+        }
 
         shutdownTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.lifetime))
             guard !Task.isCancelled else { return }
-            self?.stop()
+            await self?.stop()
         }
 
-        let portValue = resolvedPort.rawValue
-        guard let url = URL(string: "http://127.0.0.1:\(portValue)/AnywhereMITMRoot.mobileconfig") else {
+        guard let url = URL(string: "http://127.0.0.1:\(boundPort.rawValue)/AnywhereMITMRoot.mobileconfig") else {
             stop()
             throw ProfileServerError.bindFailed
         }
@@ -85,58 +78,34 @@ final class MITMProfileServer {
     }
 
     func stop() {
+        runTask?.cancel()
+        runTask = nil
         shutdownTask?.cancel()
         shutdownTask = nil
-        listener?.cancel()
-        listener = nil
-        port = nil
         payload = nil
     }
 
     // MARK: - Connection handling
-
-    private func handle(connection: NWConnection) {
-        connection.start(queue: .main)
-        receiveRequest(on: connection)
-    }
-
-    private func receiveRequest(on connection: NWConnection, accumulated: Data = Data()) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
-            Task {
-                guard let self else {
-                    connection.cancel()
+    
+    private func handle(connection: NetworkConnection<TCP>) async {
+        var buffer = Data()
+        do {
+            while true {
+                let message = try await connection.receive(atLeast: 1, atMost: 8192)
+                if !message.content.isEmpty { buffer.append(message.content) }
+                if buffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) != nil {
+                    try await sendResponse(on: connection)
                     return
                 }
-                if let error {
-                    logger.error("receive error: \(error)")
-                    connection.cancel()
-                    return
-                }
-                var buffer = accumulated
-                if let data { buffer.append(data) }
-
-                // Wait for end-of-headers (CRLFCRLF).
-                if let range = buffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) {
-                    _ = range
-                    await self.send(connection: connection)
-                    return
-                }
-
-                if isComplete {
-                    connection.cancel()
-                    return
-                }
-
-                await self.receiveRequest(on: connection, accumulated: buffer)
+                if message.metadata.endOfStream { return }
             }
+        } catch {
+            logger.error("profile server connection error: \(error)")
         }
     }
 
-    private func send(connection: NWConnection) {
-        guard let payload else {
-            connection.cancel()
-            return
-        }
+    private func sendResponse(on connection: NetworkConnection<TCP>) async throws {
+        guard let payload else { return }
         let header = "HTTP/1.1 200 OK\r\n" +
                      "Content-Type: application/x-apple-aspen-config\r\n" +
                      "Content-Disposition: attachment; filename=\"AnywhereMITMRoot.mobileconfig\"\r\n" +
@@ -145,10 +114,7 @@ final class MITMProfileServer {
                      "Cache-Control: no-store\r\n\r\n"
         var response = Data(header.utf8)
         response.append(payload)
-
-        connection.send(content: response, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        try await connection.send(response, endOfStream: true)
     }
 
     enum ProfileServerError: Error, LocalizedError {

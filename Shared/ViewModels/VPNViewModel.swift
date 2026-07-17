@@ -325,17 +325,8 @@ class VPNViewModel {
     ) async -> LatencyResult {
         guard let messageData = try? JSONEncoder().encode(TunnelMessage.testLatency(configuration)) else { return .failed }
 
-        return await withCheckedContinuation { continuation in
-            do {
-                try session.sendProviderMessage(messageData) { responseData in
-                    let result = (responseData.flatMap { try? JSONDecoder().decode(LatencyTestResponse.self, from: $0) })?.asLatencyResult ?? .failed
-                    continuation.resume(returning: result)
-                }
-            } catch {
-                logger.warning("Failed to send latency test request: \(error.localizedDescription)")
-                continuation.resume(returning: .failed)
-            }
-        }
+        let responseData = await ProviderMessageConcurrencyBridge.send(messageData, over: session)
+        return (responseData.flatMap { try? JSONDecoder().decode(LatencyTestResponse.self, from: $0) })?.asLatencyResult ?? .failed
     }
 
     /// Returns `configuration` with `resolvedIP` set, preferring an existing value, then `fallback`,

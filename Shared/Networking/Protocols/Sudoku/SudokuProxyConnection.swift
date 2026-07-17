@@ -1876,20 +1876,11 @@ nonisolated final class SudokuRecordStream {
     /// Tail of the send chain (mux frames from N streams + the keepalive timer converge here). Each
     /// chained body — the epoch/seq assignment plus the wire write — runs only once the previous
     /// finished, so record order matches wire order without a lock held across the `await`.
-    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+    private let sendChain = SerialSendChain()
 
     /// Links `body` after all prior chained sends and awaits it (ordering + backpressure + errors).
     private func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
-        let task: Task<Void, Error> = sendChain.withLock { tail in
-            let previous = tail
-            let task = Task<Void, Error> {
-                _ = try? await previous?.value
-                try await body()
-            }
-            tail = task
-            return task
-        }
-        try await task.value
+        try await sendChain.run(body)
     }
 
     init(transport: SudokuObfsTransport, method: SudokuAEADMethod, baseSend: Data, baseRecv: Data) throws {
@@ -2521,20 +2512,11 @@ nonisolated final class SudokuMuxStream: Sendable {
     /// Tail of this stream's send chain: each frame (data chunk or the FIN) links after the previous
     /// and runs only once it finishes, so no data frame is ever emitted after the close frame — no
     /// lock held across the `await`.
-    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+    private let sendChain = SerialSendChain()
 
     /// Links `body` after all prior chained sends and awaits it (ordering + backpressure + errors).
     private func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
-        let task: Task<Void, Error> = sendChain.withLock { tail in
-            let previous = tail
-            let task = Task<Void, Error> {
-                _ = try? await previous?.value
-                try await body()
-            }
-            tail = task
-            return task
-        }
-        try await task.value
+        try await sendChain.run(body)
     }
 
     private struct State {
@@ -2760,7 +2742,7 @@ nonisolated final class SudokuTCPProxyConnection:
 
 nonisolated final class SudokuMuxTCPProxyConnection:
     ProxyConnection,
-    @unchecked Sendable
+    Sendable
 {
     private struct State {
         var onClose: (() -> Void)?

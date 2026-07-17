@@ -29,7 +29,7 @@ nonisolated final class MITMSession {
     /// `AsyncThrowingStream`; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
     /// lwIP write buffers and gives no backpressure signal).
     final class InnerTransport: ByteTransport, @unchecked Sendable {
-        let queue: DispatchQueue
+        let lwipBridge: LWIPConcurrencyBridge
         var onSendToClient: ((Data) -> Void)?
 
         /// Client→session bytes. Producer side (`inbox`) is `Sendable` (fed from the lwIP queue);
@@ -48,8 +48,8 @@ nonisolated final class MITMSession {
 
         var isReady: Bool { state.withLock { !$0.closed } }
 
-        init(queue: DispatchQueue) {
-            self.queue = queue
+        init(lwipBridge: LWIPConcurrencyBridge) {
+            self.lwipBridge = lwipBridge
             let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
             self.inbox = inbox
             self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
@@ -61,7 +61,7 @@ nonisolated final class MITMSession {
             guard !state.withLock({ $0.closed }) else { throw TransportError.notConnected }
             // Ordered onto the lwIP queue (the confinement for onSendToClient/writeToLWIP); the lwIP
             // write buffers, so there is no completion to await — enqueueing preserves send order.
-            queue.async { [self] in
+            lwipBridge.enqueue { [self] in
                 guard !state.withLock({ $0.closed }) else { return }
                 onSendToClient?(data)
             }
@@ -103,8 +103,9 @@ nonisolated final class MITMSession {
 
     private let dstHost: String
     private let dstPort: UInt16
-    private let lwipQueue: DispatchQueue
-    
+    /// The lwIP concurrency boundary; every queue hop and continuation seam routes through it.
+    private let lwipBridge: LWIPConcurrencyBridge
+
     private let isPlaintext: Bool
 
     /// nil for a plaintext session; cleartext presents no certificate.
@@ -293,7 +294,7 @@ nonisolated final class MITMSession {
         leafCache: MITMLeafCertCache?,
         policy: MITMRewritePolicy,
         dialer: @escaping MITMDialer,
-        lwipQueue: DispatchQueue,
+        lwipBridge: LWIPConcurrencyBridge,
         isPlaintext: Bool = false
     ) {
         self.dstHost = dstHost
@@ -302,9 +303,9 @@ nonisolated final class MITMSession {
         self.leafCache = leafCache
         self.policy = policy
         self.dialer = dialer
-        self.lwipQueue = lwipQueue
+        self.lwipBridge = lwipBridge
         self.isPlaintext = isPlaintext
-        self.innerTransport = InnerTransport(queue: lwipQueue)
+        self.innerTransport = InnerTransport(lwipBridge: lwipBridge)
         // Cleartext requests carry an http:// URL; rule gates and script `request.url` must reflect it.
         let scheme = isPlaintext ? "http" : "https"
         // Scope keyed by matched set id to line up with the Anywhere.store scope.
@@ -318,7 +319,7 @@ nonisolated final class MITMSession {
             effectiveAuthority: nil,
             scriptEngineProvider: scriptEngineProvider,
             requestLog: requestLog,
-            lwipQueue: lwipQueue
+            lwipBridge: lwipBridge
         )
         self.responseStream = MITMHTTP1Stream(
             host: dstHost,
@@ -328,7 +329,7 @@ nonisolated final class MITMSession {
             effectiveAuthority: nil, // Host headers do not apply on responses.
             scriptEngineProvider: scriptEngineProvider,
             requestLog: requestLog,
-            lwipQueue: lwipQueue
+            lwipBridge: lwipBridge
         )
         self.h2Rewriter = MITMHTTP2Rewriter(
             host: dstHost,
@@ -368,16 +369,16 @@ nonisolated final class MITMSession {
         // avoid re-entrant teardown). The request direction can't cleanly answer the client so it just
         // closes; the response direction answers a 502 first.
         requestStream.onFatalClose = { [weak self] in
-            self?.lwipQueue.async { self?.cancel(error: nil) }
+            self?.lwipBridge.enqueue { self?.cancel(error: nil) }
         }
         responseStream.onFatalClose = { [weak self] in
-            self?.lwipQueue.async { self?.failInnerLegWith502("rejected a malformed or oversized upstream response") }
+            self?.lwipBridge.enqueue { self?.failInnerLegWith502("rejected a malformed or oversized upstream response") }
         }
         // Mid-body chunked framing breakage (head already on the wire): tear down both legs. A 502
         // can't be written over an in-flight response, and a synthesized terminator would frame a
         // truncated body as complete and desync the peer.
         let hardClose: () -> Void = { [weak self] in
-            self?.lwipQueue.async { self?.cancel(error: nil) }
+            self?.lwipBridge.enqueue { self?.cancel(error: nil) }
         }
         requestStream.onHardClose = hardClose
         responseStream.onHardClose = hardClose
@@ -476,13 +477,13 @@ nonisolated final class MITMSession {
             do {
                 let leaf = try await leafCache.leaf(for: sni)
                 guard let self else { return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     self.beginInnerHandshake(with: leaf, alpns: alpns, tlsVersions: tlsVersions)
                 }
             } catch {
                 guard let self else { return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     self.cancel(error: error)
                 }
@@ -555,7 +556,7 @@ nonisolated final class MITMSession {
             do {
                 let record = try await client.connect(overTunnel: connection)
                 guard let self else { record.cancel(); connection.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard disarm() else { record.cancel(); connection.cancel(); return }
                     guard !self.torn, let inner = self.innerRecord else {
                         // Handshake won the timeout race but the session was already torn down; cancel the
@@ -574,7 +575,7 @@ nonisolated final class MITMSession {
                 }
             } catch {
                 guard let self else { connection.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard disarm() else { connection.cancel(); return }
                     guard !self.torn else { return }
                     // A cert-validation failure is a security signal: a 502 over the trusted inner leg
@@ -631,20 +632,17 @@ nonisolated final class MITMSession {
     private var legWriters: [ObjectIdentifier: LegWriter] = [:]
 
     /// Hops onto lwipQueue and runs `body`, resuming the caller with its result — the async seam
-    /// between the pump tasks (pure async/await) and the session's lwIP-queue-confined state.
+    /// between the pump tasks (pure async/await) and the session's lwIP-queue-confined state. The
+    /// continuation itself lives in ``LWIPConcurrencyBridge``.
     private func onLwip<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            lwipQueue.async { continuation.resume(returning: body()) }
-        }
+        await lwipBridge.run(body)
     }
 
     /// Throwing counterpart of ``onLwip`` that hands the continuation to `body` on lwipQueue for parked
     /// resolution: `body` resumes it itself — inline (e.g. a torn guard) or later, from a leg writer's
-    /// drain completion. Only the `lwipQueue.async` + continuation scaffolding lives here.
+    /// drain completion. The continuation itself lives in ``LWIPConcurrencyBridge``.
     private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Error>) -> Void) async throws -> T {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-            lwipQueue.async { body(continuation) }
-        }
+        try await lwipBridge.runParkedThrowing(body)
     }
 
     /// Serialized, chunked send to a leg. Enqueues on lwipQueue (so concurrent callers keep enqueue
@@ -673,7 +671,7 @@ nonisolated final class MITMSession {
         guard !torn else { return }
         writer(for: record).enqueue(data) { [weak self] error in
             guard let error, let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 guard !self.torn else { return }
                 self.cancel(error: error)
             }
@@ -686,7 +684,7 @@ nonisolated final class MITMSession {
         guard !torn else { return }
         writer(for: record).enqueue(data) { [weak self] _ in
             guard let self else { return }
-            self.lwipQueue.async { self.cancel(error: nil) }
+            self.lwipBridge.enqueue { self.cancel(error: nil) }
         }
     }
 
@@ -737,7 +735,7 @@ nonisolated final class MITMSession {
             catch let e { data = nil; error = e }
             guard let self else { return }
             if let error {
-                self.lwipQueue.async { guard !self.torn else { return }; self.cancel(error: error) }
+                self.lwipBridge.enqueue { guard !self.torn else { return }; self.cancel(error: error) }
                 return
             }
             guard let data, !data.isEmpty else {
@@ -796,7 +794,7 @@ nonisolated final class MITMSession {
             do {
                 try await sendChunked(transformed, via: outer)
             } catch {
-                lwipQueue.async { [weak self] in guard let self, !self.torn else { return }; self.cancel(error: error) }
+                lwipBridge.enqueue { [weak self] in guard let self, !self.torn else { return }; self.cancel(error: error) }
                 return
             }
             startInboundPump(inner: inner)
@@ -836,7 +834,7 @@ nonisolated final class MITMSession {
             do {
                 let dial = try await dialer(host, port)
                 guard let self else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { dial.connection.cancel(); dial.proxyClient?.cancel(); return }
                     self.proxyClient = dial.proxyClient
                     self.outerConnection = dial.connection
@@ -848,7 +846,7 @@ nonisolated final class MITMSession {
                 }
             } catch {
                 guard let self else { return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     self.failInnerLegWith502("upstream connect failed: \(error)")
                 }
@@ -946,7 +944,7 @@ nonisolated final class MITMSession {
         disarm.task = Task { [weak self] in
             try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
             guard !Task.isCancelled, let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 guard !self.torn, !disarm.settled else { return }
                 disarm.settled = true
                 onTimeout()
@@ -1008,7 +1006,7 @@ nonisolated final class MITMSession {
             case .eof:
                 // Upstream half-closed: an HTTP/1 close terminates the body, so flush buffered rewrites.
                 let flushed = await self.responseStream.finish()
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     if flushed.isEmpty {
                         self.cancel(error: nil)
@@ -1026,7 +1024,7 @@ nonisolated final class MITMSession {
                 do {
                     try await self.sendChunked(transformed, via: inner)
                 } catch {
-                    self.lwipQueue.async { guard !self.torn else { return }; self.cancel(error: error) }
+                    self.lwipBridge.enqueue { guard !self.torn else { return }; self.cancel(error: error) }
                     return
                 }
                 self.startOutboundPump(inner: inner, outer: outer)
@@ -1063,7 +1061,7 @@ extension MITMSession: TLSServerDelegate {
                 host: dstHost,
                 rewriter: h2Rewriter,
                 flowController: h2FlowController,
-                lwipQueue: lwipQueue
+                lwipBridge: lwipBridge
             )
             client.delegate = self
             bridgeClient = client
@@ -1199,7 +1197,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             do {
                 let dial = try await dialer(host, port)
                 guard let self else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { dial.connection.cancel(); dial.proxyClient?.cancel(); return }
                     self.sharedUpstreamProxyClient = dial.proxyClient
                     self.sharedUpstreamConnection = dial.connection
@@ -1207,7 +1205,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 }
             } catch {
                 guard let self else { return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     self.failPendingBridgeRequests(error: error)
                 }
@@ -1255,7 +1253,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             do {
                 let record = try await client.connect(overTunnel: connection)
                 guard let self else { record.cancel(); connection.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard disarm() else { record.cancel(); connection.cancel(); return }
                     guard !self.torn else { record.cancel(); connection.cancel(); return }
                     self.sharedUpstreamRecord = record
@@ -1267,7 +1265,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 }
             } catch {
                 guard let self else { connection.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard disarm() else { connection.cancel(); return }
                     guard !self.torn else { return }
                     // A cert-validation failure is a security signal: a 502 over the trusted inner leg
@@ -1287,7 +1285,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
 
     private func bindH2Upstream(record: TLSRecordConnection) {
         upstreamProtocol = .h2
-        let leg = MITMHTTP2UpstreamLeg(host: dstHost, rewriter: h2Rewriter, flowController: h2FlowController, lwipQueue: lwipQueue)
+        let leg = MITMHTTP2UpstreamLeg(host: dstHost, rewriter: h2Rewriter, flowController: h2FlowController, lwipBridge: lwipBridge)
         leg.sink = bridgeClient
         // Drain-coupled backpressure: as response bytes reach the client, credit the upstream's
         // per-stream receive window so a slow client throttles the origin (h2 only).
@@ -1305,7 +1303,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             guard let self, !self.torn, !bytes.isEmpty else { return }
             self.sendChunkedCancellingOnError(bytes, via: record)
         }
-        leg.onFatalError = { [weak self] _ in self?.lwipQueue.async { self?.cancel(error: nil) } }
+        leg.onFatalError = { [weak self] _ in self?.lwipBridge.enqueue { self?.cancel(error: nil) } }
         // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST, not
         // this connection-level frame) so it redials new streams while in-flight ones finish here.
         leg.onDraining = { [weak self] in
@@ -1383,12 +1381,12 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         responseLog.recordHTTP1(method: head.method, url: url, originalUrl: head.originalURL)
         let responseStream = MITMHTTP1Stream(
             host: dstHost, phase: .httpResponse, policy: policy, effectiveAuthority: nil,
-            scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipQueue: lwipQueue
+            scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipBridge: lwipBridge
         )
         // A malformed / oversized upstream response fails just this stream (RST), not the whole
         // multiplexed h2 connection.
         responseStream.onFatalClose = { [weak self] in
-            self?.lwipQueue.async {
+            self?.lwipBridge.enqueue {
                 self?.bridgeAbortStream(streamID)
                 self?.bridgeClient?.acceptResponseAborted(streamID: streamID)
             }
@@ -1399,7 +1397,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             // RST the client stream now; free the dead h1 upstream after the current `transform`
             // returns (don't tear down the stream we're mid-call on).
             self.bridgeClient?.acceptResponseAborted(streamID: sid)
-            self.lwipQueue.async { self.bridgeAbortStream(sid) }
+            self.lwipBridge.enqueue { self.bridgeAbortStream(sid) }
         }
         responseStream.responseIRSink = irSink
         bs.responseIRSink = irSink
@@ -1433,7 +1431,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             do {
                 let dial = try await dialer(host, port)
                 guard let self else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn, let bs = self.bridgeStreams[streamID] else {
                         dial.connection.cancel(); dial.proxyClient?.cancel(); return
                     }
@@ -1443,7 +1441,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 }
             } catch {
                 guard let self else { return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     // Inner leg is up; answer the stream with a 502 rather than a bare RST_STREAM that
                     // hides a transient upstream-connect failure.
@@ -1489,7 +1487,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard !data.isEmpty, !torn else { return }
         writer(for: record).enqueue(data) { [weak self] sendError in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.lwipBridge.enqueue {
                 guard !self.torn else { return }
                 self.bridgeStreams[streamID]?.unsentUpstreamBytes -= data.count
                 if sendError != nil { self.bridgeClient?.acceptResponseAborted(streamID: streamID) }
@@ -1531,7 +1529,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             do {
                 let record = try await client.connect(overTunnel: connection)
                 guard let self else { record.cancel(); connection.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard disarm() else { record.cancel(); connection.cancel(); return }
                     guard !self.torn, let bs = self.bridgeStreams[streamID] else {
                         record.cancel(); connection.cancel(); return
@@ -1545,7 +1543,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 }
             } catch {
                 guard let self else { connection.cancel(); return }
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard disarm() else { connection.cancel(); return }
                     guard !self.torn else { return }
                     // A cert-validation failure is host-level (the origin's cert is invalid for every
@@ -1594,7 +1592,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 // Upstream half-closed: a read-until-close body terminates here, so flush the buffered
                 // remainder first, then signal EOF (the IR end / reset was delivered via the sink).
                 _ = await responseStream.finish()
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     // A clean completion already closed the upstream (clientLegResponseComplete);
                     // otherwise drop the now-dead upstream rather than pin it until teardown.
@@ -1604,7 +1602,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 // The rewritten response is delivered as IR via the sink during `transform`; it may
                 // complete and close this stream's upstream.
                 _ = await responseStream.transform(data)
-                self.lwipQueue.async {
+                self.lwipBridge.enqueue {
                     guard !self.torn else { return }
                     guard self.bridgeStreams[streamID] != nil else { return }
                     self.startBridgeUpstreamPump(streamID: streamID)

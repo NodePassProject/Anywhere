@@ -47,7 +47,6 @@ nonisolated final class HysteriaSession: Sendable {
     private let quic: QUICConnection
     private let configuration: HysteriaConfiguration
 
-    var queue: DispatchQueue { quic.queue }
     var isOnQueue: Bool { quic.isOnQueue }
 
     /// Runs `body` on the ngtcp2 queue and awaits its result (forwards the bridge hop), so
@@ -420,7 +419,7 @@ nonisolated final class HysteriaSession: Sendable {
     }
 
     func releaseTCPStream(_ sid: Int64) {
-        queue.async { [weak self] in
+        quic.enqueue { [weak self] in
             guard let self else { return }
             if self.tcpStreams.removeValue(forKey: sid) != nil {
                 self._poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
@@ -451,7 +450,7 @@ nonisolated final class HysteriaSession: Sendable {
     }
 
     func releaseUDPSession(_ sessionID: UInt32) {
-        queue.async { [weak self] in
+        quic.enqueue { [weak self] in
             guard let self else { return }
             if self.udpSessions.removeValue(forKey: sessionID) != nil {
                 self._poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
@@ -474,7 +473,7 @@ nonisolated final class HysteriaSession: Sendable {
         idleCloseTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.idleCloseDelay))
             guard !Task.isCancelled, let self else { return }
-            self.queue.async {
+            self.quic.enqueue {
                 let liveCount = self._poolState.withLock { $0.tcpCount + $0.udpCount }
                 guard liveCount == 0, self.state == .ready else { return }
                 self.close()
@@ -536,13 +535,13 @@ nonisolated final class HysteriaSession: Sendable {
         if isOnQueue {
             work()
         } else {
-            queue.async(execute: work)
+            quic.enqueue(work)
         }
     }
 
     private func failSession(_ error: Error) {
         // Strong `self` and shared `closed` flag as in close(); first enqueue wins.
-        queue.async {
+        quic.enqueue {
             guard !self.closed else { return }
             self.closed = true
             self.state = .closed

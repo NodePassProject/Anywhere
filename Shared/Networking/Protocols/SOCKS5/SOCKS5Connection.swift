@@ -318,7 +318,7 @@ nonisolated enum SOCKS5Handshake {
 
 /// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
 /// The TCP control connection is retained because closing it ends the UDP session.
-nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, @unchecked Sendable {
+nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
     private let tcpTransport: any ByteTransport
     private let relay: ProxyConnection
     private let udpHeader: Data
