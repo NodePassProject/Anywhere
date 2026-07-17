@@ -434,7 +434,8 @@ nonisolated final class ProxyClient: Sendable {
 
         if configuration.outboundProtocol == .nowhere {
             return try await connectWithNowhere(
-                command: command, destinationHost: destinationHost, destinationPort: destinationPort
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData
             )
         }
 

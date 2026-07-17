@@ -11,7 +11,7 @@ import Synchronization
 actor NowhereUDPConnection {
 
     private let session: NowhereSession
-    private let destination: String
+    private let destination: NowhereProtocol.Target
     private let flowHeader: NowhereProtocol.FlowHeader
     private let expectsResult: Bool
 
@@ -27,23 +27,9 @@ actor NowhereUDPConnection {
     // MARK: Inbound datagrams
 
     /// Bounded so a burst that outruns the reader drops oldest rather than growing without limit.
-    private nonisolated let datagramInbox: AsyncThrowingStream<NowhereProtocol.UDPMessage, Error>.Continuation
-    private var datagramIterator: AsyncThrowingStream<NowhereProtocol.UDPMessage, Error>.AsyncIterator
-    private static let maxBufferedDatagrams = 512
-
-    // MARK: Reassembly (actor-isolated)
-
-    private struct DefragSlot {
-        var fragments: [Data?]
-        var received: Int
-        var receivedBytes: Int
-        let fragmentCount: Int
-        let totalLength: Int
-        let createdAt: DispatchTime
-    }
-    private var defragSlots: [UInt32: DefragSlot] = [:]
-    private nonisolated static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    private nonisolated static let maxDefragSlots = 32
+    private nonisolated let datagramInbox: AsyncThrowingStream<NowhereQueuedDatagram, Error>.Continuation
+    private var datagramIterator: AsyncThrowingStream<NowhereQueuedDatagram, Error>.AsyncIterator
+    private static let maxBufferedDatagrams = 64
     private var nextPacketID: UInt32 = 1
 
     // MARK: Termination
@@ -60,7 +46,7 @@ actor NowhereUDPConnection {
 
     init(
         session: NowhereSession,
-        destination: String,
+        destination: NowhereProtocol.Target,
         flowHeader: NowhereProtocol.FlowHeader
     ) {
         self.session = session
@@ -71,8 +57,8 @@ actor NowhereUDPConnection {
         self.controlInbox = controlInbox
         self.controlIterator = controlStream.makeAsyncIterator()
         let (datagramStream, datagramInbox) = AsyncThrowingStream.makeStream(
-            of: NowhereProtocol.UDPMessage.self,
-            bufferingPolicy: .bufferingNewest(Self.maxBufferedDatagrams)
+            of: NowhereQueuedDatagram.self,
+            bufferingPolicy: .bufferingOldest(Self.maxBufferedDatagrams)
         )
         self.datagramInbox = datagramInbox
         self.datagramIterator = datagramStream.makeAsyncIterator()
@@ -99,16 +85,12 @@ actor NowhereUDPConnection {
     func open() async throws {
         do {
             _ = try await session.registerUDPSession(self, requestedFlowID: flowHeader.flowID)
-            let sid = try await session.openUDPControlStream(for: self)
-            controlStreamID = sid
-
             let request = try NowhereProtocol.encodeFlowRequest(
                 header: flowHeader,
-                target: destination,
-                protocolSpec: session.protocolSpec
+                target: flowHeader.carriesTarget ? destination : nil
             )
-            // Half-close our send side: the control stream carries only this one request.
-            try await session.writeStream(sid, data: request, fin: true)
+            let sid = try await session.openUDPControlStream(for: self, request: request)
+            controlStreamID = sid
 
             if expectsResult {
                 var buffer = Data()
@@ -119,8 +101,7 @@ actor NowhereUDPConnection {
                     buffer.append(chunk)
                     session.extendStreamOffset(sid, count: chunk.count)
                     guard buffer.count >= NowhereProtocol.flowResultSize else { continue }
-                    guard buffer.count == NowhereProtocol.flowResultSize,
-                          let result = NowhereProtocol.decodeFlowResult(buffer) else {
+                    guard let result = NowhereProtocol.decodeFlowResult(buffer) else {
                         throw NowhereError.connectionFailed("Invalid UDP flow result")
                     }
                     switch result {
@@ -135,7 +116,10 @@ actor NowhereUDPConnection {
 
             // Handshake done: the control stream is no longer needed.
             releaseControlStream(reset: false)
-            _isReady.store(true, ordering: .relaxed)
+            if flowHeader.role != .open {
+                await session.activateUDPSession(flowHeader.flowID)
+                _isReady.store(true, ordering: .relaxed)
+            }
         } catch {
             fail(error)
             throw error
@@ -155,8 +139,8 @@ actor NowhereUDPConnection {
     }
 
     /// One inbound `.data` datagram (the session filters `.close` into `handleFlowClose`).
-    nonisolated func handleIncomingDatagram(_ message: NowhereProtocol.UDPMessage) {
-        datagramInbox.yield(message)
+    nonisolated func handleIncomingDatagram(_ datagram: NowhereQueuedDatagram) {
+        datagramInbox.yield(datagram)
     }
 
     nonisolated func handleFlowClose() {
@@ -178,31 +162,27 @@ actor NowhereUDPConnection {
     // MARK: - ProxyConnection overrides
 
     func receiveRaw() async throws -> Data? {
-        while true {
-            guard let message = try await nextDatagram() else { return nil }
-            let payload: Data?
-            if message.fragmentCount <= 1 {
-                payload = message.payload
-            } else {
-                payload = assembleFragment(message)
-            }
-            guard let out = payload, !out.isEmpty else { continue }
-            return out
-        }
+        guard let datagram = try await nextDatagram() else { return nil }
+        return datagram.payload
+    }
+
+    /// Called by the logical split-flow coordinator after the selected downlink has READY.
+    func activatePairedFlow() async {
+        guard !_isReady.load(ordering: .relaxed), !closed else { return }
+        await session.activateUDPSession(flowHeader.flowID)
+        _isReady.store(true, ordering: .relaxed)
     }
 
     func sendRaw(_ data: Data) async throws {
         guard _isReady.load(ordering: .relaxed) else {
             throw NowhereError.streamClosed
         }
-        // No send lock: actor isolation makes PacketID allocation atomic (distinct ids per
-        // concurrent send), and QUIC writes each datagram batch atomically.
-        try await attemptSend(data: data, packetID: newPacketID(), maxSizeOverride: nil, retriesLeft: 1)
+        // Packet IDs are allocated only when the final PMTU requires fragmentation.
+        try await attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1)
     }
 
     private func attemptSend(
         data: Data,
-        packetID: UInt32,
         maxSizeOverride: Int?,
         retriesLeft: Int
     ) async throws {
@@ -214,6 +194,9 @@ actor NowhereUDPConnection {
         }
         let frames: [Data]
         do {
+            let packetID = data.count + NowhereProtocol.udpHeaderSize <= maxSize
+                ? 0
+                : newPacketID()
             frames = try NowhereProtocol.encodeUDPDataFragments(
                 flowID: flowHeader.flowID,
                 packetID: packetID,
@@ -237,7 +220,6 @@ actor NowhereUDPConnection {
                 // different geometry after the path MTU changed mid-send.
                 try await attemptSend(
                     data: data,
-                    packetID: newPacketID(),
                     maxSizeOverride: maxBound,
                     retriesLeft: retriesLeft - 1
                 )
@@ -286,7 +268,6 @@ actor NowhereUDPConnection {
         if sendAdvisory { await sendCloseFrame() }
         releaseControlStream(reset: reset)
         session.releaseUDPSession(flowHeader.flowID)
-        defragSlots.removeAll()
     }
 
     private func sendCloseFrame() async {
@@ -325,73 +306,11 @@ actor NowhereUDPConnection {
         return next
     }
 
-    private func nextDatagram() async throws -> NowhereProtocol.UDPMessage? {
+    private func nextDatagram() async throws -> NowhereQueuedDatagram? {
         var iterator = datagramIterator
         let next = try await iterator.next()
         datagramIterator = iterator
         return next
-    }
-
-    // MARK: - Reassembly
-
-    private func assembleFragment(_ message: NowhereProtocol.UDPMessage) -> Data? {
-        guard message.fragmentCount > 1, message.fragmentID < message.fragmentCount else { return nil }
-        cleanupExpiredDefragSlots()
-        let now = DispatchTime.now()
-        let totalLength = Int(message.totalLength)
-
-        var slot: DefragSlot
-        if let existing = defragSlots[message.packetID],
-           existing.fragmentCount == Int(message.fragmentCount),
-           existing.totalLength == totalLength {
-            slot = existing
-        } else {
-            // New slot: evict the oldest first if at the cap.
-            if defragSlots[message.packetID] == nil, defragSlots.count >= Self.maxDefragSlots {
-                if let victim = defragSlots.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
-                    defragSlots.removeValue(forKey: victim)
-                }
-            }
-            slot = DefragSlot(
-                fragments: Array(repeating: nil, count: Int(message.fragmentCount)),
-                received: 0,
-                receivedBytes: 0,
-                fragmentCount: Int(message.fragmentCount),
-                totalLength: totalLength,
-                createdAt: now
-            )
-        }
-
-        let index = Int(message.fragmentID)
-        if slot.fragments[index] != nil {
-            return nil  // duplicate fragment
-        }
-        guard slot.receivedBytes + message.payload.count <= totalLength else {
-            defragSlots.removeValue(forKey: message.packetID)
-            return nil  // overflows the declared length
-        }
-        slot.fragments[index] = message.payload
-        slot.received += 1
-        slot.receivedBytes += message.payload.count
-
-        if slot.received < slot.fragmentCount {
-            defragSlots[message.packetID] = slot
-            return nil
-        }
-
-        defragSlots.removeValue(forKey: message.packetID)
-        var full = Data(capacity: totalLength)
-        for fragment in slot.fragments {
-            guard let fragment else { return nil }
-            full.append(fragment)
-        }
-        guard full.count == totalLength else { return nil }
-        return full
-    }
-
-    private func cleanupExpiredDefragSlots() {
-        let now = DispatchTime.now().uptimeNanoseconds
-        defragSlots = defragSlots.filter { now &- $0.value.createdAt.uptimeNanoseconds < Self.defragSlotTTLNanos }
     }
 
     // MARK: - Helpers

@@ -14,6 +14,7 @@ nonisolated final class NowhereFlowOpenAttempt {
         var cancelled = false
         var resolved = false
         var deadline: Task<Void, Never>?
+        var earlyDataWriteStarted = false
     }
     private let state = Mutex(State())
 
@@ -30,6 +31,12 @@ nonisolated final class NowhereFlowOpenAttempt {
     }
 
     var isCancelled: Bool { state.withLock { $0.cancelled } }
+
+    func markEarlyDataWriteStarted() {
+        state.withLock { $0.earlyDataWriteStarted = true }
+    }
+
+    var hasStartedEarlyDataWrite: Bool { state.withLock { $0.earlyDataWriteStarted } }
 
     func armDeadline(at deadline: DispatchTime, handler: @escaping @Sendable () -> Void) {
         // A Task starts on creation, so only spin one up if we might still arm.
@@ -85,7 +92,6 @@ nonisolated final class NowhereClient {
         let host: String
         let port: UInt16
         let key: String
-        let spec: String?
         let uplink: NowhereNetwork
         let downlink: NowhereNetwork
         let sni: String
@@ -108,11 +114,10 @@ nonisolated final class NowhereClient {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
-            spec: configuration.spec,
             uplink: configuration.uplink,
             downlink: configuration.downlink,
             sni: configuration.tls.serverName,
-            alpn: configuration.protocolSpec.effectiveALPN,
+            alpn: configuration.alpn,
             chainSignature: "",
             sessionID: configuration.sessionID
         )
@@ -150,11 +155,10 @@ nonisolated final class NowhereClient {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
-            spec: configuration.spec,
             uplink: configuration.uplink,
             downlink: configuration.downlink,
             sni: configuration.tls.serverName,
-            alpn: configuration.protocolSpec.effectiveALPN,
+            alpn: configuration.alpn,
             chainSignature: chainSignature,
             sessionID: configuration.sessionID
         )
@@ -311,8 +315,9 @@ nonisolated final class NowhereClient {
     }
 
     func openTCPHalf(
-        destination: String,
+        destination: NowhereProtocol.Target,
         header: NowhereProtocol.FlowHeader,
+        initialData: Data?,
         attempt: NowhereFlowOpenAttempt? = nil,
         isDefaultProxy: Bool
     ) async throws -> ProxyConnection {
@@ -326,7 +331,9 @@ nonisolated final class NowhereClient {
         let connection = NowhereConnection(
             session: session,
             destination: destination,
-            flowHeader: header
+            flowHeader: header,
+            initialData: initialData,
+            attempt: attempt
         )
         guard attempt?.bind(connection) != false else {
             throw NowhereError.streamClosed
@@ -344,7 +351,7 @@ nonisolated final class NowhereClient {
     }
 
     func openUDP(
-        destination: String,
+        destination: NowhereProtocol.Target,
         header: NowhereProtocol.FlowHeader,
         attempt: NowhereFlowOpenAttempt? = nil,
         isDefaultProxy: Bool

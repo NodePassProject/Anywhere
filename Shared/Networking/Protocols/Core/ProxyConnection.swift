@@ -30,7 +30,8 @@ nonisolated protocol ProxyConnection: AnyObject, Sendable {
     /// Sends `data` on the wire. Required.
     func sendRaw(_ data: Data) async throws
 
-    /// Receives one chunk; `nil` (or empty) signals EOF. Required.
+    /// Receives one chunk; only `nil` signals EOF. A datagram transport may return
+    /// `Data()` for a legal zero-length UDP packet. Required.
     func receiveRaw() async throws -> Data?
 
     /// Bypasses transport encryption; used for Vision direct-copy mode. Defaults to `sendRaw`.

@@ -35,63 +35,98 @@ nonisolated enum NowhereError: Error, LocalizedError {
     }
 }
 
-/// One authenticated Nowhere session over a `QUICConnection`. An actor on the QUIC
-/// connection's serial executor, so the demux path, the auth state machine, and ngtcp2
-/// share a single isolation domain with no cross-queue dispatch.
-actor NowhereSession {
+nonisolated final class NowhereQueuedDatagram: @unchecked Sendable {
+    let payload: Data
+    private let reservation: NowhereUDPBudgetReservation
 
+    init(payload: Data, reservation: NowhereUDPBudgetReservation) {
+        self.payload = payload
+        self.reservation = reservation
+    }
+}
+
+nonisolated final class NowhereUDPBudgetReservation: @unchecked Sendable {
+    let units: Int
+    private let release: @Sendable (Int) -> Void
+
+    init(units: Int, release: @escaping @Sendable (Int) -> Void) {
+        self.units = units
+        self.release = release
+    }
+
+    deinit { release(units) }
+}
+
+/// Shared QUIC carrier. The first business stream carries AUTH followed immediately by
+/// its FLOW request; later streams wait for the Portal's post-auth stream credit.
+actor NowhereSession {
     nonisolated var unownedExecutor: UnownedSerialExecutor { quic.unownedExecutor }
 
-    enum State { case idle, connecting, authenticating, ready, closed }
+    private enum State { case idle, connecting, transportReady, authenticating, ready, closed }
+
+    private struct UDPRoute {
+        let connection: NowhereUDPConnection
+        var ready: Bool
+    }
+
+    private struct ReassemblyKey: Hashable {
+        let flowID: UInt32
+        let packetID: UInt32
+    }
+
+    private struct ReassemblySlot {
+        let createdAt: ContinuousClock.Instant
+        let fragmentCount: UInt8
+        let totalLength: UInt16
+        var fragments: [Data?]
+        var received = 0
+        var receivedBytes = 0
+        let reservation: NowhereUDPBudgetReservation
+    }
 
     private let quic: QUICConnection
     private let configuration: NowhereConfiguration
-
     private var state: State = .idle
     private var closed = false
+    private var authFrame: Data?
+    private var firstStreamID: Int64?
+    private var bootstrapSubmitted = false
+    private var postAuthCreditObserved = false
 
-    private var authStreamID: Int64 = -1
-    private var authFrameWritten = false
-    /// Readiness latch: the ready/teardown path finishes `readySignal` (throwing on failure);
-    /// every awaiter gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
-    private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
-    private let readyTask: Task<Void, Error>
+    private let transportSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let transportTask: Task<Void, Error>
+    private let authSignal: AsyncThrowingStream<Never, Error>.Continuation
+    private let authTask: Task<Void, Error>
 
     private var tcpStreams: [Int64: NowhereConnection] = [:]
-    private var udpSessions: [UInt64: NowhereUDPConnection] = [:]
+    private var udpRoutes: [UInt32: UDPRoute] = [:]
     private var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
-
+    private var reassembly: [ReassemblyKey: ReassemblySlot] = [:]
+    private var reassemblyExpiryTask: Task<Void, Never>?
+    private var udpBudgetUsed = 0
     static let maxUDPFlows = 256
+    private static let maxReassemblySlots = 64
+    private static let udpBudgetLimit = 4 * 1024 * 1024
+    private static let reassemblyTTL: Duration = .seconds(10)
 
-    /// Pending idle close. Without it the QUIC connection stays resident forever
-    /// after the last consumer goes away.
     private var idleCloseTask: Task<Void, Never>?
     private static let idleCloseDelay: TimeInterval = 60
-
-    // MARK: Pool-visible state (read without entering the actor)
 
     private struct PoolState {
         var isClosed = false
         var tcpCount = 0
         var udpCount = 0
-        /// Registry eviction hook, fired exactly once on close.
         var onClose: (@Sendable () -> Void)?
     }
-    private let _poolState = Mutex(PoolState())
+    private let poolState = Mutex(PoolState())
 
-    nonisolated var protocolSpec: NowhereProtocol.EffectiveSpec { configuration.protocolSpec }
-
-    nonisolated var isClosed: Bool {
-        _poolState.withLock { $0.isClosed }
-    }
-
+    nonisolated var isClosed: Bool { poolState.withLock { $0.isClosed } }
     nonisolated var hasActiveConnections: Bool {
-        _poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
+        poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
     }
 
-    /// Installs the registry's eviction hook; fired exactly once when the session closes.
     nonisolated func setOnClose(_ hook: @escaping @Sendable () -> Void) {
-        _poolState.withLock { $0.onClose = hook }
+        poolState.withLock { $0.onClose = hook }
     }
 
     init(configuration: NowhereConfiguration, transport: QUICDatagramTransport? = nil) {
@@ -100,29 +135,31 @@ actor NowhereSession {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             serverName: configuration.tls.serverName,
-            alpn: [configuration.protocolSpec.effectiveALPN],
+            alpn: [configuration.alpn],
             datagramsEnabled: true,
             tuning: .nowhere,
             transport: transport
         )
-        let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
-        self.readySignal = readySignal
-        self.readyTask = Task { for try await _ in readyStream {} }
+        let (transportStream, transportSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.transportSignal = transportSignal
+        self.transportTask = Task { for try await _ in transportStream {} }
+        let (authStream, authSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+        self.authSignal = authSignal
+        self.authTask = Task { for try await _ in authStream {} }
     }
 
+    /// Establishes QUIC/TLS and the exporter. Authentication is deliberately deferred until
+    /// the first business flow supplies bytes for the pre-auth stream.
     func ensureReady() async throws {
-        // Kick off connect+auth exactly once; the gate resolves it.
         if state == .idle {
             state = .connecting
             startConnection()
         }
-        // Resolves on `.ready` (success) or teardown (`.streamClosed` retryable / real error).
-        try await readyTask.value
+        try await transportTask.value
     }
 
     private func startConnection() {
         QUICCrypto.registerCallbacks()
-
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
                 self?.assumeIsolated { $0.failSession(error) }
@@ -134,93 +171,56 @@ actor NowhereSession {
                 self?.assumeIsolated { $0.handleStreamTermination(sid: sid, error: error) }
             }
             handlers.bidiCredit = { [weak self] _ in
-                self?.assumeIsolated { $0.finishAuthenticationIfReady() }
+                self?.assumeIsolated {
+                    $0.postAuthCreditObserved = true
+                    $0.finishAuthenticationIfReady()
+                }
             }
             handlers.datagram = { [weak self] data in
                 self?.assumeIsolated { $0.handleDatagram(data) }
             }
         }
 
-        // Strong `self`: the connect task owns the session until auth kicks off, so it
-        // can't deallocate mid-handshake and leak the ngtcp2 state.
         Task {
             do {
                 try await quic.connect()
+                let exporter = try await quic.exportKeyingMaterial(
+                    label: "EXPORTER-Nowhere-Auth",
+                    context: Data(),
+                    length: 32
+                )
+                authFrame = try NowhereProtocol.makeAuthFrame(
+                    authKey: configuration.authKey,
+                    transport: .quic,
+                    exporter: exporter,
+                    sessionID: configuration.sessionID
+                )
+                guard state == .connecting else { return }
+                state = .transportReady
+                transportSignal.finish()
             } catch {
                 failSession(error)
-                return
             }
-            state = .authenticating
-            sendAuthFrame()
         }
     }
 
-    private func sendAuthFrame() {
-        guard let sid = quic.openBidiStream() else {
-            failSession(NowhereError.connectionFailed("Failed to open auth stream"))
-            return
-        }
-        authStreamID = sid
-
-        let frame: Data
-        do {
-            frame = try NowhereProtocol.makeAuthFrame(
-                key: configuration.key,
-                protocolSpec: configuration.protocolSpec,
-                sessionID: configuration.sessionID
-            )
-        } catch {
-            failSession(error)
-            return
-        }
-
-        // Strong `self`: the auth write task owns the session until the frame lands.
-        Task {
-            do {
-                try await quic.writeStream(sid, data: frame, fin: true)
-            } catch {
-                failSession(error)
-                return
-            }
-            guard state == .authenticating else { return }
-            authFrameWritten = true
-            finishAuthenticationIfReady()
-        }
-    }
-
-    /// The auth write callback only means ngtcp2 accepted the frame locally.
-    /// The Portal confirms successful authentication by increasing the stream
-    /// limit from the single pre-auth stream; do not release callers before that
-    /// MAX_STREAMS update reaches the client.
     private func finishAuthenticationIfReady() {
-        guard state == .authenticating,
-              authFrameWritten,
-              quic.availableBidiStreams > 0 else { return }
-
+        guard state == .authenticating, bootstrapSubmitted, postAuthCreditObserved else { return }
         state = .ready
         quic.handlers.withLock { $0.bidiCredit = nil }
-        readySignal.finish()
+        authSignal.finish()
+        updateIdleCloseTimer()
     }
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
-        if sid == authStreamID {
-            if !data.isEmpty {
-                quic.extendStreamOffset(sid, count: data.count)
-                failSession(NowhereError.authFailed("Auth stream returned unexpected data"))
-            }
-            return
-        }
-
         if let connection = tcpStreams[sid] {
             connection.feedStreamData(data, fin: fin)
             return
         }
-
         if let connection = udpControlStreams[sid] {
             connection.handleControlStreamData(data, fin: fin)
             return
         }
-
         if (sid & 0x01) == 0x01, !data.isEmpty {
             quic.extendStreamOffset(sid, count: data.count)
             quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
@@ -228,16 +228,12 @@ actor NowhereSession {
     }
 
     private func handleStreamTermination(sid: Int64, error: Error?) {
-        if sid == authStreamID {
-            if state == .authenticating, let error {
-                failSession(error)
-            } else if state == .authenticating, !authFrameWritten {
-                failSession(NowhereError.authFailed("Auth stream closed before completion"))
-            }
+        if firstStreamID == sid, state == .authenticating {
+            failSession(error ?? NowhereError.authFailed("Bootstrap stream closed before authentication"))
             return
         }
         if let connection = tcpStreams.removeValue(forKey: sid) {
-            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
+            poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
             updateIdleCloseTimer()
             connection.handleStreamTermination(error: error)
             return
@@ -248,27 +244,200 @@ actor NowhereSession {
     }
 
     private func handleDatagram(_ data: Data) {
-        guard let message = NowhereProtocol.decodeUDPDatagram(data),
-              let connection = udpSessions[message.flowID] else { return }
-        if message.type == .data {
-            connection.handleIncomingDatagram(message)
-        } else if message.type == .close {
-            connection.handleFlowClose()
+        guard let envelope = NowhereProtocol.decodeUDPEnvelope(data),
+              let route = udpRoutes[envelope.flowID], route.ready,
+              let message = NowhereProtocol.decodeUDPDatagram(data) else { return }
+        switch message.type {
+        case .data:
+            guard let reservation = reserveUDPBudget(message.payload.count) else { return }
+            route.connection.handleIncomingDatagram(
+                NowhereQueuedDatagram(payload: message.payload, reservation: reservation)
+            )
+        case .fragment:
+            if let queued = acceptFragment(message) {
+                route.connection.handleIncomingDatagram(queued)
+            }
+        case .close:
+            removeReassembly(flowID: message.flowID)
+            route.connection.handleFlowClose()
         }
     }
 
-    func openTCPStream(for connection: NowhereConnection) throws -> Int64 {
-        guard state == .ready else { throw NowhereError.notReady }
-        guard let sid = quic.openBidiStream() else {
-            throw NowhereError.connectionFailed("Failed to open TCP stream")
+    private func reserveUDPBudget(_ payloadLength: Int) -> NowhereUDPBudgetReservation? {
+        let units = max(payloadLength, 1)
+        guard units <= Self.udpBudgetLimit - udpBudgetUsed else { return nil }
+        udpBudgetUsed += units
+        return NowhereUDPBudgetReservation(units: units) { [weak self] released in
+            self?.releaseUDPBudget(released)
         }
-        tcpStreams[sid] = connection
-        _poolState.withLock { $0.tcpCount += 1 }
-        updateIdleCloseTimer()
+    }
+
+    private nonisolated func releaseUDPBudget(_ units: Int) {
+        Task { await self.performReleaseUDPBudget(units) }
+    }
+
+    private func performReleaseUDPBudget(_ units: Int) {
+        udpBudgetUsed = max(0, udpBudgetUsed - units)
+    }
+
+    private func acceptFragment(_ message: NowhereProtocol.UDPMessage) -> NowhereQueuedDatagram? {
+        expireReassembly(now: .now)
+        let key = ReassemblyKey(flowID: message.flowID, packetID: message.packetID)
+        var slot: ReassemblySlot
+        if let existing = reassembly[key] {
+            guard existing.fragmentCount == message.fragmentCount,
+                  existing.totalLength == message.totalLength else {
+                reassembly.removeValue(forKey: key)
+                scheduleReassemblyExpiry()
+                return nil
+            }
+            slot = existing
+        } else {
+            guard reassembly.count < Self.maxReassemblySlots,
+                  let reservation = reserveUDPBudget(Int(message.totalLength)) else { return nil }
+            slot = ReassemblySlot(
+                createdAt: .now,
+                fragmentCount: message.fragmentCount,
+                totalLength: message.totalLength,
+                fragments: Array(repeating: nil, count: Int(message.fragmentCount)),
+                reservation: reservation
+            )
+        }
+
+        let index = Int(message.fragmentID)
+        if let duplicate = slot.fragments[index] {
+            if duplicate != message.payload { reassembly.removeValue(forKey: key) }
+            scheduleReassemblyExpiry()
+            return nil
+        }
+        guard slot.receivedBytes + message.payload.count <= Int(slot.totalLength) else {
+            reassembly.removeValue(forKey: key)
+            scheduleReassemblyExpiry()
+            return nil
+        }
+        slot.fragments[index] = message.payload
+        slot.received += 1
+        slot.receivedBytes += message.payload.count
+        guard slot.received == Int(slot.fragmentCount) else {
+            reassembly[key] = slot
+            scheduleReassemblyExpiry()
+            return nil
+        }
+
+        reassembly.removeValue(forKey: key)
+        guard slot.receivedBytes == Int(slot.totalLength) else {
+            scheduleReassemblyExpiry()
+            return nil
+        }
+        var payload = Data(capacity: Int(slot.totalLength))
+        for fragment in slot.fragments {
+            guard let fragment else { return nil }
+            payload.append(fragment)
+        }
+        scheduleReassemblyExpiry()
+        return NowhereQueuedDatagram(payload: payload, reservation: slot.reservation)
+    }
+
+    private func removeReassembly(flowID: UInt32) {
+        reassembly = reassembly.filter { $0.key.flowID != flowID }
+        scheduleReassemblyExpiry()
+    }
+
+    private func expireReassembly(now: ContinuousClock.Instant) {
+        reassembly = reassembly.filter {
+            $0.value.createdAt.duration(to: now) <= Self.reassemblyTTL
+        }
+    }
+
+    private func scheduleReassemblyExpiry() {
+        reassemblyExpiryTask?.cancel()
+        reassemblyExpiryTask = nil
+        guard let earliest = reassembly.values.map(\.createdAt).min() else { return }
+        let deadline = earliest.advanced(by: Self.reassemblyTTL)
+        reassemblyExpiryTask = Task { [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            guard !Task.isCancelled, let self else { return }
+            await self.expireAndRescheduleReassembly()
+        }
+    }
+
+    private func expireAndRescheduleReassembly() {
+        expireReassembly(now: .now)
+        scheduleReassemblyExpiry()
+    }
+
+    private func openStream(
+        request: Data,
+        fin: Bool,
+        earlyDataAttempt: NowhereFlowOpenAttempt? = nil,
+        register: (Int64) -> Void
+    ) async throws -> Int64 {
+        try await ensureReady()
+        if state == .transportReady {
+            guard let authFrame, let sid = quic.openBidiStream() else {
+                throw NowhereError.connectionFailed("Failed to open bootstrap stream")
+            }
+            state = .authenticating
+            firstStreamID = sid
+            register(sid)
+            var bootstrap = Data(capacity: authFrame.count + request.count)
+            bootstrap.append(authFrame)
+            bootstrap.append(request)
+            do {
+                earlyDataAttempt?.markEarlyDataWriteStarted()
+                try await quic.writeStream(sid, data: bootstrap, fin: fin)
+                bootstrapSubmitted = true
+                finishAuthenticationIfReady()
+                return sid
+            } catch {
+                failSession(error)
+                throw error
+            }
+        }
+
+        try await authTask.value
+        guard state == .ready else { throw NowhereError.streamClosed }
+        let sid = try await quic.awaitBidiStream()
+        do {
+            try Task.checkCancellation()
+        } catch {
+            quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
+            throw error
+        }
+        register(sid)
+        do {
+            earlyDataAttempt?.markEarlyDataWriteStarted()
+            try await quic.writeStream(sid, data: request, fin: fin)
+            return sid
+        } catch {
+            quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
+            throw error
+        }
+    }
+
+    func openTCPStream(
+        for connection: NowhereConnection,
+        request: Data,
+        earlyDataAttempt: NowhereFlowOpenAttempt?
+    ) async throws -> Int64 {
+        let sid = try await openStream(
+            request: request,
+            fin: false,
+            earlyDataAttempt: earlyDataAttempt
+        ) { sid in
+            tcpStreams[sid] = connection
+            poolState.withLock { $0.tcpCount += 1 }
+            updateIdleCloseTimer()
+        }
         return sid
     }
 
-    /// Async stream write, over the QUIC ngtcp2-boundary continuation.
+    func openUDPControlStream(for connection: NowhereUDPConnection, request: Data) async throws -> Int64 {
+        try await openStream(request: request, fin: true) { sid in
+            udpControlStreams[sid] = connection
+        }
+    }
+
     nonisolated func writeStream(_ sid: Int64, data: Data, fin: Bool = false) async throws {
         try await quic.writeStream(sid, data: data, fin: fin)
     }
@@ -287,18 +456,9 @@ actor NowhereSession {
 
     private func performReleaseTCPStream(_ sid: Int64) {
         if tcpStreams.removeValue(forKey: sid) != nil {
-            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
+            poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
             updateIdleCloseTimer()
         }
-    }
-
-    func openUDPControlStream(for connection: NowhereUDPConnection) throws -> Int64 {
-        guard state == .ready else { throw NowhereError.notReady }
-        guard let sid = quic.openBidiStream() else {
-            throw NowhereError.connectionFailed("Failed to open UDP control stream")
-        }
-        udpControlStreams[sid] = connection
-        return sid
     }
 
     nonisolated func releaseUDPControlStream(_ sid: Int64) {
@@ -309,62 +469,55 @@ actor NowhereSession {
         udpControlStreams.removeValue(forKey: sid)
     }
 
-    /// Async half-close of a stream, over the QUIC ngtcp2-boundary continuation.
-    nonisolated func finishStream(_ sid: Int64) async throws {
-        try await quic.writeStream(sid, data: Data(), fin: true)
-    }
-
     func registerUDPSession(
         _ connection: NowhereUDPConnection,
-        requestedFlowID: UInt64? = nil
-    ) throws -> UInt64 {
-        guard state == .ready else { throw NowhereError.notReady }
-        guard udpSessions.count < Self.maxUDPFlows else {
+        requestedFlowID: UInt32? = nil
+    ) throws -> UInt32 {
+        guard state != .closed, state != .idle else { throw NowhereError.notReady }
+        guard udpRoutes.count < Self.maxUDPFlows else {
             throw NowhereError.connectionFailed("UDP flow pool exhausted")
         }
-        guard let flowID = requestedFlowID,
-              flowID != 0, udpSessions[flowID] == nil else {
+        guard let flowID = requestedFlowID, flowID != 0, udpRoutes[flowID] == nil else {
             throw NowhereError.connectionFailed("UDP flow ID collision")
         }
-        udpSessions[flowID] = connection
-        _poolState.withLock { $0.udpCount += 1 }
+        udpRoutes[flowID] = UDPRoute(connection: connection, ready: false)
+        poolState.withLock { $0.udpCount += 1 }
         updateIdleCloseTimer()
         return flowID
     }
 
-    nonisolated func releaseUDPSession(_ flowID: UInt64) {
+    func activateUDPSession(_ flowID: UInt32) {
+        guard var route = udpRoutes[flowID] else { return }
+        route.ready = true
+        udpRoutes[flowID] = route
+    }
+
+    nonisolated func releaseUDPSession(_ flowID: UInt32) {
         Task { await self.performReleaseUDPSession(flowID) }
     }
 
-    private func performReleaseUDPSession(_ flowID: UInt64) {
-        if udpSessions.removeValue(forKey: flowID) != nil {
-            _poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
+    private func performReleaseUDPSession(_ flowID: UInt32) {
+        if udpRoutes.removeValue(forKey: flowID) != nil {
+            removeReassembly(flowID: flowID)
+            poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
             updateIdleCloseTimer()
         }
     }
 
-    /// Async atomic DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
     nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
         try await quic.writeDatagramsAtomically(datagrams)
     }
 
-    /// Async reader for the path-MTU-bounded datagram payload size.
     nonisolated func currentMaxDatagramPayloadSize() async -> Int {
         await quic.currentMaxDatagramPayloadSize()
     }
 
-    /// Re-checks counts at fire time so a rapid release-then-open cycle doesn't
-    /// tear the connection down.
     private func updateIdleCloseTimer() {
         idleCloseTask?.cancel()
         idleCloseTask = nil
-
         guard state == .ready else { return }
-        let total = _poolState.withLock { $0.tcpCount + $0.udpCount }
+        let total = poolState.withLock { $0.tcpCount + $0.udpCount }
         guard total == 0 else { return }
-
-        // Weak: the idle timer observes its owner; it must not keep an otherwise
-        // dropped session alive for the whole idle window.
         idleCloseTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.idleCloseDelay))
             guard !Task.isCancelled, let self else { return }
@@ -373,17 +526,14 @@ actor NowhereSession {
     }
 
     private func closeIfStillIdle() {
-        let liveCount = _poolState.withLock { $0.tcpCount + $0.udpCount }
+        let liveCount = poolState.withLock { $0.tcpCount + $0.udpCount }
         guard liveCount == 0, state == .ready else { return }
         performTeardown(readyError: NowhereError.streamClosed, handleClean: true)
     }
 
     nonisolated func close() {
-        // Strong `self`: an off-actor caller may hold the last reference; the enqueued
-        // teardown must still run so the socket and ngtcp2 state are released.
         quic.enqueue {
             self.assumeIsolated {
-                // `streamClosed` (not a connect failure) so a racing acquire retries on a fresh session.
                 $0.performTeardown(readyError: NowhereError.streamClosed, handleClean: true)
             }
         }
@@ -393,18 +543,17 @@ actor NowhereSession {
         performTeardown(readyError: error, handleClean: false, error: error)
     }
 
-    /// Terminal teardown; the `closed` gate makes it run exactly once. `handleClean`
-    /// selects the consumers' notification: `handleSessionClose()` for a deliberate
-    /// close, `handleSessionError(_:)` with `error` for a failure.
     private func performTeardown(readyError: Error, handleClean: Bool, error: Error? = nil) {
         guard !closed else { return }
         closed = true
         state = .closed
         idleCloseTask?.cancel()
         idleCloseTask = nil
+        reassemblyExpiryTask?.cancel()
+        reassemblyExpiryTask = nil
         quic.handlers.withLock { $0.bidiCredit = nil }
 
-        let onClose = _poolState.withLock { state in
+        let onClose = poolState.withLock { state in
             state.isClosed = true
             state.tcpCount = 0
             state.udpCount = 0
@@ -412,24 +561,23 @@ actor NowhereSession {
             state.onClose = nil
             return hook
         }
-
-        readySignal.finish(throwing: readyError)
+        transportSignal.finish(throwing: readyError)
+        authSignal.finish(throwing: readyError)
 
         let tcp = Array(tcpStreams.values)
+        let udp = udpRoutes.values.map(\.connection)
         tcpStreams.removeAll()
-        let udp = Array(udpSessions.values)
-        udpSessions.removeAll()
+        udpRoutes.removeAll()
+        reassembly.removeAll()
         udpControlStreams.removeAll()
-
         if handleClean {
-            for c in tcp { c.handleSessionClose() }
-            for c in udp { c.handleSessionClose() }
+            for connection in tcp { connection.handleSessionClose() }
+            for connection in udp { connection.handleSessionClose() }
         } else {
-            let error = error ?? NowhereError.streamClosed
-            for c in tcp { c.handleSessionError(error) }
-            for c in udp { c.handleSessionError(error) }
+            let failure = error ?? NowhereError.streamClosed
+            for connection in tcp { connection.handleSessionError(failure) }
+            for connection in udp { connection.handleSessionError(failure) }
         }
-
         quic.close()
         onClose?()
     }
