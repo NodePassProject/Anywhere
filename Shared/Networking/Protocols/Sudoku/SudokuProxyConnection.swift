@@ -506,7 +506,7 @@ nonisolated final class BlockingProxyStream {
     }
 }
 
-private extension Data {
+private nonisolated extension Data {
     func prefixData(_ count: Int) -> Data {
         let n = Swift.min(count, self.count)
         guard n > 0 else { return Data() }
@@ -1103,7 +1103,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
     }
 }
 
-private func sudokuReadHTTPLine(
+private nonisolated func sudokuReadHTTPLine(
     from stream: BlockingProxyStream,
     maxBytes: Int = 8 * 1024
 ) async throws -> String {
@@ -2515,7 +2515,9 @@ nonisolated final class SudokuMuxStream: Sendable {
     }
 
     let id: UInt32
-    private weak var client: SudokuMuxClient?
+    /// Weak back-reference to the owning mux client, boxed so the stream stays `Sendable`; set once at init.
+    private struct WeakClient { weak var value: SudokuMuxClient? }
+    private let clientBox: Mutex<WeakClient>
     /// Tail of this stream's send chain: each frame (data chunk or the FIN) links after the previous
     /// and runs only once it finishes, so no data frame is ever emitted after the close frame — no
     /// lock held across the `await`.
@@ -2549,12 +2551,12 @@ nonisolated final class SudokuMuxStream: Sendable {
     }
     private let state = Mutex(State())
 
-    init(client: SudokuMuxClient, id: UInt32) { self.client = client; self.id = id }
+    init(client: SudokuMuxClient, id: UInt32) { self.clientBox = Mutex(WeakClient(value: client)); self.id = id }
 
     func send(_ data: Data) async throws {
         if data.isEmpty { return }
         try await chainedSend { [self] in
-            guard let client else { throw SudokuNativeError.closed }
+            guard let client = clientBox.withLock({ $0.value }) else { throw SudokuNativeError.closed }
             let (cannotWrite, error) = state.withLock { state in
                 (state.fullyClosed || state.localWriteClosed, state.terminalError)
             }
@@ -2643,7 +2645,7 @@ nonisolated final class SudokuMuxStream: Sendable {
         }
         if skip { return }
         if shouldRemove {
-            client?.removeStream(id: id)
+            clientBox.withLock { $0.value }?.removeStream(id: id)
         }
         deliver?()
     }
@@ -2671,7 +2673,7 @@ nonisolated final class SudokuMuxStream: Sendable {
         }
         guard let shouldSendClose else { return }
 
-        if let client {
+        if let client = clientBox.withLock({ $0.value }) {
             if shouldSendClose {
                 Task { [weak self] in await self?.sendCloseFrame(to: client) }
             }

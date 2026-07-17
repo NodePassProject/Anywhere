@@ -8,11 +8,11 @@
 import Foundation
 import CryptoKit
 
-private let sudokuProbabilityOne: UInt64 = 1 << 32
-private let sudokuObfsDefaultReadChunkSize = 128 * 1024
-private let sudokuObfsMinDecodeReadSize = 64
+private nonisolated let sudokuProbabilityOne: UInt64 = 1 << 32
+private nonisolated let sudokuObfsDefaultReadChunkSize = 128 * 1024
+private nonisolated let sudokuObfsMinDecodeReadSize = 64
 
-func sudokuObfsWireReadSize(decodedRemaining: Int, pureDownlink: Bool, maxRaw: Int = sudokuObfsDefaultReadChunkSize) -> Int {
+nonisolated func sudokuObfsWireReadSize(decodedRemaining: Int, pureDownlink: Bool, maxRaw: Int = sudokuObfsDefaultReadChunkSize) -> Int {
     guard maxRaw > sudokuObfsMinDecodeReadSize, decodedRemaining > 0 else { return maxRaw }
     let multiplier = pureDownlink ? 5 : 2
     if decodedRemaining > (maxRaw - sudokuObfsMinDecodeReadSize) / multiplier {
@@ -72,7 +72,7 @@ nonisolated struct SudokuXorshift64Star {
 
 }
 
-private let sudokuPermutations: [[Int]] = [
+private nonisolated let sudokuPermutations: [[Int]] = [
     [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1],
     [0, 3, 1, 2], [0, 3, 2, 1], [1, 0, 2, 3], [1, 0, 3, 2],
     [1, 2, 0, 3], [1, 2, 3, 0], [1, 3, 0, 2], [1, 3, 2, 0],
@@ -81,7 +81,7 @@ private let sudokuPermutations: [[Int]] = [
     [3, 1, 0, 2], [3, 1, 2, 0], [3, 2, 0, 1], [3, 2, 1, 0]
 ]
 
-private let sudokuGoCooked: [Int64] = [
+private nonisolated let sudokuGoCooked: [Int64] = [
         -4181792142133755926, -4576982950128230565, 1395769623340756751, 5333664234075297259,
         -6347679516498800754, 9033628115061424579, 7143218595135194537, 4812947590706362721,
         7937252194349799378, 5307299880338848416, 8209348851763925077, -7107630437535961764,
@@ -422,10 +422,10 @@ nonisolated private struct SudokuLayout {
     }
 }
 
-private func sudokuSHA256(_ string: String) -> [UInt8] { Array(SHA256.hash(data: Data(string.utf8))) }
-private func sudokuSHA256(_ data: Data) -> [UInt8] { Array(SHA256.hash(data: data)) }
+private nonisolated func sudokuSHA256(_ string: String) -> [UInt8] { Array(SHA256.hash(data: Data(string.utf8))) }
+private nonisolated func sudokuSHA256(_ data: Data) -> [UInt8] { Array(SHA256.hash(data: data)) }
 
-private func sudokuPackHints(_ a: UInt8, _ b: UInt8, _ c: UInt8, _ d: UInt8) -> UInt32 {
+private nonisolated func sudokuPackHints(_ a: UInt8, _ b: UInt8, _ c: UInt8, _ d: UInt8) -> UInt32 {
     var h0 = a
     var h1 = b
     var h2 = c
@@ -438,7 +438,7 @@ private func sudokuPackHints(_ a: UInt8, _ b: UInt8, _ c: UInt8, _ d: UInt8) -> 
     return (UInt32(h0) << 24) | (UInt32(h1) << 16) | (UInt32(h2) << 8) | UInt32(h3)
 }
 
-private func sudokuHasUniqueMatch(grids: [[UInt8]], positions: [UInt8], values: [UInt8]) -> Bool {
+private nonisolated func sudokuHasUniqueMatch(grids: [[UInt8]], positions: [UInt8], values: [UInt8]) -> Bool {
     var count = 0
     for grid in grids where grid[Int(positions[0])] == values[0] && grid[Int(positions[1])] == values[1] && grid[Int(positions[2])] == values[2] && grid[Int(positions[3])] == values[3] {
         count += 1

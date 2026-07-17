@@ -90,7 +90,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
 
 // MARK: - Outbound Protocol Configuration
 
-nonisolated enum Outbound: Hashable {
+nonisolated enum Outbound: Hashable, Sendable {
     /// The only outbound with a user-selectable transport and TLS/Reality security layer.
     case vless(
         uuid: UUID,
@@ -144,7 +144,7 @@ nonisolated enum Outbound: Hashable {
 
 // MARK: - Xray Transport Layer Configuration
 
-nonisolated enum XrayTransportLayer: Hashable {
+nonisolated enum XrayTransportLayer: Hashable, Sendable {
     case raw
     case ws(WebSocketConfiguration)
     case httpUpgrade(HTTPUpgradeConfiguration)
@@ -165,7 +165,7 @@ nonisolated enum XrayTransportLayer: Hashable {
 
 // MARK: - Xray Security Layer Configuration
 
-nonisolated enum XraySecurityLayer: Hashable {
+nonisolated enum XraySecurityLayer: Hashable, Sendable {
     case none
     case tls(TLSConfiguration)
     case reality(RealityConfiguration)
@@ -189,7 +189,7 @@ nonisolated enum XraySecurityLayer: Hashable {
 
 // MARK: - Generic Security Layer Configuration
 
-nonisolated enum GenericSecurityLayer: Hashable {
+nonisolated enum GenericSecurityLayer: Hashable, Sendable {
     case tls(TLSConfiguration)
     case none
     
@@ -209,7 +209,7 @@ nonisolated enum GenericSecurityLayer: Hashable {
 
 // MARK: - ProxyConfiguration
 
-nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable {
+nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable {
     let id: UUID
     let name: String
     let serverAddress: String

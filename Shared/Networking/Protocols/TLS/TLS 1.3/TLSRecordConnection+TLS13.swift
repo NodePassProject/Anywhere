@@ -14,7 +14,7 @@ extension TLSRecordConnection {
 
     // MARK: - TLS 1.3 Record Crypto
 
-    func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
+    nonisolated func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
         let seqNum = nextEgressSeqNum()
 
         let innerLen = plaintext.count + 1

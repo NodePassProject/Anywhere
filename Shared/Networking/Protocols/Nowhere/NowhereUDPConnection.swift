@@ -42,8 +42,8 @@ actor NowhereUDPConnection: ProxyConnection, NowhereTerminationObservable {
         let createdAt: DispatchTime
     }
     private var defragSlots: [UInt32: DefragSlot] = [:]
-    private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    private static let maxDefragSlots = 32
+    private nonisolated static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
+    private nonisolated static let maxDefragSlots = 32
     private var nextPacketID: UInt32 = 1
 
     // MARK: Termination

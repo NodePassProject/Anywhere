@@ -13,7 +13,7 @@ nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg"
 /// assigns its own monotonically-increasing upstream stream IDs (client requests can arrive
 /// reordered, and RFC 9113 §5.1.1 forbids opening a lower ID after a higher one).
 /// lwIP-queue-confined.
-nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg {
+nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
 
     weak var sink: MITMResponseSink?
     var onUpstreamBytes: ((Data) -> Void)?

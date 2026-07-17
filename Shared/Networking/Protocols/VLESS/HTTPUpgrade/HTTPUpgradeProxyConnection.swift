@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class HTTPUpgradeProxyConnection: ProxyConnection {
+nonisolated final class HTTPUpgradeProxyConnection: ProxyConnection {
     private let huConnection: HTTPUpgradeConnection
 
     init(huConnection: HTTPUpgradeConnection) {

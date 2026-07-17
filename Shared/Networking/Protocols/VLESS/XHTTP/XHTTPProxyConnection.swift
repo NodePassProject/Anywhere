@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class XHTTPProxyConnection: ProxyConnection {
+nonisolated final class XHTTPProxyConnection: ProxyConnection {
     private let xhttpConnection: XHTTPConnection
 
     init(xhttpConnection: XHTTPConnection) {

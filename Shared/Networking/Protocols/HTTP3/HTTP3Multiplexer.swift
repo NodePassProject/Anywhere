@@ -24,7 +24,7 @@ nonisolated protocol HTTP3StreamHandler: AnyObject {
     nonisolated func handleSessionError(_ error: Error)
 }
 
-nonisolated class HTTP3Multiplexer: Multiplexer {
+nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
     // MARK: - State
 

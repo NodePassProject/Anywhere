@@ -11,9 +11,9 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
 
 /// Keyed by `(host, port, password)`; configs sharing the triple reuse one warm pool.
-nonisolated final class AnyTLSMultiplexerRegistry {
+nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
 
-    static let shared = AnyTLSMultiplexerRegistry()
+    nonisolated static let shared = AnyTLSMultiplexerRegistry()
 
     private struct Key: Hashable {
         let host: String

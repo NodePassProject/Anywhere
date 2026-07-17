@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveProxyConnection")
 
@@ -25,9 +26,12 @@ nonisolated protocol NaiveTunnel: AnyObject {
 // MARK: - NaiveProxyConnection
 
 /// Padding framing applies only to the first 8 reads/writes, and only when the server negotiates variant 1.
-nonisolated class NaiveProxyConnection: ProxyConnection {
+nonisolated final class NaiveProxyConnection: ProxyConnection {
     private let tunnel: NaiveTunnel
-    private var paddingFramer = NaivePaddingFramer()
+    /// Padding framer touched by both the send and receive paths (which run on separate tasks),
+    /// so it is Mutex-guarded — the lock is taken only for the synchronous frame/read, never across
+    /// the tunnel `await`.
+    private let paddingFramer = Mutex(NaivePaddingFramer())
     private let paddingType: NaivePaddingNegotiator.PaddingType
 
     init(tunnel: NaiveTunnel, paddingType: NaivePaddingNegotiator.PaddingType) {
@@ -46,7 +50,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
     func sendRaw(_ data: Data) async throws {
         var data = data
         while true {
-            if paddingFramer.isWritePaddingActive && paddingType == .variant1 {
+            if paddingFramer.withLock({ $0.isWritePaddingActive }) && paddingType == .variant1 {
                 if data.count >= 400 && data.count <= 1024 {
                     try await sendFragmented(data: data)
                     return
@@ -55,7 +59,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
                 let payload = data.count > Self.maxPaddingPayload
                     ? Data(data.prefix(Self.maxPaddingPayload)) : data
                 let paddingSize = Self.generateSendPaddingSize(payloadSize: payload.count)
-                let framed = paddingFramer.write(payload: payload, paddingSize: paddingSize)
+                let framed = paddingFramer.withLock { $0.write(payload: payload, paddingSize: paddingSize) }
                 try await tunnel.sendData(framed)
                 if payload.count < data.count {
                     data = Data(data[payload.count...])
@@ -72,7 +76,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
     private func sendFragmented(data: Data) async throws {
         var offset = 0
         while offset < data.count {
-            guard paddingFramer.isWritePaddingActive else {
+            guard paddingFramer.withLock({ $0.isWritePaddingActive }) else {
                 let remaining = Data(data[offset...])
                 try await tunnel.sendData(remaining)
                 return
@@ -82,7 +86,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
             let chunkSize = remaining <= 300 ? remaining : Int.random(in: 200...300)
             let chunk = Data(data[offset..<(offset + chunkSize)])
             let paddingSize = Self.generateSendPaddingSize(payloadSize: chunk.count)
-            let framed = paddingFramer.write(payload: chunk, paddingSize: paddingSize)
+            let framed = paddingFramer.withLock { $0.write(payload: chunk, paddingSize: paddingSize) }
             try await tunnel.sendData(framed)
             offset += chunkSize
         }
@@ -96,9 +100,9 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
                 return nil
             }
 
-            if paddingFramer.isReadPaddingActive && paddingType == .variant1 {
+            if paddingFramer.withLock({ $0.isReadPaddingActive }) && paddingType == .variant1 {
                 var output = Data()
-                let payloadBytes = paddingFramer.read(padded: data, into: &output)
+                let payloadBytes = paddingFramer.withLock { $0.read(padded: data, into: &output) }
                 if payloadBytes > 0 {
                     return output
                 }

@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class GRPCProxyConnection: ProxyConnection {
+nonisolated final class GRPCProxyConnection: ProxyConnection {
     private let grpcConnection: GRPCConnection
 
     init(grpcConnection: GRPCConnection) {

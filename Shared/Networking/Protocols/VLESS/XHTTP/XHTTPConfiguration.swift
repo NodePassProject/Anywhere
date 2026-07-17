@@ -762,7 +762,7 @@ extension XHTTPDownloadSettings {
 
 /// Immutable reference box breaking the value-type recursion; conformances
 /// delegate to the wrapped value, so the box never appears in JSON or affects equality.
-nonisolated final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
+nonisolated final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable, Sendable {
     let value: XHTTPDownloadSettings
 
     init(_ value: XHTTPDownloadSettings) { self.value = value }

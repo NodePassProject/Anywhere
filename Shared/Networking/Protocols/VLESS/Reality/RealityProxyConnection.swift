@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class RealityProxyConnection: ProxyConnection {
+nonisolated final class RealityProxyConnection: ProxyConnection {
     private let realityConnection: TLSRecordConnection
 
     init(realityConnection: TLSRecordConnection) {

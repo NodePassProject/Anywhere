@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
+nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler, Sendable {
 
     // MARK: - State
 

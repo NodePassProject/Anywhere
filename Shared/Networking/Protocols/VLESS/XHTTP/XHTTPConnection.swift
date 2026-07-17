@@ -796,8 +796,8 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     }
 }
 
-nonisolated final class XHTTPXMUXMultiplexerRegistry {
-    static let shared = XHTTPXMUXMultiplexerRegistry()
+nonisolated final class XHTTPXMUXMultiplexerRegistry: Sendable {
+    nonisolated static let shared = XHTTPXMUXMultiplexerRegistry()
     private let managers = Mutex<[String: XHTTPXMUXMultiplexerManager]>([:])
     private init() {}
 

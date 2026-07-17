@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension Data {
+nonisolated extension Data {
     init?(hexString: String) {
         let hex = hexString.replacingOccurrences(of: " ", with: "")
         guard hex.count % 2 == 0 else { return nil }
@@ -50,7 +50,7 @@ extension Data {
         return result
     }
 
-    nonisolated func base64URLEncodedString() -> String {
+    func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

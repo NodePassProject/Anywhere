@@ -28,7 +28,9 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     let streamID: UInt32
     let destination: String
 
-    private weak var multiplexer: NaiveHTTP2Multiplexer?
+    /// Weak back-reference to the owning multiplexer, boxed so the stream stays `Sendable`; set once at init.
+    private struct WeakMultiplexer { weak var value: NaiveHTTP2Multiplexer? }
+    private let multiplexerBox: Mutex<WeakMultiplexer>
 
     /// Receive/response state, guarded by ``lock``. The *send* flow window lives on the multiplexer
     /// (folded there for atomic build passes), so this stream never manages it.
@@ -67,7 +69,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     init(streamID: UInt32, multiplexer: NaiveHTTP2Multiplexer, destination: String) {
         self.streamID = streamID
-        self.multiplexer = multiplexer
+        self.multiplexerBox = Mutex(WeakMultiplexer(value: multiplexer))
         self.destination = destination
         let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.connectSignal = connectSignal
@@ -92,7 +94,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     // yields to the inbox; the async surface awaits them there, preserving the state machine.
 
     func openTunnel() async throws {
-        guard let multiplexer else { throw NaiveHTTP2Error.notReady }
+        guard let multiplexer = multiplexerBox.withLock({ $0.value }) else { throw NaiveHTTP2Error.notReady }
         try await multiplexer.ensureReady()
 
         // The peer's INITIAL_WINDOW_SIZE is known once SETTINGS is exchanged (ensureReady done);
@@ -102,7 +104,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         lock.withLock { $0.phase = .connectSent }
 
         Task { [weak self] in
-            guard let self, let multiplexer = self.multiplexer else { return }
+            guard let self, let multiplexer = self.multiplexerBox.withLock({ $0.value }) else { return }
             do {
                 try await multiplexer.sendConnect(stream: self)
             } catch {
@@ -113,7 +115,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     }
 
     func sendData(_ data: Data) async throws {
-        guard let multiplexer else { throw NaiveHTTP2Error.notReady }
+        guard let multiplexer = multiplexerBox.withLock({ $0.value }) else { throw NaiveHTTP2Error.notReady }
         let open = lock.withLock { $0.phase == .open }
         guard open else { throw NaiveHTTP2Error.notReady }
         try await multiplexer.sendData(data, on: self)
@@ -129,7 +131,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     }
 
     func close() {
-        guard let multiplexer else { return }
+        guard let multiplexer = multiplexerBox.withLock({ $0.value }) else { return }
         enum Action { case none; case teardown(needsRst: Bool) }
         let action: Action = lock.withLock { state in
             guard state.phase != .closed else { return .none }
@@ -196,7 +198,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
                 state.phase = .closed
                 return true
             }
-            if removed { multiplexer?.removeStream(self) }
+            if removed { multiplexerBox.withLock { $0.value }?.removeStream(self) }
             inbox.finish()
         }
     }
@@ -221,7 +223,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         }
         guard proceed else { return }
 
-        multiplexer?.removeStream(self)
+        multiplexerBox.withLock { $0.value }?.removeStream(self)
         connectSignal.finish(throwing: error)
         inbox.finish(throwing: error)
     }
@@ -236,6 +238,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
             state.recvConsumed = 0
             return NaiveHTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
         }
+        let multiplexer = multiplexerBox.withLock { $0.value }
         if let update { multiplexer?.sendControlFrame(update) }
         multiplexer?.acknowledgeReceivedData(count: count)
     }

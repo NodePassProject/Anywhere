@@ -15,7 +15,7 @@ nonisolated struct FailableDecodable<T: Decodable>: Decodable {
     }
 }
 
-extension JSONDecoder {
+nonisolated extension JSONDecoder {
     /// Decodes `[T]`, dropping elements that fail; nil only when the JSON isn't an array at all.
     func decodeSkippingInvalid<T: Decodable>(
         _ type: [T].Type,
@@ -28,7 +28,7 @@ extension JSONDecoder {
     }
 }
 
-extension KeyedDecodingContainer {
+nonisolated extension KeyedDecodingContainer {
     /// Decodes `[T]` for `key`, dropping elements that fail; throws only when the key is missing or not an array.
     func decodeSkippingInvalid<T: Decodable>(
         _ type: [T].Type,

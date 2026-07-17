@@ -11,7 +11,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "DNSResolver")
 
-nonisolated final class DNSResolver {
+nonisolated final class DNSResolver: Sendable {
     static let shared = DNSResolver()
 
     static let defaultTTL: TimeInterval = 120
@@ -408,14 +408,14 @@ nonisolated final class DNSResolver {
 
 /// DNS RR type for HTTPS records (RFC 9460). Used as a literal to avoid a hard
 /// dependency on `kDNSServiceType_HTTPS`, which is missing from older SDKs.
-private let kHTTPSRecordType: UInt16 = 65
+private nonisolated let kHTTPSRecordType: UInt16 = 65
 
 /// Extracts the `ech` SvcParam (SvcParamKey 5) from an HTTPS/SVCB record's RDATA
 /// (RFC 9460): `SvcPriority(2) ++ TargetName ++ SvcParams`, where each SvcParam
 /// is `key(2) ++ length(2) ++ value`. Returns the ECHConfigList bytes, or nil
 /// when absent. TargetName is uncompressed per spec; AliasMode (priority 0,
 /// no params) yields nil. A free function so the C callback can reach it.
-private func echParseSVCBECH(_ rdata: Data) -> Data? {
+private nonisolated func echParseSVCBECH(_ rdata: Data) -> Data? {
     return rdata.withUnsafeBytes { raw -> Data? in
         let bytes = raw.bindMemory(to: UInt8.self)
         guard let base = bytes.baseAddress else { return nil }

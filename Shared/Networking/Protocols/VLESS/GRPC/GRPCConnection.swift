@@ -266,7 +266,7 @@ nonisolated final class GRPCConnection: Sendable {
 
 // MARK: - HTTP/2 constants
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// HTTP/2 connection preface (RFC 7540 §3.5).
     static let h2Preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
@@ -290,7 +290,7 @@ extension GRPCConnection {
 
 // MARK: - Frame I/O
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Builds an HTTP/2 frame per RFC 7540 §4.1.
     fileprivate func buildH2Frame(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) -> Data {
@@ -419,7 +419,7 @@ extension GRPCConnection {
 
 // MARK: - HPACK encoding for request HEADERS
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// HPACK-encodes the request HEADERS block; static-table indexing where possible,
     /// strings emitted without Huffman compression.
@@ -506,7 +506,7 @@ extension GRPCConnection {
 
 // MARK: - HPACK decoding for response :status
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Returns `nil` if the HEADERS block's `:status` is `200`, or a short error string otherwise.
     fileprivate func checkH2ResponseStatus(_ headerBlock: Data) -> String? {
@@ -605,7 +605,7 @@ extension GRPCConnection {
 
 // MARK: - gRPC / protobuf framing
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Encodes a `Hunk` protobuf (`bytes data = 1`): `0x0A <varint length> <bytes>`.
     fileprivate static func encodeHunk(_ data: Data) -> Data {
@@ -710,7 +710,7 @@ extension GRPCConnection {
 
 // MARK: - HTTP/2 DATA send (respects flow control)
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Sends `data` as DATA frames, batching as much as the flow-control window allows into
     /// one transport write; the remainder awaits a WINDOW_UPDATE.
@@ -796,7 +796,7 @@ extension GRPCConnection {
 
 // MARK: - Receive pipeline
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Outcome of processing one inbound H2 frame in the receive loop.
     private enum FrameOutcome {
@@ -1047,7 +1047,7 @@ extension GRPCConnection {
 
 // MARK: - Keepalive
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Starts a periodic keepalive PING loop when `idleTimeout` is non-zero.
     fileprivate func startKeepaliveIfNeeded() {
@@ -1077,7 +1077,7 @@ extension GRPCConnection {
 
 // MARK: - Error-code descriptions
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Human-readable HTTP/2 error code (RFC 7540 §7).
     fileprivate static func h2ErrorCodeName(_ code: UInt32) -> String {
@@ -1137,7 +1137,7 @@ extension GRPCConnection {
 
 // MARK: - gRPC trailer parsing
 
-extension GRPCConnection {
+nonisolated extension GRPCConnection {
 
     /// Returns `.callFailed` when the trailer's `grpc-status` is non-zero; `nil` on OK or absent.
     fileprivate static func parseGRPCTrailer(_ payload: Data) -> GRPCError? {

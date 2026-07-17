@@ -653,7 +653,7 @@ actor ShadowsocksUDPSession {
 
 // MARK: - AES-ECB Single Block
 
-private func ssAESECBEncryptBlock(key: Data, block: Data) throws -> Data {
+private nonisolated func ssAESECBEncryptBlock(key: Data, block: Data) throws -> Data {
     guard block.count == 16 else { throw ShadowsocksError.decryptionFailed }
     var outBytes = [UInt8](repeating: 0, count: 16 + kCCBlockSizeAES128)
     var outLen: Int = 0
@@ -675,7 +675,7 @@ private func ssAESECBEncryptBlock(key: Data, block: Data) throws -> Data {
     return Data(outBytes.prefix(16))
 }
 
-private func ssAESECBDecryptBlock(key: Data, block: Data) throws -> Data {
+private nonisolated func ssAESECBDecryptBlock(key: Data, block: Data) throws -> Data {
     guard block.count == 16 else { throw ShadowsocksError.decryptionFailed }
     var outBytes = [UInt8](repeating: 0, count: 16 + kCCBlockSizeAES128)
     var outLen: Int = 0

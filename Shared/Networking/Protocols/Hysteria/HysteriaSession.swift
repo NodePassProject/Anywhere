@@ -40,7 +40,7 @@ nonisolated enum HysteriaError: Error, LocalizedError {
 
 // MARK: - HysteriaSession
 
-nonisolated final class HysteriaSession {
+nonisolated final class HysteriaSession: Sendable {
 
     enum State { case idle, connecting, authenticating, ready, closed }
 

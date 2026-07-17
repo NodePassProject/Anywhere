@@ -53,7 +53,7 @@ extension UDPFramingCapable {
     }
 
     /// Drops all buffered bytes; call inside `udpState.withLock`.
-    func clearUDPBuffer(_ state: inout UDPFramingState) {
+    nonisolated func clearUDPBuffer(_ state: inout UDPFramingState) {
         state.buffer = Data()
         state.bufferOffset = 0
     }

@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension Data {
+nonisolated extension Data {
     /// `other` must be a freshly allocated read: when `self` is empty it is
     /// adopted as-is, slices and all.
     mutating func appendCompacting(_ other: Data) {

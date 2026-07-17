@@ -498,11 +498,11 @@ actor UDPFlow {
         // fallback misroutes flows sharing a destination port (e.g. QUIC on 443).
         if cachedHints.isEmpty, Self.isDomainName(host) {
             // Hold `session` weakly so a torn-down flow isn't pinned open across the
-            // blocking DNS resolve below.
-            DispatchQueue.global(qos: .userInitiated).async { [weak session] in
-                let ips = DNSResolver.shared.resolveAll(host)
+            // resolve; the async overload hops to the resolver's own worker queue.
+            Task { [weak session] in
+                let ips = await DNSResolver.shared.resolveAll(host)
                 guard !ips.isEmpty, let session else { return }
-                Task { await session.addResponseHints(token: token, hints: ips) }
+                await session.addResponseHints(token: token, hints: ips)
             }
         }
     }

@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Synchronization
 
 // MARK: - Key Derivation
 
@@ -183,32 +184,39 @@ nonisolated enum ShadowsocksAEADCrypto {
 
 /// Encrypts into Shadowsocks AEAD chunks — `[sealed 2-byte length][sealed payload]` —
 /// with the salt prepended to the first output.
-nonisolated class ShadowsocksAEADWriter {
+nonisolated final class ShadowsocksAEADWriter: Sendable {
     private let cipher: ShadowsocksCipher
     private let subkey: Data
-    private var nonce: ShadowsocksNonce
-    private var salt: Data
-    private var saltWritten = false
+
+    /// Send-side AEAD state; a Mutex makes the writer `Sendable` (its single owner still uses it
+    /// serially — the lock only guards nonce/salt against the data-race checker).
+    private struct Guarded {
+        var nonce: ShadowsocksNonce
+        var salt: Data
+        var saltWritten = false
+    }
+    private let guarded: Mutex<Guarded>
 
     static let maxPayloadSize = 0x3FFF // 16383
 
     init(cipher: ShadowsocksCipher, masterKey: Data) {
         self.cipher = cipher
-        self.nonce = ShadowsocksNonce(size: cipher.nonceSize)
+        let nonce = ShadowsocksNonce(size: cipher.nonceSize)
 
         guard cipher != .none else {
-            self.salt = Data()
             self.subkey = Data()
+            self.guarded = Mutex(Guarded(nonce: nonce, salt: Data()))
             return
         }
 
         var saltBytes = [UInt8](repeating: 0, count: cipher.saltSize)
         _ = SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes)
-        self.salt = Data(saltBytes)
+        let salt = Data(saltBytes)
 
         self.subkey = ShadowsocksKeyDerivation.deriveSubkey(
             masterKey: masterKey, salt: salt, keySize: cipher.keySize
         )
+        self.guarded = Mutex(Guarded(nonce: nonce, salt: salt))
     }
 
     func seal(plaintext: Data) throws -> Data {
@@ -216,133 +224,143 @@ nonisolated class ShadowsocksAEADWriter {
             return plaintext
         }
 
-        var output = Data()
+        return try guarded.withLock { g in
+            var output = Data()
 
-        if !saltWritten {
-            output.append(salt)
-            saltWritten = true
+            if !g.saltWritten {
+                output.append(g.salt)
+                g.saltWritten = true
+            }
+
+            var offset = 0
+            while offset < plaintext.count {
+                let remaining = plaintext.count - offset
+                let chunkSize = min(remaining, Self.maxPayloadSize)
+                let chunk = plaintext[plaintext.startIndex.advanced(by: offset)..<plaintext.startIndex.advanced(by: offset + chunkSize)]
+
+                let lengthBytes = Data([UInt8(chunkSize >> 8), UInt8(chunkSize & 0xFF)])
+                let encryptedLength = try ShadowsocksAEADCrypto.seal(
+                    cipher: cipher, key: subkey, nonce: g.nonce.next(), plaintext: lengthBytes
+                )
+                output.append(encryptedLength)
+
+                let encryptedPayload = try ShadowsocksAEADCrypto.seal(
+                    cipher: cipher, key: subkey, nonce: g.nonce.next(), plaintext: chunk
+                )
+                output.append(encryptedPayload)
+
+                offset += chunkSize
+            }
+
+            return output
         }
-
-        var offset = 0
-        while offset < plaintext.count {
-            let remaining = plaintext.count - offset
-            let chunkSize = min(remaining, Self.maxPayloadSize)
-            let chunk = plaintext[plaintext.startIndex.advanced(by: offset)..<plaintext.startIndex.advanced(by: offset + chunkSize)]
-
-            let lengthBytes = Data([UInt8(chunkSize >> 8), UInt8(chunkSize & 0xFF)])
-            let encryptedLength = try ShadowsocksAEADCrypto.seal(
-                cipher: cipher, key: subkey, nonce: nonce.next(), plaintext: lengthBytes
-            )
-            output.append(encryptedLength)
-
-            let encryptedPayload = try ShadowsocksAEADCrypto.seal(
-                cipher: cipher, key: subkey, nonce: nonce.next(), plaintext: chunk
-            )
-            output.append(encryptedPayload)
-
-            offset += chunkSize
-        }
-
-        return output
     }
 }
 
 // MARK: - ShadowsocksAEADReader (Decrypt)
 
-nonisolated class ShadowsocksAEADReader {
+nonisolated final class ShadowsocksAEADReader: Sendable {
     private let cipher: ShadowsocksCipher
     private let masterKey: Data
-    private var subkey: Data?
-    private var nonce: ShadowsocksNonce
-    private var state: State = .waitingSalt
-    private var buffer = Data()
-    private var bufferOffset = 0
-    private var pendingPayloadLength = 0
 
-    /// Compaction threshold — avoid O(n) shifts until dead space is significant.
-    private static let compactThreshold = 4096
-
-    private enum State {
+    private enum Phase {
         case waitingSalt
         case readingLength
         case readingPayload
     }
 
+    /// Receive-side AEAD + reassembly state; a Mutex makes the reader `Sendable` (its single
+    /// consumer still uses it serially).
+    private struct Guarded {
+        var subkey: Data?
+        var nonce: ShadowsocksNonce
+        var phase: Phase = .waitingSalt
+        var buffer = Data()
+        var bufferOffset = 0
+        var pendingPayloadLength = 0
+    }
+    private let guarded: Mutex<Guarded>
+
+    /// Compaction threshold — avoid O(n) shifts until dead space is significant.
+    private static let compactThreshold = 4096
+
     init(cipher: ShadowsocksCipher, masterKey: Data) {
         self.cipher = cipher
         self.masterKey = masterKey
-        self.nonce = ShadowsocksNonce(size: cipher.nonceSize)
-
+        var initial = Guarded(subkey: nil, nonce: ShadowsocksNonce(size: cipher.nonceSize))
         if cipher == .none {
-            self.subkey = Data()
-            self.state = .readingLength
+            initial.subkey = Data()
+            initial.phase = .readingLength
         }
+        self.guarded = Mutex(initial)
     }
 
     func open(ciphertext: Data) throws -> Data {
         guard cipher != .none else { return ciphertext }
 
-        buffer.append(ciphertext)
-        var output = Data()
+        return try guarded.withLock { g in
+            g.buffer.append(ciphertext)
+            var output = Data()
 
-        while true {
-            let remaining = buffer.count - bufferOffset
-            switch state {
-            case .waitingSalt:
-                guard remaining >= cipher.saltSize else { break }
-                let salt = buffer[bufferOffset..<(bufferOffset + cipher.saltSize)]
-                bufferOffset += cipher.saltSize
-                self.subkey = ShadowsocksKeyDerivation.deriveSubkey(
-                    masterKey: masterKey, salt: salt, keySize: cipher.keySize
-                )
-                state = .readingLength
-                continue
+            while true {
+                let remaining = g.buffer.count - g.bufferOffset
+                switch g.phase {
+                case .waitingSalt:
+                    guard remaining >= cipher.saltSize else { break }
+                    let salt = g.buffer[g.bufferOffset..<(g.bufferOffset + cipher.saltSize)]
+                    g.bufferOffset += cipher.saltSize
+                    g.subkey = ShadowsocksKeyDerivation.deriveSubkey(
+                        masterKey: masterKey, salt: salt, keySize: cipher.keySize
+                    )
+                    g.phase = .readingLength
+                    continue
 
-            case .readingLength:
-                let needed = 2 + cipher.tagSize
-                guard remaining >= needed else { break }
+                case .readingLength:
+                    let needed = 2 + cipher.tagSize
+                    guard remaining >= needed else { break }
 
-                let encryptedLength = buffer[bufferOffset..<(bufferOffset + needed)]
-                bufferOffset += needed
+                    let encryptedLength = g.buffer[g.bufferOffset..<(g.bufferOffset + needed)]
+                    g.bufferOffset += needed
 
-                guard let subkey else { throw ShadowsocksError.decryptionFailed }
-                let lengthData = try ShadowsocksAEADCrypto.open(
-                    cipher: cipher, key: subkey, nonce: nonce.next(), ciphertext: encryptedLength
-                )
-                guard lengthData.count == 2 else { throw ShadowsocksError.decryptionFailed }
+                    guard let subkey = g.subkey else { throw ShadowsocksError.decryptionFailed }
+                    let lengthData = try ShadowsocksAEADCrypto.open(
+                        cipher: cipher, key: subkey, nonce: g.nonce.next(), ciphertext: encryptedLength
+                    )
+                    guard lengthData.count == 2 else { throw ShadowsocksError.decryptionFailed }
 
-                pendingPayloadLength = Int(UInt16(lengthData[lengthData.startIndex]) << 8 | UInt16(lengthData[lengthData.startIndex + 1]))
-                state = .readingPayload
-                continue
+                    g.pendingPayloadLength = Int(UInt16(lengthData[lengthData.startIndex]) << 8 | UInt16(lengthData[lengthData.startIndex + 1]))
+                    g.phase = .readingPayload
+                    continue
 
-            case .readingPayload:
-                let needed = pendingPayloadLength + cipher.tagSize
-                guard remaining >= needed else { break }
+                case .readingPayload:
+                    let needed = g.pendingPayloadLength + cipher.tagSize
+                    guard remaining >= needed else { break }
 
-                let encryptedPayload = buffer[bufferOffset..<(bufferOffset + needed)]
-                bufferOffset += needed
+                    let encryptedPayload = g.buffer[g.bufferOffset..<(g.bufferOffset + needed)]
+                    g.bufferOffset += needed
 
-                guard let subkey else { throw ShadowsocksError.decryptionFailed }
-                let payload = try ShadowsocksAEADCrypto.open(
-                    cipher: cipher, key: subkey, nonce: nonce.next(), ciphertext: encryptedPayload
-                )
-                output.append(payload)
+                    guard let subkey = g.subkey else { throw ShadowsocksError.decryptionFailed }
+                    let payload = try ShadowsocksAEADCrypto.open(
+                        cipher: cipher, key: subkey, nonce: g.nonce.next(), ciphertext: encryptedPayload
+                    )
+                    output.append(payload)
 
-                state = .readingLength
-                continue
+                    g.phase = .readingLength
+                    continue
+                }
+                break
             }
-            break
-        }
 
-        if bufferOffset > Self.compactThreshold {
-            buffer.removeSubrange(0..<bufferOffset)
-            bufferOffset = 0
-        } else if bufferOffset > 0 && bufferOffset == buffer.count {
-            buffer.removeAll(keepingCapacity: true)
-            bufferOffset = 0
-        }
+            if g.bufferOffset > Self.compactThreshold {
+                g.buffer.removeSubrange(0..<g.bufferOffset)
+                g.bufferOffset = 0
+            } else if g.bufferOffset > 0 && g.bufferOffset == g.buffer.count {
+                g.buffer.removeAll(keepingCapacity: true)
+                g.bufferOffset = 0
+            }
 
-        return output
+            return output
+        }
     }
 }
 

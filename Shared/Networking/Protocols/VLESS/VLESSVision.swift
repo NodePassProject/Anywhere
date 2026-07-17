@@ -17,15 +17,15 @@ nonisolated enum VisionCommand: UInt8 {
     case paddingDirect = 0x02
 }
 
-private let tlsClientHandshakeStart: [UInt8] = [0x16, 0x03]
-private let tlsServerHandshakeStart: [UInt8] = [0x16, 0x03, 0x03]
-private let tlsApplicationDataStart: [UInt8] = [0x17, 0x03, 0x03]
-private let tls13SupportedVersions: [UInt8] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]
-private let tlsHandshakeTypeClientHello: UInt8 = 0x01
-private let tlsHandshakeTypeServerHello: UInt8 = 0x02
+private nonisolated let tlsClientHandshakeStart: [UInt8] = [0x16, 0x03]
+private nonisolated let tlsServerHandshakeStart: [UInt8] = [0x16, 0x03, 0x03]
+private nonisolated let tlsApplicationDataStart: [UInt8] = [0x17, 0x03, 0x03]
+private nonisolated let tls13SupportedVersions: [UInt8] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]
+private nonisolated let tlsHandshakeTypeClientHello: UInt8 = 0x01
+private nonisolated let tlsHandshakeTypeServerHello: UInt8 = 0x02
 
 /// TLS 1.3 cipher suites that support XTLS direct copy.
-private let tls13CipherSuites: Set<UInt16> = [
+private nonisolated let tls13CipherSuites: Set<UInt16> = [
     0x1301,  // TLS_AES_128_GCM_SHA256
     0x1302,  // TLS_AES_256_GCM_SHA384
     0x1303,  // TLS_CHACHA20_POLY1305_SHA256
@@ -64,19 +64,19 @@ nonisolated class VisionTrafficState {
 }
 
 /// Vision padding seed: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
-private let visionPaddingSeed: [UInt32] = [900, 500, 900, 256]
+private nonisolated let visionPaddingSeed: [UInt32] = [900, 500, 900, 256]
 
 // MARK: - Buffer Reshaping
 
 /// Must equal the protocol buffer size.
-private let visionBufSize: Int32 = 8192
+private nonisolated let visionBufSize: Int32 = 8192
 
 /// Buffers >= this are split to leave room for the 21-byte padding header.
-private let reshapeThreshold: Int = 8192 - 21
+private nonisolated let reshapeThreshold: Int = 8192 - 21
 
 /// Splits data too large for one Vision-padded frame at the last TLS application-data
 /// boundary (midpoint fallback), recursing until every chunk is below reshapeThreshold.
-private func reshapeData(_ data: Data) -> [Data] {
+private nonisolated func reshapeData(_ data: Data) -> [Data] {
     guard data.count >= reshapeThreshold else {
         return [data]
     }
@@ -104,7 +104,7 @@ private func reshapeData(_ data: Data) -> [Data] {
 
 /// Frame layout: `[UUID (16 bytes, first packet only)] [command (1)] [contentLen (2)] [paddingLen (2)] [content] [padding]`.
 /// `longPadding` pads short content with a large random block to obscure the VLESS header.
-private func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficState, longPadding: Bool) -> Data {
+private nonisolated func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficState, longPadding: Bool) -> Data {
     let contentLen = Int32(data?.count ?? 0)
     var paddingLen: Int32 = 0
 
@@ -156,7 +156,7 @@ private func visionPadding(data: Data?, command: VisionCommand, state: VisionTra
     return result
 }
 
-private func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
+private nonisolated func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
     var readOffset = 0
     let dataCount = data.count
     let startIdx = data.startIndex
@@ -232,7 +232,7 @@ private func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Dat
 // MARK: - TLS Filtering
 
 /// Detects TLS 1.3 in incoming server responses.
-private func visionFilterTLS(data: Data, state: VisionTrafficState) {
+private nonisolated func visionFilterTLS(data: Data, state: VisionTrafficState) {
     guard state.numberOfPacketsToFilter > 0 else { return }
 
     state.numberOfPacketsToFilter -= 1
@@ -285,7 +285,7 @@ private func visionFilterTLS(data: Data, state: VisionTrafficState) {
 }
 
 /// Detects a TLS Client Hello in outgoing data without decrementing the filter counter.
-private func visionDetectClientHello(data: Data, state: VisionTrafficState) {
+private nonisolated func visionDetectClientHello(data: Data, state: VisionTrafficState) {
     guard data.count >= 6 else { return }
 
     let startIdx = data.startIndex
@@ -298,7 +298,7 @@ private func visionDetectClientHello(data: Data, state: VisionTrafficState) {
     }
 }
 
-private func isCompleteTLSRecord(data: Data) -> Bool {
+private nonisolated func isCompleteTLSRecord(data: Data) -> Bool {
     let totalLen = data.count
 
     guard totalLen >= 5 else { return false }
@@ -335,7 +335,7 @@ private func isCompleteTLSRecord(data: Data) -> Bool {
 
 // MARK: - Vision Connection Wrapper
 
-nonisolated class VLESSVisionConnection: ProxyConnection {
+nonisolated final class VLESSVisionConnection: ProxyConnection {
     private let innerConnection: ProxyConnection
     /// Guards `VisionTrafficState` mutations across the async send/receive paths.
     private let trafficState: Mutex<VisionTrafficState>

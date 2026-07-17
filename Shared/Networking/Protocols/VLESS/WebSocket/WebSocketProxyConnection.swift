@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class WebSocketProxyConnection: ProxyConnection {
+nonisolated final class WebSocketProxyConnection: ProxyConnection {
     private let wsConnection: WebSocketConnection
 
     init(wsConnection: WebSocketConnection) {

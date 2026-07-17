@@ -10,12 +10,12 @@ import Foundation
 protocol ProxyConnection: AnyObject, Sendable {
 
     /// The negotiated TLS version of the outer transport; `nil` for non-TLS transports.
-    var outerTLSVersion: TLSVersion? { get }
+    nonisolated var outerTLSVersion: TLSVersion? { get }
 
     /// Whether each `send`/`receive` call preserves one UDP datagram boundary.
-    var deliversDatagrams: Bool { get }
+    nonisolated var deliversDatagrams: Bool { get }
 
-    var isConnected: Bool { get }
+    nonisolated var isConnected: Bool { get }
 
     // MARK: Send / Receive
 
@@ -42,16 +42,16 @@ protocol ProxyConnection: AnyObject, Sendable {
     // MARK: Cancel
 
     /// Abortive teardown of the underlying transport.
-    func cancel()
+    nonisolated func cancel()
 
     /// Abortive teardown for error paths. Defaults to `cancel()`; conformers owning a raw
     /// socket override to close with RST.
-    func abort()
+    nonisolated func abort()
 }
 
 // MARK: - Defaults
 
-extension ProxyConnection {
+nonisolated extension ProxyConnection {
 
     var outerTLSVersion: TLSVersion? { nil }
 

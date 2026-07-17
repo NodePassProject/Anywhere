@@ -35,9 +35,9 @@ actor HysteriaUDPConnection: ProxyConnection {
         let createdAt: DispatchTime
     }
     private var defragSlots: [UInt16: DefragSlot] = [:]
-    private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
+    private nonisolated static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
     /// Concurrent reassembly cap; 32 bounds worst-case memory to ~11 MB while keeping eviction rare.
-    private static let maxDefragSlots = 32
+    private nonisolated static let maxDefragSlots = 32
 
     /// Monotonic PacketID, wrapping 0xFFFF → 1 and skipping 0 ("unfragmented" to some servers);
     /// colliding IDs would merge two packets into one corrupt defrag slot. Allocated in `newPacketID`,

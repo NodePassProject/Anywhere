@@ -748,7 +748,9 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     }
 
     private let inner: ProxyConnection
-    private weak var xorConnection: VLESSXORConnection?
+    /// Weak back-reference to the XOR leg, boxed so the connection stays `Sendable`; set once at init.
+    private struct WeakXOR { weak var value: VLESSXORConnection? }
+    private let xorConnectionBox: Mutex<WeakXOR>
     private let unitedKey: Data
     private let useAES: Bool
 
@@ -787,7 +789,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         zeroRTTState: ZeroRTTState?
     ) {
         self.inner = inner
-        self.xorConnection = xorConnection
+        self.xorConnectionBox = Mutex(WeakXOR(value: xorConnection))
         self.useAES = useAES
         self.unitedKey = unitedKey
         self.sendState = Mutex(SendState(writeAEAD: writeAEAD, preludeBytes: preludeBytes))
@@ -877,7 +879,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     private func installReadAEAD(serverRandom: Data) throws {
         let aead = VLESSEncryptionAEAD(context: serverRandom, key: unitedKey, useAES: useAES)
         recvState.withLock { $0.readAEAD = aead }
-        if let xor = xorConnection {
+        if let xor = xorConnectionBox.withLock({ $0.value }) {
             xor.installInboundCTR(try VLESSEncryptionCTR(key: unitedKey, iv: serverRandom))
         }
     }

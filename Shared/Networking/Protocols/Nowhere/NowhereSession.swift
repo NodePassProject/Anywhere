@@ -35,7 +35,7 @@ nonisolated enum NowhereError: Error, LocalizedError {
     }
 }
 
-nonisolated final class NowhereSession {
+nonisolated final class NowhereSession: Sendable {
 
     enum State { case idle, connecting, authenticating, ready, closed }
 

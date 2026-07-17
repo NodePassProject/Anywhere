@@ -14,9 +14,9 @@ nonisolated private let logger = AnywhereLogger(category: "SudokuMultiplexerPool
 
 /// Keyed by `(server, port, direct-dial host, outbound settings)`; configs sharing the
 /// tuple reuse one warm mux session.
-nonisolated final class SudokuMultiplexerRegistry {
+nonisolated final class SudokuMultiplexerRegistry: Sendable {
 
-    static let shared = SudokuMultiplexerRegistry()
+    nonisolated static let shared = SudokuMultiplexerRegistry()
 
     private struct Key: Hashable {
         let serverAddress: String

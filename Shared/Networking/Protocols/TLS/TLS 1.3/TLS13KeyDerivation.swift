@@ -185,7 +185,7 @@ nonisolated struct TLS13KeyDerivation {
 // MARK: - Server-Side Helpers
 
 extension TLS13KeyDerivation {
-    func serverFinishedPayload(serverTrafficSecret: Data, transcript: Data) -> Data {
+    nonisolated func serverFinishedPayload(serverTrafficSecret: Data, transcript: Data) -> Data {
         finishedPayload(trafficSecret: serverTrafficSecret, transcript: transcript)
     }
 }

@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-extension XHTTPConnection {
+nonisolated extension XHTTPConnection {
 
     // MARK: HTTP/2 Constants
 

@@ -19,7 +19,7 @@ nonisolated private struct NowhereLogicalOpenError: Error {
     let context: NowhereLogicalFailureContext
 }
 
-extension ProxyClient {
+nonisolated extension ProxyClient {
     /// Connects through a Nowhere server. The iOS TUN stack already splits
     /// TCP and UDP flows, so this goes directly to Nowhere stream/DATAGRAM
     /// sessions instead of using the SOCKS5 ingress.

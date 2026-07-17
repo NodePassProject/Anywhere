@@ -10,9 +10,9 @@ import Synchronization
 
 /// Process-wide cache of 0-RTT resumption tickets, keyed by
 /// `(host, port, encryption config)` so differing configs don't collide.
-nonisolated final class VLESSEncryption0RTTCache {
+nonisolated final class VLESSEncryption0RTTCache: Sendable {
 
-    static let shared = VLESSEncryption0RTTCache()
+    nonisolated static let shared = VLESSEncryption0RTTCache()
 
     /// Snapshot used for compare-and-invalidate, so callers remove the entry they
     /// actually used and not a newer one that raced in.

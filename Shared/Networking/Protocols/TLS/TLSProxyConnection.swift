@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated class TLSProxyConnection: ProxyConnection {
+nonisolated final class TLSProxyConnection: ProxyConnection {
     private let tlsConnection: TLSRecordConnection
 
     init(tlsConnection: TLSRecordConnection) {
