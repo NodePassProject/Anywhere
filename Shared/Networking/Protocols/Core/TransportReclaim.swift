@@ -13,11 +13,11 @@ nonisolated enum TransportReclaim {
     static func reclaimAll() {
         for proto in OutboundProtocol.allCases {
             switch proto {
+            case .nowhere:  NowhereClient.pool.reclaim()
             case .vless:
                 VLESSEncryption0RTTCache.shared.clear()
                 XHTTPXMUXMultiplexerRegistry.shared.reclaim()
             case .hysteria: HysteriaClient.pool.reclaim()
-            case .nowhere:  NowhereClient.pool.reclaim()
             case .anytls:   AnyTLSMultiplexerRegistry.shared.reclaim()
             case .sudoku:   SudokuMultiplexerRegistry.shared.reclaim()
             case .http2:    NaiveHTTP2MultiplexerPool.shared.reclaim()

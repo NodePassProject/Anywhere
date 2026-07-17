@@ -11,7 +11,7 @@ import Foundation
 
 nonisolated extension ProxyConfiguration {
 
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "nowhere://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://"]
+    static let parsableURLPrefixes = ["nowhere://", "vless://", "hysteria2://", "hy2://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://"]
 
     static func canParseURL(_ string: String) -> Bool {
         parsableURLPrefixes.contains { string.hasPrefix($0) }
@@ -19,14 +19,14 @@ nonisolated extension ProxyConfiguration {
 
     /// Parses a proxy share link; per-scheme formats are documented on the private parsers.
     static func parse(url: String) throws -> ProxyConfiguration {
+        if url.hasPrefix("nowhere://") {
+            return try parseNowhere(url: url)
+        }
         if url.hasPrefix("vless://") {
             return try parseVLESS(url: url)
         }
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
-        }
-        if url.hasPrefix("nowhere://") {
-            return try parseNowhere(url: url)
         }
         if url.hasPrefix("trojan://") {
             return try parseTrojan(url: url)
@@ -43,10 +43,85 @@ nonisolated extension ProxyConfiguration {
         if url.hasPrefix("sudoku://") {
             return try parseSudoku(url: url)
         }
-        throw ProxyError.invalidURL("URL must start with vless://, hysteria2://, nowhere://, trojan://, anytls://, ss://, socks5://, or sudoku://")
+        throw ProxyError.invalidURL("URL must start with nowhere://, vless://, hysteria2://, trojan://, anytls://, ss://, socks5://, or sudoku://")
     }
 
     // MARK: - Per-Scheme Parsers
+
+    /// Parses `nowhere://<key>@host:port?up=udp|tcp&down=udp|tcp&pool=0..9#name`.
+    /// Unknown parameters (including the retired `spec`) are ignored and the first
+    /// occurrence of every recognized parameter wins.
+    private static func parseNowhere(url: String) throws -> ProxyConfiguration {
+        let body = try splitLinkBody(url, scheme: "nowhere://", label: "Nowhere")
+        let parameters = body.firstParameters
+
+        guard !body.userInfo.contains(":"), let key = body.userInfo.removingPercentEncoding else {
+            throw ProxyError.invalidURL("Invalid Nowhere key encoding")
+        }
+        guard !key.isEmpty, key.utf8.count <= UInt8.max else {
+            throw ProxyError.invalidURL("Missing Nowhere key")
+        }
+
+        let rawNetwork = parameters["net"]
+        let rawUp = parameters["up"]
+        let rawDown = parameters["down"]
+        func carrier(_ explicit: String?, name: String) throws -> NowhereNetwork {
+            if let explicit {
+                guard let value = NowhereNetwork(rawValue: explicit) else {
+                    throw ProxyError.invalidURL("Invalid Nowhere \(name) value")
+                }
+                return value
+            }
+            if let rawNetwork {
+                guard let value = NowhereNetwork(rawValue: rawNetwork) else {
+                    throw ProxyError.invalidURL("Invalid Nowhere net value")
+                }
+                return value
+            }
+            return .udp
+        }
+        let uplink = try carrier(rawUp, name: "up")
+        let downlink = try carrier(rawDown, name: "down")
+        let supportsPreconnect = uplink == .tcp && downlink == .tcp
+        let pool: Int
+        if !supportsPreconnect {
+            pool = 0
+        } else if let rawPool = parameters["pool"] {
+            guard let parsed = Int(rawPool), parsed >= 0 else {
+                throw ProxyError.invalidURL("Invalid Nowhere pool value")
+            }
+            pool = min(parsed, NowherePool.validRange.upperBound)
+        } else {
+            pool = supportsPreconnect ? NowherePool.enabledDefault : 0
+        }
+
+        let rawSNI = parameters["sni"]
+        let sni = rawSNI == nil || rawSNI!.isEmpty || rawSNI == "none" ? body.host : rawSNI!
+        let alpn: [String]?
+        if let rawALPN = parameters["alpn"] {
+            guard !rawALPN.isEmpty, rawALPN.utf8.count <= UInt8.max else {
+                throw ProxyError.invalidURL("Invalid Nowhere ALPN")
+            }
+            alpn = [rawALPN]
+        } else {
+            alpn = nil
+        }
+        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
+        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
+
+        return ProxyConfiguration(
+            name: body.fragment ?? "Nowhere",
+            serverAddress: body.host,
+            serverPort: body.port,
+            outbound: .nowhere(
+                key: key,
+                uplink: uplink,
+                downlink: downlink,
+                pool: pool,
+                securityLayer: .tls(tlsConfiguration)
+            )
+        )
+    }
 
     /// Parses `vless://uuid@host:port?type=…&security=…#name`.
     private static func parseVLESS(url: String) throws -> ProxyConfiguration {
@@ -143,81 +218,6 @@ nonisolated extension ProxyConfiguration {
                 downloadMbps: downloadMbps,
                 obfuscation: obfuscation,
                 sni: sni
-            )
-        )
-    }
-
-    /// Parses `nowhere://<key>@host:port?up=udp|tcp&down=udp|tcp&pool=0..9#name`.
-    /// Unknown parameters (including the retired `spec`) are ignored and the first
-    /// occurrence of every recognized parameter wins.
-    private static func parseNowhere(url: String) throws -> ProxyConfiguration {
-        let body = try splitLinkBody(url, scheme: "nowhere://", label: "Nowhere")
-        let parameters = body.firstParameters
-
-        guard !body.userInfo.contains(":"), let key = body.userInfo.removingPercentEncoding else {
-            throw ProxyError.invalidURL("Invalid Nowhere key encoding")
-        }
-        guard !key.isEmpty, key.utf8.count <= UInt8.max else {
-            throw ProxyError.invalidURL("Missing Nowhere key")
-        }
-
-        let rawNetwork = parameters["net"]
-        let rawUp = parameters["up"]
-        let rawDown = parameters["down"]
-        func carrier(_ explicit: String?, name: String) throws -> NowhereNetwork {
-            if let explicit {
-                guard let value = NowhereNetwork(rawValue: explicit) else {
-                    throw ProxyError.invalidURL("Invalid Nowhere \(name) value")
-                }
-                return value
-            }
-            if let rawNetwork {
-                guard let value = NowhereNetwork(rawValue: rawNetwork) else {
-                    throw ProxyError.invalidURL("Invalid Nowhere net value")
-                }
-                return value
-            }
-            return .udp
-        }
-        let uplink = try carrier(rawUp, name: "up")
-        let downlink = try carrier(rawDown, name: "down")
-        let supportsPreconnect = uplink == .tcp && downlink == .tcp
-        let pool: Int
-        if !supportsPreconnect {
-            pool = 0
-        } else if let rawPool = parameters["pool"] {
-            guard let parsed = Int(rawPool), parsed >= 0 else {
-                throw ProxyError.invalidURL("Invalid Nowhere pool value")
-            }
-            pool = min(parsed, NowherePool.validRange.upperBound)
-        } else {
-            pool = supportsPreconnect ? NowherePool.enabledDefault : 0
-        }
-
-        let rawSNI = parameters["sni"]
-        let sni = rawSNI == nil || rawSNI!.isEmpty || rawSNI == "none" ? body.host : rawSNI!
-        let alpn: [String]?
-        if let rawALPN = parameters["alpn"] {
-            guard !rawALPN.isEmpty, rawALPN.utf8.count <= UInt8.max else {
-                throw ProxyError.invalidURL("Invalid Nowhere ALPN")
-            }
-            alpn = [rawALPN]
-        } else {
-            alpn = nil
-        }
-        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
-
-        return ProxyConfiguration(
-            name: body.fragment ?? "Nowhere",
-            serverAddress: body.host,
-            serverPort: body.port,
-            outbound: .nowhere(
-                key: key,
-                uplink: uplink,
-                downlink: downlink,
-                pool: pool,
-                securityLayer: .tls(tlsConfiguration)
             )
         )
     }

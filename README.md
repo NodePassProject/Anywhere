@@ -59,9 +59,9 @@ Every protocol, transport, and crypto layer below is implemented natively in Swi
 
 | Protocol | Runs over | Highlights |
 | --- | --- | --- |
+| **Nowhere** | TLS / TCP · QUIC / UDP | Split upload/download paths · pooled TCP relay · QUIC DATAGRAM · UDP-over-TCP |
 | **VLESS** | TCP · WebSocket · HTTP Upgrade · gRPC · XHTTP | XTLS-RPRX-Vision flow control with adaptive padding · post-quantum encryption · Mux + XUDP |
 | **Hysteria2** | QUIC | Brutal and BBR congestion control · Salamander/Gecko obfuscation |
-| **Nowhere** | TLS / TCP · QUIC / UDP | Split upload/download paths · pooled TCP relay · QUIC DATAGRAM · UDP-over-TCP|
 | **Trojan** | TLS / TCP | SHA-224 password auth · UDP-over-TCP relay |
 | **AnyTLS** | TLS / TCP | Stream multiplexing over pooled TLS sessions · server-driven padding · warm idle-session pool · UDP-over-TCP |
 | **Shadowsocks** | TCP | AEAD ciphers and Shadowsocks 2022 (BLAKE3) |
@@ -93,7 +93,7 @@ Selectable on VLESS; layered under TLS or Reality.
 
 - **Minimal dependencies** — Apple frameworks and vendored C libraries (lwIP, ngtcp2, BLAKE3, libyaml)
 - **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack
-- **Native QUIC stack** — ngtcp2-powered client used for Hysteria2, Nowhere QUIC/UDP, Naive HTTP/3, and XHTTP over HTTP/3
+- **Native QUIC stack** — ngtcp2-powered client used for Nowhere QUIC/UDP, Hysteria2, Naive HTTP/3, and XHTTP over HTTP/3
 - **Fake-IP DNS** — transparent domain-based routing for all apps
 
 ## Documentation
@@ -111,7 +111,7 @@ Anywhere registers several URL schemes so external apps and websites can trigger
 anywhere://add-proxy?link=<link>
 ```
 
-`<link>` can be any URL the app supports: a subscription URL, a `vless://` link, a `hysteria2://` link, an `ss://` link, etc.
+`<link>` can be any URL the app supports: a subscription URL, a `nowhere://` link, a `vless://` link, an `ss://` link, etc.
 
 > **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
 
@@ -129,7 +129,7 @@ Import one or more routing (`.arrs`) and MITM (`.amrs`) rule sets from remote li
 
 Tapping any of the following links on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import:
 
-`vless://` · `hysteria2://` (`hy2://`) · `nowhere://` · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `sudoku://` · `https://` · `quic://`
+`nowhere://` · `vless://` · `hysteria2://` (`hy2://`) · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `sudoku://` · `https://` · `quic://`
 
 ### Integration Example
 
@@ -142,7 +142,7 @@ Link from a webpage:
 Open from another iOS app:
 
 ```swift
-if let url = URL(string: "anywhere://add-proxy?link=vless://uuid@host:443?type=tcp&security=tls") {
+if let url = URL(string: "anywhere://add-proxy?link=nowhere://key@host:443?up=udp&down=udp") {
     UIApplication.shared.open(url)
 }
 ```

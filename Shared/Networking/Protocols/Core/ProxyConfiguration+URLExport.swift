@@ -24,12 +24,12 @@ extension ProxyConfiguration {
 
     func toURL() -> String {
         switch outboundProtocol {
+        case .nowhere:
+            return toNowhereURL()
         case .vless:
             return toVLESSURL()
         case .hysteria:
             return toHysteriaURL()
-        case .nowhere:
-            return toNowhereURL()
         case .trojan:
             return toTrojanURL()
         case .anytls:
@@ -43,6 +43,28 @@ extension ProxyConfiguration {
         case .http11, .http2, .http3:
             return toNaiveURL()
         }
+    }
+
+    private func toNowhereURL() -> String {
+        guard case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = outbound,
+              let tls = securityLayer.tlsConfiguration else {
+            return ""
+        }
+        let usernameCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: usernameCharacters) ?? ""
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        var parameters: [String] = ["up=\(uplink.rawValue)", "down=\(downlink.rawValue)"]
+        if uplink == .tcp && downlink == .tcp {
+            parameters.append("pool=\(pool)")
+        }
+        if tls.serverName != serverAddress {
+            parameters.append("sni=\(encodedQueryValue(tls.serverName))")
+        }
+        if let alpn = tls.alpn?.first, !alpn.isEmpty {
+            parameters.append("alpn=\(encodedQueryValue(alpn))")
+        }
+        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
+        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toVLESSURL() -> String {
@@ -119,28 +141,6 @@ extension ProxyConfiguration {
         }
         let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
         return "hysteria2://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
-    }
-
-    private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = outbound,
-              let tls = securityLayer.tlsConfiguration else {
-            return ""
-        }
-        let usernameCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
-        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: usernameCharacters) ?? ""
-        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        var parameters: [String] = ["up=\(uplink.rawValue)", "down=\(downlink.rawValue)"]
-        if uplink == .tcp && downlink == .tcp {
-            parameters.append("pool=\(pool)")
-        }
-        if tls.serverName != serverAddress {
-            parameters.append("sni=\(encodedQueryValue(tls.serverName))")
-        }
-        if let alpn = tls.alpn?.first, !alpn.isEmpty {
-            parameters.append("alpn=\(encodedQueryValue(alpn))")
-        }
-        let query = parameters.isEmpty ? "" : "?\(parameters.joined(separator: "&"))"
-        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toTrojanURL() -> String {

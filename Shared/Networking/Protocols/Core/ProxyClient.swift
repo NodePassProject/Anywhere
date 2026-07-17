@@ -86,14 +86,14 @@ nonisolated final class ProxyClient: Sendable {
     // MARK: - Public API
     
     var isQUICTransport: Bool {
-        configuration.outboundProtocol == .hysteria
-            || (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
+        (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
+            || configuration.outboundProtocol == .hysteria
             || configuration.isXHTTPOverHTTP3
     }
     
     private var poolsQUICSession: Bool {
-        configuration.outboundProtocol == .hysteria
-            || (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
+        (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
+            || configuration.outboundProtocol == .hysteria
     }
     
     /// Times the outbound handshake for the default proxy's live stats; matches the former
@@ -426,16 +426,16 @@ nonisolated final class ProxyClient: Sendable {
             )
         }
 
-        if configuration.outboundProtocol == .hysteria {
-            return try await connectWithHysteria(
-                command: command, destinationHost: destinationHost, destinationPort: destinationPort
-            )
-        }
-
         if configuration.outboundProtocol == .nowhere {
             return try await connectWithNowhere(
                 command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData
+            )
+        }
+
+        if configuration.outboundProtocol == .hysteria {
+            return try await connectWithHysteria(
+                command: command, destinationHost: destinationHost, destinationPort: destinationPort
             )
         }
 

@@ -14,10 +14,18 @@ class TVProxyEditorViewController: UITableViewController {
     private let existingConfiguration: ProxyConfiguration?
     private let onSave: (ProxyConfiguration) -> Void
 
-    private var selectedProtocol: OutboundProtocol = .vless
+    private var selectedProtocol: OutboundProtocol = .nowhere
     private var name = ""
     private var serverAddress = ""
     private var serverPort = ""
+
+    private var nowhereKey = ""
+    private var nowhereUplink: NowhereNetwork = .udp
+    private var nowhereDownlink: NowhereNetwork = .udp
+    private var nowherePreconnectEnabled = true
+    private var nowherePoolValue = NowherePool.enabledDefault
+    private var nowhereSNI = ""
+    private var nowhereALPN = ""
 
     private var vlessUUID = ""
     private var vlessEncryption = "none"
@@ -75,14 +83,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaObfuscationMaxText = String(HysteriaObfuscation.geckoMaxPacketSizeDefault)
     private var hysteriaSNI = ""
 
-    private var nowhereKey = ""
-    private var nowhereUplink: NowhereNetwork = .udp
-    private var nowhereDownlink: NowhereNetwork = .udp
-    private var nowherePreconnectEnabled = true
-    private var nowherePoolValue = NowherePool.enabledDefault
-    private var nowhereSNI = ""
-    private var nowhereALPN = ""
-
     private var trojanPassword = ""
     private var trojanSNI = ""
     private var trojanALPN = ""
@@ -120,11 +120,11 @@ class TVProxyEditorViewController: UITableViewController {
     private var naiveUsername = ""
     private var naivePassword = ""
 
+    private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isVLESSReality: Bool { vlessSecurity == "reality" }
     private var isVLESSTLS: Bool { vlessSecurity == "tls" }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
-    private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
@@ -143,6 +143,7 @@ class TVProxyEditorViewController: UITableViewController {
     private enum FieldKey {
         case name, address, port
         case outboundProtocol
+        case nowhereKey, nowhereUplink, nowhereDownlink, nowherePreconnect, nowherePool, nowhereSNI, nowhereALPN
         case vlessUUID, vlessEncryption, vlessTransport, vlessFlow, vlessSecurity
         case vlessWebSocketHost, vlessWebSocketPath
         case vlessHTTPUpgradeHost, vlessHTTPUpgradePath
@@ -158,7 +159,6 @@ class TVProxyEditorViewController: UITableViewController {
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
         case hysteriaObfuscationType, hysteriaObfuscationPassword, hysteriaObfuscationMin, hysteriaObfuscationMax
         case hysteriaSNI
-        case nowhereKey, nowhereUplink, nowhereDownlink, nowherePreconnect, nowherePool, nowhereSNI, nowhereALPN
         case trojanPassword, trojanSNI, trojanALPN, trojanECHEnabled, trojanECH, trojanFingerprint
         case anytlsPassword, anytlsSNI, anytlsALPN, anytlsECHEnabled, anytlsECH, anytlsFingerprint
         case ssPassword, ssMethod
@@ -179,9 +179,9 @@ class TVProxyEditorViewController: UITableViewController {
         ]))
 
         let protocolOptions: [(String, String)] = [
+            ("Nowhere", "nowhere"),
             ("VLESS", "vless"),
             ("Hysteria", "hysteria"),
-            ("Nowhere", "nowhere"),
             ("Trojan", "trojan"),
             ("AnyTLS", "anytls"),
             ("Shadowsocks", "shadowsocks"),
@@ -199,7 +199,9 @@ class TVProxyEditorViewController: UITableViewController {
             .text(label: String(localized: "Address"), value: serverAddress, placeholder: String(localized: "Address"), key: .address),
             .text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port),
         ]
-        if isVLESS {
+        if isNowhere {
+            serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
+        } else if isVLESS {
             serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: vlessUUID, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .vlessUUID))
             // Encryption (mlkem768x25519plus) needs CryptoKit ML-KEM-768; older OSes refuse it at dial time, so hide the field.
             if #available(tvOS 26.0, *) {
@@ -219,8 +221,6 @@ class TVProxyEditorViewController: UITableViewController {
                 serverRows.append(.text(label: String(localized: "Minimum Packet Size", comment: "Minimum Packet Size for Hysteria protocol Gecko obfuscation"), value: hysteriaObfuscationMinText, placeholder: String(HysteriaObfuscation.geckoMinPacketSizeDefault), key: .hysteriaObfuscationMin))
                 serverRows.append(.text(label: String(localized: "Maximum Packet Size", comment: "Maximum Packet Size for Hysteria protocol Gecko obfuscation"), value: hysteriaObfuscationMaxText, placeholder: String(HysteriaObfuscation.geckoMaxPacketSizeDefault), key: .hysteriaObfuscationMax))
             }
-        } else if isNowhere {
-            serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isAnyTLS {
@@ -254,7 +254,38 @@ class TVProxyEditorViewController: UITableViewController {
         }
         sections.append((String(localized: "Server"), serverRows))
 
-        if isVLESS {
+        if isNowhere {
+            var transportRows: [RowType] = [
+                .selection(
+                    label: String(localized: "Upload"),
+                    value: nowhereUplink.rawValue.uppercased(),
+                    options: [("TCP", "tcp"), ("UDP", "udp")],
+                    key: .nowhereUplink
+                ),
+                .selection(
+                    label: String(localized: "Download"),
+                    value: nowhereDownlink.rawValue.uppercased(),
+                    options: [("TCP", "tcp"), ("UDP", "udp")],
+                    key: .nowhereDownlink
+                ),
+            ]
+            if nowhereUplink == .tcp && nowhereDownlink == .tcp {
+                transportRows.append(.toggle(
+                    label: String(localized: "Preconnect"),
+                    isOn: nowherePreconnectEnabled,
+                    key: .nowherePreconnect
+                ))
+                if nowherePreconnectEnabled {
+                    transportRows.append(.selection(
+                        label: String(localized: "Connections"),
+                        value: String(nowherePoolValue),
+                        options: NowherePool.sliderRange.map { (String($0), String($0)) },
+                        key: .nowherePool
+                    ))
+                }
+            }
+            sections.append((String(localized: "Network"), transportRows))
+        } else if isVLESS {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
@@ -294,37 +325,6 @@ class TVProxyEditorViewController: UITableViewController {
                 ], key: .vlessFlow),
             ]))
             sections.append((String(localized: "Transport"), transportRows))
-        } else if isNowhere {
-            var transportRows: [RowType] = [
-                .selection(
-                    label: String(localized: "Upload"),
-                    value: nowhereUplink.rawValue.uppercased(),
-                    options: [("TCP", "tcp"), ("UDP", "udp")],
-                    key: .nowhereUplink
-                ),
-                .selection(
-                    label: String(localized: "Download"),
-                    value: nowhereDownlink.rawValue.uppercased(),
-                    options: [("TCP", "tcp"), ("UDP", "udp")],
-                    key: .nowhereDownlink
-                ),
-            ]
-            if nowhereUplink == .tcp && nowhereDownlink == .tcp {
-                transportRows.append(.toggle(
-                    label: String(localized: "Preconnect"),
-                    isOn: nowherePreconnectEnabled,
-                    key: .nowherePreconnect
-                ))
-                if nowherePreconnectEnabled {
-                    transportRows.append(.selection(
-                        label: String(localized: "Connections"),
-                        value: String(nowherePoolValue),
-                        options: NowherePool.sliderRange.map { (String($0), String($0)) },
-                        key: .nowherePool
-                    ))
-                }
-            }
-            sections.append((String(localized: "Network"), transportRows))
         } else if isHysteria {
             var hysteriaNetworkRows: [RowType] = [
                 .selection(label: String(localized: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol"), value: hysteriaCC.displayName, options: HysteriaCongestionControl.allCases.map { ($0.displayName, $0.rawValue) }, key: .hysteriaCC),
@@ -336,7 +336,12 @@ class TVProxyEditorViewController: UITableViewController {
             sections.append((nil, hysteriaNetworkRows))
         }
 
-        if isVLESS {
+        if isNowhere {
+            sections.append((String(localized: "TLS"), [
+                .text(label: String(localized: "SNI"), value: nowhereSNI, placeholder: String(localized: "SNI"), key: .nowhereSNI),
+                .text(label: String(localized: "ALPN"), value: nowhereALPN, placeholder: String(localized: "ALPN"), key: .nowhereALPN),
+            ]))
+        } else if isVLESS {
             var tlsRows: [RowType] = [
                 .selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
                     (String("None"), "none"),
@@ -363,11 +368,6 @@ class TVProxyEditorViewController: UITableViewController {
             let tlsTitle = (vlessTransport == "xhttp" && vlessXHTTPDownloadEnabled)
                 ? String(localized: "TLS (Upload)") : String(localized: "TLS")
             sections.append((tlsTitle, tlsRows))
-        } else if isNowhere {
-            sections.append((String(localized: "TLS"), [
-                .text(label: String(localized: "SNI"), value: nowhereSNI, placeholder: String(localized: "SNI"), key: .nowhereSNI),
-                .text(label: String(localized: "ALPN"), value: nowhereALPN, placeholder: String(localized: "ALPN"), key: .nowhereALPN),
-            ]))
         } else if isTrojan {
             var trojanRows: [RowType] = [
                 .text(label: String(localized: "SNI"), value: trojanSNI, placeholder: String(localized: "SNI"), key: .trojanSNI),
@@ -546,6 +546,11 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        if isNowhere {
+            return !nowhereKey.isEmpty
+                && nowhereKey.utf8.count <= 255
+                && nowhereALPN.utf8.count <= 255
+        }
         if isVLESS {
             guard UUID(uuidString: vlessUUID) != nil,
                   !isVLESSReality || (!vlessRealitySNI.isEmpty && !vlessRealityPublicKey.isEmpty) else { return false }
@@ -563,11 +568,6 @@ class TVProxyEditorViewController: UITableViewController {
                 else { return false }
             }
             return true
-        }
-        if isNowhere {
-            return !nowhereKey.isEmpty
-                && nowhereKey.utf8.count <= 255
-                && nowhereALPN.utf8.count <= 255
         }
         if isTrojan { return !trojanPassword.isEmpty }
         if isAnyTLS { return !anytlsPassword.isEmpty }
@@ -734,6 +734,18 @@ class TVProxyEditorViewController: UITableViewController {
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
             }
+        case .nowhereKey: nowhereKey = value
+        case .nowhereUplink:
+            if let network = NowhereNetwork(rawValue: value) { nowhereUplink = network }
+        case .nowhereDownlink:
+            if let network = NowhereNetwork(rawValue: value) { nowhereDownlink = network }
+        case .nowherePreconnect: nowherePreconnectEnabled = value == "true"
+        case .nowherePool:
+            if let count = Int(value), NowherePool.sliderRange.contains(count) {
+                nowherePoolValue = count
+            }
+        case .nowhereSNI: nowhereSNI = value
+        case .nowhereALPN: nowhereALPN = value
         case .vlessUUID: vlessUUID = value
         case .vlessEncryption: vlessEncryption = value
         case .vlessTransport: vlessTransport = value
@@ -782,18 +794,6 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteriaObfuscationPassword: hysteriaObfuscationPassword = value
         case .hysteriaObfuscationMin: hysteriaObfuscationMinText = value
         case .hysteriaObfuscationMax: hysteriaObfuscationMaxText = value
-        case .nowhereKey: nowhereKey = value
-        case .nowhereUplink:
-            if let network = NowhereNetwork(rawValue: value) { nowhereUplink = network }
-        case .nowhereDownlink:
-            if let network = NowhereNetwork(rawValue: value) { nowhereDownlink = network }
-        case .nowherePreconnect: nowherePreconnectEnabled = value == "true"
-        case .nowherePool:
-            if let count = Int(value), NowherePool.sliderRange.contains(count) {
-                nowherePoolValue = count
-            }
-        case .nowhereSNI: nowhereSNI = value
-        case .nowhereALPN: nowhereALPN = value
         case .trojanPassword: trojanPassword = value
         case .trojanSNI: trojanSNI = value
         case .trojanALPN: trojanALPN = value
@@ -841,6 +841,16 @@ class TVProxyEditorViewController: UITableViewController {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
+        if case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound {
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
+            nowhereKey = key
+            nowhereUplink = uplink
+            nowhereDownlink = downlink
+            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
+            nowherePoolValue = pool > 0 ? pool : NowherePool.enabledDefault
+            nowhereSNI = tls.serverName
+            nowhereALPN = tls.alpn?.first ?? ""
+        }
         if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _) = configuration.outbound {
             self.vlessUUID = vlessUUID.uuidString
             self.vlessEncryption = vlessEncryption
@@ -909,6 +919,8 @@ class TVProxyEditorViewController: UITableViewController {
         }
 
         switch configuration.outbound {
+        case .nowhere:
+            break
         case .vless:
             break
         case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni):
@@ -925,15 +937,6 @@ class TVProxyEditorViewController: UITableViewController {
                 }
             }
             hysteriaSNI = sni
-        case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer):
-            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
-            nowhereKey = key
-            nowhereUplink = uplink
-            nowhereDownlink = downlink
-            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
-            nowherePoolValue = pool > 0 ? pool : NowherePool.enabledDefault
-            nowhereSNI = tls.serverName
-            nowhereALPN = tls.alpn?.first ?? ""
         case .trojan(let password, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             trojanPassword = password
@@ -1030,7 +1033,7 @@ class TVProxyEditorViewController: UITableViewController {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = existingConfiguration?.id ?? UUID()
         } else {
             guard let parsed = UUID(uuidString: vlessUUID) else { return }
@@ -1099,6 +1102,22 @@ class TVProxyEditorViewController: UITableViewController {
 
         let outbound: Outbound
         switch selectedProtocol {
+        case .nowhere:
+            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
+                ? min(
+                    NowherePool.sliderRange.upperBound,
+                    max(NowherePool.sliderRange.lowerBound, nowherePoolValue)
+                )
+                : 0
+            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
+            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
+            outbound = .nowhere(
+                key: nowhereKey,
+                uplink: nowhereUplink,
+                downlink: nowhereDownlink,
+                pool: pool,
+                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
+            )
         case .vless:
             let vlessXrayTransportLayer: XrayTransportLayer
             if let vlessWebSocketConfiguration { vlessXrayTransportLayer = .ws(vlessWebSocketConfiguration) }
@@ -1130,22 +1149,6 @@ class TVProxyEditorViewController: UITableViewController {
                 downloadMbps: downloadMbps,
                 obfuscation: hysteriaObfuscationValue,
                 sni: sni
-            )
-        case .nowhere:
-            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
-                ? min(
-                    NowherePool.sliderRange.upperBound,
-                    max(NowherePool.sliderRange.lowerBound, nowherePoolValue)
-                )
-                : 0
-            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
-            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
-            outbound = .nowhere(
-                key: nowhereKey,
-                uplink: nowhereUplink,
-                downlink: nowhereDownlink,
-                pool: pool,
-                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
             )
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI

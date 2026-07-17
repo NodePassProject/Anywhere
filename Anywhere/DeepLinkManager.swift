@@ -18,7 +18,7 @@ final class DeepLinkManager {
         switch url.scheme?.lowercased() {
         case "anywhere":
             handleAnywhereScheme(url)
-        case "vless", "hysteria2", "hy2", "nowhere", "trojan", "anytls", "ss", "quic", "sudoku":
+        case "nowhere", "vless", "hysteria2", "hy2", "trojan", "anytls", "ss", "quic", "sudoku":
             self.url = url.absoluteString
         default:
             break
