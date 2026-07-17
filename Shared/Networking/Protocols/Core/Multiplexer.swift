@@ -9,7 +9,6 @@ import Foundation
 
 // MARK: - Multiplexer
 
-/// One underlying connection fanned out into many logical streams.
 nonisolated protocol Multiplexer: AnyObject {
     /// Closed multiplexers are evicted by their pool.
     var isClosed: Bool { get }
@@ -22,9 +21,9 @@ nonisolated protocol Multiplexer: AnyObject {
 
 // MARK: - MultiplexerStreamSink
 
-nonisolated protocol MultiplexerStreamSink: AnyObject {
-    func deliverData(_ data: Data)
+protocol MultiplexerStreamSink: AnyObject {
+    nonisolated func deliverData(_ data: Data)
 
     /// `error` non-nil for abnormal termination, nil for clean EOF.
-    func deliverClose(error: Error?)
+    nonisolated func deliverClose(error: Error?)
 }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP3Stream")
 
@@ -28,13 +29,15 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
     private var state: StreamState = .idle
     private var headersReceived = false
 
-    /// Inbound DATA payloads / EOF / error from the multiplexer's demux loop; the async
-    /// replacement for the parked `pendingReceive` completion. QUIC flow control counts every
-    /// stream byte (HTTP/3 frame header + payload), so the per-chunk `quicBytes` accounting is
-    /// split: `deliverData` credits the frame-header octets on the multiplexer queue as chunks
-    /// arrive, and ``receiveData()`` credits the payload octets only once ``AsyncByteChannel/next()``
-    /// hands them over — total credit stays exact, backpressure preserved.
-    private let inbox = AsyncByteChannel()
+    /// Inbound DATA payloads / EOF / error from the multiplexer's demux loop. Producer side (`inbox`)
+    /// is `Sendable` and driven on the multiplexer queue; the single consumer pulls `inboxIterator`
+    /// from ``receiveData()``. The `Mutex` guards the iterator *value* (this stream is a queue-confined
+    /// class, not an actor). QUIC flow control counts every stream byte (HTTP/3 frame header +
+    /// payload), so the per-chunk `quicBytes` accounting is split: `deliverData` credits the
+    /// frame-header octets on the multiplexer queue as chunks arrive, and ``receiveData()`` credits
+    /// the payload octets only once the app takes them — total credit stays exact, backpressure preserved.
+    private let inbox: AsyncThrowingStream<Data, Error>.Continuation
+    private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
 
     /// Partial HTTP/3 frame buffer; frames may span QUIC deliveries.
     private var frameBuffer = Data()
@@ -59,6 +62,18 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.connectSignal = connectSignal
         self.connectTask = Task { for try await _ in connectStream {} }
+        let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
+        self.inbox = inbox
+        self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
+    }
+
+    /// Single-consumer pull over `inbox`: takes the stored iterator, awaits one element, stores it
+    /// back. Serial by ``receiveData()``'s single-consumer contract.
+    private func nextInboxChunk() async throws -> Data? {
+        var iterator = inboxIterator.withLock { $0 }
+        let next = try await iterator.next()
+        inboxIterator.withLock { $0 = iterator }
+        return next
     }
 
     // MARK: - NaiveTunnel
@@ -144,7 +159,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     func receiveData() async throws -> Data? {
         guard let multiplexer else { throw HTTP3Error.streamClosed }
-        let data = try await inbox.next()
+        let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
             multiplexer.queue.async { [weak self] in self?.closeAndShutdown() }
@@ -171,7 +186,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
             }
 
             connectSignal.finish(throwing: HTTP3Error.streamClosed)
-            inbox.cancel()
+            inbox.finish()
         }
     }
 
@@ -303,7 +318,7 @@ nonisolated class NaiveHTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
         closeAndShutdown(code: code)
 
         connectSignal.finish(throwing: error)
-        inbox.fail(error)
+        inbox.finish(throwing: error)
     }
 
     /// Closes the stream and sends RESET_STREAM/STOP_SENDING so the server can free the slot via MAX_STREAMS.

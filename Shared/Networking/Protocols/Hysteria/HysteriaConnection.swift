@@ -10,197 +10,94 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaConnection")
 
-nonisolated final class HysteriaConnection: ProxyConnection {
-
-    enum State { case idle, openingStream, handshaking, ready, closed }
+actor HysteriaConnection: ProxyConnection {
 
     private let session: HysteriaSession
     private let destination: String
 
-    /// Confined to `session.queue`. The setter mirrors readiness into the
-    /// atomic `_isReady` so `isConnected` can be read from any queue
-    /// without a sync hop onto `session.queue`.
-    private var _state: State = .idle
-    private var state: State {
-        get { _state }
-        set {
-            _state = newValue
-            _isReady.store(newValue == .ready, ordering: .relaxed)
-        }
-    }
-    private let _isReady = Atomic<Bool>(false)
+    /// Readiness mirror, so the nonisolated `isConnected`/send-guard read it without hopping.
+    private nonisolated let _isReady = Atomic<Bool>(false)
+    /// Assigned once in `open()`, read from the send/receive/cancel paths.
+    private nonisolated let _streamID = Atomic<Int64>(-1)
 
-    /// Stored atomically: set once on `session.queue` during open, then read from the
-    /// async send/receive paths off-queue.
-    private let _streamID = Atomic<Int64>(-1)
+    /// Inbound stream bytes from the demux. The producer (`rawInbox`) is `Sendable` and driven on
+    /// the ngtcp2 queue via `feedStreamData`; the single consumer pulls `rawIterator` from `open()`
+    /// (header) then `receiveRaw()` (data), so the iterator is plain actor-isolated state.
+    private nonisolated let rawInbox: AsyncThrowingStream<Data, Error>.Continuation
+    private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Post-header bytes left over from `open()`'s parse, handed to the app first by `receiveRaw()`.
+    private var pendingData = Data()
+
+    /// Guards `teardown()` so the stream is shut down and released exactly once.
+    private var closed = false
+
+    init(session: HysteriaSession, destination: String) {
+        self.session = session
+        self.destination = destination
+        let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
+        self.rawInbox = continuation
+        self.rawIterator = stream.makeAsyncIterator()
+    }
+
+    nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
+    nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
+
     private var streamID: Int64 {
         get { _streamID.load(ordering: .relaxed) }
         set { _streamID.store(newValue, ordering: .relaxed) }
     }
 
-    /// Post-response stream bytes / EOF / error from the session's demux loop. The async
-    /// replacement for the parked `pendingReceive` completion; QUIC stream credit is
-    /// returned in ``receiveRaw()`` only once ``AsyncByteChannel/next()`` hands bytes over,
-    /// so the buffered queue stays bounded by the stream window (backpressure preserved).
-    private let inbox = AsyncByteChannel()
-
-    /// Accumulates incoming bytes until the response header is parsed. Confined to `session.queue`.
-    private var receiveBuffer = Data()
-    private var responseParsed = false
-
-    /// One-shot open signal: finished when the Hysteria TCP response header is demuxed, or
-    /// finished-throwing on failure. `open()` awaits `openTask.value` (broadcast-safe); the
-    /// session's ngtcp2 demux loop resolves it by finishing `openSignal`.
-    private let openSignal: AsyncThrowingStream<Never, Error>.Continuation
-    private let openTask: Task<Void, Error>
-
-    init(session: HysteriaSession, destination: String) {
-        self.session = session
-        self.destination = destination
-        let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
-        self.openSignal = openSignal
-        self.openTask = Task { for try await _ in openStream {} }
-    }
-
-    var isConnected: Bool {
-        _isReady.load(ordering: .relaxed)
-    }
-
-    var outerTLSVersion: TLSVersion? { .tls13 }
-
-    // MARK: - Open (called by ProxyClient after session is ready)
+    // MARK: - Open (called by ProxyClient after the session is ready)
 
     func open() async throws {
-        // Claim the connection on the ngtcp2 queue; `openSignal` resolves later in
-        // `tryParseResponse` (response header) or `fail` (error).
-        let started: Bool = await session.run { [self] in
-            guard state == .idle else { return false }
-            state = .openingStream
-            return true
-        }
-        guard started else { throw HysteriaError.notReady }
-
-        // Reserve the stream, then send the request.
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let streamID = try await self.session.openTCPStream(for: self)
-                await self.session.run { self.streamID = streamID; self.sendTCPRequest() }
-            } catch {
-                await self.session.run { self.fail(error) }
-            }
-        }
-        try await openTask.value
-    }
-
-    private func sendTCPRequest() {
-        state = .handshaking
+        let sid = try await session.openTCPStream(for: self)
+        streamID = sid
         let frame = HysteriaProtocol.encodeTCPRequest(address: destination)
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.session.writeStream(self.streamID, data: frame)
-            } catch {
-                self.session.queue.async { self.fail(error) }
-            }
-        }
-    }
+        try await session.writeStream(sid, data: frame)
 
-    // MARK: - Stream data (from HysteriaSession.handleStreamData)
-
-    func handleStreamData(_ data: Data, fin: Bool) {
-        // On session.queue, synchronously inside ngtcp2's read_pkt. `data` is
-        // a zero-copy view into ngtcp2's buffer — detach with Data(...) before
-        // handing it to the inbox (Data.append also copies).
-        guard state != .closed else { return }
-
-        if !responseParsed {
-            if !data.isEmpty {
-                receiveBuffer.append(data)
+        // Read inbound bytes until the Hysteria TCP response header parses (or the stream ends/fails).
+        var buffer = Data()
+        while true {
+            guard let chunk = try await nextChunk() else {
+                throw HysteriaError.connectionFailed("Stream closed before response")
             }
-            tryParseResponse()
-            // A failed status closes us inside tryParseResponse.
-            guard state != .closed else { return }
-            if !responseParsed {
-                if fin {
-                    fail(HysteriaError.connectionFailed("Stream closed before response"))
-                }
-                return
+            buffer.append(chunk)
+            guard let parsed = HysteriaProtocol.parseTCPResponse(from: buffer) else { continue }
+            // Credit the consumed header now (small, bounded); post-header bytes are credited
+            // lazily in `receiveRaw` as the app consumes them.
+            if parsed.consumed > 0 { session.extendStreamOffset(sid, count: parsed.consumed) }
+            guard parsed.status == HysteriaProtocol.tcpResponseStatusOK else {
+                throw HysteriaError.tunnelFailed(message: parsed.message)
             }
-            // Just became ready: flush any post-header bytes, then honour FIN.
-            flushBufferToInbox()
-            if fin { inbox.finish() }
+            buffer.removeFirst(parsed.consumed)
+            pendingData = buffer
+            _isReady.store(true, ordering: .relaxed)
             return
         }
-
-        if !data.isEmpty {
-            inbox.yield(Data(data))
-        }
-        if fin { inbox.finish() }
     }
 
-    private func tryParseResponse() {
-        guard let parsed = HysteriaProtocol.parseTCPResponse(from: receiveBuffer) else {
-            return
-        }
-        responseParsed = true
-        receiveBuffer.removeFirst(parsed.consumed)
-        // Credit the consumed response header now (small, bounded); post-header data
-        // bytes are credited lazily as the app consumes them in `receiveRaw`.
-        if parsed.consumed > 0 {
-            session.extendStreamOffset(streamID, count: parsed.consumed)
-        }
+    // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
 
-        guard parsed.status == HysteriaProtocol.tcpResponseStatusOK else {
-            fail(HysteriaError.tunnelFailed(message: parsed.message))
-            return
-        }
-
-        state = .ready
-        openSignal.finish()
+    /// New inbound bytes / FIN from the session's demux loop. `data` is a zero-copy view into
+    /// ngtcp2's buffer — detach with `Data(...)` before buffering it.
+    nonisolated func feedStreamData(_ data: Data, fin: Bool) {
+        if !data.isEmpty { rawInbox.yield(Data(data)) }
+        if fin { rawInbox.finish() }
     }
 
-    /// Hands any buffered post-header bytes to the inbox. Runs on `session.queue`.
-    private func flushBufferToInbox() {
-        guard !receiveBuffer.isEmpty else { return }
-        let out = receiveBuffer
-        receiveBuffer = Data()
-        inbox.yield(out)
+    /// QUIC stream termination (RESET_STREAM or stream_close). Idempotent — finishing an
+    /// already-finished stream is a no-op, so both callbacks firing is harmless.
+    nonisolated func handleStreamTermination(error: Error?) {
+        if let error { rawInbox.finish(throwing: error) } else { rawInbox.finish() }
     }
 
-    func handleSessionError(_ error: Error) {
+    nonisolated func handleSessionError(_ error: Error) {
+        _isReady.store(false, ordering: .relaxed)
         if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
-            session.queue.async { [weak self] in self?.handleStreamTermination(error: nil) }
-            return
+            rawInbox.finish()
+        } else {
+            rawInbox.finish(throwing: error)
         }
-        session.queue.async { [weak self] in self?.fail(error) }
-    }
-
-    /// QUIC stream termination (RESET_STREAM or stream_close). Idempotent —
-    /// both callbacks can fire for the same stream. Runs on `session.queue`.
-    func handleStreamTermination(error: Error?) {
-        guard state != .closed else { return }
-        if let error {
-            fail(error)
-            return
-        }
-        // FIN before the Hysteria TCP response — servers reject this way;
-        // fail so `openCompletion` isn't leaked forever.
-        if state != .ready {
-            fail(HysteriaError.connectionFailed("Stream closed before TCP response"))
-            return
-        }
-        state = .closed
-        // EOF is ordered after every byte already queued in the inbox.
-        inbox.finish()
-    }
-
-    private func fail(_ error: Error) {
-        guard state != .closed else { return }
-        state = .closed
-
-        openSignal.finish(throwing: error)
-        inbox.fail(error)
     }
 
     // MARK: - ProxyConnection overrides
@@ -213,24 +110,42 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     }
 
     func receiveRaw() async throws -> Data? {
-        let data = try await inbox.next()
-        if let data, !data.isEmpty {
-            // Return stream flow-control credit only now the app has taken the bytes.
-            session.extendStreamOffset(streamID, count: data.count)
+        if !pendingData.isEmpty {
+            let out = pendingData
+            pendingData = Data()
+            session.extendStreamOffset(streamID, count: out.count)
+            return out
         }
-        return data
+        guard let chunk = try await nextChunk() else { return nil }
+        if !chunk.isEmpty {
+            // Return stream flow-control credit only now the app has taken the bytes.
+            session.extendStreamOffset(streamID, count: chunk.count)
+        }
+        return chunk
     }
 
-    func cancel() {
-        session.queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
-            self.state = .closed
-            self.openSignal.finish(throwing: HysteriaError.streamClosed)
-            if self.streamID >= 0 {
-                self.session.shutdownStream(self.streamID)
-                self.session.releaseTCPStream(self.streamID)
-            }
-            self.inbox.cancel()
+    /// Single-consumer pull over `rawInbox`. Takes a local copy of the iterator for the mutating
+    /// async `next()` (both share the stream's backing storage) and stores it back.
+    private func nextChunk() async throws -> Data? {
+        var iterator = rawIterator
+        let next = try await iterator.next()
+        rawIterator = iterator
+        return next
+    }
+
+    nonisolated func cancel() {
+        _isReady.store(false, ordering: .relaxed)
+        rawInbox.finish()
+        Task { await self.teardown() }
+    }
+
+    private func teardown() {
+        guard !closed else { return }
+        closed = true
+        let sid = _streamID.load(ordering: .relaxed)
+        if sid >= 0 {
+            session.shutdownStream(sid)
+            session.releaseTCPStream(sid)
         }
     }
 }

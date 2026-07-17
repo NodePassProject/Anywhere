@@ -8,16 +8,11 @@
 import Foundation
 import Synchronization
 
-/// UDP-over-AnyTLS wrapper: after the UoT request `[isConnect=1][SocksaddrSerializer(dest)]`,
-/// every datagram in either direction is `[length BE u16][payload]`.
 nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: AnyTLSStream
 
     let udpState = Mutex(UDPFramingState())
-
-    /// Serializes framed datagram writes across the wire `await`; see `VLESSUDPConnection`.
-    private let sendMutex = AsyncMutex()
 
     init(inner: AnyTLSStream) {
         self.inner = inner
@@ -30,9 +25,7 @@ nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable 
     // MARK: - Send
 
     func sendRaw(_ data: Data) async throws {
-        try await sendMutex.withLock {
-            try await inner.sendRaw(frameUDPPacket(data))
-        }
+        try await inner.sendRaw(frameUDPPacket(data))
     }
 
     // MARK: - Receive

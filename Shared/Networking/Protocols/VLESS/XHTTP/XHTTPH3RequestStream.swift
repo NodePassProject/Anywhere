@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
@@ -32,9 +33,12 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
     /// Inbound DATA payloads / EOF / error from the multiplexer's demux loop. QUIC flow control
     /// counts every stream byte (HTTP/3 frame header + payload), so the per-chunk `quicBytes`
     /// accounting is split: `deliverData` credits the frame-header octets on the multiplexer queue
-    /// as chunks arrive, and ``receive()`` credits the payload octets only once
-    /// ``AsyncByteChannel/next()`` hands them over — total credit stays exact, backpressure preserved.
-    private let inbox = AsyncByteChannel()
+    /// as chunks arrive, and ``receive()`` credits the payload octets only once the app takes them —
+    /// total credit stays exact, backpressure preserved. Producer side (`inbox`) is `Sendable` and
+    /// driven on the multiplexer queue; the single consumer pulls `inboxIterator` from ``receive()``.
+    /// The `Mutex` guards the iterator *value* (this stream is a queue-confined class, not an actor).
+    private let inbox: AsyncThrowingStream<Data, Error>.Continuation
+    private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
 
     // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
     // keeps cost amortized O(1).
@@ -51,6 +55,18 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
             for try await status in responseStream { return status }
             throw HTTP3Error.streamClosed
         }
+        let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
+        self.inbox = inbox
+        self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
+    }
+
+    /// Single-consumer pull over `inbox`: takes the stored iterator, awaits one element, stores it
+    /// back. Serial by ``receive()``'s single-consumer contract.
+    private func nextInboxChunk() async throws -> Data? {
+        var iterator = inboxIterator.withLock { $0 }
+        let next = try await iterator.next()
+        inboxIterator.withLock { $0 = iterator }
+        return next
     }
 
     // MARK: - Request
@@ -110,7 +126,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     func receive() async throws -> Data? {
         guard let multiplexer else { throw HTTP3Error.streamClosed }
-        let data = try await inbox.next()
+        let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
             multiplexer.queue.async { [weak self] in self?.closeAndShutdown() }
@@ -147,7 +163,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
                 multiplexer.shutdownStream(sid, code: code)
             }
             responseSignal.finish(throwing: HTTP3Error.streamClosed)
-            inbox.cancel()
+            inbox.finish()
         }
     }
 
@@ -258,7 +274,7 @@ nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
         guard state != .closed else { return }
         closeAndShutdown(code: .internalError)
         responseSignal.finish(throwing: error)
-        inbox.fail(error)
+        inbox.finish(throwing: error)
     }
 
     private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {

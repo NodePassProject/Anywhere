@@ -14,11 +14,10 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     let udpState = Mutex(UDPFramingState())
 
-    /// Serializes framed datagram writes across the wire `await`. The datagram flow
-    /// submits sends fire-and-forget, so without this two datagrams could interleave
-    /// their length-prefixed frames on the stream transport and corrupt it. UDP
-    /// tolerates whole-datagram reordering; only intra-frame interleaving is fatal.
-    private let sendMutex = AsyncMutex()
+    /// Tail of the send chain: each framed datagram links after the previous and runs only once it
+    /// finishes, so a datagram's length-prefixed frame never interleaves another's on the stream
+    /// transport. UDP tolerates whole-datagram reordering; only intra-frame interleaving is fatal.
+    private let sendChain = Mutex<Task<Void, Error>?>(nil)
 
     init(inner: ProxyConnection) {
         self.inner = inner
@@ -31,9 +30,18 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
     // MARK: - Send: length-prefix each datagram, then hand off to the TCP-style inner.
 
     func sendRaw(_ data: Data) async throws {
-        try await sendMutex.withLock {
-            try await inner.sendRaw(frameUDPPacket(data))
+        let frame = frameUDPPacket(data)
+        let inner = self.inner
+        let task: Task<Void, Error> = sendChain.withLock { tail in
+            let previous = tail
+            let task = Task<Void, Error> {
+                _ = try? await previous?.value
+                try await inner.sendRaw(frame)
+            }
+            tail = task
+            return task
         }
+        try await task.value
     }
 
     // MARK: - Receive: pull one framed packet at a time.

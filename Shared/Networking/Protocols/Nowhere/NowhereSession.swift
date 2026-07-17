@@ -67,10 +67,6 @@ nonisolated final class NowhereSession {
     private var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
 
     static let maxUDPFlows = 256
-    static let maxUDPReassemblySlots = 64
-    static let maxUDPBufferedBytes = 4 * 1024 * 1024
-    private var udpReassemblySlots = 0
-    private var udpBufferedBytes = 0
 
     /// Pending idle close, accessed only on `queue`. Without it the QUIC
     /// connection stays resident forever after the last consumer goes away.
@@ -214,7 +210,7 @@ nonisolated final class NowhereSession {
         }
 
         if let connection = tcpStreams[sid] {
-            connection.handleStreamData(data, fin: fin)
+            connection.feedStreamData(data, fin: fin)
             return
         }
 
@@ -337,24 +333,6 @@ nonisolated final class NowhereSession {
         }
     }
 
-    func reserveUDPBuffer(bytes: Int, reassemblySlot: Bool) -> Bool {
-        dispatchPrecondition(condition: .onQueue(queue))
-        guard bytes >= 0, bytes <= Self.maxUDPBufferedBytes,
-              udpBufferedBytes <= Self.maxUDPBufferedBytes - bytes,
-              !reassemblySlot || udpReassemblySlots < Self.maxUDPReassemblySlots else {
-            return false
-        }
-        udpBufferedBytes += bytes
-        if reassemblySlot { udpReassemblySlots += 1 }
-        return true
-    }
-
-    func releaseUDPBuffer(bytes: Int, reassemblySlot: Bool) {
-        dispatchPrecondition(condition: .onQueue(queue))
-        udpBufferedBytes = max(0, udpBufferedBytes - max(0, bytes))
-        if reassemblySlot { udpReassemblySlots = max(0, udpReassemblySlots - 1) }
-    }
-
     func releaseUDPSession(_ flowID: UInt64) {
         queue.async { [weak self] in
             guard let self else { return }
@@ -426,8 +404,6 @@ nonisolated final class NowhereSession {
             let udp = Array(self.udpSessions.values)
             self.udpSessions.removeAll()
             self.udpControlStreams.removeAll()
-            self.udpBufferedBytes = 0
-            self.udpReassemblySlots = 0
             for c in udp { c.handleSessionClose() }
 
             self.quic.close()
@@ -464,8 +440,6 @@ nonisolated final class NowhereSession {
             let udp = Array(self.udpSessions.values)
             self.udpSessions.removeAll()
             self.udpControlStreams.removeAll()
-            self.udpBufferedBytes = 0
-            self.udpReassemblySlots = 0
             for c in udp { c.handleSessionError(error) }
 
             self.quic.close()

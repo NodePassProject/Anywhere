@@ -44,14 +44,14 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
         /// Set while an acquire has claimed this mux for serial reuse (before its stream opens).
         var reserved: Bool = false
+
+        /// Tail of the wire-send chain. Each send links after the previous one and runs only once
+        /// it finishes, so the padding-schedule packet order matches on-wire order without a lock —
+        /// the compute (`packetCounter`/padding) and the link happen together under ``lock``.
+        var sendTail: Task<Void, Error>?
     }
 
     private let lock: Mutex<State>
-
-    /// Serializes wire sends so the padding-schedule packet order matches on-wire order:
-    /// each ``writeConnLocked`` computes its framed output and awaits the write as one
-    /// critical section.
-    private let sendMutex = AsyncMutex()
 
     var seq: UInt64 = 0
 
@@ -110,9 +110,10 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         }
         logger.debug("[AnyTLSMultiplexer] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
         // The prologue rides ahead of the framed writes (not through the padding scheduler);
-        // ordered through `sendMutex` so it precedes every writeConnLocked flush.
+        // linked first on the send chain so it precedes every writeConnLocked flush.
         do {
-            try await sendMutex.withLock { try await self.inner.send(prologue) }
+            let task = lock.withLock { chainSend(prologue, state: &$0) }
+            try await task.value
         } catch {
             logger.debug("[AnyTLSMultiplexer] prologue write failed: \(error.localizedDescription)")
             handleTransportFailure(error)
@@ -228,56 +229,73 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         try await writeConnLocked(frame)
     }
 
-    /// Padding-aware writer: buffers while `buffering`, otherwise slices output per the
-    /// padding schedule, topping up with cmdWaste. Compute-and-send runs as one
-    /// ``sendMutex`` critical section so packet order matches on-wire order.
+    /// Padding-aware writer: buffers while `buffering`, otherwise slices output per the padding
+    /// schedule, topping up with cmdWaste. The compute (`packetCounter`/padding) and the send-chain
+    /// link happen together under ``lock``, so packet order matches on-wire order without a lock held
+    /// across the `await`.
     private func writeConnLocked(_ bytes: Data) async throws {
         enum Action {
             case rejected
             case buffered
-            case send(Data)
+            case send(Task<Void, Error>)
         }
 
-        try await sendMutex.withLock {
-            let action: Action = self.lock.withLock { (state: inout State) -> Action in
-                if state.closed {
-                    return .rejected
-                }
-                if state.buffering {
-                    state.outboundBuffer.append(bytes)
-                    return .buffered
-                }
-                var pending = bytes
-                if !state.outboundBuffer.isEmpty {
-                    pending = state.outboundBuffer + pending
-                    state.outboundBuffer.removeAll(keepingCapacity: false)
-                }
+        let action: Action = lock.withLock { (state: inout State) -> Action in
+            if state.closed {
+                return .rejected
+            }
+            if state.buffering {
+                state.outboundBuffer.append(bytes)
+                return .buffered
+            }
+            var pending = bytes
+            if !state.outboundBuffer.isEmpty {
+                pending = state.outboundBuffer + pending
+                state.outboundBuffer.removeAll(keepingCapacity: false)
+            }
 
-                if !state.sendPadding {
-                    return .send(pending)
-                }
-
+            let output: Data
+            if !state.sendPadding {
+                output = pending
+            } else {
                 state.packetCounter &+= 1
                 let packet = state.packetCounter
                 let scheme = state.padding
                 if packet >= scheme.stop {
                     state.sendPadding = false
-                    return .send(pending)
+                    output = pending
+                } else {
+                    let schedule = scheme.generateRecordPayloadSizes(packet: packet)
+                    output = Self.applyPaddingSchedule(pending: pending, schedule: schedule)
                 }
-                let schedule = scheme.generateRecordPayloadSizes(packet: packet)
-                return .send(Self.applyPaddingSchedule(pending: pending, schedule: schedule))
             }
-
-            switch action {
-            case .rejected:
-                logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
-                throw ProxyError.connectionFailed("AnyTLS multiplexer closed")
-            case .buffered:
-                return
-            case .send(let output):
-                try await self.inner.send(output)
-            }
+            return .send(chainSend(output, state: &state))
         }
+
+        switch action {
+        case .rejected:
+            logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
+            throw ProxyError.connectionFailed("AnyTLS multiplexer closed")
+        case .buffered:
+            return
+        case .send(let task):
+            try await task.value
+        }
+    }
+
+    /// Links one wire write after the current send tail and returns its task. The write runs only
+    /// once the previous one finishes, giving strict on-wire order with backpressure and error
+    /// propagation (via the returned task's `value`) and no lock held across the `await`.
+    /// Must be called with ``lock`` held.
+    private func chainSend(_ output: Data, state: inout State) -> Task<Void, Error> {
+        let inner = self.inner
+        let previous = state.sendTail
+        let task = Task<Void, Error> {
+            _ = try? await previous?.value
+            try await inner.send(output)
+        }
+        state.sendTail = task
+        return task
     }
 
     /// Slices `pending` into the padding schedule's record sizes, topping up short

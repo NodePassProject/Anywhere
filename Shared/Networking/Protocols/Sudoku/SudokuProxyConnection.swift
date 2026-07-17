@@ -435,7 +435,7 @@ nonisolated final class SudokuTables {
 
 /// An async byte stream over a ``ProxyConnection``, with a leftover-read buffer.
 ///
-/// Send is serialized by the caller (the record-layer ``AsyncMutex`` funnels every
+/// Send is serialized by the caller (the record-layer send chain funnels every
 /// write, and each per-request HTTPMask stream is used by one task), so this holds no
 /// send lock. Receive is single-flight by contract, so `pending` is only touched under
 /// a short synchronous `Mutex` — never across the wire `await`.
@@ -1752,7 +1752,7 @@ nonisolated final class SudokuObfsTransport {
     private let pureDownlink: Bool
     /// Short synchronous critical section around the decoder state — receive is single-flight
     /// by contract, so this is never held across the wire `await`. Send serialization is
-    /// provided by the record-layer ``AsyncMutex`` (obfs `send` only ever run
+    /// provided by the record-layer send chain (obfs `send` only ever run
     /// under it), so no send lock lives here.
     private struct State {
         var pureDecoder = SudokuPureDecoder()
@@ -1873,9 +1873,24 @@ nonisolated final class SudokuRecordStream {
         var readBuffer = SudokuDataQueue()
     }
     private let state: Mutex<State>
-    /// Serializes the *send* funnel across the wire `await` (mux frames from N streams + the
-    /// keepalive timer converge here). This is the mandatory record-layer send lock.
-    private let sendLock = AsyncMutex()
+    /// Tail of the send chain (mux frames from N streams + the keepalive timer converge here). Each
+    /// chained body — the epoch/seq assignment plus the wire write — runs only once the previous
+    /// finished, so record order matches wire order without a lock held across the `await`.
+    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+
+    /// Links `body` after all prior chained sends and awaits it (ordering + backpressure + errors).
+    private func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
+        let task: Task<Void, Error> = sendChain.withLock { tail in
+            let previous = tail
+            let task = Task<Void, Error> {
+                _ = try? await previous?.value
+                try await body()
+            }
+            tail = task
+            return task
+        }
+        try await task.value
+    }
 
     init(transport: SudokuObfsTransport, method: SudokuAEADMethod, baseSend: Data, baseRecv: Data) throws {
         self.transport = transport
@@ -1887,7 +1902,7 @@ nonisolated final class SudokuRecordStream {
     }
 
     func rekey(send: Data, recv: Data) async throws {
-        try await sendLock.withLock {
+        try await chainedSend { [self] in
             baseSend = send
             sendEpoch = try SudokuNativeCrypto.randomNonZeroUInt32()
             sendSeq = try SudokuNativeCrypto.randomNonZeroUInt64()
@@ -1905,7 +1920,7 @@ nonisolated final class SudokuRecordStream {
 
     func send(_ data: Data) async throws {
         if data.isEmpty { return }
-        try await sendLock.withLock {
+        try await chainedSend { [self] in
             if method == .none {
                 try await transport.send(data)
                 return
@@ -2501,9 +2516,24 @@ nonisolated final class SudokuMuxStream: Sendable {
 
     let id: UInt32
     private weak var client: SudokuMuxClient?
-    /// Serializes this stream's frame sends (data chunks vs the FIN) across the wire `await`,
-    /// so no data frame is ever emitted after the stream's close frame.
-    private let sendLock = AsyncMutex()
+    /// Tail of this stream's send chain: each frame (data chunk or the FIN) links after the previous
+    /// and runs only once it finishes, so no data frame is ever emitted after the close frame — no
+    /// lock held across the `await`.
+    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+
+    /// Links `body` after all prior chained sends and awaits it (ordering + backpressure + errors).
+    private func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
+        let task: Task<Void, Error> = sendChain.withLock { tail in
+            let previous = tail
+            let task = Task<Void, Error> {
+                _ = try? await previous?.value
+                try await body()
+            }
+            tail = task
+            return task
+        }
+        try await task.value
+    }
 
     private struct State {
         var queue = SudokuDataQueue()
@@ -2523,7 +2553,7 @@ nonisolated final class SudokuMuxStream: Sendable {
 
     func send(_ data: Data) async throws {
         if data.isEmpty { return }
-        try await sendLock.withLock {
+        try await chainedSend { [self] in
             guard let client else { throw SudokuNativeError.closed }
             let (cannotWrite, error) = state.withLock { state in
                 (state.fullyClosed || state.localWriteClosed, state.terminalError)
@@ -2651,7 +2681,7 @@ nonisolated final class SudokuMuxStream: Sendable {
     }
 
     private func sendCloseFrame(to client: SudokuMuxClient) async {
-        await sendLock.withLock {
+        try? await chainedSend { [self] in
             try? await client.sendFrame(type: 0x03, streamID: id, payload: Data())
         }
     }

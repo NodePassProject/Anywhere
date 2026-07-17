@@ -34,14 +34,30 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     let sni: String
 
     private let transport: TLSStreamTransport
-    /// Ordered async send funnel over the TLS transport — frames reach the wire in
-    /// submission order (already async infra; unchanged by the queue→`Mutex` migration).
-    private var sendPump: AsyncSendPump!
+    /// Tail of the ordered wire-send chain over the TLS transport. Each frame links after the
+    /// previous and runs only once it finishes, so frames reach the wire in submission order
+    /// without a lock held across the write.
+    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+
+    /// Links a wire send onto the ordered chain; the returned task's `value` carries backpressure
+    /// and the send's error to whoever awaits it.
+    private func chainSend(_ data: Data) -> Task<Void, Error> {
+        let transport = self.transport
+        return sendChain.withLock { tail in
+            let previous = tail
+            let task = Task<Void, Error> {
+                _ = try? await previous?.value
+                try await transport.send(data)
+            }
+            tail = task
+            return task
+        }
+    }
     /// Invoked once per stream so randomized values (auth, padding) differ per request.
     private let connectHeaders: () -> [(name: String, value: String)]
 
     /// Guards all mutable multiplexer + per-stream *send*-window state. Never held across a call
-    /// into a stream, a `sendPump` enqueue, or a continuation resume; effects are computed under the
+    /// into a stream, a chained send, or a continuation resume; effects are computed under the
     /// lock and performed after it is released. (Per-stream *response* state lives in the stream
     /// under its own lock, so a stream only ever calls back with no lock held: stream → multiplexer.)
     private struct State {
@@ -108,15 +124,6 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.readySignal = readySignal
         self.readyTask = Task { for try await _ in readyStream {} }
-        // Weak self so the pump task doesn't retain the multiplexer; it's stopped by close().
-        // Must follow the latch setup: capturing `self` requires every stored property set.
-        sendPump = AsyncSendPump(
-            send: { [weak self] data in
-                guard let self else { throw CancellationError() }
-                try await self.transport.send(data)
-            },
-            finish: {}
-        )
     }
 
     // MARK: - Capacity
@@ -276,9 +283,12 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         )
         data.append(windowUpdate.serialized)
 
-        sendPump.enqueueSend(data) { [weak self] error in
+        let prefaceTask = chainSend(data)
+        Task { [weak self] in
             guard let self else { return }
-            if let error {
+            do {
+                try await prefaceTask.value
+            } catch {
                 let failed: Bool = self.lock.withLock { state in
                     guard state.phase != .closed else { return false }
                     state.phase = .closed
@@ -286,7 +296,6 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
                 }
                 if failed {
                     self.transport.cancel()
-                    self.sendPump.finish()
                     self.refreshPoolSnapshot()
                     self.completeReadyContinuations(error)
                 }
@@ -588,20 +597,18 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         }
     }
 
-    /// Enqueues one ordered send on the pump and awaits its completion (bridges the pump's
-    /// single-shot completion into async; the pump preserves submission order).
+    /// Links one ordered send onto the chain and awaits it (submission order preserved).
     private func enqueueOrdered(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendPump.enqueueSend(data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await chainSend(data).value
     }
 
     /// Sends a control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE). Fire-and-forget.
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
-        sendPump.enqueueSend(frame.serialized) { error in
-            if let error {
+        let task = chainSend(frame.serialized)
+        Task {
+            do {
+                try await task.value
+            } catch {
                 logger.warning("[NaiveHTTP2Multiplexer] Failed to send control frame: \(error.localizedDescription)")
             }
         }
@@ -639,7 +646,6 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
         guard proceed else { return }
 
         transport.cancel()
-        sendPump.finish()
         completeReadyContinuations(reason)
         for continuation in parks { continuation.resume() }
         for stream in victims { stream.handleSessionError(reason) }

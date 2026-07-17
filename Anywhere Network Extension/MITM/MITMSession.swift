@@ -26,13 +26,17 @@ nonisolated final class MITMSession {
 
     /// Bidirectional pipe between the inner-leg TLS record connection and the lwIP-attached caller.
     /// Client→session bytes arrive via ``feedFromClient(_:)``/``endOfClient()`` and drain through an
-    /// ``AsyncByteChannel``; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
+    /// `AsyncThrowingStream`; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
     /// lwIP write buffers and gives no backpressure signal).
     final class InnerTransport: ByteTransport, @unchecked Sendable {
         let queue: DispatchQueue
         var onSendToClient: ((Data) -> Void)?
 
-        private let inbox = AsyncByteChannel()
+        /// Client→session bytes. Producer side (`inbox`) is `Sendable` (fed from the lwIP queue);
+        /// the single consumer pulls `inboxIterator` from ``receive()``. The `Mutex` guards the
+        /// iterator *value* (this transport is an `@unchecked Sendable` class, not an actor).
+        private let inbox: AsyncThrowingStream<Data, Error>.Continuation
+        private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
         private struct State {
             var closed = false
             /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
@@ -46,6 +50,9 @@ nonisolated final class MITMSession {
 
         init(queue: DispatchQueue) {
             self.queue = queue
+            let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
+            self.inbox = inbox
+            self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
         }
 
         // MARK: ByteTransport
@@ -66,13 +73,17 @@ nonisolated final class MITMSession {
         }
 
         func receive() async throws -> TransportChunk {
-            if let data = try await inbox.next() { return .bytes(data) }
+            // Single-consumer pull: take the iterator, await one element, store it back.
+            var iterator = inboxIterator.withLock { $0 }
+            let next = try await iterator.next()
+            inboxIterator.withLock { $0 = iterator }
+            if let next { return .bytes(next) }
             return .end
         }
 
         func cancel() {
             state.withLock { $0.closed = true }
-            inbox.cancel()
+            inbox.finish()
         }
 
         // MARK: External Inputs (from the lwIP side, on `queue`)

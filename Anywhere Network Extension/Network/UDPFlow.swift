@@ -353,13 +353,11 @@ actor UDPFlow {
         }
     }
 
-    /// Drives the mux stream's inbound `AsyncByteChannel`: EOF closes cleanly, an error
-    /// reports and closes.
+    /// Drives the mux stream's inbound datagrams: EOF closes cleanly, an error reports and closes.
     private func startMuxReceiving(session: VLESSVisionUDPStream) {
-        let inbox = session.inbox
         Task { [weak self] in
             do {
-                while let data = try await inbox.next() {
+                while let data = try await session.receive() {
                     await self?.handleProxyData(data)
                 }
                 // Clean EOF (End frame / normal close): close without reporting a failure.
@@ -454,21 +452,21 @@ actor UDPFlow {
         let port = dstPort
 
         Task { [weak self] in
-            let (token, inbox) = await session.register(
+            let (token, stream) = await session.register(
                 dstHost: host, dstPort: port, responseHostHints: cachedHints
             )
             guard let self else {
                 await session.unregister(token: token)
                 return
             }
-            await self.finishShadowsocksConnect(session: session, token: token, inbox: inbox,
+            await self.finishShadowsocksConnect(session: session, token: token, stream: stream,
                                                  host: host, port: port, cachedHints: cachedHints)
         }
     }
 
     private func finishShadowsocksConnect(session: ShadowsocksUDPSession,
                                           token: ShadowsocksUDPSession.Token,
-                                          inbox: AsyncByteChannel,
+                                          stream: AsyncThrowingStream<Data, Error>,
                                           host: String, port: UInt16, cachedHints: [String]) {
         proxyConnecting = false
         guard !closed else {
@@ -478,7 +476,7 @@ actor UDPFlow {
 
         ssUDPSession = session
         ssUDPSessionToken = token
-        startShadowsocksReceiving(inbox: inbox)
+        startShadowsocksReceiving(stream: stream)
 
         // Drain what buffered meanwhile, preserving order in a single task.
         let buffered = pendingData
@@ -509,12 +507,12 @@ actor UDPFlow {
         }
     }
 
-    /// Drives the SS session's per-flow inbound `AsyncByteChannel`: data pushes to the flow,
+    /// Drives the SS session's per-flow inbound datagram stream: data pushes to the flow,
     /// a thrown error reports and closes.
-    private func startShadowsocksReceiving(inbox: AsyncByteChannel) {
+    private func startShadowsocksReceiving(stream: AsyncThrowingStream<Data, Error>) {
         Task { [weak self] in
             do {
-                while let data = try await inbox.next() {
+                for try await data in stream {
                     await self?.handleProxyData(data)
                 }
                 // Clean EOF (unregister) — the flow is already tearing down; nothing to do.

@@ -266,7 +266,8 @@ nonisolated final class HysteriaSession {
         }
 
         if let connection = tcpStreams[sid] {
-            connection.handleStreamData(data, fin: fin)
+            // Hand the zero-copy bytes to the connection's Sendable inbox; it detaches + buffers them.
+            connection.feedStreamData(data, fin: fin)
             return
         }
 
@@ -376,6 +377,7 @@ nonisolated final class HysteriaSession {
         guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
         _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
         updateIdleCloseTimer()
+        // On the ngtcp2 executor, which the connection actor shares — enter it directly.
         connection.handleStreamTermination(error: error)
     }
 
@@ -384,7 +386,7 @@ nonisolated final class HysteriaSession {
     private func handleDatagram(_ data: Data) {
         guard let message = HysteriaProtocol.decodeUDPMessage(data) else { return }
         if let connection = udpSessions[message.sessionID] {
-            connection.handleIncomingDatagram(message)
+            connection.feedDatagram(message)
         }
         // Unknown sessions drop silently; Hysteria has no UDP teardown handshake.
     }

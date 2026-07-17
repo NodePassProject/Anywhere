@@ -50,7 +50,7 @@ extension Data {
         return result
     }
 
-    func base64URLEncodedString() -> String {
+    nonisolated func base64URLEncodedString() -> String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

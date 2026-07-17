@@ -81,7 +81,7 @@ nonisolated enum NowhereProtocol {
         case close = 2
     }
 
-    struct UDPMessage {
+    struct UDPMessage: Sendable {
         let type: UDPType
         let flowID: UInt64
         let packetID: UInt32

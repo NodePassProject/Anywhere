@@ -138,7 +138,7 @@ nonisolated enum HysteriaProtocol {
     /// uint32 SessionID | uint16 PacketID | uint8 FragID | uint8 FragCount.
     static let udpHeaderFixedSize = 4 + 2 + 1 + 1
 
-    struct UDPMessage {
+    struct UDPMessage: Sendable {
         let sessionID: UInt32
         let packetID: UInt16
         let fragID: UInt8

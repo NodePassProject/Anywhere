@@ -23,17 +23,32 @@ nonisolated class TLSRecordConnection {
     private let connectionBox = Mutex<(any ByteTransport)?>(nil)
 
     /// The underlying async byte transport. `nil` after ``cancel()``. Every write is serialized
-    /// through ``sendMutex`` so records reach the wire in submission order.
+    /// through the send chain so records reach the wire in submission order.
     var connection: (any ByteTransport)? {
         get { connectionBox.withLock { $0 } }
         set { connectionBox.withLock { $0 = newValue } }
     }
 
-    /// Serializes every write to ``connection`` — the async `send`/`sendRaw`
-    /// surface and the internal TLS 1.3 KeyUpdate response — so on-wire order (and thus each
-    /// record's sequence number) is preserved. FIFO: submission order is wire order. Internal
-    /// so the +TLS13 KeyUpdate response (a different file) can drain through it.
-    let sendMutex = AsyncMutex()
+    /// Tail of the wire-send chain shared by the async `send`/`sendRaw` surface and the internal
+    /// TLS 1.3 KeyUpdate response. Each ``chainedSend`` body runs only once the previous finished,
+    /// so record building (sequence-number assignment) and the key-switch never interleave a send —
+    /// submission order is wire order — without a lock held across the `await`.
+    private let sendChain = Mutex<Task<Void, Error>?>(nil)
+
+    /// Links `body` after all prior chained sends and awaits it (backpressure + errors). Internal so
+    /// the +TLS13 KeyUpdate response (a different file) drains through the same chain.
+    func chainedSend(_ body: @escaping @Sendable () async throws -> Void) async throws {
+        let task: Task<Void, Error> = sendChain.withLock { tail in
+            let previous = tail
+            let task = Task<Void, Error> {
+                _ = try? await previous?.value
+                try await body()
+            }
+            tail = task
+            return task
+        }
+        try await task.value
+    }
 
     let tlsVersion: UInt16
 
@@ -42,7 +57,7 @@ nonisolated class TLSRecordConnection {
 
     // Mutable so a TLS 1.3 post-handshake KeyUpdate (RFC 8446 §7.2) can install the next
     // key generation. Egress (`*Key`/`*IV` for our send direction) is only mutated under
-    // `sendMutex`; ingress (our read direction) only from the receive path. See `rekeyIngress`.
+    // the send chain; ingress (our read direction) only from the receive path. See `rekeyIngress`.
     var clientKey: Data
     var clientIV: Data
     var serverKey: Data
@@ -69,7 +84,7 @@ nonisolated class TLSRecordConnection {
     /// each send/receive does a read-modify-write (fetch-then-increment), and a TLS 1.3
     /// KeyUpdate resets one direction to zero. They live inside the mutex so the RMW is atomic
     /// rather than being guarded by a bare lock. Egress writes are additionally ordered by
-    /// ``sendMutex`` and ingress by the single reader, so the counters never race across
+    /// the send chain and ingress by the single reader, so the counters never race across
     /// directions — the mutex covers the same-direction RMW.
     struct SeqNumbers {
         var client: UInt64 = 0
@@ -197,10 +212,10 @@ nonisolated class TLSRecordConnection {
     // crypto and shuttles already-framed TLS records straight through. A given connection is driven
     // by one consumer, so this never races the encrypted `receive()` on `receiveBuffer`.
 
-    /// Sends `data` verbatim (no record encryption), serialized through ``sendMutex`` so it
+    /// Sends `data` verbatim (no record encryption), serialized through the send chain so it
     /// orders with the encrypted sends and the internal KeyUpdate response.
     func sendRaw(_ data: Data) async throws {
-        try await sendMutex.withLock {
+        try await chainedSend { [self] in
             guard let connection else { throw TLSRecordError.connectionUnavailable }
             try await connection.send(data)
         }
@@ -227,18 +242,18 @@ nonisolated class TLSRecordConnection {
     // MARK: - Async Surface
 
     // The record layer's send/receive surface, over the transport's async surface
-    // (writes serialized through `sendMutex`). Its consumers are `TLSProxyConnection`/
+    // (writes serialized through the send chain). Its consumers are `TLSProxyConnection`/
     // `RealityProxyConnection`, the MITM `MITMByteLeg` legs, and the async raw direct-copy above.
     // Sends and the raw direct-copy share the synchronous record crypto and `processBuffer`;
     // a given connection is driven by one consumer, so the receive paths never touch
     // `receiveBuffer` concurrently.
 
     /// Encrypts `data` into TLS records and sends them, awaiting the write. The record build
-    /// (sequence-number assignment) and the wire send happen under a single ``sendMutex`` hold,
+    /// (sequence-number assignment) and the wire send happen under a single the send chain hold,
     /// so a record's sequence number always matches its position on the wire — even under
     /// concurrent callers — and it orders with the internal KeyUpdate response.
     func send(_ data: Data) async throws {
-        try await sendMutex.withLock {
+        try await chainedSend { [self] in
             guard let connection else { throw TLSRecordError.connectionUnavailable }
             let record = try buildTLSRecords(for: data)
             try await connection.send(record)

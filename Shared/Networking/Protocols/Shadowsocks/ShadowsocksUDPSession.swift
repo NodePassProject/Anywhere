@@ -37,16 +37,18 @@ actor ShadowsocksUDPSession {
         var responseHosts: Set<String>
         /// True once a reply source is pinned; port-only fallback prefers unpinned flows.
         var hasLearnedSource: Bool
-        /// Inbound datagrams for this flow; failed on transport error / session teardown,
-        /// EOF'd (`cancel()`) on unregister so the flow's reader unwinds cleanly.
-        let inbox = AsyncByteChannel()
+        /// Producer side of the inbound-datagram stream for this flow; finished-throwing on
+        /// transport error / session teardown, finished (clean EOF) on unregister so the flow's
+        /// reader unwinds cleanly. The flow owns the consuming iteration.
+        let inbox: AsyncThrowingStream<Data, Error>.Continuation
 
         init(token: Token, port: UInt16, responseHosts: Set<String>,
-             hasLearnedSource: Bool) {
+             hasLearnedSource: Bool, inbox: AsyncThrowingStream<Data, Error>.Continuation) {
             self.token = token
             self.port = port
             self.responseHosts = responseHosts
             self.hasLearnedSource = hasLearnedSource
+            self.inbox = inbox
         }
     }
 
@@ -169,7 +171,7 @@ actor ShadowsocksUDPSession {
     /// flow's token and its inbound datagram channel (drained by the caller).
     func register(dstHost: String,
                   dstPort: UInt16,
-                  responseHostHints: [String] = []) -> (token: Token, inbox: AsyncByteChannel) {
+                  responseHostHints: [String] = []) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
         nextToken += 1
         let token = nextToken
 
@@ -179,9 +181,10 @@ actor ShadowsocksUDPSession {
         // Pre-supplied hints count as a pinned source; `dstHost` alone does not.
         let pinned = hosts.count > 1
 
+        let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         let registration = Registration(token: token, port: dstPort,
                                responseHosts: hosts,
-                               hasLearnedSource: pinned)
+                               hasLearnedSource: pinned, inbox: continuation)
         registrations[token] = registration
         for host in hosts {
             tokensByResponse[ResponseKey(host: host, port: dstPort), default: []].append(token)
@@ -191,7 +194,7 @@ actor ShadowsocksUDPSession {
         if case .idle = state {
             beginConnect()
         }
-        return (token, registration.inbox)
+        return (token, stream)
     }
 
     func addResponseHints(token: Token, hints: [String]) {
@@ -214,7 +217,7 @@ actor ShadowsocksUDPSession {
         }
         removeToken(token, from: &tokensByPort, key: registration.port)
         // EOF the flow's reader so its receive loop unwinds without surfacing an error.
-        registration.inbox.cancel()
+        registration.inbox.finish()
     }
 
     /// Awaits transport readiness (parking if still dialing), then encrypts and sends.
@@ -345,7 +348,7 @@ actor ShadowsocksUDPSession {
     /// Fails every registered flow's inbox (transport error / teardown).
     private func notifyAllFlows(error: Error) {
         for registration in registrations.values {
-            registration.inbox.fail(error)
+            registration.inbox.finish(throwing: error)
         }
     }
 

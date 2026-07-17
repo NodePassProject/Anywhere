@@ -34,12 +34,13 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
 
         /// Idle-close timer as a cancellable `Task` (re-armed whenever the stream set empties).
         var idleTask: Task<Void, Never>?
+
+        /// Tail of the wire-send chain: each frame links after the previous and runs only once it
+        /// finishes, so frames never interleave on the shared connection — no lock held across the write.
+        var sendTail: Task<Void, Error>?
     }
 
     private let lock = Mutex(State())
-
-    /// Serializes framed wire writes so frames never interleave on the shared connection.
-    private let sendMutex = AsyncMutex()
 
     private static let idleTimeout: TimeInterval = 16
 
@@ -246,18 +247,22 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
 
     // MARK: - Send
 
-    /// Serializes framed writes through `sendMutex`; a failed write tears the mux down.
+    /// Links a framed write onto the send chain; a failed write tears the mux down.
     func writeFrame(_ data: Data) async throws {
-        let connection: ProxyConnection = try lock.withLock { state in
+        let task: Task<Void, Error> = try lock.withLock { state in
             guard !state.closed, let connection = state.proxyConnection else {
                 throw ProxyError.connectionFailed("Mux client closed")
             }
-            return connection
-        }
-        do {
-            try await sendMutex.withLock {
+            let previous = state.sendTail
+            let task = Task<Void, Error> {
+                _ = try? await previous?.value
                 try await connection.sendRaw(data)
             }
+            state.sendTail = task
+            return task
+        }
+        do {
+            try await task.value
         } catch {
             close(error: error)
             throw error

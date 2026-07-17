@@ -43,12 +43,14 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     /// Advertised per-stream receive window; constant.
     private let recvWindowSize = NaiveHTTP2FlowControl.naiveInitialWindowSize
 
-    /// Inbound DATA payloads / EOF / error from the multiplexer's read loop; the async
-    /// replacement for the parked `pendingReceive` completion. QUIC-style backpressure is
-    /// preserved: flow-control credit is returned in ``receiveData()`` only once
-    /// ``AsyncByteChannel/next()`` hands the bytes over. H2 flow control counts DATA payload
+    /// Inbound DATA payloads / EOF / error from the multiplexer's read loop. Producer side (`inbox`)
+    /// is `Sendable` and driven by the read loop; the single consumer pulls `inboxIterator` from
+    /// ``receiveData()``. The `Mutex` guards the iterator *value* (this stream is a Sendable class
+    /// with nonisolated read-loop callbacks, not an actor). Backpressure is preserved: flow-control
+    /// credit is returned only once the app takes the bytes. H2 flow control counts DATA payload
     /// octets (RFC 7540 §6.9.1), so `data.count` is the exact amount to credit.
-    private let inbox = AsyncByteChannel()
+    private let inbox: AsyncThrowingStream<Data, Error>.Continuation
+    private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
 
     /// Resolves when the CONNECT response (200) arrives, or the stream fails first. The waiter
     /// continuation lives in the promise (async infra), bridging the multiplexer's read loop.
@@ -70,6 +72,18 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.connectSignal = connectSignal
         self.connectTask = Task { for try await _ in connectStream {} }
+        let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
+        self.inbox = inbox
+        self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
+    }
+
+    /// Single-consumer pull over `inbox`: takes the stored iterator, awaits one element, stores it
+    /// back. Serial by ``receiveData()``'s single-consumer contract.
+    private func nextInboxChunk() async throws -> Data? {
+        var iterator = inboxIterator.withLock { $0 }
+        let next = try await iterator.next()
+        inboxIterator.withLock { $0 = iterator }
+        return next
     }
 
     // MARK: - HTTPTunnel
@@ -106,7 +120,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     }
 
     func receiveData() async throws -> Data? {
-        let data = try await inbox.next()
+        let data = try await nextInboxChunk()
         if let data, !data.isEmpty {
             // Return flow-control credit only now the app has taken the bytes (preserves backpressure).
             acknowledgeConsumedData(count: data.count)
@@ -133,7 +147,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
             )
         }
         connectSignal.finish(throwing: NaiveHTTP2Error.connectionFailed("Stream closed"))
-        inbox.cancel()
+        inbox.finish()
     }
 
     // MARK: - Session Callbacks (called by the multiplexer with no multiplexer lock held)
@@ -209,7 +223,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
         multiplexer?.removeStream(self)
         connectSignal.finish(throwing: error)
-        inbox.fail(error)
+        inbox.finish(throwing: error)
     }
 
     // MARK: - Flow Control

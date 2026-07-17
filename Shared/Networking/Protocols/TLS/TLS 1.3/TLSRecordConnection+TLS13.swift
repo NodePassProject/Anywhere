@@ -144,12 +144,12 @@ extension TLSRecordConnection {
     }
 
     /// Sends our KeyUpdate using the *current* write keys, then advances egress. The whole
-    /// method runs under ``sendMutex`` so the build → send → key-switch sequence is atomic with
+    /// method runs under the send chain so the build → send → key-switch sequence is atomic with
     /// respect to application sends; called only after `receiveBuffer`'s lock has been released.
     func sendKeyUpdateResponseAndRekeyEgress() async {
-        await sendMutex.withLock {
+        try? await chainedSend { [self] in
             // Build the KeyUpdate with the CURRENT egress keys, put it on the wire, then advance
-            // egress — all under `sendMutex` so no application send interleaves the key switch.
+            // egress — all on the send chain so no application send interleaves the key switch.
             let record: Data
             do {
                 // KeyUpdate: msg_type(24) | uint24 length(1) | request_update == update_not_requested(0).

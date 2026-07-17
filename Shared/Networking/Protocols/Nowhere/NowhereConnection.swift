@@ -13,52 +13,31 @@ nonisolated enum NowhereTCPRelayMode {
     case udp
 }
 
-nonisolated protocol NowhereTerminationObservable: AnyObject {
-    func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
+protocol NowhereTerminationObservable: AnyObject {
+    nonisolated func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
 }
 
-nonisolated final class NowhereConnection: ProxyConnection {
-
-    enum State { case idle, openingStream, handshaking, waitingResult, ready, closed }
-    enum BufferedFlowResultStep: Equatable {
-        case deferred
-        case needMore
-        case ready
-        case reject(NowhereProtocol.FlowRejectCode)
-        case invalid
-    }
+actor NowhereConnection: ProxyConnection {
 
     private let session: NowhereSession
     private let destination: String
     private let flowHeader: NowhereProtocol.FlowHeader
 
-    private var _state: State = .idle
-    private var state: State {
-        get { _state }
-        set {
-            _state = newValue
-            _isReady.store(newValue == .ready, ordering: .relaxed)
-        }
-    }
-    private let _isReady = Atomic<Bool>(false)
+    /// Readiness mirror, so the nonisolated `isConnected`/send-guard read it without hopping.
+    private nonisolated let _isReady = Atomic<Bool>(false)
+    /// Assigned once in `open()`, read from the send/cancel paths.
+    private nonisolated let _streamID = Atomic<Int64>(-1)
 
-    /// Stored atomically: set once on `session.queue` during open, then read from the
-    /// async send/close paths off-queue.
-    private let _streamID = Atomic<Int64>(-1)
-    private var streamID: Int64 {
-        get { _streamID.load(ordering: .relaxed) }
-        set { _streamID.store(newValue, ordering: .relaxed) }
-    }
-    private var readClosed = false
-    private var receiveBuffer = Data()
-    /// Post-result stream bytes / EOF / error from the session demux; the async
-    /// replacement for the parked `pendingReceive`. Stream credit is returned in
-    /// ``receiveRaw()`` only once the app takes the bytes (backpressure preserved).
-    private let inbox = AsyncByteChannel()
-    /// One-shot open signal, resolved by the demux/callback path; the awaiter is `openTask.value`.
-    private let openSignal: AsyncThrowingStream<Never, Error>.Continuation
-    private let openTask: Task<Void, Error>
-    private var setupTerminationError: Error?
+    /// Inbound stream bytes from the demux. Producer (`rawInbox`) is Sendable and driven on the
+    /// ngtcp2 queue via `feedStreamData`; the single consumer pulls `rawIterator` from `open()`
+    /// (flow result) then `receiveRaw()` (data), so the iterator is plain actor-isolated state.
+    private nonisolated let rawInbox: AsyncThrowingStream<Data, Error>.Continuation
+    private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Post-result bytes left over from `open()`'s handshake, handed to the app first by `receiveRaw()`.
+    private var pendingData = Data()
+
+    /// Guards `teardown()` so the stream is shut down and released exactly once.
+    private var closed = false
 
     init(
         session: NowhereSession,
@@ -68,230 +47,95 @@ nonisolated final class NowhereConnection: ProxyConnection {
         self.session = session
         self.destination = destination
         self.flowHeader = flowHeader
-        let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
-        self.openSignal = openSignal
-        self.openTask = Task { for try await _ in openStream {} }
+        let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
+        self.rawInbox = continuation
+        self.rawIterator = stream.makeAsyncIterator()
     }
 
-    var isConnected: Bool {
-        _isReady.load(ordering: .relaxed)
+    nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
+    nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
+
+    private var streamID: Int64 {
+        get { _streamID.load(ordering: .relaxed) }
+        set { _streamID.store(newValue, ordering: .relaxed) }
     }
 
-    var outerTLSVersion: TLSVersion? { .tls13 }
+    // MARK: - Open (called by ProxyClient after the session is ready)
 
     func open() async throws {
-        // Claim the connection on the ngtcp2 queue; `openSignal` resolves later in
-        // `finishOpen`/`processFlowResultIfAvailable` (result) or `fail` (error).
-        let started: Bool = await session.run { [self] in
-            guard state == .idle else { return false }
-            state = .openingStream
-            return true
-        }
-        guard started else { throw NowhereError.notReady }
-
-        // Reserve the stream, then send the request.
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let streamID = try await self.session.openTCPStream(for: self)
-                await self.session.run { self.streamID = streamID; self.sendTCPRequest() }
-            } catch {
-                await self.session.run { self.fail(error) }
-            }
-        }
-        try await openTask.value
-    }
-
-    private func sendTCPRequest() {
-        state = .handshaking
-        let frame: Data
         do {
-            frame = try NowhereProtocol.encodeFlowRequest(
+            let sid = try await session.openTCPStream(for: self)
+            streamID = sid
+            let frame = try NowhereProtocol.encodeFlowRequest(
                 header: flowHeader,
                 target: destination,
                 protocolSpec: session.protocolSpec
             )
+            try await session.writeStream(sid, data: frame)
+
+            if flowHeader.role == .open {
+                // OPEN has no F2: ready once the request is on the wire (a write failure threw above;
+                // a later reset surfaces on the first `receiveRaw`).
+                pendingData = Data()
+                _isReady.store(true, ordering: .relaxed)
+                return
+            }
+
+            // Non-open: read inbound bytes until the flow-result (F2) frame parses.
+            var buffer = Data()
+            while true {
+                guard let chunk = try await nextChunk() else {
+                    throw NowhereError.connectionFailed("Stream closed before complete READY")
+                }
+                buffer.append(chunk)
+                guard buffer.count >= NowhereProtocol.flowResultSize else { continue }
+                let prefix = Data(buffer.prefix(NowhereProtocol.flowResultSize))
+                guard let result = NowhereProtocol.decodeFlowResult(prefix) else {
+                    throw NowhereError.connectionFailed("Invalid flow result")
+                }
+                // Credit the consumed result frame; post-result data is credited lazily in `receiveRaw`.
+                session.extendStreamOffset(sid, count: NowhereProtocol.flowResultSize)
+                switch result {
+                case .ready:
+                    buffer.removeFirst(NowhereProtocol.flowResultSize)
+                    pendingData = buffer
+                    _isReady.store(true, ordering: .relaxed)
+                    return
+                case .reject(let code):
+                    throw NowhereError.flowRejected(code)
+                }
+            }
         } catch {
-            fail(error)
-            return
-        }
-        Task { [weak self] in
-            guard let self else { return }
-            let writeError: Error?
-            do {
-                try await self.session.writeStream(self.streamID, data: frame)
-                writeError = nil
-            } catch {
-                writeError = error
-            }
-            self.session.queue.async {
-                guard self.state == .handshaking else { return }
-                if self.flowHeader.role != .open {
-                    self.state = .waitingResult
-                    self.processFlowResultIfAvailable()
-                    guard self.state == .waitingResult else { return }
-                    if let writeError {
-                        self.fail(writeError)
-                    } else if self.readClosed {
-                        self.fail(NowhereError.connectionFailed(
-                            "Stream closed before complete READY"
-                        ))
-                    }
-                } else {
-                    if let terminalError = Self.openSetupError(
-                        writeError: writeError,
-                        terminationError: self.setupTerminationError
-                    ) {
-                        self.fail(terminalError)
-                        return
-                    }
-                    self.finishOpen()
-                }
-            }
+            teardown()
+            throw error
         }
     }
 
-    func handleStreamData(_ data: Data, fin: Bool) {
-        // On session.queue, synchronously inside ngtcp2's read_pkt; `data` is a zero-copy
-        // view that must be detached before it escapes to the inbox.
-        guard state != .closed else { return }
+    // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
 
-        if state == .openingStream || state == .handshaking || state == .waitingResult {
-            if !data.isEmpty {
-                receiveBuffer.append(data)
-            }
-            if fin { readClosed = true }
-            if state == .waitingResult {
-                processFlowResultIfAvailable()
-                if readClosed, state == .waitingResult {
-                    fail(NowhereError.connectionFailed("Stream closed before complete READY"))
-                }
-            }
-            return
-        }
-
-        guard state == .ready else { return }
-
-        if !data.isEmpty {
-            inbox.yield(Data(data))
-        }
-        if fin {
-            readClosed = true
-            inbox.finish()
-        }
+    /// New inbound bytes / FIN from the session's demux loop. `data` is a zero-copy view into
+    /// ngtcp2's buffer — detach with `Data(...)` before buffering it.
+    nonisolated func feedStreamData(_ data: Data, fin: Bool) {
+        if !data.isEmpty { rawInbox.yield(Data(data)) }
+        if fin { rawInbox.finish() }
     }
 
-    private func processFlowResultIfAvailable() {
-        switch Self.bufferedFlowResultStep(state: state, buffer: receiveBuffer) {
-        case .deferred, .needMore:
-            return
-        case .invalid:
-            fail(NowhereError.connectionFailed("Invalid flow result"))
-        case .ready:
-            receiveBuffer.removeFirst(NowhereProtocol.flowResultSize)
-            // Credit the consumed flow-result frame now; post-result app data is
-            // credited lazily as the app consumes it in `receiveRaw`.
-            session.extendStreamOffset(streamID, count: NowhereProtocol.flowResultSize)
-            if let setupTerminationError {
-                fail(setupTerminationError)
-            } else {
-                finishOpen()
-            }
-        case .reject(let code):
-            receiveBuffer.removeFirst(NowhereProtocol.flowResultSize)
-            session.extendStreamOffset(streamID, count: NowhereProtocol.flowResultSize)
-            fail(NowhereError.flowRejected(code))
-        }
+    /// QUIC stream termination (RESET_STREAM or stream_close). Idempotent.
+    nonisolated func handleStreamTermination(error: Error?) {
+        if let error { rawInbox.finish(throwing: error) } else { rawInbox.finish() }
     }
 
-    static func bufferedFlowResultStep(
-        state: State,
-        buffer: Data
-    ) -> BufferedFlowResultStep {
-        guard state == .waitingResult else { return .deferred }
-        guard buffer.count >= NowhereProtocol.flowResultSize else { return .needMore }
-        let prefix = Data(buffer.prefix(NowhereProtocol.flowResultSize))
-        guard let result = NowhereProtocol.decodeFlowResult(prefix) else { return .invalid }
-        switch result {
-        case .ready: return .ready
-        case .reject(let code): return .reject(code)
-        }
+    nonisolated func handleSessionClose() {
+        rawInbox.finish()
     }
 
-    /// OPEN has no F2. A clean peer FIN proves the server consumed the request;
-    /// only a local write failure or reset/error makes setup fail.
-    static func openSetupError(
-        writeError: Error?,
-        terminationError: Error?
-    ) -> Error? {
-        writeError ?? terminationError
-    }
-
-    private func finishOpen() {
-        guard state != .closed else { return }
-        state = .ready
-        openSignal.finish()
-        // Flush any coalesced post-result app data, then honour a buffered FIN.
-        flushBufferToInbox()
-        if readClosed { inbox.finish() }
-    }
-
-    /// Hands buffered post-result app bytes to the inbox. Runs on `session.queue`.
-    private func flushBufferToInbox() {
-        guard !receiveBuffer.isEmpty else { return }
-        let out = receiveBuffer
-        receiveBuffer = Data()
-        inbox.yield(out)
-    }
-
-    func handleSessionError(_ error: Error) {
+    nonisolated func handleSessionError(_ error: Error) {
+        _isReady.store(false, ordering: .relaxed)
         if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
-            session.queue.async { [weak self] in self?.handleStreamTermination(error: nil) }
-            return
+            rawInbox.finish()
+        } else {
+            rawInbox.finish(throwing: error)
         }
-        session.queue.async { [weak self] in self?.fail(error) }
-    }
-
-    func handleSessionClose() {
-        session.queue.async { [weak self] in self?.handleStreamTermination(error: nil) }
-    }
-
-    func handleStreamTermination(error: Error?) {
-        guard state != .closed else { return }
-        if state == .openingStream || state == .handshaking || state == .waitingResult {
-            readClosed = true
-            setupTerminationError = error
-            if state == .waitingResult {
-                processFlowResultIfAvailable()
-                if state == .waitingResult {
-                    fail(error ?? NowhereError.connectionFailed(
-                        "Stream closed before complete READY"
-                    ))
-                }
-            }
-            return
-        }
-        if let error {
-            fail(error)
-            return
-        }
-        readClosed = true
-        state = .closed
-        // EOF ordered after every byte already queued in the inbox.
-        inbox.finish()
-    }
-
-    private func fail(_ error: Error) {
-        guard state != .closed else { return }
-        state = .closed
-
-        if streamID >= 0 {
-            session.shutdownStream(streamID)
-            session.releaseTCPStream(streamID)
-        }
-
-        openSignal.finish(throwing: error)
-        inbox.fail(error)
     }
 
     // MARK: - ProxyConnection overrides
@@ -304,24 +148,41 @@ nonisolated final class NowhereConnection: ProxyConnection {
     }
 
     func receiveRaw() async throws -> Data? {
-        let data = try await inbox.next()
-        if let data, !data.isEmpty {
-            // Return stream flow-control credit only now the app has taken the bytes.
-            session.extendStreamOffset(streamID, count: data.count)
+        if !pendingData.isEmpty {
+            let out = pendingData
+            pendingData = Data()
+            session.extendStreamOffset(streamID, count: out.count)
+            return out
         }
-        return data
+        guard let chunk = try await nextChunk() else { return nil }
+        if !chunk.isEmpty {
+            // Return stream flow-control credit only now the app has taken the bytes.
+            session.extendStreamOffset(streamID, count: chunk.count)
+        }
+        return chunk
     }
 
-    func cancel() {
-        session.queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
-            self.state = .closed
-            if self.streamID >= 0 {
-                self.session.shutdownStream(self.streamID)
-                self.session.releaseTCPStream(self.streamID)
-            }
-            self.inbox.cancel()
-            self.openSignal.finish(throwing: NowhereError.streamClosed)
+    /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`).
+    private func nextChunk() async throws -> Data? {
+        var iterator = rawIterator
+        let next = try await iterator.next()
+        rawIterator = iterator
+        return next
+    }
+
+    nonisolated func cancel() {
+        _isReady.store(false, ordering: .relaxed)
+        rawInbox.finish()
+        Task { await self.teardown() }
+    }
+
+    private func teardown() {
+        guard !closed else { return }
+        closed = true
+        let sid = _streamID.load(ordering: .relaxed)
+        if sid >= 0 {
+            session.shutdownStream(sid)
+            session.releaseTCPStream(sid)
         }
     }
 }
