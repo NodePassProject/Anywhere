@@ -144,7 +144,7 @@ extension XHTTPConnection {
                 return
 
             case Self.h2FrameWindowUpdate:
-                let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+                state.withLock { state in
                     if frame.payload.count >= 4 {
                         let windowIncrementRaw = frame.payload.prefix(4).withUnsafeBytes {
                             $0.load(as: UInt32.self).bigEndian
@@ -158,11 +158,8 @@ extension XHTTPConnection {
                             state.h2PeerStreamSendWindow += increment
                         }
                     }
-                    let resumptions = state.h2FlowResumptions
-                    state.h2FlowResumptions.removeAll()
-                    return resumptions
+                    state.h2FlowGate.wakeAll()
                 }
-                for continuation in resumptions { continuation.resume() }
                 continue
 
             case Self.h2FramePing:
@@ -184,26 +181,21 @@ extension XHTTPConnection {
     /// Marks the stream closed and wakes sends parked on flow control — a send awaiting a
     /// WINDOW_UPDATE that will never arrive must observe the close, not hang until cancel().
     func markH2Closed() {
-        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+        state.withLock { state in
             state.h2StreamClosed = true
-            let resumptions = state.h2FlowResumptions
-            state.h2FlowResumptions.removeAll()
-            return resumptions
+            state.h2FlowGate.wakeAll()
         }
-        for continuation in resumptions { continuation.resume() }
     }
 
     /// Suspends until a WINDOW_UPDATE re-opens a send window (or the stream closes). `hasWindow`
     /// is evaluated under the lock so a window re-open racing the caller's check isn't missed.
     private func parkForH2Flow(hasWindow: (inout State) -> Bool) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let resumeNow: Bool = state.withLock { state in
-                if state.h2StreamClosed { return true }
-                if hasWindow(&state) { return true }
-                state.h2FlowResumptions.append(continuation)
-                return false
+        await H2FlowGate.park {
+            state.withLock { state -> AsyncStream<Never>? in
+                if state.h2StreamClosed { return nil }
+                if hasWindow(&state) { return nil }
+                return state.h2FlowGate.enroll()
             }
-            if resumeNow { continuation.resume() }
         }
     }
 
@@ -503,7 +495,7 @@ extension XHTTPConnection {
                 }
 
             case Self.h2FrameWindowUpdate:
-                let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+                state.withLock { state in
                     if frame.payload.count >= 4 {
                         let raw = frame.payload.prefix(4).withUnsafeBytes {
                             $0.load(as: UInt32.self).bigEndian
@@ -517,11 +509,8 @@ extension XHTTPConnection {
                             state.h2PeerStreamSendWindow += increment
                         }
                     }
-                    let resumptions = state.h2FlowResumptions
-                    state.h2FlowResumptions.removeAll()
-                    return resumptions
+                    state.h2FlowGate.wakeAll()
                 }
-                for continuation in resumptions { continuation.resume() }
 
             case Self.h2FramePing:
                 let pong = buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)

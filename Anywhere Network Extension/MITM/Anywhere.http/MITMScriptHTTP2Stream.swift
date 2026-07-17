@@ -22,8 +22,9 @@ nonisolated final class MITMScriptHTTP2Stream {
     private let maxBytes: Int
     private let resourceTimeout: TimeInterval
 
-    /// Resumed exactly once in `finish`; the async bridge over the connection's read loop.
-    private let continuation: CheckedContinuation<MITMScriptHTTPClient.Response, Error>
+    /// One-shot response channel, resolved exactly once in `finish`; the async bridge over the
+    /// connection's read loop. `perform` awaits it.
+    private let responseSignal: AsyncThrowingStream<MITMScriptHTTPClient.Response, Error>.Continuation
 
     // MARK: State (behind `lock`)
 
@@ -58,7 +59,7 @@ nonisolated final class MITMScriptHTTP2Stream {
         hostHeader: String,
         maxBytes: Int,
         resourceTimeout: TimeInterval,
-        continuation: CheckedContinuation<MITMScriptHTTPClient.Response, Error>
+        responseSignal: AsyncThrowingStream<MITMScriptHTTPClient.Response, Error>.Continuation
     ) {
         self.streamID = streamID
         self.connection = connection
@@ -66,7 +67,7 @@ nonisolated final class MITMScriptHTTP2Stream {
         self.hostHeader = hostHeader
         self.maxBytes = maxBytes
         self.resourceTimeout = resourceTimeout
-        self.continuation = continuation
+        self.responseSignal = responseSignal
     }
 
     // MARK: - Lifecycle
@@ -350,6 +351,12 @@ nonisolated final class MITMScriptHTTP2Stream {
         }
         // Unblock a request send parked on this stream's flow window so its task unwinds.
         connection?.wakeFlowParks()
-        continuation.resume(with: result)
+        switch result {
+        case .success(let response):
+            responseSignal.yield(response)
+            responseSignal.finish()
+        case .failure(let error):
+            responseSignal.finish(throwing: error)
+        }
     }
 }

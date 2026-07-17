@@ -53,7 +53,7 @@ nonisolated final class GRPCConnection: Sendable {
         var h2StreamReceiveConsumed: Int = 0
 
         /// Send-side continuations waiting for a WINDOW_UPDATE that re-opens flow control.
-        var h2FlowResumptions: [CheckedContinuation<Void, Never>] = []
+        var h2FlowGate = H2FlowGate()
 
         /// Keepalive ping timer (nil when idleTimeout == 0).
         var keepaliveTask: Task<Void, Never>?
@@ -243,7 +243,7 @@ nonisolated final class GRPCConnection: Sendable {
     // MARK: - Cancel
 
     func cancel() {
-        let waiters: [CheckedContinuation<Void, Never>] = state.withLock { state in
+        state.withLock { state in
             state._isConnected = false
             state.h2StreamClosed = true
             state.h2ReadBuffer.removeAll()
@@ -251,11 +251,8 @@ nonisolated final class GRPCConnection: Sendable {
             state.decodedBuffer.removeAll()
             state.keepaliveTask?.cancel()
             state.keepaliveTask = nil
-            let waiters = state.h2FlowResumptions
-            state.h2FlowResumptions.removeAll()
-            return waiters
+            state.h2FlowGate.wakeAll()
         }
-        for waiter in waiters { waiter.resume() }
         transport.cancel()
     }
 
@@ -399,7 +396,7 @@ nonisolated extension GRPCConnection {
 
     /// Applies a WINDOW_UPDATE to the send windows and wakes blocked sends.
     fileprivate func handleWindowUpdate(frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
-        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+        state.withLock { state in
             if frame.payload.count >= 4 {
                 let raw = frame.payload.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
                 let increment = Int(raw & 0x7FFFFFFF)
@@ -409,11 +406,8 @@ nonisolated extension GRPCConnection {
                     state.h2PeerStreamSendWindow += increment
                 }
             }
-            let resumptions = state.h2FlowResumptions
-            state.h2FlowResumptions.removeAll()
-            return resumptions
+            state.h2FlowGate.wakeAll()
         }
-        for r in resumptions { r.resume() }
     }
 }
 
@@ -768,29 +762,24 @@ nonisolated extension GRPCConnection {
     /// Suspends until a WINDOW_UPDATE re-opens the send window (or the stream closes). Re-checks
     /// under the lock before parking so a window re-open racing the caller's check isn't missed.
     private func parkForFlowWindow() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let resumeNow: Bool = state.withLock { state in
-                if state.h2StreamClosed { return true }
-                if min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow) > 0 { return true }
-                state.h2FlowResumptions.append(continuation)
-                return false
+        await H2FlowGate.park {
+            state.withLock { state -> AsyncStream<Never>? in
+                if state.h2StreamClosed { return nil }
+                if min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow) > 0 { return nil }
+                return state.h2FlowGate.enroll()
             }
-            if resumeNow { continuation.resume() }
         }
     }
 
     private func markClosed() {
-        state.withLock { $0.h2StreamClosed = true }
-        drainFlowResumptions()
+        state.withLock { state in
+            state.h2StreamClosed = true
+            state.h2FlowGate.wakeAll()
+        }
     }
 
     private func drainFlowResumptions() {
-        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
-            let resumptions = state.h2FlowResumptions
-            state.h2FlowResumptions.removeAll()
-            return resumptions
-        }
-        for continuation in resumptions { continuation.resume() }
+        state.withLock { $0.h2FlowGate.wakeAll() }
     }
 }
 

@@ -154,6 +154,7 @@
 				"Networking/Protocols/AnyTLS/ProxyClient+AnyTLS.swift",
 				Networking/Protocols/Core/CertificatePolicy.swift,
 				Networking/Protocols/Core/HPACKEncoder.swift,
+				Networking/Protocols/Core/H2FlowGate.swift,
 				Networking/Protocols/Core/HTTPTunnel.swift,
 				Networking/Protocols/Core/Multiplexer.swift,
 				Networking/Protocols/Core/MultiplexerPool.swift,

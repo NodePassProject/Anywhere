@@ -22,13 +22,12 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
         var proxyConnection: ProxyConnection?
         var streams: [UInt16: VLESSVisionUDPStream] = [:]
         var nextSessionID: UInt16 = 1
-        var connecting = false
-        var connected = false
         var closed = false
         var isXUDP = false
 
-        /// Coalesced connect waiters (parked while dialing); resumed on connect / failed on close.
-        var connectContinuations: [CheckedContinuation<Void, Error>] = []
+        /// Memoized dial: the first `ensureReady` caller stores its connect task here and every
+        /// other caller awaits it, so a burst of first-use streams coalesces onto one dial.
+        var readyTask: Task<Void, Error>?
 
         var frameParser = VLESSVisionUDPFrameParser()
 
@@ -62,79 +61,53 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
 
     // MARK: - Lifecycle
 
-    /// Parks the caller until the underlying proxy connection is ready, lazily dialing on
-    /// first use. Multiple callers coalesce onto one dial.
+    /// Suspends the caller until the underlying proxy connection is ready, lazily dialing on first
+    /// use. Multiple callers coalesce onto the one memoized dial task and share its outcome.
     private func ensureReady() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            // Decide + park under one lock section so a concurrent `finishConnect` can't
-            // resume the waiter set before this continuation is enqueued.
-            var clientToStart: ProxyClient?
-            let immediate: Result<Void, Error>? = lock.withLock { state in
-                if state.connected { return .success(()) }
-                if state.closed { return .failure(ProxyError.connectionFailed("Mux client closed")) }
-                if !state.connecting {
-                    state.connecting = true
-                    let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
-                    state.proxyClient = client
-                    clientToStart = client
-                }
-                state.connectContinuations.append(continuation)
-                return nil
+        let task: Task<Void, Error> = try lock.withLock { state in
+            if state.closed { throw ProxyError.connectionFailed("Mux client closed") }
+            if let existing = state.readyTask { return existing }
+            let task = Task<Void, Error> { [weak self] in
+                guard let self else { throw ProxyError.connectionFailed("Mux client released") }
+                try await self.performConnect()
             }
-            switch immediate {
-            case .success:
-                continuation.resume()
-            case .failure(let error):
-                continuation.resume(throwing: error)
-            case nil:
-                if let clientToStart { startConnect(client: clientToStart) }
-            }
+            state.readyTask = task
+            return task
         }
+        try await task.value
     }
 
-    private func startConnect(client: ProxyClient) {
-        Task { [weak self] in
-            let result: Result<ProxyConnection, Error>
-            do {
-                result = .success(try await client.connectMultiplexer())
-            } catch {
-                result = .failure(error)
-            }
-            self?.finishConnect(result)
+    /// Dials the underlying proxy multiplexer once for all coalesced callers, publishing the
+    /// connection and starting the read loop on success. A failure closes the mux.
+    private func performConnect() async throws {
+        let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
+        let live = lock.withLock { state -> Bool in
+            guard !state.closed else { return false }
+            state.proxyClient = client
+            return true
         }
-    }
+        guard live else { throw ProxyError.connectionFailed("Mux client closed") }
 
-    private func finishConnect(_ result: Result<ProxyConnection, Error>) {
-        switch result {
-        case .success(let connection):
-            let waiters: [CheckedContinuation<Void, Error>]? = lock.withLock { state in
-                guard !state.closed else { return nil }
-                state.connecting = false
-                state.connected = true
-                state.proxyConnection = connection
-                let waiters = state.connectContinuations
-                state.connectContinuations.removeAll()
-                return waiters
-            }
-            guard let waiters else {
-                // Closed mid-dial: `close()` already failed the waiters; just drop the connection.
-                connection.cancel()
-                return
-            }
-            startReadLoop(connection)
-            resetIdleTimer()
-            for continuation in waiters { continuation.resume() }
-
-        case .failure(let error):
-            let waiters: [CheckedContinuation<Void, Error>] = lock.withLock { state in
-                state.connecting = false
-                let waiters = state.connectContinuations
-                state.connectContinuations.removeAll()
-                return waiters
-            }
-            for continuation in waiters { continuation.resume(throwing: error) }
+        let connection: ProxyConnection
+        do {
+            connection = try await client.connectMultiplexer()
+        } catch {
             close(error: error)
+            throw error
         }
+
+        let published = lock.withLock { state -> Bool in
+            guard !state.closed else { return false }
+            state.proxyConnection = connection
+            return true
+        }
+        guard published else {
+            // Closed mid-dial: `close()` already tore down; just drop the connection.
+            connection.cancel()
+            throw ProxyError.connectionFailed("Mux client closed")
+        }
+        startReadLoop(connection)
+        resetIdleTimer()
     }
 
     private func resetIdleTimer() {
@@ -344,7 +317,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
             var connection: ProxyConnection?
             var client: ProxyClient?
             var idleTask: Task<Void, Never>?
-            var connectContinuations: [CheckedContinuation<Void, Error>]
+            var readyTask: Task<Void, Error>?
         }
 
         let teardown: Teardown? = lock.withLock { state in
@@ -356,14 +329,13 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
                 connection: state.proxyConnection,
                 client: state.proxyClient,
                 idleTask: state.idleTask,
-                connectContinuations: state.connectContinuations
+                readyTask: state.readyTask
             )
             state.streams.removeAll()
             state.proxyConnection = nil
             state.proxyClient = nil
             state.idleTask = nil
-            state.connectContinuations.removeAll()
-            state.connecting = false
+            state.readyTask = nil
             state.frameParser.reset()
             return snapshot
         }
@@ -383,13 +355,10 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
         teardown.connection?.cancel()
         teardown.client?.cancel()
 
-        // Fail every parked connect waiter so its async caller unblocks rather than leaking a
-        // suspended continuation. In-flight/queued sends fail fast on their own because the
-        // connection above is now cancelled.
-        let closeError = error ?? ProxyError.connectionFailed("Mux client closed")
-        for continuation in teardown.connectContinuations {
-            continuation.resume(throwing: closeError)
-        }
+        // Cancel the in-flight dial so a coalesced `ensureReady` caller unblocks: its `connectMultiplexer`
+        // observes cancellation (and the just-cancelled client) and throws, failing every awaiter of the
+        // shared task. In-flight/queued sends fail fast on their own because the connection is cancelled.
+        teardown.readyTask?.cancel()
 
         notifyClose?()
     }

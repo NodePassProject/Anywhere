@@ -96,8 +96,9 @@ nonisolated final class NowhereClient {
 
     private struct RegistryState {
         var entries: [Key: NowhereClient] = [:]
-        /// Coalesces concurrent first-time builds for the same key.
-        var pending: [Key: [CheckedContinuation<NowhereClient, Error>]] = [:]
+        /// Coalesces concurrent first-time builds for the same key: the leader stores its in-flight
+        /// build task here and every joiner awaits it, so there is no waiter array of continuations.
+        var pending: [Key: Task<NowhereClient, Error>] = [:]
         var epoch: UInt64 = 0
     }
     private static let registry = Mutex(RegistryState())
@@ -158,63 +159,60 @@ nonisolated final class NowhereClient {
             sessionID: configuration.sessionID
         )
 
-        enum Decision { case existing(NowhereClient); case joined; case build(UInt64) }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NowhereClient, Error>) in
-            let decision: Decision = registry.withLock { state in
-                if let client = state.entries[key] { return .existing(client) }
-                if state.pending[key] != nil {
-                    state.pending[key]?.append(continuation)
-                    return .joined
-                }
-                state.pending[key] = [continuation]      // our own continuation leads; drained below
-                return .build(state.epoch)
+        enum Decision { case existing(NowhereClient); case join(Task<NowhereClient, Error>) }
+        let decision: Decision = registry.withLock { state in
+            if let client = state.entries[key] { return .existing(client) }
+            if let inFlight = state.pending[key] { return .join(inFlight) }
+            let buildEpoch = state.epoch
+            let task = Task<NowhereClient, Error> {
+                try await Self.buildChained(key: key, configuration: configuration,
+                                            buildEpoch: buildEpoch, builder: builder)
             }
-            switch decision {
-            case .existing(let client):
-                continuation.resume(returning: client)
-            case .joined:
-                break                                     // resumed by the build leader's drain
-            case .build(let buildEpoch):
-                Task {
-                    let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
-                    do { builderResult = .success(try await builder()) }
-                    catch { builderResult = .failure(error) }
-                    // Registry insert and waiter drain happen atomically; the coalesced
-                    // continuations resume after the lock is released.
-                    let (queued, outcome, discarded): (
-                        [CheckedContinuation<NowhereClient, Error>],
-                        Result<NowhereClient, Error>,
-                        [ProxyClient]
-                    ) = Self.registry.withLock { state in
-                        let queued = state.pending.removeValue(forKey: key) ?? []
-                        guard state.epoch == buildEpoch else {
-                            let discarded: [ProxyClient]
-                            if case .success((_, let holders)) = builderResult {
-                                discarded = holders
-                            } else {
-                                discarded = []
-                            }
-                            return (queued, .failure(NowhereError.streamClosed), discarded)
-                        }
-                        switch builderResult {
-                        case .success(let (transport, holders)):
-                            let client = NowhereClient(
-                                configuration: configuration,
-                                transport: transport,
-                                chainHolders: holders,
-                                poolKey: key
-                            )
-                            state.entries[key] = client
-                            return (queued, .success(client), [])
-                        case .failure(let error):
-                            return (queued, .failure(error), [])
-                        }
-                    }
-                    for client in discarded { await client.cancel() }
-                    for waiter in queued { waiter.resume(with: outcome) }
-                }
+            state.pending[key] = task           // our task leads; joiners await it
+            return .join(task)
+        }
+        switch decision {
+        case .existing(let client):
+            return client
+        case .join(let task):
+            return try await task.value
+        }
+    }
+
+    /// Runs the coalesced build once for the leader; joiners share its result via `task.value`.
+    /// Clears the pending slot and honors the epoch guard (a `closeAll` mid-build discards the result).
+    private static func buildChained(
+        key: Key,
+        configuration: NowhereConfiguration,
+        buildEpoch: UInt64,
+        builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
+    ) async throws -> NowhereClient {
+        let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
+        do { builderResult = .success(try await builder()) }
+        catch { builderResult = .failure(error) }
+
+        let (outcome, discarded): (Result<NowhereClient, Error>, [ProxyClient]) = registry.withLock { state in
+            state.pending.removeValue(forKey: key)
+            guard state.epoch == buildEpoch else {
+                let discarded = (try? builderResult.get())?.1 ?? []
+                return (.failure(NowhereError.streamClosed), discarded)
+            }
+            switch builderResult {
+            case .success(let (transport, holders)):
+                let client = NowhereClient(
+                    configuration: configuration,
+                    transport: transport,
+                    chainHolders: holders,
+                    poolKey: key
+                )
+                state.entries[key] = client
+                return (.success(client), [])
+            case .failure(let error):
+                return (.failure(error), [])
             }
         }
+        for client in discarded { await client.cancel() }
+        return try outcome.get()
     }
 
     private let configuration: NowhereConfiguration
@@ -420,15 +418,16 @@ nonisolated final class NowhereClient {
     }
 
     static func closeAll() {
-        let (clients, pending): ([NowhereClient], [CheckedContinuation<NowhereClient, Error>]) = registry.withLock { state in
+        let (clients, pending): ([NowhereClient], [Task<NowhereClient, Error>]) = registry.withLock { state in
             let clients = Array(state.entries.values)
             state.entries.removeAll(keepingCapacity: false)
-            let pending = state.pending.values.flatMap { $0 }
+            let pending = Array(state.pending.values)
             state.pending.removeAll(keepingCapacity: false)
+            // Bumping the epoch makes any in-flight build discard its result and fail its joiners.
             state.epoch &+= 1
             return (clients, pending)
         }
-        for continuation in pending { continuation.resume(throwing: NowhereError.streamClosed) }
+        for task in pending { task.cancel() }
         for client in clients {
             client.invalidateSession()
         }

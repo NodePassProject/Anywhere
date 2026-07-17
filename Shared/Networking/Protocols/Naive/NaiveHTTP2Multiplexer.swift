@@ -70,7 +70,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
         /// Send-side parks waiting on a WINDOW_UPDATE that re-opens flow control. Replaces the old
         /// 50 ms flow-control retry poll.
-        var flowResumptions: [CheckedContinuation<Void, Never>] = []
+        var flowGate = H2FlowGate()
     }
     private let lock = Mutex(State())
 
@@ -466,7 +466,7 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
     private func handleWindowUpdate(_ frame: NaiveHTTP2Frame) {
         guard let increment = NaiveHTTP2Framer.parseWindowUpdate(payload: frame.payload) else { return }
-        let parks: [CheckedContinuation<Void, Never>] = lock.withLock { state in
+        lock.withLock { state in
             if frame.streamID == 0 {
                 state.connectionSendWindow += Int(increment)
             } else if state.sendWindows[frame.streamID] != nil {
@@ -474,11 +474,8 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
             }
             // A re-opened window (connection- or stream-level) wakes parked sends; each re-checks its
             // own min(connection, stream) window before building frames.
-            let parks = state.flowResumptions
-            state.flowResumptions.removeAll()
-            return parks
+            state.flowGate.wakeAll()
         }
-        for continuation in parks { continuation.resume() }
     }
 
     /// Acknowledges only bytes actually delivered to the consumer; called by a stream.
@@ -577,15 +574,13 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     /// Suspends until a WINDOW_UPDATE re-opens the send window (or the session closes). Re-checks
     /// under `lock` before parking so a window re-open racing the caller isn't missed.
     private func parkForFlow(stream: NaiveHTTP2Stream) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let resumeNow: Bool = lock.withLock { state in
-                if state.phase == .closed { return true }
-                guard let streamSendWindow = state.sendWindows[stream.streamID] else { return true }
-                if min(state.connectionSendWindow, streamSendWindow) > 0 { return true }
-                state.flowResumptions.append(continuation)
-                return false
+        await H2FlowGate.park {
+            lock.withLock { state -> AsyncStream<Never>? in
+                if state.phase == .closed { return nil }
+                guard let streamSendWindow = state.sendWindows[stream.streamID] else { return nil }
+                if min(state.connectionSendWindow, streamSendWindow) > 0 { return nil }
+                return state.flowGate.enroll()
             }
-            if resumeNow { continuation.resume() }
         }
     }
 
@@ -623,13 +618,11 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
     /// Central close/teardown: flips to `.closed`, cancels the transport/pump, and fails every
     /// waiter, park, and live stream. Idempotent.
     private func teardown(reason: Error) {
-        var parks: [CheckedContinuation<Void, Never>] = []
         var victims: [NaiveHTTP2Stream] = []
         let proceed: Bool = lock.withLock { state in
             guard state.phase != .closed else { return false }
             state.phase = .closed
-            parks = state.flowResumptions
-            state.flowResumptions.removeAll()
+            state.flowGate.wakeAll()
             victims = Array(state.streams.values)
             state.streams.removeAll()
             state.sendWindows.removeAll()
@@ -639,7 +632,6 @@ nonisolated class NaiveHTTP2Multiplexer: Multiplexer, @unchecked Sendable {
 
         transport.cancel()
         completeReadyContinuations(reason)
-        for continuation in parks { continuation.resume() }
         for stream in victims { stream.handleSessionError(reason) }
         refreshPoolSnapshot()
         onClose?()

@@ -24,8 +24,9 @@ nonisolated final class HysteriaClient {
 
     private struct RegistryState {
         var entries: [Key: HysteriaClient] = [:]
-        /// Coalesces concurrent first-time builds for the same key.
-        var pending: [Key: [CheckedContinuation<HysteriaClient, Error>]] = [:]
+        /// Coalesces concurrent first-time builds for the same key: the leader stores its in-flight
+        /// build task here and every joiner awaits it, so there is no waiter array of continuations.
+        var pending: [Key: Task<HysteriaClient, Error>] = [:]
     }
     private static let registry = Mutex(RegistryState())
 
@@ -79,49 +80,51 @@ nonisolated final class HysteriaClient {
             chainSignature: chainSignature
         )
 
-        enum Decision { case existing(HysteriaClient); case joined; case build }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HysteriaClient, Error>) in
-            let decision: Decision = registry.withLock { state in
-                if let client = state.entries[key] { return .existing(client) }
-                if state.pending[key] != nil {
-                    state.pending[key]?.append(continuation)
-                    return .joined
-                }
-                state.pending[key] = [continuation]      // our own continuation leads; drained below
-                return .build
+        enum Decision { case existing(HysteriaClient); case join(Task<HysteriaClient, Error>) }
+        let decision: Decision = registry.withLock { state in
+            if let client = state.entries[key] { return .existing(client) }
+            if let inFlight = state.pending[key] { return .join(inFlight) }
+            let task = Task<HysteriaClient, Error> {
+                try await Self.buildChained(key: key, configuration: configuration, builder: builder)
             }
-            switch decision {
-            case .existing(let client):
-                continuation.resume(returning: client)
-            case .joined:
-                break                                     // resumed by the build leader's drain
-            case .build:
-                Task {
-                    let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
-                    do { builderResult = .success(try await builder()) }
-                    catch { builderResult = .failure(error) }
-                    // Registry insert and waiter drain happen atomically; the coalesced
-                    // continuations resume after the lock is released.
-                    let (queued, outcome): ([CheckedContinuation<HysteriaClient, Error>], Result<HysteriaClient, Error>) = Self.registry.withLock { state in
-                        let queued = state.pending.removeValue(forKey: key) ?? []
-                        switch builderResult {
-                        case .success(let (transport, holders)):
-                            let client = HysteriaClient(
-                                configuration: configuration,
-                                transport: transport,
-                                chainHolders: holders,
-                                poolKey: key
-                            )
-                            state.entries[key] = client
-                            return (queued, .success(client))
-                        case .failure(let error):
-                            return (queued, .failure(error))
-                        }
-                    }
-                    for waiter in queued { waiter.resume(with: outcome) }
-                }
+            state.pending[key] = task           // our task leads; joiners await it
+            return .join(task)
+        }
+        switch decision {
+        case .existing(let client):
+            return client
+        case .join(let task):
+            return try await task.value
+        }
+    }
+
+    /// Runs the coalesced build once for the leader; joiners share its result via `task.value`.
+    private static func buildChained(
+        key: Key,
+        configuration: HysteriaConfiguration,
+        builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
+    ) async throws -> HysteriaClient {
+        let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
+        do { builderResult = .success(try await builder()) }
+        catch { builderResult = .failure(error) }
+
+        let outcome: Result<HysteriaClient, Error> = registry.withLock { state in
+            state.pending.removeValue(forKey: key)
+            switch builderResult {
+            case .success(let (transport, holders)):
+                let client = HysteriaClient(
+                    configuration: configuration,
+                    transport: transport,
+                    chainHolders: holders,
+                    poolKey: key
+                )
+                state.entries[key] = client
+                return .success(client)
+            case .failure(let error):
+                return .failure(error)
             }
         }
+        return try outcome.get()
     }
 
     private let configuration: HysteriaConfiguration

@@ -73,7 +73,7 @@ actor ShadowsocksUDPSession {
 
     // MARK: - Mutable state (actor-isolated)
 
-    /// The async-native datagram transport; `connect()` is awaited in `beginConnect`.
+    /// The async-native datagram transport; `connect()` is awaited in `performConnect`.
     private let asyncTransport: UDPTransport
 
     /// Readiness mirror: `true` while idle/connecting/ready, `false` once failed/cancelled.
@@ -91,9 +91,9 @@ actor ShadowsocksUDPSession {
         }
     }
 
-    /// Awaiting `send` calls parked while the transport dials; resumed (or thrown) once
-    /// `finishConnect` lands. Replaces the old ordered `pendingSends` buffer.
-    private var readyWaiters: [CheckedContinuation<Void, Error>] = []
+    /// Memoized transport dial: `register` (first flow) and `ensureReadyForSend` (first send)
+    /// coalesce onto this one task and share its outcome, so there is no waiter array.
+    private var readyTask: Task<Void, Error>?
 
     private var nextToken: Token = 0
     private var registrations: [Token: Registration] = [:]
@@ -192,7 +192,7 @@ actor ShadowsocksUDPSession {
         tokensByPort[dstPort, default: []].append(token)
 
         if case .idle = state {
-            beginConnect()
+            startConnectIfNeeded()
         }
         return (token, stream)
     }
@@ -256,7 +256,10 @@ actor ShadowsocksUDPSession {
         if case .cancelled = state { return }
         state = .cancelled
         notifyAllFlows(error: ProxyError.connectionFailed("Session cancelled"))
-        resumeReadyWaiters(throwing: ProxyError.connectionFailed("Session cancelled"))
+        // Cancel the in-flight dial so a coalesced `ensureReadyForSend` caller unblocks; the
+        // transport was already cancelled in `cancel()`, so its `connect()` throws.
+        readyTask?.cancel()
+        readyTask = nil
         registrations.removeAll()
         tokensByResponse.removeAll()
         tokensByPort.removeAll()
@@ -264,7 +267,8 @@ actor ShadowsocksUDPSession {
 
     // MARK: - Connect
 
-    /// Parks the caller until the transport is ready; kicks off the dial on first use.
+    /// Suspends the caller until the transport is ready; kicks off the dial on first use. All
+    /// callers share the memoized dial task and its outcome.
     private func ensureReadyForSend() async throws {
         switch state {
         case .ready:
@@ -273,49 +277,50 @@ actor ShadowsocksUDPSession {
             throw error
         case .cancelled:
             throw ProxyError.connectionFailed("Session cancelled")
-        case .idle:
-            beginConnect()
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                readyWaiters.append(c)
-            }
-        case .connecting:
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                readyWaiters.append(c)
-            }
+        case .idle, .connecting:
+            // No suspension between the switch and here, so a live dial task always exists for
+            // these states.
+            guard let task = startConnectIfNeeded() else { return }
+            try await task.value
         }
     }
 
-    private func beginConnect() {
-        guard case .idle = state else { return }
-        state = .connecting
-        let asyncTransport = self.asyncTransport
-        Task { [weak self] in
-            let connectResult: Result<Void, Error>
-            do {
-                try await asyncTransport.connect()
-                connectResult = .success(())
-            } catch {
-                connectResult = .failure(error)
+    /// Ensures the transport dial is in flight and returns its memoized task; idempotent. Returns
+    /// `nil` (starting nothing) once the session is ready or terminal.
+    @discardableResult
+    private func startConnectIfNeeded() -> Task<Void, Error>? {
+        switch state {
+        case .ready, .failed, .cancelled:
+            return nil
+        case .idle, .connecting:
+            if let existing = readyTask { return existing }
+            let task = Task<Void, Error> { [weak self] in
+                guard let self else { throw ProxyError.connectionFailed("Session released") }
+                try await self.performConnect()
             }
-            await self?.finishConnect(connectResult)
+            readyTask = task
+            return task
         }
     }
 
-    /// Completes the dial: arms the receive loop and releases parked senders, or fails the session.
-    private func finishConnect(_ result: Result<Void, Error>) {
-        if case .cancelled = state { return }
-
-        if case .failure(let error) = result {
+    /// Dials the transport once for all coalesced callers, arming the receive loop on success or
+    /// failing the session. Its result flows to every awaiter of the memoized `readyTask`.
+    private func performConnect() async throws {
+        if case .idle = state { state = .connecting }
+        do {
+            try await asyncTransport.connect()
+        } catch {
+            if case .cancelled = state { throw ProxyError.connectionFailed("Session cancelled") }
             state = .failed(error)
             asyncTransport.cancel()
             notifyAllFlows(error: error)
-            resumeReadyWaiters(throwing: error)
-            return
+            throw error
         }
-
+        if case .cancelled = state {
+            throw ProxyError.connectionFailed("Session cancelled")
+        }
         state = .ready
         startReceiveLoop()
-        resumeReadyWaiters(throwing: nil)
     }
 
     private func handleTransportError(_ error: Error) {
@@ -326,7 +331,6 @@ actor ShadowsocksUDPSession {
         state = .failed(error)
         asyncTransport.cancel()
         notifyAllFlows(error: error)
-        resumeReadyWaiters(throwing: error)
     }
 
     /// Drives the datagram downlink into the actor. The loop is unstored: it never retains
@@ -352,18 +356,6 @@ actor ShadowsocksUDPSession {
         }
     }
 
-    /// Resumes every parked sender exactly once — with success (`nil`) or the given error.
-    private func resumeReadyWaiters(throwing error: Error?) {
-        let waiters = readyWaiters
-        readyWaiters.removeAll()
-        for continuation in waiters {
-            if let error {
-                continuation.resume(throwing: error)
-            } else {
-                continuation.resume()
-            }
-        }
-    }
 
     // MARK: - Receive & Route
 

@@ -103,7 +103,7 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
         var h2StreamClosed = false
 
         /// Sends blocked on flow control; the WINDOW_UPDATE handler resumes all, each re-checks its window.
-        var h2FlowResumptions: [CheckedContinuation<Void, Never>] = []
+        var h2FlowGate = H2FlowGate()
         /// Send windows for packet-up streams blocked on flow control, keyed by stream ID.
         var h2PacketStreamWindows: [UInt32: Int] = [:]
 
@@ -427,7 +427,6 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
         // preserve the original critical section; the parked flow-control continuations are
         // resumed only after `withLock` returns.
         let teardown = state.withLock { state -> (
-            resumptions: [CheckedContinuation<Void, Never>],
             h3Download: XHTTPH3RequestStream?,
             h3Upload: XHTTPH3RequestStream?,
             h3Session: HTTP3Multiplexer?,
@@ -454,16 +453,11 @@ nonisolated class XHTTPConnection: @unchecked Sendable {
             xmuxLease = nil
             let upload = state.uploadTransport
             state.uploadTransport = nil
-            // Sends parked on H2 flow control; each re-enters its send, sees the closed stream,
-            // and completes with `.connectionClosed` rather than hanging forever.
-            let flowResumptions = state.h2FlowResumptions
-            state.h2FlowResumptions.removeAll()
-            return (flowResumptions, h3DownloadStream, h3UploadStream, h3Session,
+            // Sends parked on H2 flow control wake here; each re-enters its send, sees the closed
+            // stream, and completes with `.connectionClosed` rather than hanging forever.
+            state.h2FlowGate.wakeAll()
+            return (h3DownloadStream, h3UploadStream, h3Session,
                     sharedH2DownloadStream, sharedH2UploadStream, lease, upload)
-        }
-
-        for continuation in teardown.resumptions {
-            continuation.resume()
         }
 
         download.cancel()
@@ -581,9 +575,9 @@ nonisolated final class XHTTPXMUXMultiplexerClient {
     var leftRequests: Int
     /// Wall-clock retirement time (`hMaxReusableSecs`); nil = never.
     let unreusableAt: CFAbsoluteTime?
-    /// Continuations parked on this connection's in-flight dial; drained (and resumed
-    /// outside the lock) once the leader's dial resolves.
-    var waiters: [CheckedContinuation<XHTTPXMUXMultiplexerPoolable?, Never>] = []
+    /// The in-flight dial for this connection, created by the leader under the pool lock. Every
+    /// joiner awaits its value, so the coalescing needs no waiter array of continuations.
+    var dialTask: Task<XHTTPXMUXMultiplexerPoolable?, Never>?
 
     init(leftUsage: Int, leftRequests: Int, unreusableAt: CFAbsoluteTime?) {
         self.leftUsage = leftUsage
@@ -678,6 +672,9 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
             let client = XHTTPXMUXMultiplexerClient(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
             client.openUsage = 1
             clients.append(client)
+            // Create the memoized dial under the lock so a joiner deciding `.join` on this client
+            // always finds `dialTask` set.
+            client.dialTask = Task { [weak self] in await self?.performDial(for: client) ?? nil }
             return .dial(client)
         }
 
@@ -686,43 +683,21 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
             return makeLease(connection, client)
         case .failed:
             return nil
-        case .dial(let client):
-            return await dialNewConnection(for: client)
-        case .join(let client):
-            // Park behind the leader's in-flight dial. The dial may have resolved between the
-            // decision above and this append, so re-check the state under the lock: a finished
-            // dial is consumed inline rather than parking a waiter that nobody will drain.
-            let connection: XHTTPXMUXMultiplexerPoolable? = await withCheckedContinuation { (continuation: CheckedContinuation<XHTTPXMUXMultiplexerPoolable?, Never>) in
-                enum Parked { case wait; case resume(XHTTPXMUXMultiplexerPoolable?) }
-                let parked: Parked = clients.withLock { _ in
-                    switch client.state {
-                    case .dialing:
-                        client.waiters.append(continuation)
-                        return .wait
-                    case .ready:
-                        return .resume(client.connection)
-                    case .failed:
-                        return .resume(nil)
-                    }
-                }
-                if case .resume(let connection) = parked {
-                    continuation.resume(returning: connection)
-                }
-            }
-            guard let connection else { return nil }
+        case .dial(let client), .join(let client):
+            // Leader and joiners both await the client's memoized dial task (the leader created it
+            // under the lock in the decision above, so a joiner always finds it set).
+            guard let connection = await client.dialTask?.value else { return nil }
             return makeLease(connection, client)
         }
     }
 
-    /// Dials a new pooled connection for `client`, then resolves this leader's lease and
-    /// drains the waiters that joined the dial. The dial runs outside the lock, and the
-    /// coalesced continuations are resumed only after `withLock` returns.
-    private func dialNewConnection(for client: XHTTPXMUXMultiplexerClient) async -> XHTTPXMUXMultiplexerLease? {
+    /// The memoized dial body: dials a new pooled connection, resolves the client's state, and
+    /// evicts an empty pool on failure. Its result is shared by the leader and every joiner via
+    /// `client.dialTask.value`.
+    private func performDial(for client: XHTTPXMUXMultiplexerClient) async -> XHTTPXMUXMultiplexerPoolable? {
         let connection = await newConnection()
         var drained = false
-        let waiters: [CheckedContinuation<XHTTPXMUXMultiplexerPoolable?, Never>] = clients.withLock { clients in
-            let waiters = client.waiters
-            client.waiters.removeAll()
+        clients.withLock { clients in
             if let connection {
                 client.connection = connection
                 client.state = .ready
@@ -731,14 +706,10 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
                 clients.removeAll { $0 === client }
                 drained = clients.isEmpty
             }
-            return waiters
         }
-        for waiter in waiters { waiter.resume(returning: connection) }
         // A failed first dial leaves an empty pool; evict the manager shell.
         if drained { registry?.evictIfEmpty(self) }
-
-        guard let connection else { return nil }
-        return makeLease(connection, client)
+        return connection
     }
 
     /// Selects a reusable pooled connection (lock held); nil ⇒ dial a new connection.
@@ -909,7 +880,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
         var peerConnWindow = 65535
         var peerInitialWindow = 65535
         var maxFrameSize = 16384
-        var flowResumptions: [CheckedContinuation<Void, Never>] = []
+        var flowGate = H2FlowGate()
 
         // Local receive-window accounting (replenished as sessions consume data).
         var connReceiveConsumed = 0
@@ -1107,23 +1078,19 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     private func handleConnWindowUpdate(_ payload: Data) {
         guard payload.count >= 4 else { return }
         let increment = Int(readUInt32(payload) & 0x7FFFFFFF)
-        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+        state.withLock { state in
             state.peerConnWindow += increment
-            let resumptions = state.flowResumptions; state.flowResumptions.removeAll()
-            return resumptions
+            state.flowGate.wakeAll()
         }
-        for continuation in resumptions { continuation.resume() }
     }
 
     private func handleStreamWindowUpdate(streamId: UInt32, payload: Data) {
         guard payload.count >= 4 else { return }
         let inc = Int(readUInt32(payload) & 0x7FFFFFFF)
-        let resumptions: [CheckedContinuation<Void, Never>] = state.withLock { state in
+        state.withLock { state in
             state.streams[streamId]?.sendWindow += inc
-            let resumptions = state.flowResumptions; state.flowResumptions.removeAll()
-            return resumptions
+            state.flowGate.wakeAll()
         }
-        for continuation in resumptions { continuation.resume() }
     }
 
     /// Lock held. Hands buffered data/EOF/error to a waiting receiver; returns the effect to run after unlock.
@@ -1219,14 +1186,12 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     /// Suspends until a WINDOW_UPDATE re-opens this stream's send window (or the connection closes).
     /// Re-checks under the lock before parking so a window re-open racing the caller isn't missed.
     private func parkForFlow(stream: XHTTPH2Stream) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let resumeNow: Bool = state.withLock { state in
-                if state.closedFlag { return true }
-                if min(state.peerConnWindow, stream.sendWindow) > 0 { return true }
-                state.flowResumptions.append(continuation)
-                return false
+        await H2FlowGate.park {
+            state.withLock { state -> AsyncStream<Never>? in
+                if state.closedFlag { return nil }
+                if min(state.peerConnWindow, stream.sendWindow) > 0 { return nil }
+                return state.flowGate.enroll()
             }
-            if resumeNow { continuation.resume() }
         }
     }
 
@@ -1289,22 +1254,20 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     /// receive (e.g. a clean transport FIN of the shared H2 connection); a non-nil error
     /// surfaces as a failure.
     private func failAll(_ error: Error?) {
-        let handoff: (pendings: [CheckedContinuation<Data?, Error>], resumptions: [CheckedContinuation<Void, Never>])? = state.withLock { state in
+        let pendings: [CheckedContinuation<Data?, Error>]? = state.withLock { state in
             if state.closedFlag { return nil }
             state.closedFlag = true
             let pendings = state.streams.values.compactMap { $0.pendingReceive }
             for stream in state.streams.values { stream.pendingReceive = nil }
             state.streams.removeAll()
-            // Sends parked on flow control; each re-enters `sendData`, sees the closed connection,
-            // and throws `.connectionClosed` rather than hanging forever.
-            let resumptions = state.flowResumptions
-            state.flowResumptions.removeAll()
-            return (pendings: pendings, resumptions: resumptions)
+            // Sends parked on flow control wake here; each re-enters `sendData`, sees the closed
+            // connection, and throws `.connectionClosed` rather than hanging forever.
+            state.flowGate.wakeAll()
+            return pendings
         }
-        guard let handoff else { return }
+        guard let pendings else { return }
         frameReader.reset()
-        for continuation in handoff.resumptions { continuation.resume() }
-        for pending in handoff.pendings {
+        for pending in pendings {
             if let error { pending.resume(throwing: error) } else { pending.resume(returning: nil) }
         }
         transport.cancel()

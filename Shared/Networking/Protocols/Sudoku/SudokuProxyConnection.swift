@@ -1238,7 +1238,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         var stoppedPreparedMaintenance = false
         var generation: UInt64 = 0
         var nextWaiterID: UInt64 = 0
-        var waiters: [(id: UInt64, cont: CheckedContinuation<Void, Never>)] = []
+        var waiters: [(id: UInt64, cont: AsyncStream<Never>.Continuation)] = []
     }
     private let state = Mutex(State())
 
@@ -1271,7 +1271,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     // MARK: Async broadcast (replaces the single NSCondition)
 
     /// Bumps `generation` and returns every parked waiter to resume (outside the lock).
-    private func drainWaitersLocked(_ s: inout State) -> [CheckedContinuation<Void, Never>] {
+    private func drainWaitersLocked(_ s: inout State) -> [AsyncStream<Never>.Continuation] {
         s.generation &+= 1
         let conts = s.waiters.map { $0.cont }
         s.waiters.removeAll(keepingCapacity: true)
@@ -1288,22 +1288,18 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
             s.nextWaiterID &+= 1
             return id
         }
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                let resumeNow = state.withLock { s -> Bool in
-                    if s.generation != observed { return true }
-                    s.waiters.append((id: id, cont: cont))
-                    return false
-                }
-                if resumeNow { cont.resume() }
-            }
-        } onCancel: {
-            let cont = state.withLock { s -> CheckedContinuation<Void, Never>? in
-                guard let index = s.waiters.firstIndex(where: { $0.id == id }) else { return nil }
-                return s.waiters.remove(at: index).cont
-            }
-            cont?.resume()
+        // Enroll a finishing `AsyncStream` under the lock, re-checking the generation so a broadcast
+        // racing in before registration isn't lost. A drain `finish()`es it; a cancellation ends the
+        // `for await` too, and the post-loop cleanup removes a still-registered (cancelled) waiter.
+        let stream: AsyncStream<Never>? = state.withLock { s -> AsyncStream<Never>? in
+            if s.generation != observed { return nil }
+            let (stream, cont) = AsyncStream.makeStream(of: Never.self)
+            s.waiters.append((id: id, cont: cont))
+            return stream
         }
+        guard let stream else { return }
+        for await _ in stream {}
+        state.withLock { s in s.waiters.removeAll { $0.id == id } }
     }
 
     /// Suspends until a broadcast or `deadline`, whichever comes first.
@@ -1324,7 +1320,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
         let queueLimit = max(sudokuHTTPMaskMaxQueueBytes, data.count)
         while true {
             try Task.checkCancellation()
-            var toResume: [CheckedContinuation<Void, Never>] = []
+            var toResume: [AsyncStream<Never>.Continuation] = []
             let step: Step<Void> = state.withLock { s in
                 if s.closed || s.writeClosed { return .fail(SudokuNativeError.closed) }
                 if s.txQueue.count + data.count > queueLimit { return .wait(s.generation) }
@@ -1332,7 +1328,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 toResume = drainWaitersLocked(&s)
                 return .done(())
             }
-            for cont in toResume { cont.resume() }
+            for cont in toResume { cont.finish() }
             switch step {
             case .done: return
             case .fail(let error): throw error
@@ -1344,7 +1340,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     func receive(max: Int) async throws -> Data {
         while true {
             try Task.checkCancellation()
-            var toResume: [CheckedContinuation<Void, Never>] = []
+            var toResume: [AsyncStream<Never>.Continuation] = []
             let step: Step<Data> = state.withLock { s in
                 if !s.rxQueue.isEmpty {
                     let out = s.rxQueue.read(max: max)
@@ -1358,7 +1354,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 }
                 return .wait(s.generation)
             }
-            for cont in toResume { cont.resume() }
+            for cont in toResume { cont.finish() }
             switch step {
             case .done(let out): return out
             case .fail(let error): throw error
@@ -1522,27 +1518,27 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     }
 
     private func markReadEOF() {
-        let conts = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+        let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
             guard !s.readEOF else { return [] }
             s.readEOF = true
             return drainWaitersLocked(&s)
         }
-        for cont in conts { cont.resume() }
+        for cont in conts { cont.finish() }
     }
 
     private func completeWrite(_ error: Error?) {
-        let conts = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+        let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
             guard !s.writeDone else { return [] }
             s.writeError = error
             s.writeDone = true
             return drainWaitersLocked(&s)
         }
-        for cont in conts { cont.resume() }
+        for cont in conts { cont.finish() }
     }
 
     private func markClosed(fatal: Bool) {
         var stopPreparedMaintenance = false
-        let conts = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+        let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
             s.fatal = s.fatal || fatal
             s.closed = true
             if !s.stoppedPreparedMaintenance {
@@ -1552,7 +1548,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
             return drainWaitersLocked(&s)
         }
         // Wake every waiter (send/receive/waitReady/the loops), then stop the loops.
-        for cont in conts { cont.resume() }
+        for cont in conts { cont.finish() }
         pullTask?.cancel()
         pushTask?.cancel()
         if stopPreparedMaintenance {
@@ -1589,11 +1585,11 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 guard opened.status == 200 else { throw SudokuNativeError.connectionFailed("HTTPMask pull status \(opened.status)") }
                 retryCount = 0
                 retryDelayMs = 10
-                let conts = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+                let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
                     s.pullReady = true
                     return drainWaitersLocked(&s)
                 }
-                for cont in conts { cont.resume() }
+                for cont in conts { cont.finish() }
                 var sawAny = false
                 var pollLine = Data()
                 while true {
@@ -1636,7 +1632,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
     private func enqueueRX(_ data: Data) async {
         let queueLimit = max(sudokuHTTPMaskMaxQueueBytes, data.count)
         while true {
-            var toResume: [CheckedContinuation<Void, Never>] = []
+            var toResume: [AsyncStream<Never>.Continuation] = []
             let step: Step<Void> = state.withLock { s in
                 if s.closed { return .done(()) }
                 if s.rxQueue.count + data.count > queueLimit { return .wait(s.generation) }
@@ -1644,7 +1640,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 toResume = drainWaitersLocked(&s)
                 return .done(())
             }
-            for cont in toResume { cont.resume() }
+            for cont in toResume { cont.finish() }
             switch step {
             case .done, .fail: return
             case .wait(let generation): await waitSignal(observed: generation)
@@ -1686,7 +1682,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
             }
 
             // 3. Read the batch (or determine we should send the FIN).
-            var toResume: [CheckedContinuation<Void, Never>] = []
+            var toResume: [AsyncStream<Never>.Continuation] = []
             let (batch, shouldFinishWrite, isClosed): (Data?, Bool, Bool) = state.withLock { s in
                 if s.closed { return (nil, false, true) }
                 if s.txQueue.isEmpty { return (nil, s.writeClosed, false) }
@@ -1696,7 +1692,7 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 toResume = drainWaitersLocked(&s)
                 return (batch, false, false)
             }
-            for cont in toResume { cont.resume() }
+            for cont in toResume { cont.finish() }
             if isClosed { return }
 
             if shouldFinishWrite {
@@ -1726,11 +1722,11 @@ nonisolated final class SudokuHTTPMaskTransport: @unchecked Sendable {
                 let opened = try await request(method: "POST", requestPath: pushPath, authPath: "/api/v1/upload", contentType: contentType, body: body)
                 _ = try await opened.readAll(limit: 256)
                 guard opened.status == 200 else { throw SudokuNativeError.connectionFailed("HTTPMask push status \(opened.status)") }
-                let conts = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+                let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
                     s.pushReady = true
                     return drainWaitersLocked(&s)
                 }
-                for cont in conts { cont.resume() }
+                for cont in conts { cont.finish() }
             } catch {
                 markClosed(fatal: true)
                 return
