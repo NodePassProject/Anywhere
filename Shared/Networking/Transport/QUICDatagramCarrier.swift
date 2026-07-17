@@ -14,17 +14,25 @@ nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
 /// Carries QUIC's UDP datagrams for ngtcp2, backed by iOS 26's `NetworkConnection`.
 ///
-/// The public surface is synchronous and runs on the owner-provided `queue`, while
-/// a driver `Task` owns the connection inside `withNetworkConnection`. The path
-/// callbacks (`onPathDown`/`onBetterPath`/`onReady`) map to
-/// `onViabilityUpdate`/`onBetterPathUpdate`/`onStateUpdate`; `currentInterfaceType`
-/// is cached from the path so it stays synchronously readable on `queue`.
-nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
+/// An `actor` on the ngtcp2 bridge's serial executor — the same isolation domain as the owning
+/// ``QUICConnection``, so the owner reaches its synchronous surface (`send`/`connect`/`close`/…)
+/// via `assumeIsolated` (both are already on the bridge queue), exactly as `QUICConnection` enters
+/// its own ngtcp2 C callbacks. A driver `Task` owns the `NetworkConnection` off the executor and
+/// hops every state mutation back on via `bridge.enqueue` + `assumeIsolated`. The path callbacks
+/// (`onPathDown`/`onBetterPath`/`onReady`) map to `onViabilityUpdate`/`onBetterPathUpdate`/
+/// `onStateUpdate`; `currentInterfaceType` is cached so it stays synchronously readable.
+actor QUICDatagramCarrier {
+
+    /// Adopts the ngtcp2 bridge's serial executor, so this actor's isolation domain *is* the bridge
+    /// queue — shared with ``QUICConnection`` and the C callbacks that drive both.
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        bridge.executor.asUnownedSerialExecutor()
+    }
 
     private typealias QUICError = QUICConnection.QUICError
 
-    /// The ngtcp2 concurrency boundary; every method and callback hops onto its serial queue via
-    /// `bridge.enqueue`, so the raw queue never leaks for unguarded access.
+    /// The ngtcp2 concurrency boundary; vends this actor's executor and the queue the driver hops
+    /// back onto.
     private let bridge: NGTCP2ConcurrencyBridge
 
     /// Owns the `NetworkConnection` for its whole lifetime; cancelling it tears
@@ -162,8 +170,9 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
 
     // MARK: - Driver
 
-    /// Weak handle the driver task and its loops hold instead of the carrier itself.
-    private struct WeakCarrier: @unchecked Sendable {
+    /// Weak handle the driver task and its loops hold instead of the carrier itself, so the driver
+    /// never keeps the actor alive.
+    private struct WeakCarrier: Sendable {
         weak var value: QUICDatagramCarrier?
     }
 
@@ -178,19 +187,21 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
     ) async {
         do {
             try await withNetworkConnection(to: endpoint, using: { UDP() }) { connection in
+                // Each hop lands on the bridge queue (`bridge.enqueue`), where `assumeIsolated`
+                // enters the actor synchronously — the queue is its executor.
                 connection.onStateUpdate { connection, state in
                     switch state {
                     case .ready:
                         // Capture the interface here so it's cached before `onReady`
                         // fires (proactive migration reads it immediately).
                         let interfaceType = connection.currentPath?.availableInterfaces.first?.type
-                        bridge.enqueue { carrier.value?.handleReady(interfaceType: interfaceType) }
+                        bridge.enqueue { carrier.value?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
                     case .failed(let error):
                         let code = TransportError.errnoCode(from: error)
-                        bridge.enqueue { carrier.value?.deliverError(code) }
+                        bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
                     case .waiting(let error):
                         let code = TransportError.errnoCode(from: error)
-                        bridge.enqueue { carrier.value?.handleWaiting(code) }
+                        bridge.enqueue { carrier.value?.assumeIsolated { $0.handleWaiting(code) } }
                     default:
                         break  // .setup, .preparing, .cancelled
                     }
@@ -200,17 +211,17 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 // tears down instead of waiting on its PTO/idle timers.
                 connection.onViabilityUpdate { _, viable in
                     guard !viable else { return }
-                    bridge.enqueue { carrier.value?.handleViabilityLost() }
+                    bridge.enqueue { carrier.value?.assumeIsolated { $0.handleViabilityLost() } }
                 }
                 // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
                 // proactive migration before the current path degrades.
                 connection.onBetterPathUpdate { _, better in
                     guard better else { return }
-                    bridge.enqueue { carrier.value?.handleBetterPath() }
+                    bridge.enqueue { carrier.value?.assumeIsolated { $0.handleBetterPath() } }
                 }
                 connection.onPathUpdate { _, path in
                     let interfaceType = path.availableInterfaces.first?.type
-                    bridge.enqueue { carrier.value?.cachedInterfaceType = interfaceType }
+                    bridge.enqueue { carrier.value?.assumeIsolated { $0.cachedInterfaceType = interfaceType } }
                 }
 
                 try await withThrowingTaskGroup(of: Void.self) { group in
@@ -223,7 +234,7 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
         } catch {
             // Connection ended (cancelled or failed).
         }
-        bridge.enqueue { carrier.value?.releaseFlowCount() }
+        bridge.enqueue { carrier.value?.assumeIsolated { $0.releaseFlowCount() } }
     }
 
     /// Drains ordered datagram sends; errors drop the packet (ngtcp2 retransmits).
@@ -246,12 +257,12 @@ nonisolated final class QUICDatagramCarrier: @unchecked Sendable {
                 let message = try await connection.receive()
                 let data = message.content
                 if !data.isEmpty {
-                    bridge.enqueue { carrier.value?.deliverPacket(data) }
+                    bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverPacket(data) } }
                 }
             }
         } catch {
             let code = TransportError.errnoCode(from: error)
-            bridge.enqueue { carrier.value?.deliverError(code) }
+            bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
             throw error
         }
     }

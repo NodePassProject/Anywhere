@@ -35,40 +35,43 @@ nonisolated struct TrafficByteCounts {
 
 // MARK: - TunnelStack
 
-/// Coordinator for the tunnel's data plane: TCP/ICMP feed the vendored lwIP
-/// stack on ``lwipQueue``; UDP is handled entirely in Swift on ``udpQueue``
-/// (lwIP is built `LWIP_UDP 0`).
 nonisolated class TunnelStack {
 
     // MARK: Properties
-
-    /// The lwIP engine's concurrency boundary: owns the serial executor everything
-    /// lwIP-touching runs on, the async hop the relay drivers suspend across, and the
-    /// per-PCB `TCPConnection` token lifetime. lwIP is not thread-safe, so the executor's
-    /// single queue is the only place `tcp_*`/`pbuf_*` calls and callbacks may run.
+    
     let lwipBridge = LWIPConcurrencyBridge(label: AWCore.Identifier.lwipQueue)
+    
+    var udpPlane: UDPPlane!
 
-    /// Serial queue for all lwIP operations, vended by ``lwipBridge``'s custom executor.
-    var lwipQueue: DispatchQueue { lwipBridge.queue }
+    /// Wakes ``drainOutputLoop`` when a producer buffers packets while no drain is in flight.
+    /// `.bufferingNewest(1)` coalesces a burst of kicks into a single pending wake — the drain
+    /// loop empties the whole buffer each pass, so one wake suffices. Replaces the former
+    /// `outputQueue.async` hop with an async-native single-consumer signal.
+    let outputKick: AsyncStream<Void>
+    private let outputKickContinuation: AsyncStream<Void>.Continuation
 
-    /// Serial queue for TunnelStack's TUN-side UDP intake (parse/route/registry insert). The
-    /// per-flow data plane runs off this queue in the independent ``UDPFlow`` actors.
-    let udpQueue = DispatchQueue(label: AWCore.Identifier.udpQueue,
-                                 qos: .userInitiated,
-                                 autoreleaseFrequency: .workItem)
+    /// The single output-drain consumer: awaits ``outputKick`` and drains the buffer to utun off
+    /// the lwIP/UDP queues so producers never block on `writePackets`. Owned by the stack:
+    /// ``start(packetFlow:configuration:)`` spawns it, ``stop()`` cancels it. One consumer means
+    /// the drain stays serial without a queue.
+    var outputDrainTask: Task<Void, Never>?
 
-    /// Queue for writing packets back to the tunnel.
-    let outputQueue = DispatchQueue(label: AWCore.Identifier.outputQueue,
-                                    qos: .userInitiated,
-                                    autoreleaseFrequency: .workItem)
+    /// The TUN read loop: awaits each inbound batch, partitions it, and feeds lwIP + the UDP plane.
+    /// A single task, so the next read waits on both sub-batches (utun paces us). Owned by the
+    /// stack; ``stop()`` cancels it.
+    var readTask: Task<Void, Never>?
+
+    /// Ordered command channel to ``udpPlane`` for mux/reclaim. lwipQueue producers `yield` (which
+    /// preserves order), and a single driver applies them to the actor in that order — so a
+    /// restart's reclaim-then-set never races. `.bufferingOldest` (unbounded) keeps every command.
+    let planeCommands: AsyncStream<UDPPlaneCommand>
+    private let planeCommandContinuation: AsyncStream<UDPPlaneCommand>.Continuation
+    /// The single plane-command driver; owned by the stack, cancelled in ``stop()``.
+    var planeCommandTask: Task<Void, Never>?
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
-
-    /// Identity of the default outbound, derived from the app's persisted
-    /// selection so a chain resolves to its stable chain id, not the
-    /// composite's throwaway id. Recomputed on every start/switch. Owned by
-    /// ``lwipQueue``; udpQueue readers use ``UDPConfig/defaultRouteTarget``.
+    
     var defaultRouteTarget: RouteTarget = .direct
 
     static let ipv4Proto = NSNumber(value: AF_INET)
@@ -86,8 +89,7 @@ nonisolated class TunnelStack {
         /// uses a `.none` deallocator). Index-aligned with ``packets``;
         /// releases fire on ``lwipQueue``.
         var releases: [PendingRelease] = []
-        /// True while a drain loop is running on ``outputQueue``; appenders only
-        /// kick a new loop when false.
+        /// True while ``outputDrainTask`` is draining; appenders only wake it when false.
         var drainInFlight = false
     }
     let outputBuffer = Mutex(OutputBufferState())
@@ -139,16 +141,12 @@ nonisolated class TunnelStack {
     /// on device wake.
     let scheduler = TunnelScheduler()
 
-    var timeoutTimer: DispatchSourceTimer?
-
-    /// True while ``timeoutTimer`` is suspended. Mutated only on ``lwipQueue``
-    /// so it tracks the suspend count exactly — releasing a suspended
-    /// `DispatchSource` traps.
-    var lwipTickSuspended = false
-
-    /// Per-target traffic counters. Payload bytes, not wire bytes (headers,
-    /// ACKs, retransmits excluded). Written from ``lwipQueue``/``udpQueue``,
-    /// read from the NE message handler — every access goes through the Mutex.
+    /// lwIP's periodic timeout tick (retransmit, persist, TIME_WAIT), vended by ``lwipBridge`` so
+    /// the `DispatchSourceTimer` stays in the bridge layer. Self-suspends when lwIP's timeout list
+    /// drains and re-arms on fresh input; ``BridgeTimer`` keeps the suspend count balanced. Owned
+    /// by ``lwipQueue``.
+    var lwipTick: BridgeTimer?
+    
     private let _byteCounts = Mutex(TrafficByteCounts())
     func addBytesIn(_ n: Int64, target: RouteTarget) {
         _byteCounts.withLock { $0.add(bytesIn: n, target: target) }
@@ -191,27 +189,17 @@ nonisolated class TunnelStack {
         }
     }
 
-    /// Mux manager for multiplexing UDP flows (created when Vision flow is active). Read by the
-    /// independent ``UDPFlow`` actors, so it is `Mutex`-guarded.
-    private let _udpMultiplexerPool = Mutex<VLESSVisionUDPMultiplexerPool?>(nil)
-    var udpMultiplexerPool: VLESSVisionUDPMultiplexerPool? {
-        get { _udpMultiplexerPool.withLock { $0 } }
-        set { _udpMultiplexerPool.withLock { $0 = newValue } }
-    }
-
     // MARK: - UDP Config Snapshot
     //
-    // The UDP path on ``udpQueue`` needs config that ``lwipQueue`` owns and
-    // mutates; reading the stored properties cross-queue would race, so
+    // The UDP data plane (``udpPlane``) needs config that ``lwipQueue`` owns and
+    // mutates; reading the stored properties cross-domain would race, so
     // ``lwipQueue`` publishes an immutable snapshot through a Mutex
     // on every change.
 
     /// Immutable view of the config the UDP path needs, published on change.
     struct UDPConfig {
         let configuration: ProxyConfiguration?
-        /// `configuration?.id`, precomputed to avoid a cross-queue read.
         let configurationID: UUID?
-        /// Mirror of ``TunnelStack/defaultRouteTarget`` for udpQueue readers.
         let defaultRouteTarget: RouteTarget
         let blockUDP: Bool
         let quicPolicy: QUICPolicy
@@ -295,14 +283,6 @@ nonisolated class TunnelStack {
         }
     }
 
-    /// Active UDP flows keyed by 5-tuple. `Mutex`-guarded so the independent ``UDPFlow`` actors
-    /// can deregister themselves off ``udpQueue``.
-    let udpFlows = Mutex<[UDPFlowKey: UDPFlow]>([:])
-
-    /// Rising-edge latch so a sustained flow storm logs once, not per evicted
-    /// flow. Owned by ``udpQueue``.
-    var udpFlowCapWarned = false
-
     /// Rising-edge latch so a sustained TCP connection storm logs once, not per
     /// refused connection. Owned by ``lwipQueue``.
     var tcpConnectionCapWarned = false
@@ -310,19 +290,6 @@ nonisolated class TunnelStack {
     /// Rising-edge latch for SYNs shed by the flow budget / exhaustion brake.
     /// Owned by ``lwipQueue``.
     var flowShedWarned = false
-
-    /// Rising-edge latch for UDP flows shed by the flow budget / exhaustion
-    /// brake. Owned by ``udpQueue``.
-    var udpShedWarned = false
-
-    /// Whether the UDP flow cap is shrunk to
-    /// ``TunnelLimits/udpMaxFlowsUnderPressure``; see ``currentUDPFlowCap()``.
-    /// Owned by ``udpQueue``.
-    var udpPressureShedding = false
-
-    /// Shared Shadowsocks UDP sessions keyed by configuration id: one session serves every flow
-    /// for that configuration. `Mutex`-guarded (resolved by the independent ``UDPFlow`` actors).
-    let ssUDPSessions = Mutex<[UUID: ShadowsocksUDPSession]>([:])
 
     /// Domain-based DNS routing (loaded from App Group routing.json).
     let domainRouter: DomainRouter
@@ -343,65 +310,35 @@ nonisolated class TunnelStack {
         self.fakeIPPool = fakeIPPool
         self.domainRouter = domainRouter
         self.connectionRouter = ConnectionRouter(fakeIPPool: fakeIPPool, domainRouter: domainRouter)
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        self.outputKick = stream
+        self.outputKickContinuation = continuation
+        let (commandStream, commandContinuation) = AsyncStream.makeStream(of: UDPPlaneCommand.self)
+        self.planeCommands = commandStream
+        self.planeCommandContinuation = commandContinuation
+        // Assigned last: the plane back-references the (now fully-initialized) stack.
+        self.udpPlane = UDPPlane(stack: self)
+    }
+
+    /// Kicks the output-drain consumer. Called by producers that flipped ``drainInFlight`` true.
+    func kickOutputDrain() {
+        outputKickContinuation.yield(())
+    }
+
+    /// Submits a mux/reclaim command to the ordered plane driver. Call on ``lwipQueue`` so commands
+    /// stay ordered relative to each other.
+    func submitPlaneCommand(_ command: UDPPlaneCommand) {
+        planeCommandContinuation.yield(command)
+    }
+
+    /// Ends the plane-command channel so the driver drains its buffered commands and finishes.
+    func finishPlaneCommands() {
+        planeCommandContinuation.finish()
     }
 
     /// Re-applies tunnel network settings via `setTunnelNetworkSettings`,
     /// resetting the virtual interface and flushing the OS DNS cache.
     var onTunnelSettingsNeedReapply: (() -> Void)?
-
-    // MARK: - Shadowsocks UDP Sessions
-
-    /// Returns the shared SS UDP session for `configuration`, creating or
-    /// replacing terminal ones; sharing one sessionID + socket across flows
-    /// restores full-cone NAT. Must be called on `udpQueue`.
-    func shadowsocksUDPSession(for configuration: ProxyConfiguration) -> Result<ShadowsocksUDPSession, Error> {
-        ssUDPSessions.withLock { sessions in
-            if let existing = sessions[configuration.id], existing.isUsable {
-                return .success(existing)
-            }
-            sessions.removeValue(forKey: configuration.id)
-
-            guard case .shadowsocks(let password, let method) = configuration.outbound else {
-                return .failure(ProxyError.protocolError("Shadowsocks password not set"))
-            }
-            guard let cipher = ShadowsocksCipher(method: method) else {
-                return .failure(ShadowsocksError.invalidMethod(method))
-            }
-
-            let mode: ShadowsocksUDPSession.Mode
-            if cipher.isSS2022 {
-                guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
-                    return .failure(ShadowsocksError.invalidPSK)
-                }
-                if cipher == .blake3chacha20poly1305 {
-                    mode = .ss2022ChaCha(psk: pskList.last!)
-                } else {
-                    mode = .ss2022AES(cipher: cipher, pskList: pskList)
-                }
-            } else {
-                let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
-                mode = .legacy(cipher: cipher, masterKey: masterKey)
-            }
-
-            let session = ShadowsocksUDPSession(
-                mode: mode,
-                serverHost: configuration.serverAddress,
-                serverPort: configuration.serverPort
-            )
-            sessions[configuration.id] = session
-            return .success(session)
-        }
-    }
-
-    /// Cancels and forgets every SS UDP session.
-    func purgeShadowsocksUDPSessions() {
-        let sessions = ssUDPSessions.withLock { sessions -> [ShadowsocksUDPSession] in
-            let all = Array(sessions.values)
-            sessions.removeAll()
-            return all
-        }
-        for session in sessions { session.cancel() }
-    }
 
     // MARK: - Runtime Configuration
 
@@ -427,13 +364,13 @@ nonisolated class TunnelStack {
         publishReflector()
         publishOutboundRoutingContext(configuration: configuration)
 
-        udpQueue.async { [self] in
-            if configuration.outboundProtocol == .vless {
-                udpMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration)
-            } else {
-                udpMultiplexerPool = nil
-            }
-        }
+        // Build the Vision mux pool here on lwipQueue (which owns `configuration`), then hand it
+        // to the UDP plane through the ordered command channel (so it can't be reordered against a
+        // restart's reclaim).
+        let multiplexerPool = configuration.outboundProtocol == .vless
+            ? VLESSVisionUDPMultiplexerPool(configuration: configuration)
+            : nil
+        submitPlaneCommand(.setMultiplexerPool(multiplexerPool))
 
         // Only rule mode consults the router; global and direct reset it and
         // rely on the default outbound.

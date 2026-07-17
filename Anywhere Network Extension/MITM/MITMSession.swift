@@ -926,11 +926,15 @@ nonisolated final class MITMSession {
         var description: String { "upstream TLS handshake timed out" }
     }
 
-    /// One-shot race gate between a deferred upstream handshake and its deadline; `settled`/`task` are
-    /// touched only on lwipQueue, so the box is safely `@unchecked Sendable`.
-    private final class HandshakeDisarm: @unchecked Sendable {
-        var settled = false
-        var task: Task<Void, Never>?
+    /// One-shot winner gate for the deferred-handshake race, shared by the deadline hop and the
+    /// disarm closure. A plain `Sendable` class (its `Atomic` flag makes it concurrency-safe) — the
+    /// replacement for the former `@unchecked Sendable` box whose `settled` was an unsynchronized
+    /// `var` trusted to queue confinement. `claim` wins exactly once.
+    private final class HandshakeRaceGate: Sendable {
+        private let settled = Atomic(false)
+        func claim() -> Bool {
+            settled.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged
+        }
     }
 
     /// Bounds a deferred upstream TLS handshake. The per-connection `handshakeTimer` is cancelled once
@@ -938,22 +942,20 @@ nonisolated final class MITMSession {
     /// 300–600 s idle timer, letting a black-holing origin park the connection for minutes. The deadline
     /// is a cancellable `Task`+`Task.sleep`; the returned `disarm` closure — called on lwipQueue by the
     /// completion — returns `true` if the handshake won the race, `false` if the timeout already fired
-    /// (first to set `settled` wins), and cancels the sleep. lwipQueue only.
+    /// (``HandshakeRaceGate/claim`` picks the single winner).
     private func armUpstreamHandshakeTimeout(_ onTimeout: @escaping () -> Void) -> () -> Bool {
-        let disarm = HandshakeDisarm()
-        disarm.task = Task { [weak self] in
+        let gate = HandshakeRaceGate()
+        let task = Task { [weak self] in
             try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
             guard !Task.isCancelled, let self else { return }
             self.lwipBridge.enqueue {
-                guard !self.torn, !disarm.settled else { return }
-                disarm.settled = true
+                guard !self.torn, gate.claim() else { return }
                 onTimeout()
             }
         }
-        return { [disarm] in
-            if disarm.settled { return false }
-            disarm.settled = true
-            disarm.task?.cancel()
+        return { [gate, task] in
+            guard gate.claim() else { return false }
+            task.cancel()
             return true
         }
     }

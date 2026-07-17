@@ -59,9 +59,7 @@ nonisolated final class DNSResolver: Sendable {
 
     private let state = Mutex(State())
     
-    private static let blockingBridge = BlockingSyscallConcurrencyBridge(
-        label: AWCore.Identifier.dnsResolveQueue
-    )
+    private static let blockingBridge = DNSSyscallConcurrencyBridge()
 
     private init() {}
 

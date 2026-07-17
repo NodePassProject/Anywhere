@@ -12,8 +12,8 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
     /// This connection's serial executor. Everything ngtcp2-touching runs on its queue.
     let executor: BridgeExecutor
 
-    init(label: String) {
-        self.executor = BridgeExecutor(label: label)
+    init() {
+        self.executor = BridgeExecutor(label: "com.argsment.Anywhere.NGTCP2ConcurrencyBridge")
     }
 
     /// The ngtcp2 serial queue, vended by ``executor``. Timers and the carrier target it.
@@ -29,6 +29,12 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
     /// True when the caller already runs on ``queue`` — the on-queue fast paths and the
     /// deferred-teardown guard both branch on it.
     var isOnQueue: Bool { executor.isOnQueue }
+
+    /// A re-armable one-shot timer firing on ``queue`` for ngtcp2's loss/PTO expiry, so the
+    /// connection drives its retransmit deadline without naming a `DispatchSourceTimer`.
+    func makeDeadlineTimer(handler: @escaping @Sendable () -> Void) -> BridgeDeadlineTimer {
+        executor.makeDeadlineTimer(handler: handler)
+    }
 
     // MARK: - Async hop
 

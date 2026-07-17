@@ -14,17 +14,7 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
 extension TunnelStack {
 
     // MARK: - Output Batching
-    //
-    // Two producers append under the ``outputBuffer`` Mutex (lwIP callbacks on
-    // ``lwipQueue``, Swift UDP/ICMP builders on ``udpQueue``); the appender
-    // that finds no drain in flight kicks one ``drainOutputLoop`` on
-    // ``outputQueue``. Per-packet pbuf/heap releases still fire on ``lwipQueue``.
-
-    /// Drains the output buffer with back-to-back writePackets calls, each
-    /// capped at tunnelMaxPacketsPerWrite (utun's empirical per-call ceiling —
-    /// exceeding it trips ENOSPC). ``OutputBufferState/drainInFlight`` flips
-    /// back false under the lock, atomic with the empty check, so a concurrent
-    /// appender can't see "drain in flight" after the loop has decided to exit.
+    
     func drainOutputLoop() {
         let cap = TunnelConstants.tunnelMaxPacketsPerWrite
         while true {
@@ -72,9 +62,7 @@ extension TunnelStack {
             }
         }
     }
-
-    /// Appends a Swift-built IP packet to the output buffer and kicks the drain
-    /// if idle; ``noopRelease`` keeps ``OutputBufferState/releases`` index-aligned.
+    
     func enqueueOutbound(_ packet: Data, isIPv6: Bool) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
         let needsKick: Bool = outputBuffer.withLock { buffer in
@@ -86,151 +74,84 @@ extension TunnelStack {
             return true
         }
         if needsKick {
-            outputQueue.async { [self] in drainOutputLoop() }
+            kickOutputDrain()
         }
     }
 
     // MARK: - Packet Reading
-
-    /// Continuously reads IP packets from the tunnel, splitting each batch:
-    /// UDP datagrams to ``udpQueue``, TCP/ICMP into lwIP on ``lwipQueue``.
-    /// Backpressure: the next read is issued only after *both* sub-batches
-    /// finish, so at most one batch is ever in flight (utun paces us).
+    
     func startReadingPackets() {
-        packetFlow?.readPackets { [weak self] packets, _ in
-            guard let self, self.running else { return }
+        guard let packetFlow else { return }
+        readTask = Task { [weak self, packetFlow] in
+            while !Task.isCancelled {
+                let (packets, _) = await PacketFlowConcurrencyBridge.read(from: packetFlow)
+                guard let self, self.running, !Task.isCancelled else { return }
 
-            // Partition on the read-callback thread — a cheap header peek per
-            // packet. Reflected packets bounce straight back into the TUN here,
-            // never reaching lwIP, UDP, routing, or the proxy.
-            let reflector = self.reflector()
-            var udpBatch: [Data] = []
-            var lwipBatch: [Data] = []
-            for packet in packets {
-                if reflector.isActive, let reflected = reflector.reflect(packet) {
-                    self.enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
-                    continue
+                // Partition — a cheap header peek per packet. Reflected packets bounce straight
+                // back into the TUN here, never reaching lwIP, UDP, routing, or the proxy.
+                let reflector = self.reflector()
+                var udpBatch: [Data] = []
+                var lwipBatch: [Data] = []
+                for packet in packets {
+                    if reflector.isActive, let reflected = reflector.reflect(packet) {
+                        self.enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
+                        continue
+                    }
+                    if let info = UDPPacket.ipProtocol(of: packet), info.proto == UDPPacket.ipProtocolUDP {
+                        udpBatch.append(packet)
+                    } else {
+                        lwipBatch.append(packet)
+                    }
                 }
-                if let info = UDPPacket.ipProtocol(of: packet), info.proto == UDPPacket.ipProtocolUDP {
-                    udpBatch.append(packet)
-                } else {
-                    lwipBatch.append(packet)
-                }
-            }
 
-            switch (lwipBatch.isEmpty, udpBatch.isEmpty) {
-            case (true, true):
-                // Empty or all-reflected batch — re-arm so the loop can't stall.
-                self.startReadingPackets()
-            case (false, true):
-                self.lwipBridge.enqueue {
-                    self.feedLwip(lwipBatch)
-                    self.startReadingPackets()
-                }
-            case (true, false):
-                self.udpQueue.async {
-                    self.feedUDP(udpBatch)
-                    self.startReadingPackets()
-                }
-            case (false, false):
-                let group = DispatchGroup()
-                group.enter()
-                self.lwipBridge.enqueue { self.feedLwip(lwipBatch); group.leave() }
-                group.enter()
-                self.udpQueue.async { self.feedUDP(udpBatch); group.leave() }
-                // Re-arm off the data-plane queues so the next read waits only
-                // on both finishing, not on either queue's depth.
-                group.notify(queue: DispatchQueue.global(qos: .userInitiated)) { [weak self] in
-                    self?.startReadingPackets()
+                // Feed both sub-batches concurrently; the loop re-reads only once both finish.
+                await withTaskGroup(of: Void.self) { group in
+                    if !lwipBatch.isEmpty {
+                        group.addTask { await self.lwipBridge.run { self.feedLwip(lwipBatch) } }
+                    }
+                    if !udpBatch.isEmpty {
+                        group.addTask { await self.udpPlane.feed(udpBatch) }
+                    }
                 }
             }
         }
     }
-
-    /// Feeds a TCP/ICMP sub-batch into lwIP. Must run on ``lwipQueue``. The
-    /// batch bracket coalesces per-segment ACKs and walks every active PCB on `_end`.
+    
     private func feedLwip(_ packets: [Data]) {
         lwipBridge.input(packets)
         // A fresh segment may have queued a timeout while the tick was suspended — re-arm.
         resumeLwipTickIfNeeded()
     }
 
-    /// Parses and dispatches a UDP sub-batch. Must run on ``udpQueue``.
-    private func feedUDP(_ packets: [Data]) {
-        for packet in packets {
-            if let datagram = UDPPacket.parse(packet) {
-                handleInboundUDP(datagram)
-            }
-        }
-    }
-
     // MARK: - Timers
-
-    /// Starts the lwIP timeout timer (100ms, matching `TCP_TMR_INTERVAL`).
-    /// The tick suspends itself whenever lwIP's timeout list is empty so an
-    /// idle tunnel stops waking the CPU 10x/sec; ``feedLwip`` re-arms it.
+    
     func startTimeoutTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: lwipQueue)
-        timer.schedule(
-            deadline: .now() + .milliseconds(TunnelConstants.lwipTimeoutIntervalMs),
-            repeating: .milliseconds(TunnelConstants.lwipTimeoutIntervalMs),
-            leeway: .milliseconds(TunnelConstants.lwipTimeoutLeewayMs)
-        )
-        timer.setEventHandler { [weak self] in
+        lwipTick = lwipBridge.makeTick(
+            intervalMs: TunnelConstants.lwipTimeoutIntervalMs,
+            leewayMs: TunnelConstants.lwipTimeoutLeewayMs
+        ) { [weak self] in
             guard let self, self.running else { return }
-            if lwipBridge.serviceTimeouts() {
+            if self.lwipBridge.serviceTimeouts() {
                 self.suspendLwipTickIfNeeded()
             }
         }
-        timer.resume()
-        lwipTickSuspended = false
-        timeoutTimer = timer
     }
-
-    /// Suspends the drained lwIP tick; idempotent. Must run on ``lwipQueue``.
+    
     private func suspendLwipTickIfNeeded() {
-        guard let timeoutTimer, !lwipTickSuspended else { return }
-        lwipTickSuspended = true
-        timeoutTimer.suspend()
+        lwipTick?.suspend()
     }
-
-    /// Re-arms the lwIP tick if it idled. Must run on ``lwipQueue``.
+    
     func resumeLwipTickIfNeeded() {
-        guard let timeoutTimer, lwipTickSuspended else { return }
-        lwipTickSuspended = false
-        timeoutTimer.resume()
+        lwipTick?.resume()
     }
-
-    /// Registers the 1s cleanup task reaping UDP flows past their idle deadline.
-    /// Runs on ``udpQueue``, which owns ``udpFlows``; owned by ``scheduler`` so it
-    /// catches up promptly on device wake instead of drifting with the frozen clock.
+    
     func scheduleUDPCleanup() {
         scheduler.schedule(
             label: "udp-cleanup",
-            on: udpQueue,
-            every: TimeInterval(TunnelConstants.udpCleanupIntervalSec),
-            leeway: TimeInterval(TunnelConstants.udpCleanupLeewayMs) / 1000
+            every: TimeInterval(TunnelConstants.udpCleanupIntervalSec)
         ) { [weak self] in
             guard let self, self.running else { return }
-            let now = MonotonicClock.now
-            let flows = self.udpFlows.withLock { Array($0) }
-            for (key, flow) in flows where now > flow.idleDeadline {
-                Task { await flow.close() }
-                self.udpFlows.withLock { $0.removeValue(forKey: key) }
-            }
-            // Under kernel flow pressure, shed below the shrunken cap even
-            // with no inserts arriving — TCP alone can fill the budget, and
-            // eviction-on-insert never runs then. shedUDPFlows batches, so a
-            // large excess drains over successive sweeps.
-            let cap = self.currentUDPFlowCap()
-            let liveCount = self.udpFlows.withLock { $0.count }
-            if liveCount > cap {
-                self.shedUDPFlows(count: liveCount - cap)
-            }
-            // Re-arm the flow-cap warning so a later storm logs its own rising edge.
-            if self.udpFlowCapWarned && liveCount < cap {
-                self.udpFlowCapWarned = false
-            }
+            await self.udpPlane.cleanup()
         }
     }
 }

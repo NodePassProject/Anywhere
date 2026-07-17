@@ -87,6 +87,14 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         executor.runSyncOffQueue(body)
     }
 
+    /// A repeating tick on the lwIP queue for driving `lwip_bridge_check_timeouts`; the raw
+    /// `DispatchSourceTimer` lives in the bridge layer. `handler` and the returned timer's
+    /// suspend/resume/cancel are all queue-confined.
+    func makeTick(intervalMs: Int, leewayMs: Int,
+                  handler: @escaping @Sendable () -> Void) -> BridgeTimer {
+        executor.makeRepeatingTimer(intervalMs: intervalMs, leewayMs: leewayMs, handler: handler)
+    }
+
     // MARK: - Lifecycle (start / end point)
 
     /// Publishes `host` as the bridge's host context and installs the C callbacks that route

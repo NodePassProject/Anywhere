@@ -100,8 +100,11 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
     private let configuration: ProxyConfiguration
     private let directDialHost: String
 
-    /// Guards `dialing`; burst callers coalesce behind one handshake.
-    private let dialing = Mutex(false)
+    /// The in-flight cold-start dial, if one is running. Burst callers coalesce onto this one
+    /// `Task` (the leader) and `await` its result instead of polling a flag — the same
+    /// single-flight pattern as `NowhereClient`/`HysteriaClient`. The leader clears it when the
+    /// handshake settles.
+    private let inFlightDial = Mutex<Task<SudokuMuxClient, Error>?>(nil)
 
     // The base `Extra` is a `Bool` `closed` flag, guarded by ``state``.
 
@@ -153,20 +156,32 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
             if let existing = try reusableMultiplexer() {
                 return existing
             }
-            let claimedDial = dialing.withLock { dialing -> Bool in
-                if dialing { return false }
-                dialing = true
-                return true
-            }
-            if !claimedDial {
-                // Another caller is handshaking; poll (non-blocking) until it publishes a
-                // session or clears the dial slot, then re-check the pool.
-                try await Task.sleep(for: .milliseconds(10))
-                continue
+
+            // Coalesce concurrent cold starts: the first caller becomes the dial leader; the
+            // rest await that same handshake `Task` and receive the same warm session.
+            let (dial, isLeader) = inFlightDial.withLock { slot -> (Task<SudokuMuxClient, Error>, Bool) in
+                if let existing = slot {
+                    return (existing, false)
+                }
+                let dial = Task { [self] in try await dialMultiplexer() }
+                slot = dial
+                return (dial, true)
             }
 
-            defer { dialing.withLock { $0 = false } }
-            return try await dialMultiplexer()
+            if isLeader {
+                // The leader owns the slot's lifetime: clear it once the dial settles so a later
+                // cold start can lead a fresh handshake.
+                defer { inFlightDial.withLock { $0 = nil } }
+                return try await dial.value
+            }
+
+            do {
+                return try await dial.value
+            } catch {
+                // The leader's dial failed; loop to re-check the pool and, if still empty, lead
+                // a fresh handshake ourselves (matching the former re-poll-then-claim behaviour).
+                continue
+            }
         }
     }
 

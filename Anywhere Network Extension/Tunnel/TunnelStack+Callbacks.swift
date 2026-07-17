@@ -59,7 +59,7 @@ extension TunnelStack: LWIPBridgeHost {
             return true
         }
         if needsKick {
-            outputQueue.async { [self] in drainOutputLoop() }
+            kickOutputDrain()
         }
     }
 

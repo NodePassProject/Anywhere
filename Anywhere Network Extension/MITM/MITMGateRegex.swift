@@ -10,8 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMGateRegex")
 
-/// ReDoS containment for an untrusted URL-gate regex: memoization, deadline-bounded matching
-/// on a worker queue, and quarantine after repeated timeouts — all fail-closed (no-match).
 nonisolated final class MITMGateRegex: @unchecked Sendable {
 
     /// NSRegularExpression is immutable and thread-safe for concurrent matching.
@@ -31,13 +29,6 @@ nonisolated final class MITMGateRegex: @unchecked Sendable {
     private static let regexMetacharacters: Set<Character> = [
         "\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"
     ]
-
-    /// Concurrent is load-bearing: an abandoned runaway must not block subsequent matches.
-    private static let matchQueue = DispatchQueue(
-        label: AWCore.Identifier.mitmGateMatchQueue,
-        qos: .userInitiated,
-        attributes: .concurrent
-    )
 
     /// Soft deadline per cache-miss match; far above the legitimate microsecond cost so
     /// scheduling hiccups don't false-trip it.
@@ -142,22 +133,24 @@ nonisolated final class MITMGateRegex: @unchecked Sendable {
         }
         if state.withLock({ $0.quarantined }) { return nil }
 
-        let captureBox = CaptureBox()
-        let done = DispatchSemaphore(value: 0)
         // Strong regex, no self: a runaway can outlive a reload without pinning the cache.
+        // Not memoized. `.completed(nil)` is a real no-match; `.timedOut` is an abandoned worker.
         let regex = self.regex
-        Self.matchQueue.async {
-            captureBox.captures = Self.captureGroups(regex, in: normalizedURL)
-            captureBox.hasValue = true
-            done.signal()
+        let pattern = self.pattern
+        let outcome = MITMGateRegexMatchConcurrencyBridge.shared.runBounded(
+            deadlineMillis: Self.matchDeadlineMillis,
+            hardCapSeconds: Self.hardCapSeconds,
+            hardCapMessage: { Self.hardCapMessage(pattern: pattern) }
+        ) {
+            Self.captureGroups(regex, in: normalizedURL)
         }
-        // The semaphore establishes happens-before for the unsynchronized box.
-        guard done.wait(timeout: .now() + .milliseconds(Self.matchDeadlineMillis)) == .success else {
-            Self.scheduleHardCapCheck(done, pattern: pattern)
+        switch outcome {
+        case .completed(let captures):
+            return captures
+        case .timedOut:
             recordStrike()
             return nil
         }
-        return captureBox.hasValue ? captureBox.captures : nil
     }
 
     /// Extracts the first match's groups (index 0 = whole match); a non-participating
@@ -185,41 +178,35 @@ nonisolated final class MITMGateRegex: @unchecked Sendable {
         case timedOut
     }
 
-    /// Runs the match on the worker queue under the deadline; an abandoned worker that finishes
-    /// still caches its verdict.
+    /// Runs the match on a bounded worker via the gate-match bridge; an abandoned worker that
+    /// finishes late still caches its verdict (the `store` in `body`).
     private func boundedMatch(_ url: String) -> MatchOutcome {
-        let box = VerdictBox()
-        let done = DispatchSemaphore(value: 0)
         // Strong regex + weak self: a runaway can outlive a reload without pinning the cache.
         let regex = self.regex
-        Self.matchQueue.async { [weak self] in
+        let pattern = self.pattern
+        let outcome = MITMGateRegexMatchConcurrencyBridge.shared.runBounded(
+            deadlineMillis: Self.matchDeadlineMillis,
+            hardCapSeconds: Self.hardCapSeconds,
+            hardCapMessage: { Self.hardCapMessage(pattern: pattern) }
+        ) { [weak self] () -> Bool in
             let range = NSRange(url.startIndex..., in: url)
             let matched = regex.firstMatch(in: url, options: [], range: range) != nil
-            box.value = matched
-            done.signal()
             // Best-effort late cache: no-op once quarantined.
             self?.store(url, matched)
+            return matched
         }
-        // The semaphore establishes happens-before for the unsynchronized box.
-        guard done.wait(timeout: .now() + .milliseconds(Self.matchDeadlineMillis)) == .success else {
-            Self.scheduleHardCapCheck(done, pattern: pattern)
+        switch outcome {
+        case .completed(let matched):
+            return .matched(matched)
+        case .timedOut:
             return .timedOut
         }
-        return .matched(box.value ?? false)
     }
 
-    /// One-shot hard-cap crash check; the match's own semaphore is the liveness signal, so a
-    /// match that finishes within the cap makes this a no-op. The uninterruptible bounded match runs
-    /// synchronously (it gates the rule engine, which stays synchronous), so only this recovery is
-    /// async: a `Task.sleep` deadline then a non-blocking poll of the worker's semaphore, still
-    /// `fatalError` if a runaway is still pinning a core.
-    private static func scheduleHardCapCheck(_ done: DispatchSemaphore, pattern: String) {
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(for: .seconds(hardCapSeconds))
-            guard done.wait(timeout: .now()) != .success else { return }
-            let shown = pattern.count > 200 ? String(pattern.prefix(200)) + "…" : pattern
-            fatalError("URL-gate regex did not return \(hardCapSeconds)s after blowing its \(matchDeadlineMillis)ms budget — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed. Crashing the Network Extension so the system relaunches it clean. Offending pattern: \(shown)")
-        }
+    /// The `fatalError` message for a permanently-pinned URL-gate worker, built off the crash path.
+    private static func hardCapMessage(pattern: String) -> String {
+        let shown = pattern.count > 200 ? String(pattern.prefix(200)) + "…" : pattern
+        return "URL-gate regex did not return \(hardCapSeconds)s after blowing its \(matchDeadlineMillis)ms budget — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed. Crashing the Network Extension so the system relaunches it clean. Offending pattern: \(shown)"
     }
 
     /// FIFO-evicting memo store; no-op when quarantined. Idempotent so a caller store and a
@@ -257,18 +244,5 @@ nonisolated final class MITMGateRegex: @unchecked Sendable {
         if let message {
             logger.warning(message)
         }
-    }
-
-    /// Synchronized by the semaphore (written before `signal`, read after `wait`) — hence
-    /// `@unchecked Sendable`.
-    private final class VerdictBox: @unchecked Sendable {
-        var value: Bool?
-    }
-
-    /// Capture-path counterpart of ``VerdictBox``; `hasValue` distinguishes a
-    /// computed no-match (`captures == nil`) from a worker that never finished.
-    private final class CaptureBox: @unchecked Sendable {
-        var captures: [String?]?
-        var hasValue = false
     }
 }

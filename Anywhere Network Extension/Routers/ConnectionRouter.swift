@@ -40,11 +40,6 @@ nonisolated struct RouteDecision {
     }
 }
 
-/// Resolves a destination IP through the fake-IP pool, domain rules, and
-/// IP-CIDR rules — the single routing decision point for the data plane.
-/// Callable from ``TunnelStack/lwipQueue`` and ``TunnelStack/udpQueue``: the
-/// pool and matcher are internally synchronized, and the Prevent DNS Leak
-/// flag is published through a Mutex.
 nonisolated final class ConnectionRouter {
     let fakeIPPool: FakeIPPool
     let domainRouter: DomainRouter

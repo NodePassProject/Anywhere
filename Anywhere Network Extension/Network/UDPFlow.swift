@@ -12,10 +12,13 @@ nonisolated private let logger = AnywhereLogger(category: "UDPFlow")
 
 actor UDPFlow {
 
-    /// The owning stack, for the flow registry, traffic accounting, shared
-    /// sessions, and the TUN write-back. Weak: the stack can stop while late
-    /// transport completions are still in flight.
+    /// The owning stack, for traffic accounting and the TUN write-back. Weak: the stack can stop
+    /// while late transport completions are still in flight.
     private weak var stack: TunnelStack?
+
+    /// The UDP plane that owns this flow, for deregistration and the shared session / mux pool.
+    /// Weak for the same reason as ``stack``.
+    private weak var plane: UDPPlane?
 
     nonisolated let flowKey: TunnelStack.UDPFlowKey
     nonisolated let srcHost: String
@@ -85,6 +88,7 @@ actor UDPFlow {
     private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
 
     init(stack: TunnelStack,
+         plane: UDPPlane,
          flowKey: TunnelStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
          dstHost: String, dstPort: UInt16,
@@ -93,6 +97,7 @@ actor UDPFlow {
          configuration: ProxyConfiguration,
          routeTarget: RouteTarget) {
         self.stack = stack
+        self.plane = plane
         self.flowKey = flowKey
         self.srcHost = srcHost
         self.srcPort = srcPort
@@ -119,12 +124,12 @@ actor UDPFlow {
     }
 
     /// Terminal send errors close the flow; transient ones just log (UDP is lossy).
-    private func handleProxySendError(_ error: Error, connection: ProxyConnection) {
+    private func handleProxySendError(_ error: Error, connection: ProxyConnection) async {
         guard !closed else { return }
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
             close()
-            stack?.removeUDPFlow(self)
+            await plane?.remove(self)
         } else {
             logTransientSendFailure(error)
         }
@@ -163,7 +168,7 @@ actor UDPFlow {
 
     // MARK: - Data Handling
 
-    func handleReceivedData(_ data: Data, payloadLength: Int) {
+    func handleReceivedData(_ data: Data, payloadLength: Int) async {
         guard !closed else { return }
         activity.withLock { $0.lastActivity = MonotonicClock.now }
 
@@ -222,7 +227,7 @@ actor UDPFlow {
         }
 
         bufferPayload(data: data, payloadLength: payloadLength)
-        connectProxy()
+        await connectProxy()
     }
 
     /// Fire-and-forget async send to the proxy connection. Datagrams are independent, so
@@ -254,8 +259,11 @@ actor UDPFlow {
 
     // MARK: - Proxy Connection
 
-    private func connectProxy() {
+    private func connectProxy() async {
         guard !proxyConnecting && proxyConnection == nil && udpStream == nil && directTransport == nil && ssUDPSession == nil && !closed else { return }
+        // Claim before the first `await` (the mux read) so a reentrant datagram buffers via the
+        // `proxyConnecting` guard in `handleReceivedData` instead of racing a second dial.
+        proxyConnecting = true
 
         if bypass {
             connectDirectUDP()
@@ -267,20 +275,19 @@ actor UDPFlow {
         // Fast paths bypass ProxyClient, so they must only run when no chain is configured.
         if !hasChain {
             let isDefaultConfiguration = stack?.isDefaultConfiguration(configuration.id) ?? false
-            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let udpMultiplexerPool = stack?.udpMultiplexerPool {
-                proxyConnecting = true
+            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let udpMultiplexerPool = await plane?.multiplexerPool {
+                guard !closed else { return }
                 connectViaMultiplexer(udpMultiplexerPool: udpMultiplexerPool)
                 return
             }
 
             if configuration.outboundProtocol == .shadowsocks {
-                connectShadowsocksUDP()
+                await connectShadowsocksUDP()
                 return
             }
         }
 
         // ProxyClient builds the chain tunnel when needed — the only valid path with a chain.
-        proxyConnecting = true
         connectViaProxyClient()
     }
 
@@ -307,7 +314,7 @@ actor UDPFlow {
         }
     }
 
-    private func finishMultiplexerConnect(_ result: Result<VLESSVisionUDPStream, Error>) {
+    private func finishMultiplexerConnect(_ result: Result<VLESSVisionUDPStream, Error>) async {
         proxyConnecting = false
         guard !closed else {
             if case .success(let session) = result { session.close() }
@@ -319,7 +326,7 @@ actor UDPFlow {
             // closeAll() may have already closed the session before this ran.
             guard !session.closed else {
                 close()
-                stack?.removeUDPFlow(self)
+                await plane?.remove(self)
                 return
             }
 
@@ -349,7 +356,7 @@ actor UDPFlow {
                 reportFailure("Connect", error: error)
             }
             close()
-            stack?.removeUDPFlow(self)
+            await plane?.remove(self)
         }
     }
 
@@ -392,7 +399,7 @@ actor UDPFlow {
         }
     }
 
-    private func finishProxyClientConnect(_ result: Result<ProxyConnection, Error>) {
+    private func finishProxyClientConnect(_ result: Result<ProxyConnection, Error>) async {
         proxyConnecting = false
         proxyDialTask = nil
         guard !closed else {
@@ -418,19 +425,20 @@ actor UDPFlow {
                 reportFailure("Connect", error: error)
             }
             close()
-            stack?.removeUDPFlow(self)
+            await plane?.remove(self)
         }
     }
 
-    private func connectShadowsocksUDP() {
+    private func connectShadowsocksUDP() async {
         guard ssUDPSession == nil && !closed else { return }
 
-        guard let stack else {
+        guard let plane else {
             close()
             return
         }
 
-        let sessionResult = stack.shadowsocksUDPSession(for: configuration)
+        let sessionResult = await plane.shadowsocksSession(for: configuration)
+        guard !closed else { return }
         let session: ShadowsocksUDPSession
         switch sessionResult {
         case .success(let s):
@@ -438,7 +446,7 @@ actor UDPFlow {
         case .failure(let error):
             reportFailure("SS session", error: error)
             close()
-            stack.removeUDPFlow(self)
+            await plane.remove(self)
             return
         }
 
@@ -556,7 +564,7 @@ actor UDPFlow {
         }
     }
 
-    private func finishDirectConnect(transport: UDPTransport, connectError: Error?) {
+    private func finishDirectConnect(transport: UDPTransport, connectError: Error?) async {
         proxyConnecting = false
         // A close during the dial already cancelled the transport via releaseProxy.
         guard !closed else { return }
@@ -564,7 +572,7 @@ actor UDPFlow {
         if let connectError {
             reportFailure("Connect", error: connectError)
             close()
-            stack?.removeUDPFlow(self)
+            await plane?.remove(self)
             return
         }
 
@@ -626,13 +634,13 @@ actor UDPFlow {
     }
 
     /// A downlink receive loop ended: report an error if any, then close and deregister.
-    private func receiveClosed(operation: String, error: Error?) {
+    private func receiveClosed(operation: String, error: Error?) async {
         guard !closed else { return }
         if let error {
             reportFailure(operation, error: error)
         }
         close()
-        stack?.removeUDPFlow(self)
+        await plane?.remove(self)
     }
 
     // MARK: - Close

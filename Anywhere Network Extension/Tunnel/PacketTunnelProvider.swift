@@ -7,7 +7,6 @@
 
 import NetworkExtension
 import Network
-import Synchronization
 #if os(iOS)
 import WidgetKit
 #endif
@@ -17,20 +16,42 @@ nonisolated private let logger = AnywhereLogger(category: "PacketTunnelProvider"
 nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()
-    private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
+    
+    private let pathMonitorBridge = PathMonitorConcurrencyBridge()
+    private var pathMonitorTask: Task<Void, Never>?
 
-    /// Path-monitor state shared between the monitor's callbacks (on ``pathMonitorQueue``)
-    /// and start/stop (on the tunnel lifecycle contexts). Behind a mutex because
-    /// `NWPathMonitor.cancel()` does not fence an in-flight `pathUpdateHandler`.
-    private struct PathMonitorState {
-        var monitor: NWPathMonitor?
-        /// Last observed path status; nil before the first update.
+    /// Edge-transition tracker for the path loop; single-task-confined, so a plain value type.
+    private struct PathTransition {
         var lastStatus: Network.NWPath.Status?
-        /// True while `suspendOutbound` has released transports for the current outage;
-        /// drives the symmetric `resumeOutbound` on the up edge.
         var outboundSuspended = false
+
+        enum Edge { case restored, ready, waiting, unavailable, none }
+
+        /// Advances to `status`, returning the edge the provider must act on. Folds in the
+        /// dedupe/suspend bookkeeping the former lock-guarded block did.
+        mutating func advance(to status: Network.NWPath.Status) -> Edge {
+            let previousStatus = lastStatus
+            lastStatus = status
+            switch status {
+            case .satisfied:
+                if outboundSuspended {
+                    outboundSuspended = false
+                    return .restored
+                } else if previousStatus == nil {
+                    return .ready
+                }
+                return .none
+            case .requiresConnection:
+                return previousStatus != .requiresConnection ? .waiting : .none
+            case .unsatisfied:
+                guard !outboundSuspended else { return .none }
+                outboundSuspended = true
+                return .unavailable
+            @unknown default:
+                return .none
+            }
+        }
     }
-    private let pathMonitorState = Mutex(PathMonitorState())
 
     // MARK: - Tunnel Lifecycle
     
@@ -219,7 +240,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
         statsRecorder.stop()
         stopMonitoringPath()
         logTunnelStop(reason: reason)
-        tunnelStack.stop()
+        await tunnelStack.stop()
     }
 
     // MARK: - App Messages
@@ -277,34 +298,24 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Path Monitoring
 
     private func startMonitoringPath() {
-        let monitor = NWPathMonitor()
-        let installed = pathMonitorState.withLock { state -> Bool in
-            guard state.monitor == nil else { return false }
-            state.monitor = monitor
-            return true
+        guard pathMonitorTask == nil else { return }
+        pathMonitorTask = Task { [weak self] in
+            guard let self else { return }
+            var transition = PathTransition()
+            for await path in self.pathMonitorBridge.paths() {
+                await self.handlePathUpdate(path, transition: &transition)
+            }
         }
-        guard installed else { return }
-
-        monitor.pathUpdateHandler = { [weak self] path in
-            self?.handlePathUpdate(path)
-        }
-        monitor.start(queue: pathMonitorQueue)
     }
 
     private func stopMonitoringPath() {
-        let monitor = pathMonitorState.withLock { state -> NWPathMonitor? in
-            let monitor = state.monitor
-            state.monitor = nil
-            state.lastStatus = nil
-            state.outboundSuspended = false
-            return monitor
-        }
-        monitor?.cancel()
+        pathMonitorTask?.cancel()
+        pathMonitorTask = nil
     }
 
     /// Hands the egress identity (incl. Wi-Fi SSID on iOS) to the stack for the
     /// trusted-network policy. `availableInterfaces.first` is the OS-preferred egress.
-    private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) {
+    private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
         let isCellular = primaryType == .cellular
@@ -312,9 +323,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
         if isWiFi {
             // Requires the "Access WiFi Information" entitlement; otherwise `ssid`
             // is nil and the network is treated as untrusted.
-            NEHotspotNetwork.fetchCurrent { [weak self] network in
-                self?.tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: network?.ssid)
-            }
+            let ssid = await pathMonitorBridge.currentWiFiSSID()
+            tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: ssid)
             return
         }
 #endif
@@ -323,40 +333,16 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Applies the trusted-network policy, releases upstream transports while the
     /// path is down, and rebuilds them (flushing stale DNS) when it returns. Per-leg
-    /// recovery is left to the NW transports' viability handlers.
-    private func handlePathUpdate(_ path: Network.NWPath) {
-        // What the transition demands, decided atomically so a concurrent
-        // `stopMonitoringPath` can't interleave between the read and the write of
-        // `lastStatus`/`outboundSuspended`.
-        enum Transition { case restored, ready, waiting, unavailable, none }
-        let transition: Transition = pathMonitorState.withLock { state in
-            let previousStatus = state.lastStatus
-            state.lastStatus = path.status
-            switch path.status {
-            case .satisfied:
-                if state.outboundSuspended {
-                    state.outboundSuspended = false
-                    return .restored
-                } else if previousStatus == nil {
-                    return .ready
-                }
-                return .none
-            case .requiresConnection:
-                return previousStatus != .requiresConnection ? .waiting : .none
-            case .unsatisfied:
-                guard !state.outboundSuspended else { return .none }
-                state.outboundSuspended = true
-                return .unavailable
-            @unknown default:
-                return .none
-            }
-        }
+    /// recovery is left to the NW transports' viability handlers. Runs on the single
+    /// path-monitor task, so `transition` is its private, uncontended state.
+    private func handlePathUpdate(_ path: Network.NWPath, transition: inout PathTransition) async {
+        let edge = transition.advance(to: path.status)
 
         switch path.status {
         case .satisfied:
-            resolveAndUpdateNetworkContext(path)
+            await resolveAndUpdateNetworkContext(path)
 
-            switch transition {
+            switch edge {
             case .restored:
                 // Up edge: rebuild the transports suspendOutbound released; flush stale DNS.
                 logger.info("[VPN] Network path restored: \(Self.pathSummary(path))")
@@ -375,13 +361,13 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
 
         case .requiresConnection:
             // Dedupe repeated callbacks in the same state; nothing to recover onto yet.
-            guard transition == .waiting else { return }
+            guard edge == .waiting else { return }
             logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path))")
             reasserting = true
 
         case .unsatisfied:
             // Idempotent on repeated unsatisfied callbacks.
-            guard transition == .unavailable else { return }
+            guard edge == .unavailable else { return }
             logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path))")
             reasserting = true
             // Down edge: release dead upstream transports; rebuilt on the up edge.

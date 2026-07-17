@@ -29,6 +29,26 @@ extension TunnelStack {
         self.packetFlow = packetFlow
         self.configuration = configuration
 
+        // Single output-drain consumer for the stack's lifetime. Weak self + per-iteration
+        // promotion so the loop never keeps the stack alive; `stop()` cancels it, ending the
+        // `for await` and releasing the captured stream.
+        let outputKick = self.outputKick
+        outputDrainTask = Task { [weak self, outputKick] in
+            for await _ in outputKick {
+                self?.drainOutputLoop()
+            }
+        }
+
+        // Single ordered driver for UDP plane mux/reclaim commands. Started before the runtime is
+        // configured so the initial `setMultiplexerPool` command (yielded below) is applied.
+        let planeCommands = self.planeCommands
+        planeCommandTask = Task { [weak self, planeCommands] in
+            for await command in planeCommands {
+                guard let self else { return }
+                await self.udpPlane.apply(command)
+            }
+        }
+
         lwipBridge.enqueue { [self] in
             running = true
 
@@ -45,8 +65,13 @@ extension TunnelStack {
         CertificatePolicy.startObserving()
     }
 
-    func stop() {
+    func stop() async {
         stopObservingSettings()
+        // Stop reading first so no new datagrams enter intake, and end the output-drain consumer.
+        readTask?.cancel()
+        readTask = nil
+        outputDrainTask?.cancel()
+        outputDrainTask = nil
         // Runs on the provider's `stopTunnel` thread, off the lwIP queue. `runSyncOffQueue`
         // precondition-guards that (a call already on the queue would deadlock) — the sanctioned
         // primitive for "teardown that must finish before returning," in place of a raw `.sync`.
@@ -54,7 +79,7 @@ extension TunnelStack {
             running = false
             deferredRestartTask?.cancel()
             deferredRestartTask = nil
-            shutdownInternal()
+            shutdownInternal()  // submits the final `.reclaim` to the plane driver
             // After shutdown so the teardown's own callbacks (RSTs, errors)
             // still reach the stack.
             lwipBridge.clearHost()
@@ -63,8 +88,15 @@ extension TunnelStack {
             configuration = nil
         }
 
+        // Finish the command channel so the driver drains its buffered commands (including the
+        // final reclaim that closes the UDP flows) and ends; await it so the UDP plane teardown
+        // completes before `stop()` returns.
+        finishPlaneCommands()
+        await planeCommandTask?.value
+        planeCommandTask = nil
+
         AnywhereLogger.logSink = nil
-        // `packetFlow` is deliberately kept: outputQueue's drain loop and the
+        // `packetFlow` is deliberately kept: the output-drain loop and the
         // packet-read callback read it unsynchronized, so dropping it here
         // would race a late transport completion. The reference dies with the
         // provider, which owns both objects.
@@ -154,8 +186,10 @@ extension TunnelStack {
         MITMScriptHTTP2Pool.shared.reclaim()
     }
 
-    /// Reclaims the udpQueue-owned per-tunnel transports (Vision mux, SS UDP
-    /// sessions, per-flow UDP connections). Must be called on `lwipQueue`.
+    /// Reclaims the UDP plane's per-tunnel transports (Vision mux, SS UDP sessions, per-flow UDP
+    /// connections) and installs the rebuilt mux. Must be called on `lwipQueue`. The teardown runs
+    /// on ``udpPlane`` (serialized against intake), submitted through the ordered command channel so
+    /// it can't be reordered against a restart's follow-up `setMultiplexerPool`.
     private func reclaimInstanceTransports(rebuildMultiplexerPool: Bool) {
         // Build the replacement mux on lwipQueue, which owns `configuration`.
         let rebuiltMultiplexerPool: VLESSVisionUDPMultiplexerPool?
@@ -164,33 +198,14 @@ extension TunnelStack {
         } else {
             rebuiltMultiplexerPool = nil
         }
-
-        // Called on lwipQueue; blocks it until udpQueue drains this teardown. Safe because the
-        // dependency is strictly one-way — udpQueue work never synchronously waits on lwipQueue,
-        // so the two serial queues can't deadlock on each other.
-        udpQueue.sync {
-            udpMultiplexerPool?.closeAll()
-            udpMultiplexerPool = rebuiltMultiplexerPool
-            purgeShadowsocksUDPSessions()
-            let flows = udpFlows.withLock { flows -> [UDPFlow] in
-                let all = Array(flows.values)
-                flows.removeAll()
-                return all
-            }
-            for flow in flows {
-                Task { await flow.close() }
-            }
-        }
+        submitPlaneCommand(.reclaim(replacementMultiplexerPool: rebuiltMultiplexerPool))
     }
 
     /// Shuts down the lwIP stack and all active flows. Must be called on `lwipQueue`.
     private func shutdownInternal() {
-        timeoutTimer?.cancel()
-        if lwipTickSuspended {
-            lwipTickSuspended = false
-            timeoutTimer?.resume()
-        }
-        timeoutTimer = nil
+        // `BridgeTimer.cancel` balances any outstanding suspend before tearing the source down.
+        lwipTick?.cancel()
+        lwipTick = nil
         scheduler.cancelAll()
 
         outputBuffer.withLock { buffer in
@@ -403,8 +418,6 @@ extension TunnelStack {
             guard running else { return }
             logger.info("[VPN] MITM settings changed")
             loadMITMSetting()
-            // `mitmEnabled` gates the UDP/443 MITM decision via the snapshot;
-            // republish so udpQueue sees the new toggle.
             publishUDPConfig()
         }
     }

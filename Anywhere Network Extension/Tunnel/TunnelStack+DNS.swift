@@ -6,17 +6,14 @@
 //
 
 import Foundation
-import Synchronization
-
-nonisolated private let logger = AnywhereLogger(category: "TunnelStack+DNS")
 
 extension TunnelStack {
 
     // MARK: - DNS Interception (Fake-IP)
     //
-    // UDP/53 is intercepted only for ``interceptedDNSServers``. A/AAAA queries
-    // get fake-IP answers so routing is decided at connection time — rule
-    // changes take effect without waiting for OS DNS cache expiry.
+    // UDP/53 is intercepted only for ``interceptedDNSServers``. The interception
+    // itself (A/AAAA fake-IP answers, non-A/AAAA upstream forwarding, NODATA) runs
+    // on ``UDPPlane``; this file holds only the static destination table it consults.
 
     enum DNSDestination {
         /// Tunnel peer address — no real upstream behind it; non-A/AAAA query
@@ -40,139 +37,5 @@ extension TunnelStack {
 
     static func dnsDestination(for dstIP: String) -> DNSDestination? {
         interceptedDNSServers[dstIP]
-    }
-
-    /// Intercepts a DNS query carried by `datagram`. Returns true if handled
-    /// (no UDP flow needed).
-    func handleDNSQuery(_ datagram: UDPPacket.Inbound, destination: DNSDestination) -> Bool {
-        let payload = datagram.payload
-        guard let parsed = payload.withUnsafeBytes({ ptr -> (domain: String, qtype: UInt16)? in
-            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
-            return DNSPacket.parseQuery(UnsafeBufferPointer(start: base, count: ptr.count))
-        }) else { return false }
-
-        let domain = parsed.domain.lowercased()
-        let qtype = parsed.qtype
-
-        // Block DDR (RFC 9462) — otherwise the system auto-upgrades to DoH/DoT
-        // and bypasses the port-53 interception this tunnel relies on.
-        if domain == "_dns.resolver.arpa" {
-            return sendNODATA(answering: datagram, qtype: qtype)
-        }
-
-        // NODATA for SVCB/HTTPS (qtype 65, RFC 9460): proxied answers follow
-        // CNAME chains that routing rules (matched on the original domain) may
-        // miss; this forces fallback to A/AAAA, which we fake-IP.
-        if qtype == 65 {
-            return sendNODATA(answering: datagram, qtype: qtype)
-        }
-
-        // Only A (1) and AAAA (28) get fake IPs. Other types:
-        // `.anywhereResolver` forwards upstream (NODATA if no config);
-        // `.publicResolver` falls through to a proxied UDP flow.
-        guard qtype == 1 || qtype == 28 else {
-            if destination == .anywhereResolver {
-                if forwardToUpstreamResolver(datagram, domain: domain, qtype: qtype) {
-                    return true
-                }
-                return sendNODATA(answering: datagram, qtype: qtype)
-            }
-            return false
-        }
-
-        // Fake-IP even rejected domains — a NODATA here could be negatively
-        // cached by the OS; rejects are enforced at connection time instead.
-        let offset = fakeIPPool.allocate(domain: domain)
-
-        var fakeIPBytes: [UInt8]?
-        if qtype == 1 {
-            let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
-            fakeIPBytes = [ipv4.0, ipv4.1, ipv4.2, ipv4.3]
-        } else if qtype == 28, udpConfig().advertiseIPv6ToApps {
-            // Snapshot read — DNS runs on udpQueue, not lwipQueue.
-            fakeIPBytes = FakeIPPool.ipv6Bytes(offset: offset)
-        }
-        // else: AAAA with IPv6 disabled → nil → NODATA response
-
-        guard let responseData = payload.withUnsafeBytes({ ptr -> Data? in
-            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
-            return DNSPacket.generateResponse(
-                query: UnsafeBufferPointer(start: base, count: ptr.count),
-                fakeIP: fakeIPBytes,
-                qtype: qtype
-            )
-        }) else { return false }
-
-        // Reply sourced from the resolver the app queried so the client accepts it.
-        writeOutboundUDP(
-            srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
-            dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
-            isIPv6: datagram.isIPv6, payload: responseData
-        )
-
-        return true
-    }
-
-    /// Forwards a non-A/AAAA query to a real upstream resolver through the
-    /// default proxy and relays the reply (nothing answers behind the tunnel
-    /// peer address). Must be called on ``udpQueue``. Returns `false` when
-    /// there is no active configuration; the caller falls back to NODATA.
-    private func forwardToUpstreamResolver(_ datagram: UDPPacket.Inbound, domain: String, qtype: UInt16) -> Bool {
-        let udpConfig = udpConfig()
-        guard let configuration = udpConfig.configuration else { return false }
-
-        // Forward over IPv4 regardless of query family — proxy egress always
-        // reaches it; the reply family follows the flow's `isIPv6`.
-        let upstream = TunnelConstants.fallbackDNSServers(includeIPv6: false).first ?? "1.1.1.1"
-        let payload = datagram.payload
-
-        // Key on the original 5-tuple so a retransmitted query reuses this flow;
-        // intercepted destinations re-enter here, never the fast path.
-        let flowKey = UDPFlowKey(srcIP: datagram.srcIP, srcPort: datagram.srcPort,
-                                 dstIP: datagram.dstIP, dstPort: datagram.dstPort, isIPv6: datagram.isIPv6)
-        if let existing = udpFlows.withLock({ $0[flowKey] }) {
-            Task { await existing.handleReceivedData(payload, payloadLength: payload.count) }
-            return true
-        }
-
-        let flow = UDPFlow(
-            stack: self,
-            flowKey: flowKey,
-            srcHost: TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: datagram.isIPv6),
-            srcPort: datagram.srcPort,
-            dstHost: upstream,                  // outbound → real upstream resolver
-            dstPort: datagram.dstPort,
-            srcIPData: datagram.srcIPData,
-            dstIPData: datagram.dstIPData,      // reply source → the Anywhere resolver address
-            isIPv6: datagram.isIPv6,
-            configuration: configuration,
-            routeTarget: udpConfig.defaultRouteTarget   // proxied via the default outbound
-        )
-        evictUDPFlowsToAdmit()
-        udpFlows.withLock { $0[flowKey] = flow }
-        logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(datagram.dstPort) via \(configuration.name)")
-        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
-        return true
-    }
-
-    /// Answers `datagram` with a NODATA DNS response (ANCOUNT=0).
-    private func sendNODATA(answering datagram: UDPPacket.Inbound, qtype: UInt16) -> Bool {
-        guard let responseData = datagram.payload.withUnsafeBytes({ ptr -> Data? in
-            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
-            return DNSPacket.generateResponse(
-                query: UnsafeBufferPointer(start: base, count: ptr.count),
-                fakeIP: nil,
-                qtype: qtype
-            )
-        }) else { return false }
-
-        // Response sourced from the resolver the app queried (original dst).
-        writeOutboundUDP(
-            srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
-            dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
-            isIPv6: datagram.isIPv6, payload: responseData
-        )
-
-        return true
     }
 }

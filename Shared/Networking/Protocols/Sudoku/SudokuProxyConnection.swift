@@ -2522,12 +2522,18 @@ nonisolated final class SudokuMuxStream: Sendable {
         var localWriteClosed = false
         var remoteWriteClosed = false
         var terminalError: Error?
-        /// Single-flight receive slot. Every terminal path nils it under the lock and resumes
-        /// exactly once; the `fullyClosed`/read-closed gates ensure at most one path proceeds.
-        var pendingReceive: CheckedContinuation<Data?, Error>?
-        var pendingMax = 0
+        /// Single-flight receive gate: ``receive(max:)`` enrolls a one-shot waiter here when the
+        /// queue is empty; any data/close path finishes it (under the lock) so `receive` re-checks.
+        /// Single consumer by contract — a second concurrent `receive` is rejected.
+        var receiveWaiter: AsyncStream<Void>.Continuation?
     }
     private let state = Mutex(State())
+
+    /// Wakes a parked ``receive(max:)`` so it re-evaluates the queue/close state. Lock held.
+    private func wakeReceiveWaiterLocked(_ state: inout State) {
+        state.receiveWaiter?.finish()
+        state.receiveWaiter = nil
+    }
 
     init(client: SudokuMuxClient, id: UInt32) { self.clientBox = Mutex(WeakClient(value: client)); self.id = id }
 
@@ -2550,63 +2556,60 @@ nonisolated final class SudokuMuxStream: Sendable {
         }
     }
 
-    /// Receives one chunk; `nil` == EOF. Single-flight by contract.
+    /// Receives one chunk; `nil` == EOF. Single-flight by contract. Parks on an `AsyncStream`
+    /// gate (re-checking the queue/close state on each wake) instead of a stored continuation.
     func receive(max: Int) async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            var deliver: (() -> Void)?
-            state.withLock { state in
+        enum Outcome { case data(Data), eof, error(Error), concurrent, wait(AsyncStream<Void>) }
+        while true {
+            let outcome: Outcome = state.withLock { state in
                 if !state.queue.isEmpty {
-                    let out = state.queue.read(max: max)
-                    deliver = { continuation.resume(returning: out) }
-                } else if state.fullyClosed {
-                    if let error = state.terminalError {
-                        deliver = { continuation.resume(throwing: error) }
-                    } else {
-                        deliver = { continuation.resume(returning: nil) }
-                    }
-                } else if state.localReadClosed || state.remoteWriteClosed {
-                    deliver = { continuation.resume(returning: nil) }
-                } else if state.pendingReceive != nil {
-                    deliver = { continuation.resume(throwing: SudokuNativeError.protocolError("concurrent mux receive")) }
-                } else {
-                    state.pendingMax = max
-                    state.pendingReceive = continuation
+                    return .data(state.queue.read(max: max))
                 }
+                if state.fullyClosed {
+                    if let error = state.terminalError { return .error(error) }
+                    return .eof
+                }
+                if state.localReadClosed || state.remoteWriteClosed {
+                    return .eof
+                }
+                if state.receiveWaiter != nil {
+                    return .concurrent
+                }
+                let (stream, continuation) = AsyncStream<Void>.makeStream()
+                state.receiveWaiter = continuation
+                return .wait(stream)
             }
-            deliver?()
+            switch outcome {
+            case .data(let out): return out
+            case .eof: return nil
+            case .error(let error): throw error
+            case .concurrent: throw SudokuNativeError.protocolError("concurrent mux receive")
+            case .wait(let stream):
+                // Parks until a data/close path finishes the gate, then re-evaluates.
+                for await _ in stream { break }
+                // A finished gate loops to re-check; a cancelled task must not spin.
+                try Task.checkCancellation()
+            }
         }
     }
 
     func enqueue(_ data: Data) -> EnqueueResult {
-        var deliver: (() -> Void)?
-        let result: EnqueueResult = state.withLock { state in
+        state.withLock { state in
             if state.fullyClosed || state.localReadClosed || state.remoteWriteClosed {
                 return .ignored
-            }
-            if let pending = state.pendingReceive {
-                state.pendingReceive = nil
-                let out: Data
-                if data.count <= state.pendingMax {
-                    out = data
-                } else {
-                    out = data.prefixData(state.pendingMax)
-                    state.queue.append(data, from: state.pendingMax)
-                }
-                deliver = { pending.resume(returning: out) }
-                return .accepted
             }
             guard state.queue.count + data.count <= sudokuMuxMaxQueueBytes else {
                 return .overflow
             }
+            // A parked receiver only enrolls with an empty queue, so this append stays within the
+            // cap; `receive` reads back up to its own `max` (partial reads live in `SudokuDataQueue`).
             state.queue.append(data)
+            wakeReceiveWaiterLocked(&state)
             return .accepted
         }
-        deliver?()
-        return result
     }
 
     func closeRead() {
-        var deliver: (() -> Void)?
         var shouldRemove = false
         let skip = state.withLock { state -> Bool in
             if state.fullyClosed || state.localReadClosed {
@@ -2615,24 +2618,19 @@ nonisolated final class SudokuMuxStream: Sendable {
             state.localReadClosed = true
             state.queue.removeAll(keepingCapacity: false)
             shouldRemove = state.localWriteClosed
-            if let pending = state.pendingReceive {
-                state.pendingReceive = nil
-                deliver = { pending.resume(returning: nil) }
-            }
+            wakeReceiveWaiterLocked(&state)
             return false
         }
         if skip { return }
         if shouldRemove {
             clientBox.withLock { $0.value }?.removeStream(id: id)
         }
-        deliver?()
     }
 
     func close() {
         // Terminal transition + continuation resume run under the state lock only (never the
         // send mutex), so close always fires and unblocks a parked sender. The best-effort FIN
         // is dispatched to a Task, ordered after in-flight data via the send mutex.
-        var deliver: (() -> Void)?
         let shouldSendClose: Bool? = state.withLock { state -> Bool? in
             if state.fullyClosed {
                 return nil
@@ -2643,10 +2641,7 @@ nonisolated final class SudokuMuxStream: Sendable {
             state.localWriteClosed = true
             state.terminalError = nil
             state.queue.removeAll(keepingCapacity: false)
-            if let pending = state.pendingReceive {
-                state.pendingReceive = nil
-                deliver = { pending.resume(returning: nil) }
-            }
+            wakeReceiveWaiterLocked(&state)
             return shouldSendClose
         }
         guard let shouldSendClose else { return }
@@ -2657,7 +2652,6 @@ nonisolated final class SudokuMuxStream: Sendable {
             }
             client.removeStream(id: id)
         }
-        deliver?()
     }
 
     private func sendCloseFrame(to client: SudokuMuxClient) async {
@@ -2668,25 +2662,22 @@ nonisolated final class SudokuMuxStream: Sendable {
 
     @discardableResult
     func markRemoteWriteClosed() -> Bool {
-        var deliver: (() -> Void)?
-        let shouldRemove = state.withLock { state -> Bool in
+        state.withLock { state -> Bool in
             if state.fullyClosed {
                 return false
             }
             state.remoteWriteClosed = true
             let shouldRemove = state.localWriteClosed && (state.remoteWriteClosed || state.localReadClosed)
-            if state.queue.isEmpty, let pending = state.pendingReceive {
-                state.pendingReceive = nil
-                deliver = { pending.resume(returning: nil) }
+            // A parked receiver has an empty queue, so waking it surfaces EOF; if the queue holds
+            // data, the receiver drains it first (it re-checks `remoteWriteClosed` only when empty).
+            if state.queue.isEmpty {
+                wakeReceiveWaiterLocked(&state)
             }
             return shouldRemove
         }
-        deliver?()
-        return shouldRemove
     }
 
     func markClosed(discardQueuedData: Bool = false, error: Error? = nil) {
-        var deliver: (() -> Void)?
         state.withLock { state in
             if state.fullyClosed {
                 return
@@ -2696,16 +2687,8 @@ nonisolated final class SudokuMuxStream: Sendable {
             if discardQueuedData {
                 state.queue.removeAll(keepingCapacity: false)
             }
-            if let pending = state.pendingReceive {
-                state.pendingReceive = nil
-                if let error {
-                    deliver = { pending.resume(throwing: error) }
-                } else {
-                    deliver = { pending.resume(returning: nil) }
-                }
-            }
+            wakeReceiveWaiterLocked(&state)
         }
-        deliver?()
     }
 }
 

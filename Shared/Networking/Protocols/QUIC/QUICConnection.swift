@@ -154,7 +154,9 @@ actor QUICConnection {
 
     fileprivate var tlsHandler: QUICTLSHandler?
 
-    private var retransmitTimer: DispatchSourceTimer?
+    /// ngtcp2's loss/PTO retransmit timer, vended by ``bridge`` so the `DispatchSourceTimer`
+    /// stays in the bridge layer. Re-armed from ``rescheduleTimer`` to ngtcp2's next expiry.
+    private var retransmitTimer: BridgeDeadlineTimer?
 
     private var dcid = ngtcp2_cid()
     private var scid = ngtcp2_cid()
@@ -257,7 +259,7 @@ actor QUICConnection {
         self.tuning = tuning
         self.obfuscator = obfuscator
         self.transport = transport
-        self.bridge = NGTCP2ConcurrencyBridge(label: AWCore.Identifier.quicQueue)
+        self.bridge = NGTCP2ConcurrencyBridge()
     }
 
     // MARK: Connect
@@ -760,7 +762,13 @@ actor QUICConnection {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
             let carrier = QUICDatagramCarrier(bridge: bridge)
-            try carrier.connect(remoteAddr: remoteAddr, localAddr: &localAddr)
+            // The carrier shares this connection's executor (both on `bridge`), so its synchronous
+            // surface is entered via `assumeIsolated` — we're already on the bridge queue. Our own
+            // isolated addrs are copied through locals (the closure is the *carrier's* isolation).
+            let remote = remoteAddr
+            var local = localAddr
+            try carrier.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &local) }
+            localAddr = local
             self.carrier = carrier
             try initializeNgtcp2()
             state = .handshaking
@@ -837,11 +845,11 @@ actor QUICConnection {
     }
 
     private func closeCarrier() {
-        carrier?.close()
+        carrier?.assumeIsolated { $0.close() }
         carrier = nil
         // Also retire any in-flight migration target, so closing mid-migration doesn't
         // leak its NWConnection or leave a deferred path_validation/deadline on stale state.
-        migratingCarrier?.close()
+        migratingCarrier?.assumeIsolated { $0.close() }
         clearMigrationState()
     }
 
@@ -976,10 +984,12 @@ actor QUICConnection {
     /// ngtcp2 attributes them to the right path. Migration triggers are set elsewhere.
     private func armReceive(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage,
                             onError: @escaping (Int32) -> Void) {
-        carrier.startReceiving(
-            onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
-            onError: onError
-        )
+        carrier.assumeIsolated {
+            $0.startReceiving(
+                onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
+                onError: onError
+            )
+        }
     }
 
     /// Arms the active carrier's receive loop (close on hard error) and migration triggers.
@@ -993,8 +1003,10 @@ actor QUICConnection {
     /// Sets the reactive (path-down) and proactive (better-path) triggers; no-op when migration is off.
     private func installMigrationTriggers(on carrier: QUICDatagramCarrier) {
         guard migrationEnabled else { return }
-        carrier.onPathDown = { [weak self] in self?.assumeIsolated { $0.attemptReactiveMigration() } }
-        carrier.onBetterPath = { [weak self] in self?.assumeIsolated { $0.attemptProactiveMigration() } }
+        carrier.assumeIsolated {
+            $0.onPathDown = { [weak self] in self?.assumeIsolated { $0.attemptReactiveMigration() } }
+            $0.onBetterPath = { [weak self] in self?.assumeIsolated { $0.attemptProactiveMigration() } }
+        }
     }
 
     // MARK: Migration
@@ -1042,7 +1054,7 @@ actor QUICConnection {
     private func attemptReactiveMigration() {
         // A proactive migration is moot now the path is dead; abandon it (not a failure).
         if migrationKind == .proactive {
-            migratingCarrier?.close()
+            migratingCarrier?.assumeIsolated { $0.close() }
             clearMigrationState()
         }
 
@@ -1055,8 +1067,9 @@ actor QUICConnection {
 
         let newCarrier = QUICDatagramCarrier(bridge: bridge)
         var placeholder = sockaddr_storage()
+        let remote = remoteAddr
         do {
-            try newCarrier.connect(remoteAddr: remoteAddr, localAddr: &placeholder)
+            try newCarrier.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &placeholder) }
         } catch {
             close(error: error)
             return
@@ -1072,7 +1085,7 @@ actor QUICConnection {
         bridge.exitConnHeld(prevBusy)
         guard rv == 0 else {
             logger.warning("[QUIC] Reactive migration rejected (ngtcp2 \(rv)); reconnecting")
-            newCarrier.close()
+            newCarrier.assumeIsolated { $0.close() }
             migrationFailures += 1
             close(error: QUICError.connectionFailed("migration rejected: \(rv)"))
             return
@@ -1085,7 +1098,7 @@ actor QUICConnection {
         carrier = newCarrier
         localAddr = newLocal
         armActiveCarrier(newCarrier, localAddr: newLocal)
-        oldCarrier?.close()
+        oldCarrier?.assumeIsolated { $0.close() }
         logger.info("[QUIC] Reactive migration initiated; validating new path")
         writeToUDP()
         rescheduleTimer()
@@ -1098,14 +1111,15 @@ actor QUICConnection {
         guard migrationEnabled, state == .connected, migrationKind == nil,
               migrationFailures < Self.maxMigrationFailures,
               connectionOpaquePointer != nil,
-              let oldType = carrier?.currentInterfaceType else { return }
+              let oldType = carrier?.assumeIsolated({ $0.currentInterfaceType }) else { return }
 
         let target = QUICDatagramCarrier(bridge: bridge)
         var placeholder = sockaddr_storage()
+        let remote = remoteAddr
         do {
-            try target.connect(remoteAddr: remoteAddr, localAddr: &placeholder)
+            try target.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &placeholder) }
         } catch {
-            target.close()
+            target.assumeIsolated { $0.close() }
             return
         }
 
@@ -1119,7 +1133,7 @@ actor QUICConnection {
         armReceive(target, localAddr: newLocal) { [weak self] _ in
             self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
         }
-        target.onPathDown = { [weak self] in self?.assumeIsolated { $0.abortProactiveIfNotValidating() } }
+        target.assumeIsolated { $0.onPathDown = { [weak self] in self?.assumeIsolated { $0.abortProactiveIfNotValidating() } } }
 
         // If the target never reaches `.ready`, give up rather than wedge `migrationKind`.
         // Fires on `queue` (hopped back onto the ngtcp2 home queue) to touch migration state.
@@ -1138,12 +1152,12 @@ actor QUICConnection {
 
         // Once the target is up and confirmed a *different* interface, start validation.
         // NWConnection buffers the probe until ready.
-        target.onReady = { [weak self, weak target] in
+        target.assumeIsolated { $0.onReady = { [weak self, weak target] in
             guard let self else { return }
             self.assumeIsolated { me in
                 guard let target, me.migratingCarrier === target,
                       let conn = me.connectionOpaquePointer,
-                      let newType = target.currentInterfaceType, newType != oldType else {
+                      let newType = target.assumeIsolated({ $0.currentInterfaceType }), newType != oldType else {
                     me.abortProactiveMigration(countAsFailure: false)
                     return
                 }
@@ -1167,7 +1181,7 @@ actor QUICConnection {
                 me.writeToUDP()
                 me.rescheduleTimer()
             }
-        }
+        } }
     }
 
     /// Drops a proactive-migration target and stays on the current path. `countAsFailure`
@@ -1175,7 +1189,7 @@ actor QUICConnection {
     /// failed); benign aborts pass false. Runs on `queue`.
     private func abortProactiveMigration(countAsFailure: Bool) {
         guard migrationKind == .proactive else { return }
-        migratingCarrier?.close()
+        migratingCarrier?.assumeIsolated { $0.close() }
         clearMigrationState()
         if countAsFailure { migrationFailures += 1 }
     }
@@ -1218,7 +1232,7 @@ actor QUICConnection {
                 localAddr = migratingLocalAddr
                 migratingCarrier = nil       // cleared first so routing settles on `carrier`
                 armActiveCarrier(target, localAddr: localAddr)
-                old?.close()
+                old?.assumeIsolated { $0.close() }
             }
             clearMigrationState()
             migrationFailures = 0
@@ -1273,7 +1287,7 @@ actor QUICConnection {
         guard let carrier else { return }
         txBuffer.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
-            carrier.send(base, length: length)
+            carrier.assumeIsolated { $0.send(base, length: length) }
         }
     }
 
@@ -1286,7 +1300,7 @@ actor QUICConnection {
         guard let carrier else { return }
         datagram.withUnsafeBytes { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            carrier.send(base, length: datagram.count)
+            carrier.assumeIsolated { $0.send(base, length: datagram.count) }
         }
     }
 
@@ -1609,9 +1623,12 @@ actor QUICConnection {
         if expiry == lastScheduledExpiry && retransmitTimer != nil { return }
         lastScheduledExpiry = expiry
 
-        if retransmitTimer == nil {
-            let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.setEventHandler { [weak self] in
+        let timer: BridgeDeadlineTimer
+        if let existing = retransmitTimer {
+            timer = existing
+        } else {
+            // Fires on the bridge queue (this actor's executor), so `assumeIsolated` is valid.
+            timer = bridge.makeDeadlineTimer { [weak self] in
                 guard let self else { return }
                 self.assumeIsolated { me in
                     guard let connectionOpaquePointer = me.connectionOpaquePointer else { return }
@@ -1634,20 +1651,15 @@ actor QUICConnection {
                 }
             }
             retransmitTimer = timer
-            timer.resume()
         }
 
-        let deadline: DispatchTime
         if expiry == UInt64.max {
-            deadline = .distantFuture
+            timer.parkUntilRearmed()
         } else {
             let now = currentTimestamp()
             let delay = expiry > now ? expiry - now : 0
-            deadline = .now() + .nanoseconds(Int(min(delay, UInt64(Int.max))))
+            timer.schedule(afterNanoseconds: delay)
         }
-        // Zero leeway: BBR needs sub-ms pacing accuracy; slack coalesces wakeups
-        // into bursts that trip loss detection.
-        retransmitTimer?.schedule(deadline: deadline, leeway: .nanoseconds(0))
     }
 
     // MARK: Utilities

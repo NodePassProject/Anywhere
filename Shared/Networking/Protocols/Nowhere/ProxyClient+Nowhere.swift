@@ -106,18 +106,16 @@ nonisolated extension ProxyClient {
 
             let attempt = NowhereFlowOpenAttempt()
             do {
-                let connection = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProxyConnection, Error>) in
-                    // Single-winner gate: the deadline, or the open (success/failure), whichever
-                    // claims first. The deadline handler tears down bound halves before failing.
-                    attempt.armDeadline(at: deadline) {
-                        continuation.resume(throwing: NowhereError.flowOpenTimeout)
-                    }
-                    Task { [weak self] in
+                // Single-winner race: the open (success/failure) vs. the deadline, resolved by
+                // `attempt.claimResult()` — the winner returns/throws, the loser returns nil and is
+                // torn down. Structured `withThrowingTaskGroup`, so the loser is cancelled on exit.
+                let connection = try await withThrowingTaskGroup(of: ProxyConnection?.self) { group in
+                    group.addTask { [weak self] in
                         guard let self else {
                             if attempt.claimResult() {
-                                continuation.resume(throwing: ProxyError.connectionFailed("Client deallocated during connect"))
+                                throw ProxyError.connectionFailed("Client deallocated during connect")
                             }
-                            return
+                            return nil
                         }
                         do {
                             let opened: ProxyConnection
@@ -138,17 +136,31 @@ nonisolated extension ProxyClient {
                                     attempt: attempt
                                 )
                             }
-                            if attempt.claimResult() {
-                                continuation.resume(returning: opened)
-                            } else {
-                                opened.cancel()   // the deadline already won
-                            }
+                            if attempt.claimResult() { return opened }
+                            opened.cancel()   // the deadline already won
+                            return nil
                         } catch {
-                            if attempt.claimResult() {
-                                continuation.resume(throwing: error)
-                            }
+                            if attempt.claimResult() { throw error }
+                            return nil
                         }
                     }
+                    group.addTask {
+                        // Mirrors the former `armDeadline`: sleep to the shared absolute deadline,
+                        // then claim + tear down bound halves before failing.
+                        let nowNanos = DispatchTime.now().uptimeNanoseconds
+                        let deadlineNanos = deadline.uptimeNanoseconds
+                        let delayNanos = deadlineNanos > nowNanos ? deadlineNanos - nowNanos : 0
+                        try? await Task.sleep(nanoseconds: delayNanos)
+                        guard !Task.isCancelled, attempt.claimResult() else { return nil }
+                        attempt.cancel()
+                        throw NowhereError.flowOpenTimeout
+                    }
+                    defer { group.cancelAll() }
+                    while let result = try await group.next() {
+                        if let opened = result { return opened }
+                        // nil = this task lost the claim; await the winner.
+                    }
+                    throw NowhereError.flowOpenTimeout
                 }
                 return connection
             } catch {

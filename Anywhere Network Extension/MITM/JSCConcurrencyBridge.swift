@@ -10,15 +10,15 @@ import Foundation
 nonisolated final class JSCConcurrencyBridge: @unchecked Sendable {
 
     /// Shared home for all JavaScriptCore work in the extension.
-    static let shared = JSCConcurrencyBridge(label: AWCore.Identifier.mitmScriptQueue)
+    static let shared = JSCConcurrencyBridge()
 
     /// The serial executor every script invocation runs on. A ``BridgeExecutor`` (not a bare
     /// `DispatchQueue`) so a future script-engine actor can adopt it as its `unownedExecutor`,
     /// exactly as `TCPConnection` adopts the lwIP bridge's executor.
     let executor: BridgeExecutor
 
-    private init(label: String) {
-        self.executor = BridgeExecutor(label: label)
+    private init() {
+        self.executor = BridgeExecutor(label: "com.argsment.Anywhere.JSCConcurrencyBridge")
     }
 
     /// The JSC serial (home) queue — everything touching a `JSContext`/`JSValue` hops here.

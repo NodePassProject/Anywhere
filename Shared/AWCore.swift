@@ -18,37 +18,6 @@ nonisolated final class AWCore {
         static let errorDomain = bundle
         static let iCloudContainer = "iCloud.\(bundle)"
         static let lwipQueue = "\(bundle).lwip"
-        static let mitmScriptQueue = "\(bundle).mitm-script"
-        static let mitmCertMintQueue = "\(bundle).mitm-cert-mint"
-        static let outputQueue = "\(bundle).output"
-        static let dnsResolveQueue = "\(bundle).dns-resolve"
-        static let pathMonitorQueue = "\(bundle).path-monitor"
-        static let quicQueue = "\(bundle).quic"
-        static let udpQueue = "\(bundle).udp"
-        
-        // MARK: Transport queue labels
-        static let tcpTransportQueue = "\(bundle).tcp-transport"
-        static let udpTransportQueue = "\(bundle).udp-transport"
-
-        // MARK: Protocol queue labels
-        static let http11Queue = "\(bundle).http11"
-        static let http2SessionQueue = "\(bundle).http2-session"
-
-        static let sudokuTCPReadQueue = "\(bundle).sudoku.tcp.read"
-        static let sudokuTCPWriteQueue = "\(bundle).sudoku.tcp.write"
-        static let sudokuMuxReadQueue = "\(bundle).sudoku.mux.read"
-        static let sudokuMuxWriteQueue = "\(bundle).sudoku.mux.write"
-        static let sudokuUDPReadQueue = "\(bundle).sudoku.udp.read"
-        static let sudokuUDPWriteQueue = "\(bundle).sudoku.udp.write"
-
-        // MARK: MITM supervisor queue labels
-        //
-        // A supervisor must run off the worker queue it watches; one shared
-        // monitor queue hosts every hard-cap check.
-
-        static let mitmMonitorQueue = "\(bundle).mitm-monitor"
-        static let mitmBodyWatchdogQueue = "\(bundle).mitm-body-watchdog"
-        static let mitmGateMatchQueue = "\(bundle).mitm-gate-match"
     }
     
     static var isHostApp: Bool {

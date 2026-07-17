@@ -829,7 +829,10 @@ nonisolated final class XHTTPH2Stream: @unchecked Sendable {
     fileprivate var receiveBuffer = Data()
     fileprivate var ended = false
     fileprivate var failure: Error?
-    fileprivate var pendingReceive: CheckedContinuation<Data?, Error>?
+    /// Single-flight receive gate: ``XHTTPH2Multiplexer/receive(stream:)`` enrolls a one-shot waiter
+    /// here when there's nothing to hand back; any data/EOF/error path finishes it (under the
+    /// connection lock) so the receiver re-checks. Replaces a stored `CheckedContinuation`.
+    fileprivate var receiveWaiter: AsyncStream<Void>.Continuation?
     /// When true, inbound data is discarded (an upload leg's response).
     fileprivate var draining = false
     fileprivate var receiveConsumed = 0
@@ -891,10 +894,10 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     private static let localConnWindow: UInt32 = 1_073_741_824 // 1 GB
     private static let maxReadBuffer = 8_388_608               // 8 MB
 
-    /// Side effects to run outside the state lock: control frames to write, then a receive to resume.
+    /// Control frames to write outside the state lock (window updates). Receive hand-off now
+    /// happens in `receive` itself via the per-stream gate, so there's no deliver closure.
     private struct PumpEffect {
         var frames: [Data] = []
-        var deliver: (() -> Void)?
     }
 
     init(transport: any ByteTransport) {
@@ -1024,7 +1027,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     /// Runs an effect's control-frame writes, then resumes any waiting receive.
     private func apply(_ effect: PumpEffect) async {
         for frame in effect.frames { try? await transport.send(frame) }
-        effect.deliver?()
     }
 
     private func handleData(streamId: UInt32, flags: UInt8, payload: Data) -> PumpEffect? {
@@ -1045,7 +1047,8 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
             }
             if !payload.isEmpty { stream.receiveBuffer.append(payload) }
             if endStream { stream.ended = true }
-            return makeDeliveryLocked(stream, &state)
+            wakeReceiverLocked(stream)
+            return nil
         }
     }
 
@@ -1058,7 +1061,8 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
                 if stream.failure == nil {
                     stream.failure = XHTTPError.setupFailed("shared H2 stream \(streamId): \(statusError)")
                 }
-                return makeDeliveryLocked(stream, &state)
+                wakeReceiverLocked(stream)
+                return nil
             }
         }
         // Body arrives as DATA; only a HEADERS carrying END_STREAM closes the stream.
@@ -1071,7 +1075,8 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
             guard let stream = state.streams[streamId] else { return nil }
             if stream.draining { state.streams.removeValue(forKey: streamId); return nil }
             stream.ended = true
-            return makeDeliveryLocked(stream, &state)
+            wakeReceiverLocked(stream)
+            return nil
         }
     }
 
@@ -1093,28 +1098,12 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
         }
     }
 
-    /// Lock held. Hands buffered data/EOF/error to a waiting receiver; returns the effect to run after unlock.
-    private func makeDeliveryLocked(_ stream: XHTTPH2Stream, _ state: inout State) -> PumpEffect? {
-        guard let pending = stream.pendingReceive else { return nil }
-        if let failure = stream.failure {
-            stream.pendingReceive = nil
-            return PumpEffect(deliver: { pending.resume(throwing: failure) })
-        }
-        if !stream.receiveBuffer.isEmpty {
-            let data = stream.receiveBuffer
-            stream.receiveBuffer = Data()
-            stream.pendingReceive = nil
-            state.connReceiveConsumed += data.count
-            stream.receiveConsumed += data.count
-            let updates = windowUpdatesLocked(stream, &state)
-            return PumpEffect(frames: updates, deliver: { pending.resume(returning: data) })
-        }
-        if stream.ended {
-            stream.pendingReceive = nil
-            state.streams.removeValue(forKey: stream.streamId)
-            return PumpEffect(deliver: { pending.resume(returning: nil) })
-        }
-        return nil
+    /// Lock held. Wakes a parked ``receive(stream:)`` so it re-evaluates the stream's
+    /// buffer/EOF/error state (and replenishes the receive window on consume). The window-update
+    /// frames and the actual hand-off now live in `receive`, so this just finishes the gate.
+    private func wakeReceiverLocked(_ stream: XHTTPH2Stream) {
+        stream.receiveWaiter?.finish()
+        stream.receiveWaiter = nil
     }
 
     // MARK: Send
@@ -1196,22 +1185,50 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     }
 
     func receive(stream: XHTTPH2Stream) async throws -> Data? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
-            let effect: PumpEffect? = state.withLock { state in
-                if state.closedFlag, stream.receiveBuffer.isEmpty, !stream.ended, stream.failure == nil {
-                    return PumpEffect(deliver: { continuation.resume(throwing: XHTTPError.connectionClosed) })
+        enum Outcome { case data(Data, frames: [Data]), eof, error(Error), wait(AsyncStream<Void>) }
+        while true {
+            let outcome: Outcome = state.withLock { state in
+                if let failure = stream.failure {
+                    return .error(failure)
                 }
-                stream.pendingReceive = continuation
-                return makeDeliveryLocked(stream, &state)
+                if !stream.receiveBuffer.isEmpty {
+                    // Consume-time flow control: replenish the receive window only as the session
+                    // drains the buffer, so a slow reader backpressures the peer.
+                    let data = stream.receiveBuffer
+                    stream.receiveBuffer = Data()
+                    state.connReceiveConsumed += data.count
+                    stream.receiveConsumed += data.count
+                    let updates = windowUpdatesLocked(stream, &state)
+                    return .data(data, frames: updates)
+                }
+                if stream.ended {
+                    state.streams.removeValue(forKey: stream.streamId)
+                    return .eof
+                }
+                if state.closedFlag {
+                    return .error(XHTTPError.connectionClosed)
+                }
+                let (waitStream, continuation) = AsyncStream<Void>.makeStream()
+                stream.receiveWaiter = continuation
+                return .wait(waitStream)
             }
-            guard let effect else { return }
-            // Any WINDOW_UPDATEs are fire-and-forget (their order vs. the pump is immaterial); resume inline.
-            if !effect.frames.isEmpty {
-                let frames = effect.frames
-                let transport = self.transport
-                Task { for frame in frames { try? await transport.send(frame) } }
+            switch outcome {
+            case .data(let data, let frames):
+                // WINDOW_UPDATEs are fire-and-forget (order vs. the pump is immaterial).
+                if !frames.isEmpty {
+                    let transport = self.transport
+                    Task { for frame in frames { try? await transport.send(frame) } }
+                }
+                return data
+            case .eof:
+                return nil
+            case .error(let error):
+                throw error
+            case .wait(let waitStream):
+                for await _ in waitStream { break }
+                // A finished gate (data/close) loops to re-check; a cancelled task must not spin.
+                try Task.checkCancellation()
             }
-            effect.deliver?()
         }
     }
 
@@ -1254,22 +1271,27 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, @unche
     /// receive (e.g. a clean transport FIN of the shared H2 connection); a non-nil error
     /// surfaces as a failure.
     private func failAll(_ error: Error?) {
-        let pendings: [CheckedContinuation<Data?, Error>]? = state.withLock { state in
-            if state.closedFlag { return nil }
+        let didClose: Bool = state.withLock { state in
+            if state.closedFlag { return false }
             state.closedFlag = true
-            let pendings = state.streams.values.compactMap { $0.pendingReceive }
-            for stream in state.streams.values { stream.pendingReceive = nil }
+            // Stamp each stream so a parked receive re-check surfaces the right terminal result:
+            // a non-nil error as a failure, a nil error (clean FIN) as graceful EOF.
+            for stream in state.streams.values {
+                if let error {
+                    if stream.failure == nil { stream.failure = error }
+                } else {
+                    stream.ended = true
+                }
+                wakeReceiverLocked(stream)
+            }
             state.streams.removeAll()
             // Sends parked on flow control wake here; each re-enters `sendData`, sees the closed
             // connection, and throws `.connectionClosed` rather than hanging forever.
             state.flowGate.wakeAll()
-            return pendings
+            return true
         }
-        guard let pendings else { return }
+        guard didClose else { return }
         frameReader.reset()
-        for pending in pendings {
-            if let error { pending.resume(throwing: error) } else { pending.resume(returning: nil) }
-        }
         transport.cancel()
     }
 
