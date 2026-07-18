@@ -680,9 +680,6 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             return true
         }
         guard shouldRead else { return }
-        // Strong captures: the one-shot read task owns the connection until this single
-        // `receiveRaw` settles (teardown cancels the transport, failing it); the
-        // `state.inner === connection` guard in `handleTransportRead` drops stale results.
         Task {
             do {
                 let data = try await connection.receiveRaw()
@@ -815,40 +812,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     /// any reverse application byte is a protocol violation.
     private func bufferedUOTTermination(_ state: State) -> (terminated: Bool, error: Error?) {
         guard state.flowResultKind == .udp, state.flowRole == .open else { return (false, nil) }
-        switch Self.bufferedUOTTerminationStep(buffer: state.receiveBuffer) {
-        case .none:
-            return (false, nil)
-        case .close:
-            return (true, nil)
-        case .reject(let code):
-            return (true, NowhereError.flowRejected(code))
-        case .invalidControl:
-            return (true, NowhereError.connectionFailed("Invalid UoT control frame"))
-        }
-    }
-
-    static func bufferedUOTTerminationStep(buffer: Data) -> BufferedUOTTerminationStep {
-        // Only the first buffered frame decides the outcome — every branch is terminal.
-        guard buffer.count >= 3 else { return .none }
-        let length = (Int(buffer[1]) << 8) | Int(buffer[2])
-        guard buffer.count >= 3 + length else { return .none }
-        guard let (message, _) = NowhereProtocol.decodeUDPStreamFrame(
-            buffer,
-            offset: 0
-        ) else { return .invalidControl }
-        switch message.type {
-        case .data:
-            return .invalidControl
-        case .close:
-            return .close
-        case .reject:
-            guard let code = NowhereProtocol.FlowRejectCode(rawValue: message.payload[0]) else {
-                return .invalidControl
-            }
-            return .reject(code)
-        case .ready:
-            return .invalidControl
-        }
+        guard !state.receiveBuffer.isEmpty else { return (false, nil) }
+        return (true, NowhereError.connectionFailed("Unexpected reverse UoT payload"))
     }
 
     /// A prepared connection can already have a transport read in flight when
