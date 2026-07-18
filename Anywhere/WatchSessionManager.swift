@@ -11,11 +11,6 @@ import WatchConnectivity
 
 nonisolated private let logger = AnywhereLogger(category: "WatchSessionManager")
 
-// MARK: Code quality violation - tolerate here temporarily
-nonisolated private struct SendableReplyHandler: @unchecked Sendable {
-    let handler: ([String: Any]) -> Void
-}
-
 @MainActor
 final class WatchSessionManager: NSObject {
     static let shared = WatchSessionManager()
@@ -184,9 +179,9 @@ extension WatchSessionManager: WCSessionDelegate {
             replyHandler([:])
             return
         }
-        let reply = SendableReplyHandler(handler: replyHandler)
+        let reply = WatchConnectivityConcurrencyBridge.ReplyHandler(replyHandler)
         Task { @MainActor in
-            reply.handler(await self.handle(request))
+            reply(await self.handle(request))
         }
     }
 

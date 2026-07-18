@@ -385,6 +385,7 @@
 				Networking/Utilities/BridgeContext.swift,
 				Networking/Utilities/BridgeExecutor.swift,
 				Networking/Utilities/DNSSyscallConcurrencyBridge.swift,
+				Protocols/SoftDeletable.swift,
 				Utilities/AnywhereLogger.swift,
 				"Utilities/Data+appendCompacting.swift",
 				"Utilities/Data+init.swift",

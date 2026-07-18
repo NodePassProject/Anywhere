@@ -6,24 +6,34 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2Rewriter")
 
-// MARK: Code quality violation
-nonisolated final class MITMHTTP2Rewriter: @unchecked Sendable {
+nonisolated final class MITMHTTP2Rewriter: Sendable {
 
     let host: String
     /// Split by phase at init so per-frame paths don't re-pay the policy trie walk.
     private let requestRules: [CompiledMITMRule]
     private let responseRules: [CompiledMITMRule]
     private let cachedRuleSetID: UUID?
-    /// Every subsequent request's `:authority` is rewritten to this value (last write wins).
-    /// Single-upstream commitment is enforced by the session, not here.
-    private var effectiveAuthority: String?
 
-    /// Upstream to dial when a transparent rewrite resolves a replacement host; nil falls
-    /// back to the original destination. Reflects the latest transparent rewrite only.
-    private(set) var resolvedUpstream: (host: String, port: UInt16?)?
+    /// Transparent-rewrite state, mutated as request heads flow through. A `Mutex` protects the
+    /// values so the rewriter is honestly `Sendable`; every caller shares the lwIP executor, so the
+    /// lock is uncontended and never held across a suspension.
+    private struct RewriteState {
+        /// Every subsequent request's `:authority` is rewritten to this value (last write wins).
+        /// Single-upstream commitment is enforced by the session, not here.
+        var effectiveAuthority: String?
+        /// Upstream to dial when a transparent rewrite resolves a replacement host; nil falls
+        /// back to the original destination. Reflects the latest transparent rewrite only.
+        var resolvedUpstream: (host: String, port: UInt16?)?
+    }
+    private let rewriteState: Mutex<RewriteState>
+
+    /// Latest transparent-rewrite upstream, or nil to fall back to the original destination.
+    var resolvedUpstream: (host: String, port: UInt16?)? { rewriteState.withLock { $0.resolvedUpstream } }
+
     let scriptEngineProvider: MITMScriptEngine.Provider
     /// Inbound records post-rewrite method/url per stream; outbound reads them for response-script ctx.
     let requestLog: MITMRequestLog
@@ -41,7 +51,7 @@ nonisolated final class MITMHTTP2Rewriter: @unchecked Sendable {
         self.requestRules = matchedRules.filter { $0.phase == .httpRequest }
         self.responseRules = matchedRules.filter { $0.phase == .httpResponse }
         self.cachedRuleSetID = matchedSet?.id
-        self.effectiveAuthority = effectiveAuthority
+        self.rewriteState = Mutex(RewriteState(effectiveAuthority: effectiveAuthority, resolvedUpstream: nil))
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
     }
@@ -202,7 +212,7 @@ nonisolated final class MITMHTTP2Rewriter: @unchecked Sendable {
     private func applyAuthorityRewrite(
         _ headers: [(name: String, value: String)]
     ) -> [(name: String, value: String)] {
-        guard let authority = effectiveAuthority else { return headers }
+        guard let authority = rewriteState.withLock({ $0.effectiveAuthority }) else { return headers }
         // Trailer check kept local so caller classification can't break the invariant.
         let hasMethod = headers.contains { ASCII.equalsIgnoringCase($0.name, ":method") }
         guard hasMethod else { return headers }
@@ -247,8 +257,10 @@ nonisolated final class MITMHTTP2Rewriter: @unchecked Sendable {
                       let resolved = rule.resolvedRewriteAction(verdicts: verdicts, at: index),
                       case .transparent(let replacement) = resolved else { continue }
                 rewroteRequest = true
-                effectiveAuthority = replacement.authority
-                resolvedUpstream = (host: replacement.host, port: replacement.port)
+                rewriteState.withLock {
+                    $0.effectiveAuthority = replacement.authority
+                    $0.resolvedUpstream = (host: replacement.host, port: replacement.port)
+                }
                 var sawAuthority = false
                 current = current.compactMap { entry -> (name: String, value: String)? in
                     // Drop a client-sent Host — the rewritten `:authority` supersedes it (RFC 9113 §8.3.1).

@@ -61,12 +61,13 @@ nonisolated private enum VLESSWire {
 
 /// 12-byte big-endian-incrementing nonce; each seal/open without an explicit nonce
 /// advances the counter by one.
-// MARK: Code quality violation
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-nonisolated private final class VLESSEncryptionAEAD: @unchecked Sendable {
+nonisolated private final class VLESSEncryptionAEAD: Sendable {
     let key: SymmetricKey
     let useAES: Bool
-    private var nonce: [UInt8] = Array(repeating: 0, count: 12)
+    /// 12-byte counter behind a `Mutex` so the type is honestly `Sendable`; advance-and-snapshot is
+    /// one critical section, so even a concurrent seal/open can never reuse a nonce.
+    private let nonce = Mutex<[UInt8]>(Array(repeating: 0, count: 12))
 
     /// BLAKE3 key derivation from `(ctx, key)`; context is hashed as raw bytes.
     init(context: Data, key: Data, useAES: Bool) {
@@ -81,14 +82,15 @@ nonisolated private final class VLESSEncryptionAEAD: @unchecked Sendable {
 
     /// True when the *next* seal/open will use the maximum nonce, triggering a rekey.
     var nonceIsAtMax: Bool {
-        for byte in nonce where byte != 0xFF { return false }
-        return true
+        nonce.withLock { n in
+            for byte in n where byte != 0xFF { return false }
+            return true
+        }
     }
 
     func seal(_ plaintext: Data, additionalData: Data?) throws -> Data {
         // Increment before use, so nonce 0 is never used.
-        advanceNonce()
-        let nonceData = Data(nonce)
+        let nonceData = nonce.withLock { n -> Data in Self.advance(&n); return Data(n) }
         if useAES {
             let aeadNonce = try AES.GCM.Nonce(data: nonceData)
             let sealed: AES.GCM.SealedBox
@@ -112,8 +114,7 @@ nonisolated private final class VLESSEncryptionAEAD: @unchecked Sendable {
 
     /// Open a sealed buffer (`ciphertext + tag`). Same increment-before-use nonce semantics as `seal`.
     func open(_ sealed: Data, additionalData: Data?) throws -> Data {
-        advanceNonce()
-        let nonceData = Data(nonce)
+        let nonceData = nonce.withLock { n -> Data in Self.advance(&n); return Data(n) }
         return try open(sealed, nonce: nonceData, additionalData: additionalData)
     }
 
@@ -143,8 +144,8 @@ nonisolated private final class VLESSEncryptionAEAD: @unchecked Sendable {
         }
     }
 
-    /// Big-endian increment.
-    private func advanceNonce() {
+    /// Big-endian increment of a 12-byte counter.
+    private static func advance(_ nonce: inout [UInt8]) {
         for i in stride(from: 11, through: 0, by: -1) {
             nonce[i] &+= 1
             if nonce[i] != 0 { return }

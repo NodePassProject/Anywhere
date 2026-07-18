@@ -37,8 +37,7 @@ nonisolated enum MITMScriptHTTP2Error: Error, LocalizedError {
 
 // MARK: - MITMScriptHTTP2Connection
 
-// MARK: Code quality violation
-nonisolated final class MITMScriptHTTP2Connection: Multiplexer, @unchecked Sendable {
+nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     // MARK: Phase
 
@@ -111,6 +110,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, @unchecked Senda
         /// The transport read loop. Strong self: the loop owns the connection while receiving;
         /// `teardown` cancels it and the transport, ending the parked receive.
         var readTask: Task<Void, Never>?
+
+        /// HPACK dynamic table for inbound HEADERS. Confined to the read-loop task (headers decode
+        /// serially there), but kept in `State` so the connection has no non-`Sendable` stored
+        /// property; the decode runs under the lock's synchronous, uncontended critical section.
+        var hpackDecoder = HPACKDecoder()
     }
     private let lock = Mutex(State())
 
@@ -120,10 +124,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, @unchecked Senda
     /// `[CheckedContinuation]` waiter array.
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
-
-    /// Connection-scoped HPACK decoder; the dynamic table is shared across all streams (RFC 7541 §2.2).
-    /// Touched only by the single read-loop task (setup → `ingest`), so it needs no separate lock.
-    private let hpackDecoder = HPACKDecoder()
 
     /// Called once when the connection becomes permanently unusable, so the pool can evict it.
     /// Immutable — installed at creation, before the connection is shared.
@@ -319,7 +319,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, @unchecked Senda
                 enum TLSOutcome { case stale; case http1; case proceed }
                 let outcome: TLSOutcome = lock.withLock { state in
                     guard state.phase == .connecting else { return .stale }
-                    guard client.negotiatedALPN == "h2" else {
+                    guard tlsConnection.negotiatedALPN == "h2" else {
                         // HTTP/1.1-only origin: cache it and fail waiters over to the HTTP/1.1 path —
                         // one live connection can't serve N concurrent HTTP/1.1 exchanges.
                         state.negotiatedHTTP1 = true
@@ -530,8 +530,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, @unchecked Senda
     /// Decodes HPACK unconditionally, THEN routes the fields — never gate the decode on stream
     /// existence, or a finished/reset stream's HEADERS would desync the shared dynamic table.
     private func completeHeaderBlock(streamID: UInt32, flags: UInt8, block: Data) {
-        // hpackDecoder is touched only here, on the single read-loop task, so it needs no lock.
-        guard let decoded = hpackDecoder.decodeHeaders(from: block) else {
+        // The decoder is confined to this read-loop task; the lock (uncontended, synchronous) makes
+        // that confinement compiler-provable without a separate non-Sendable stored property.
+        guard let decoded = lock.withLock({ $0.hpackDecoder.decodeHeaders(from: block) }) else {
             // A failed decode leaves the dynamic table in an unknown state — connection-fatal.
             connectionError("HPACK decode failed")
             return

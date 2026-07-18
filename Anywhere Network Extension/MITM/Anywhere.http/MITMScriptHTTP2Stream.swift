@@ -8,8 +8,7 @@
 import Foundation
 import Synchronization
 
-// MARK: Code quality violation
-nonisolated final class MITMScriptHTTP2Stream: @unchecked Sendable {
+nonisolated final class MITMScriptHTTP2Stream: Sendable {
 
     /// Advertised per-stream receive window; must match the connection's SETTINGS_INITIAL_WINDOW_SIZE.
     private static let recvWindow = 4 * 1024 * 1024
@@ -17,7 +16,11 @@ nonisolated final class MITMScriptHTTP2Stream: @unchecked Sendable {
     // MARK: Inputs (immutable)
 
     let streamID: UInt32
-    private weak var connection: MITMScriptHTTP2Connection?
+    /// Weak back-reference to the owning connection (it holds the stream in its table), boxed so this
+    /// set-once value stays a `let` and the type is honestly `Sendable` — a weak load is atomic.
+    private struct WeakConnection: Sendable { weak var value: MITMScriptHTTP2Connection? }
+    private let connectionBox: WeakConnection
+    private var connection: MITMScriptHTTP2Connection? { connectionBox.value }
     private let request: URLRequest
     private let hostHeader: String
     private let maxBytes: Int
@@ -63,7 +66,7 @@ nonisolated final class MITMScriptHTTP2Stream: @unchecked Sendable {
         responseSignal: AsyncThrowingStream<MITMScriptHTTPClient.Response, Error>.Continuation
     ) {
         self.streamID = streamID
-        self.connection = connection
+        self.connectionBox = WeakConnection(value: connection)
         self.request = request
         self.hostHeader = hostHeader
         self.maxBytes = maxBytes

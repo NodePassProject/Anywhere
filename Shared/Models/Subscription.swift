@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated struct Subscription: Identifiable, Codable {
+nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
     let id: UUID
     var name: String
     var url: String

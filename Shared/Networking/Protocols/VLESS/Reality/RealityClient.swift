@@ -12,8 +12,7 @@ import Security
 
 nonisolated private let logger = AnywhereLogger(category: "RealityClient")
 
-// MARK: Code quality violation
-nonisolated class RealityClient: @unchecked Sendable {
+actor RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any ByteTransport)?
 

@@ -566,76 +566,45 @@ nonisolated protocol XHTTPXMUXMultiplexerPoolable: AnyObject, Sendable {
     func poolClose()
 }
 
-// MARK: Code quality violation
-nonisolated final class XHTTPXMUXMultiplexerLease: @unchecked Sendable {
+nonisolated final class XHTTPXMUXMultiplexerLease: Sendable {
     let connection: XHTTPXMUXMultiplexerPoolable
-    private weak var manager: XHTTPXMUXMultiplexerManager?
-    /// Strong so the connection outlives all its sessions, even after the pool retires it.
-    private let client: XHTTPXMUXMultiplexerClient
+    /// Weak back-reference to the owning manager, boxed so this set-once value stays a `let` and the
+    /// lease is honestly `Sendable` — a weak load is atomic, and the manager is itself `Sendable`.
+    private struct WeakManager: Sendable { weak var value: XHTTPXMUXMultiplexerManager? }
+    private let managerBox: WeakManager
+    private var manager: XHTTPXMUXMultiplexerManager? { managerBox.value }
+    /// Identity of the pooled connection's manager entry. `connection` above keeps the connection
+    /// itself alive for this session's lifetime; this id only routes `noteRequest`/`release` back to
+    /// the manager's entry.
+    private let clientID: UInt64
     /// One-shot release latch. A lone flag, so it is an `Atomic` compare-exchange rather than a
     /// `Mutex` guarding no compound state (matching `HandshakeRaceGate`).
     private let released = Atomic(false)
 
-    init(connection: XHTTPXMUXMultiplexerPoolable, manager: XHTTPXMUXMultiplexerManager, client: XHTTPXMUXMultiplexerClient) {
+    init(connection: XHTTPXMUXMultiplexerPoolable, manager: XHTTPXMUXMultiplexerManager, clientID: UInt64) {
         self.connection = connection
-        self.manager = manager
-        self.client = client
+        self.managerBox = WeakManager(value: manager)
+        self.clientID = clientID
     }
 
     /// Decrements the connection's remaining-request budget (`hMaxRequestTimes`).
     func noteRequest() {
-        manager?.noteRequest(client)
+        manager?.noteRequest(clientID)
     }
 
     /// Releases this session's concurrency slot. Idempotent.
     func release() {
         // Atomic take-once: the caller that flips false→true releases the slot; every later call no-ops.
         guard released.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
-        manager?.releaseSlot(client)
-    }
-}
-
-// MARK: Code quality violation
-nonisolated final class XHTTPXMUXMultiplexerClient: @unchecked Sendable {
-    enum State { case dialing, ready, failed }
-    var state: State = .dialing
-    var connection: XHTTPXMUXMultiplexerPoolable?
-    /// Concurrent sessions currently leased on this connection.
-    var openUsage = 0
-    /// Remaining session assignments (`cMaxReuseTimes - 1`); -1 = unlimited.
-    var leftUsage: Int
-    /// Remaining HTTP requests (`hMaxRequestTimes`); `Int.max` = unlimited.
-    var leftRequests: Int
-    /// Wall-clock retirement time (`hMaxReusableSecs`); nil = never.
-    let unreusableAt: CFAbsoluteTime?
-    /// The in-flight dial for this connection, created by the leader under the pool lock. Every
-    /// joiner awaits its value, so the coalescing needs no waiter array of continuations.
-    var dialTask: Task<XHTTPXMUXMultiplexerPoolable?, Never>?
-
-    init(leftUsage: Int, leftRequests: Int, unreusableAt: CFAbsoluteTime?) {
-        self.leftUsage = leftUsage
-        self.leftRequests = leftRequests
-        self.unreusableAt = unreusableAt
-    }
-
-    /// Retired when failed, closed, out of reuses/requests, or past its lifetime.
-    /// Caller holds the manager lock.
-    func isRetired(now: CFAbsoluteTime) -> Bool {
-        // Never retire mid-dial: pruning a dialing client would strand its waiters, whose
-        // completions only fire when the dial resolves.
-        if state == .dialing { return false }
-        if state == .failed { return true }
-        if connection?.isPoolClosed == true { return true }
-        if leftUsage == 0 || leftRequests <= 0 { return true }
-        if let unreusableAt, now > unreusableAt { return true }
-        return false
+        manager?.releaseSlot(clientID)
     }
 }
 
 /// Intentionally not a ``MultiplexerPool`` subclass: XMUX reuse follows Xray's per-connection
 /// retirement policy (`cMaxReuseTimes` / `hMaxRequestTimes` / `hMaxReusableSecs`, see
-/// ``XHTTPXMUXMultiplexerClient/isRetired(now:)``) rather than the base's idle-age sweep.
-/// All state is guarded by the `clients` mutex.
+/// ``ClientEntry/isRetired(now:)``) rather than the base's idle-age sweep. Every pooled connection's
+/// mutable state lives inside this manager's `pool` mutex, keyed by a `UInt64` id the lease carries —
+/// there is no shared mutable client object, so no `@unchecked` is needed.
 nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     private let config: XHTTPXMUXMultiplexerConfiguration
     /// `maxConcurrency` range rolled once at creation, fixed for the manager's lifetime.
@@ -644,7 +613,42 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     private let connections: Int
     /// Destination-bound dial: resolves to a fresh poolable connection, or nil on failure.
     private let newConnection: @Sendable () async -> XHTTPXMUXMultiplexerPoolable?
-    private let clients = Mutex<[XHTTPXMUXMultiplexerClient]>([])
+
+    private enum Phase { case dialing, ready, failed }
+
+    /// One pooled connection's state; a value type owned entirely by ``pool``.
+    private struct ClientEntry {
+        var phase: Phase = .dialing
+        var connection: XHTTPXMUXMultiplexerPoolable?
+        /// Concurrent sessions currently leased on this connection.
+        var openUsage = 0
+        /// Remaining session assignments (`cMaxReuseTimes - 1`); -1 = unlimited.
+        var leftUsage: Int
+        /// Remaining HTTP requests (`hMaxRequestTimes`); `Int.max` = unlimited.
+        var leftRequests: Int
+        /// Wall-clock retirement time (`hMaxReusableSecs`); nil = never.
+        let unreusableAt: CFAbsoluteTime?
+        /// The in-flight dial, created by the leader under the pool lock; every joiner awaits its value.
+        var dialTask: Task<XHTTPXMUXMultiplexerPoolable?, Never>?
+
+        /// Retired when failed, closed, out of reuses/requests, or past its lifetime.
+        func isRetired(now: CFAbsoluteTime) -> Bool {
+            // Never retire mid-dial: pruning a dialing entry would strand its joiners, whose
+            // completions only fire when the dial resolves.
+            if phase == .dialing { return false }
+            if phase == .failed { return true }
+            if connection?.isPoolClosed == true { return true }
+            if leftUsage == 0 || leftRequests <= 0 { return true }
+            if let unreusableAt, now > unreusableAt { return true }
+            return false
+        }
+    }
+
+    private struct PoolState {
+        var entries: [UInt64: ClientEntry] = [:]
+        var nextID: UInt64 = 0
+    }
+    private let pool = Mutex(PoolState())
 
     /// Strong back-reference is safe: the registry is a process-lifetime singleton.
     private let registry: XHTTPXMUXMultiplexerRegistry?
@@ -668,13 +672,16 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     /// Resolves to nil if a freshly-dialed connection fails.
     func acquire() async -> XHTTPXMUXMultiplexerLease? {
         let now = CFAbsoluteTimeGetCurrent()
-        // Prune retired clients; tear down those with no active sessions left.
+        // Prune retired entries; tear down those with no active sessions left.
         var retiredIdle: [XHTTPXMUXMultiplexerPoolable] = []
-        clients.withLock { clients in
-            clients.removeAll { client in
-                guard client.isRetired(now: now) else { return false }
-                if client.openUsage == 0, let connection = client.connection { retiredIdle.append(connection) }
-                return true
+        pool.withLock { pool in
+            // Collect first: mutating `entries` while iterating it would trap.
+            let retiredIDs = pool.entries.compactMap { $0.value.isRetired(now: now) ? $0.key : nil }
+            for id in retiredIDs {
+                if pool.entries[id]!.openUsage == 0, let connection = pool.entries[id]!.connection {
+                    retiredIdle.append(connection)
+                }
+                pool.entries[id] = nil
             }
         }
         for connection in retiredIdle { connection.poolClose() }
@@ -682,21 +689,20 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         // Decide under the lock: reuse a ready connection, join a still-dialing one, fail,
         // or lead a fresh dial. Any dial/await happens after the lock is released.
         enum Decision {
-            case ready(XHTTPXMUXMultiplexerPoolable, XHTTPXMUXMultiplexerClient)
+            case ready(XHTTPXMUXMultiplexerPoolable, UInt64)
             case failed
-            case join(XHTTPXMUXMultiplexerClient)
-            case dial(XHTTPXMUXMultiplexerClient)
+            case dialOrJoin(UInt64)
         }
-        let decision: Decision = clients.withLock { clients in
-            if let client = selectReusable(in: clients) {
-                client.openUsage += 1
-                if client.leftUsage > 0 { client.leftUsage -= 1 }
-                switch client.state {
+        let decision: Decision = pool.withLock { pool in
+            if let id = selectReusable(in: pool.entries) {
+                pool.entries[id]!.openUsage += 1
+                if pool.entries[id]!.leftUsage > 0 { pool.entries[id]!.leftUsage -= 1 }
+                switch pool.entries[id]!.phase {
                 case .ready:
-                    return .ready(client.connection!, client)
+                    return .ready(pool.entries[id]!.connection!, id)
                 case .dialing:
                     // Share this still-dialing connection once its dial resolves.
-                    return .join(client)
+                    return .dialOrJoin(id)
                 case .failed:
                     return .failed
                 }
@@ -710,42 +716,43 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
             let secsRand = config.hMaxReusableSecs.random()
             let unreusableAt: CFAbsoluteTime? = secsRand > 0 ? now + Double(secsRand) : nil
 
-            let client = XHTTPXMUXMultiplexerClient(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
-            client.openUsage = 1
-            clients.append(client)
-            // Create the memoized dial under the lock so a joiner deciding `.join` on this client
-            // always finds `dialTask` set.
-            client.dialTask = Task { [weak self] in await self?.performDial(for: client) ?? nil }
-            return .dial(client)
+            let id = pool.nextID
+            pool.nextID &+= 1
+            var entry = ClientEntry(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
+            entry.openUsage = 1
+            // Create the memoized dial under the lock so a joiner deciding to join always finds it set.
+            entry.dialTask = Task { [weak self] in await self?.performDial(for: id) ?? nil }
+            pool.entries[id] = entry
+            return .dialOrJoin(id)
         }
 
         switch decision {
-        case .ready(let connection, let client):
-            return makeLease(connection, client)
+        case .ready(let connection, let id):
+            return makeLease(connection, id)
         case .failed:
             return nil
-        case .dial(let client), .join(let client):
-            // Leader and joiners both await the client's memoized dial task (the leader created it
+        case .dialOrJoin(let id):
+            // Leader and joiners both await the entry's memoized dial task (the leader created it
             // under the lock in the decision above, so a joiner always finds it set).
-            guard let connection = await client.dialTask?.value else { return nil }
-            return makeLease(connection, client)
+            let task = pool.withLock { $0.entries[id]?.dialTask }
+            guard let connection = await task?.value else { return nil }
+            return makeLease(connection, id)
         }
     }
 
-    /// The memoized dial body: dials a new pooled connection, resolves the client's state, and
+    /// The memoized dial body: dials a new pooled connection, resolves the entry's state, and
     /// evicts an empty pool on failure. Its result is shared by the leader and every joiner via
-    /// `client.dialTask.value`.
-    private func performDial(for client: XHTTPXMUXMultiplexerClient) async -> XHTTPXMUXMultiplexerPoolable? {
+    /// `entry.dialTask.value`.
+    private func performDial(for id: UInt64) async -> XHTTPXMUXMultiplexerPoolable? {
         let connection = await newConnection()
         var drained = false
-        clients.withLock { clients in
+        pool.withLock { pool in
             if let connection {
-                client.connection = connection
-                client.state = .ready
+                pool.entries[id]?.connection = connection
+                pool.entries[id]?.phase = .ready
             } else {
-                client.state = .failed
-                clients.removeAll { $0 === client }
-                drained = clients.isEmpty
+                pool.entries[id] = nil
+                drained = pool.entries.isEmpty
             }
         }
         // A failed first dial leaves an empty pool; evict the manager shell.
@@ -753,48 +760,53 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         return connection
     }
 
-    /// Selects a reusable pooled connection (lock held); nil ⇒ dial a new connection.
-    private func selectReusable(in clients: [XHTTPXMUXMultiplexerClient]) -> XHTTPXMUXMultiplexerClient? {
-        if clients.isEmpty { return nil }
-        if connections > 0 && clients.count < connections { return nil }
-        let eligible = concurrency > 0 ? clients.filter { $0.openUsage < concurrency } : clients
-        guard !eligible.isEmpty else { return nil }
-        return eligible.randomElement()
+    /// Selects a reusable pooled connection id (lock held); nil ⇒ dial a new connection.
+    private func selectReusable(in entries: [UInt64: ClientEntry]) -> UInt64? {
+        if entries.isEmpty { return nil }
+        if connections > 0 && entries.count < connections { return nil }
+        let eligible = concurrency > 0 ? entries.filter { $0.value.openUsage < concurrency } : entries
+        return eligible.keys.randomElement()
     }
 
-    private func makeLease(_ connection: XHTTPXMUXMultiplexerPoolable, _ client: XHTTPXMUXMultiplexerClient) -> XHTTPXMUXMultiplexerLease {
-        XHTTPXMUXMultiplexerLease(connection: connection, manager: self, client: client)
+    private func makeLease(_ connection: XHTTPXMUXMultiplexerPoolable, _ clientID: UInt64) -> XHTTPXMUXMultiplexerLease {
+        XHTTPXMUXMultiplexerLease(connection: connection, manager: self, clientID: clientID)
     }
 
-    func releaseSlot(_ client: XHTTPXMUXMultiplexerClient) {
-        var shouldClose = false
-        let drained: Bool = clients.withLock { clients in
-            if client.openUsage > 0 { client.openUsage -= 1 }
+    func releaseSlot(_ clientID: UInt64) {
+        var shouldClose: XHTTPXMUXMultiplexerPoolable?
+        let drained: Bool = pool.withLock { pool in
+            guard pool.entries[clientID] != nil else { return pool.entries.isEmpty }
+            if pool.entries[clientID]!.openUsage > 0 { pool.entries[clientID]!.openUsage -= 1 }
             // A retired connection with no remaining sessions is dropped and torn down.
-            shouldClose = client.openUsage == 0 && client.isRetired(now: CFAbsoluteTimeGetCurrent())
-            if shouldClose { clients.removeAll { $0 === client } }
-            return clients.isEmpty
+            if pool.entries[clientID]!.openUsage == 0,
+               pool.entries[clientID]!.isRetired(now: CFAbsoluteTimeGetCurrent()) {
+                shouldClose = pool.entries[clientID]!.connection
+                pool.entries[clientID] = nil
+            }
+            return pool.entries.isEmpty
         }
-        if shouldClose { client.connection?.poolClose() }
+        shouldClose?.poolClose()
         // Last session for this destination ended; ask the registry to drop the shell.
         if drained { registry?.evictIfEmpty(self) }
     }
 
-    func noteRequest(_ client: XHTTPXMUXMultiplexerClient) {
-        clients.withLock { _ in
-            if client.leftRequests > 0 && client.leftRequests != Int.max { client.leftRequests -= 1 }
+    func noteRequest(_ clientID: UInt64) {
+        pool.withLock { pool in
+            guard pool.entries[clientID] != nil else { return }
+            let left = pool.entries[clientID]!.leftRequests
+            if left > 0 && left != Int.max { pool.entries[clientID]!.leftRequests = left - 1 }
         }
     }
 
     fileprivate func hasNoClients() -> Bool {
-        clients.withLock { $0.isEmpty }
+        pool.withLock { $0.entries.isEmpty }
     }
 
     /// Closes every pooled connection and empties the pool (called by the registry's `reclaim()`).
     func closeAll() {
-        let pooledConnections: [XHTTPXMUXMultiplexerPoolable] = clients.withLock { clients in
-            let pooled = clients.compactMap { $0.connection }
-            clients.removeAll()
+        let pooledConnections: [XHTTPXMUXMultiplexerPoolable] = pool.withLock { pool in
+            let pooled = pool.entries.values.compactMap { $0.connection }
+            pool.entries.removeAll()
             return pooled
         }
         for connection in pooledConnections { connection.poolClose() }

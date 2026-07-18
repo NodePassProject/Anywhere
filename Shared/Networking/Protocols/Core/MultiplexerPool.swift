@@ -35,9 +35,8 @@ nonisolated struct MultiplexerPolicy {
 
 // MARK: - MultiplexerPool
 
-// MARK: Code quality violation
-nonisolated class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendable>: @unchecked Sendable {
-    
+nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendable>: Sendable {
+
     struct PoolState {
         var multiplexers: [String: [S]] = [:]
 
@@ -145,8 +144,4 @@ nonisolated class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendable>: @
             multiplexer.close(error: nil)
         }
     }
-}
-
-nonisolated extension MultiplexerPool: TransportPool {
-    func reclaim() { closeAll() }
 }

@@ -10,6 +10,7 @@ import CryptoKit
 import CommonCrypto
 import Security
 import Compression
+import Synchronization
 
 // MARK: - ServerHello Result
 
@@ -23,10 +24,18 @@ nonisolated private enum ServerHelloResult {
 
 // MARK: - TLSClient
 
-// MARK: Code quality violation
-nonisolated class TLSClient: @unchecked Sendable {
+actor TLSClient {
     let configuration: TLSConfiguration
-    var connection: (any ByteTransport)?
+
+    /// The live transport, kept behind a `Mutex` (not actor-isolated) so the synchronous
+    /// ``cancel()`` — called from teardown on other tasks — can abort an in-flight handshake without
+    /// hopping onto the actor. Cancelling it makes the driver's parked `receive()` throw, which
+    /// unwinds the handshake and clears the isolated crypto state via `releaseOnFailure`.
+    private let connectionBox = Mutex<(any ByteTransport)?>(nil)
+    nonisolated var connection: (any ByteTransport)? {
+        get { connectionBox.withLock { $0 } }
+        set { connectionBox.withLock { $0 = newValue } }
+    }
 
     // Cleared after handshake.
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -156,8 +165,10 @@ nonisolated class TLSClient: @unchecked Sendable {
         }
     }
 
-    func cancel() {
-        clearHandshakeState()
+    /// Aborts an in-flight handshake from any task. Cancelling the transport makes the driver's
+    /// parked `receive()` throw, so `releaseOnFailure` clears the isolated crypto state as it unwinds
+    /// — this nonisolated path only needs to drop the transport.
+    nonisolated func cancel() {
         connection?.cancel()
         connection = nil
     }

@@ -10,16 +10,6 @@ import CoreData
 
 nonisolated private let logger = AnywhereLogger(category: "BlobSync")
 
-nonisolated protocol SoftDeletable {
-    var deletedAt: Date? { get }
-}
-
-extension ProxyConfiguration: SoftDeletable {}
-extension Subscription: SoftDeletable {}
-extension ProxyChain: SoftDeletable {}
-extension CustomRoutingRuleSet: SoftDeletable {}
-extension MITMRuleSet: SoftDeletable {}
-
 nonisolated enum Tombstone {
     static let lifetime: TimeInterval = 7 * 24 * 60 * 60
 

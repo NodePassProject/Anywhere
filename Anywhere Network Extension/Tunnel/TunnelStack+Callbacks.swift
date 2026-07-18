@@ -45,15 +45,12 @@ extension TunnelStack: LWIPBridgeHost {
 
     /// lwIP has an IP packet to write back to the TUN. Batches it onto ``outputBuffer`` and
     /// kicks a drain if idle; the release stays index-aligned and fires on ``lwipQueue``.
-    func lwipDidOutput(_ packet: Data, isIPv6: Bool,
-                       releaseCtx: UnsafeMutableRawPointer?,
-                       release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void) {
+    func lwipDidOutput(_ packet: Data, isIPv6: Bool, release: LWIPReleaseAction) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
-        let pending = PendingRelease(ctx: releaseCtx, fn: release)
         let needsKick: Bool = outputBuffer.withLock { buffer in
             buffer.packets.append(packet)
             buffer.protocols.append(proto)
-            buffer.releases.append(pending)
+            buffer.releases.append(release)
             if buffer.drainInFlight { return false }
             buffer.drainInFlight = true
             return true
@@ -97,7 +94,7 @@ extension TunnelStack: LWIPBridgeHost {
 
     /// Builds the ``TCPConnection`` for a just-accepted pcb, or `nil` to abort it (RST).
     /// `.reject` was already handled by the SYN filter.
-    func lwipAccept(pcb: LWIPPCBHandle, dstIP: UnsafeRawPointer,
+    func lwipAccept(pcb: UnsafeMutableRawPointer, dstIP: UnsafeRawPointer,
                     dstPort: UInt16, isIPv6: Bool) -> TCPConnection? {
         guard let defaultConfiguration = configuration else {
             logger.debug("[TunnelStack] tcp_accept: guard failed")
@@ -163,7 +160,7 @@ extension TunnelStack: LWIPBridgeHost {
 
         return TCPConnection(
             stack: self,
-            pcb: pcb,
+            pcb: LWIPPCBHandle(raw: pcb),
             dstHost: dstHost,
             dstPort: dstPort,
             configuration: connectionConfiguration,

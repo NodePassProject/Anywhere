@@ -28,8 +28,11 @@ nonisolated protocol MITMBridgeClientLegDelegate: AnyObject {
     func clientLegFatalError(_ message: String)
 }
 
-// MARK: Code quality violation
-nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendable {
+actor MITMBridgeClientLeg: MITMResponseSink {
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        lwipBridge.executor.asUnownedSerialExecutor()
+    }
 
     weak var delegate: MITMBridgeClientLegDelegate?
 
@@ -214,7 +217,9 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
     /// self-hops onto that queue.
     func feed(_ data: Data) async {
         await onLwipParked { (continuation: CheckedContinuation<Void, Never>) in
-            self.feedOnQueue(data, continuation: continuation)
+            // `runParked`'s body runs on the lwIP queue = this actor's executor, so enter isolation
+            // synchronously.
+            self.assumeIsolated { $0.feedOnQueue(data, continuation: continuation) }
         }
     }
 
@@ -674,15 +679,17 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
             let gates = await rewriter.resolveRequestHeadGates(originalPath: head.originalPath)
             guard let self else { return }
             self.lwipBridge.enqueue {
-                // The enqueue body runs on the lwIP queue — this leg's isolation domain.
-                guard !self.torn, !self.parseError else {
-                    let continuation = self.parkedContinuation; self.parkedContinuation = nil
-                    continuation?.resume()
-                    return
+                // The enqueue body runs on the lwIP queue — this leg's executor — so enter isolation.
+                self.assumeIsolated { me in
+                    guard !me.torn, !me.parseError else {
+                        let continuation = me.parkedContinuation; me.parkedContinuation = nil
+                        continuation?.resume()
+                        return
+                    }
+                    _ = me.applyRequestHead(head, gates: gates)
+                    let parked = me.pump()
+                    me.finishPass(parked: parked)
                 }
-                _ = self.applyRequestHead(head, gates: gates)
-                let parked = self.pump()
-                self.finishPass(parked: parked)
             }
         }
         return true
@@ -915,21 +922,24 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
             let outcome = await rewriter.applyScripts(message, phase: .httpRequest)
             guard let self else { return }
             self.lwipBridge.enqueue {
-                guard !self.torn else { return }
-                // The client can RST the stream while the script runs; only `streamMethods` still
-                // tracks it here. If it's gone, drop the result — forwarding would open an origin
-                // stream whose response every sink guard drops, and a synth answer would strand a
-                // dead `.synthAnswered` entry.
-                guard self.streamMethods[streamID] != nil else { return }
-                switch outcome {
-                case .message(let updated):
-                    self.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
-                case .synthesizedResponse(let response):
-                    self.answerSynth(streamID: streamID, response: response)
+                // The enqueue body runs on the lwIP queue — this leg's executor — so enter isolation.
+                self.assumeIsolated { me in
+                    guard !me.torn else { return }
+                    // The client can RST the stream while the script runs; only `streamMethods` still
+                    // tracks it here. If it's gone, drop the result — forwarding would open an origin
+                    // stream whose response every sink guard drops, and a synth answer would strand a
+                    // dead `.synthAnswered` entry.
+                    guard me.streamMethods[streamID] != nil else { return }
+                    switch outcome {
+                    case .message(let updated):
+                        me.emitBufferedRequest(streamID: streamID, headers: scriptedHeaders, body: updated.body, neverIndexed: buffer.neverIndexed, resolvedUpstream: buffer.resolvedUpstream, originalURL: buffer.originalURL)
+                    case .synthesizedResponse(let response):
+                        me.answerSynth(streamID: streamID, response: response)
+                    }
+                    // Non-blocking: the stream was already removed and the pump kept running, so emit
+                    // without re-pumping. Out-of-order forwarding is fine (the h2 upstream leg reorders to
+                    // monotonic IDs; an h1 upstream dials per stream).
                 }
-                // Non-blocking: the stream was already removed and the pump kept running, so emit
-                // without re-pumping. Out-of-order forwarding is fine (the h2 upstream leg reorders to
-                // monotonic IDs; an h1 upstream dials per stream).
             }
         }
         // Don't park: the script runs at END_STREAM after the stream is removed, so sibling streams
@@ -995,7 +1005,14 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
         streamMethods[streamID] != nil || paceStates[streamID] != nil
     }
 
-    func deliverResponseHead(streamID: UInt32, status: Int, headers: [(name: String, value: String)], endStream: Bool, neverIndexed: Set<String>) {
+    // The upstream leg and the h1 IR sink call these synchronously on the shared lwIP executor, so
+    // each `MITMResponseSink` method is a `nonisolated` shim that re-enters isolation via
+    // `assumeIsolated`; the isolated `…OnQueue` body holds the actual logic.
+
+    nonisolated func deliverResponseHead(streamID: UInt32, status: Int, headers: [(name: String, value: String)], endStream: Bool, neverIndexed: Set<String>) {
+        assumeIsolated { $0.deliverResponseHeadOnQueue(streamID: streamID, status: status, headers: headers, endStream: endStream, neverIndexed: neverIndexed) }
+    }
+    private func deliverResponseHeadOnQueue(streamID: UInt32, status: Int, headers: [(name: String, value: String)], endStream: Bool, neverIndexed: Set<String>) {
         guard !torn, isLiveResponseStream(streamID) else { return }
         var block: [(name: String, value: String)] = [(name: ":status", value: String(status))]
         block.append(contentsOf: MITMBridgeHeaders.responseHeadersToH2(headers))
@@ -1011,7 +1028,10 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
         }
     }
 
-    func deliverResponseInterim(streamID: UInt32, status: Int, headers: [(name: String, value: String)]) {
+    nonisolated func deliverResponseInterim(streamID: UInt32, status: Int, headers: [(name: String, value: String)]) {
+        assumeIsolated { $0.deliverResponseInterimOnQueue(streamID: streamID, status: status, headers: headers) }
+    }
+    private func deliverResponseInterimOnQueue(streamID: UInt32, status: Int, headers: [(name: String, value: String)]) {
         guard !torn, isLiveResponseStream(streamID) else { return }
         var block: [(name: String, value: String)] = [(name: ":status", value: String(status))]
         block.append(contentsOf: MITMBridgeHeaders.responseHeadersToH2(headers))
@@ -1024,12 +1044,18 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
         // stream stays open for the real head.
     }
 
-    func deliverResponseData(streamID: UInt32, _ data: Data, endStream: Bool) {
+    nonisolated func deliverResponseData(streamID: UInt32, _ data: Data, endStream: Bool) {
+        assumeIsolated { $0.deliverResponseDataOnQueue(streamID: streamID, data, endStream: endStream) }
+    }
+    private func deliverResponseDataOnQueue(streamID: UInt32, _ data: Data, endStream: Bool) {
         guard !torn, isLiveResponseStream(streamID) else { return }
         appendClientBody(streamID: streamID, data: data, endStream: endStream)
     }
 
-    func deliverResponseTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
+    nonisolated func deliverResponseTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
+        assumeIsolated { $0.deliverResponseTrailersOnQueue(streamID: streamID, trailers) }
+    }
+    private func deliverResponseTrailersOnQueue(streamID: UInt32, _ trailers: [(name: String, value: String)]) {
         guard !torn, isLiveResponseStream(streamID) else { return }
         var paceState = paceStates[streamID] ?? makePaceState(streamID)
         paceState.sawEnd = true
@@ -1040,7 +1066,10 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendab
         flushResponse(streamID)
     }
 
-    func deliverResponseReset(streamID: UInt32, errorCode: UInt32) {
+    nonisolated func deliverResponseReset(streamID: UInt32, errorCode: UInt32) {
+        assumeIsolated { $0.deliverResponseResetOnQueue(streamID: streamID, errorCode: errorCode) }
+    }
+    private func deliverResponseResetOnQueue(streamID: UInt32, errorCode: UInt32) {
         // `requestStreams` also catches an upload half still open after the response half finished —
         // an origin RST there must still reach the client. After a client RST every entry is gone,
         // so a late upstream event still no-ops.

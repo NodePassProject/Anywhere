@@ -24,7 +24,7 @@ extension TunnelStack {
         while true {
             var packets: [Data] = []
             var protocols: [NSNumber] = []
-            var releases: [PendingRelease] = []
+            var releases: [LWIPReleaseAction] = []
 
             outputBuffer.withLock { buffer in
                 let pending = buffer.packets.count
@@ -60,8 +60,8 @@ extension TunnelStack {
             if !releases.isEmpty {
                 let toRelease = releases
                 lwipBridge.enqueue {
-                    for r in toRelease {
-                        r.fn(r.ctx)
+                    for release in toRelease {
+                        release.run()
                     }
                 }
             }
@@ -75,7 +75,7 @@ extension TunnelStack {
         let needsKick: Bool = outputBuffer.withLock { buffer in
             buffer.packets.append(packet)
             buffer.protocols.append(proto)
-            buffer.releases.append(Self.noopRelease)
+            buffer.releases.append(.noop)
             if buffer.drainInFlight { return false }
             buffer.drainInFlight = true
             return true

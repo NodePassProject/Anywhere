@@ -7,9 +7,6 @@
 
 import Foundation
 
-// MARK: Code quality violation: unchecked Sendable is leaking outside of bridge
-struct LWIPPCBHandle: @unchecked Sendable { let raw: UnsafeMutableRawPointer }
-
 actor TCPStreamConcurrencyBridge {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -57,7 +54,7 @@ actor TCPStreamConcurrencyBridge {
     private var writeError: StreamError?
 
     private var pendingWriteCount: Int { pendingWrite.count - pendingWriteOffset }
-
+    
     init(bridge: LWIPConcurrencyBridge, pcb: LWIPPCBHandle) {
         self.bridge = bridge
         self.pcb = pcb.raw

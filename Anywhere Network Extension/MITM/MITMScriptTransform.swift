@@ -7,6 +7,7 @@
 
 import Foundation
 import JavaScriptCore
+import Synchronization
 
 nonisolated enum MITMScriptTransform {
 
@@ -192,13 +193,24 @@ nonisolated enum MITMScriptTransform {
         case .respond(let response):  return .synthesizedResponse(response)
         }
     }
+    
+    final class FrameCursor: Sendable {
+        private struct Mutable {
+            var state: JSValue?
+            var bypass = false
+        }
+        private let mutable = Mutex(Mutable())
 
-    // MARK: Code quality violation
-    final class FrameCursor: @unchecked Sendable {
         /// Script's persistent per-stream state; only ever touched on scriptQueue (deinit hops its release there).
-        var state: JSValue?
+        var state: JSValue? {
+            get { mutable.withLock { $0.state } }
+            set { mutable.withLock { $0.state = newValue } }
+        }
         /// Set by a done/exit directive; subsequent frames bypass the script.
-        var bypass: Bool = false
+        var bypass: Bool {
+            get { mutable.withLock { $0.bypass } }
+            set { mutable.withLock { $0.bypass = newValue } }
+        }
         /// The last matching `.streamScript` rule, resolved at creation; nil = no rule matches.
         fileprivate let resolvedMatch: ScriptMatch?
 
@@ -209,7 +221,7 @@ nonisolated enum MITMScriptTransform {
         deinit {
             // state's final release runs JSValueUnprotect, which mutates VM bookkeeping; off
             // scriptQueue that would race in-flight scripts and corrupt the VM heap.
-            guard let state else { return }
+            guard let state = mutable.withLock({ $0.state }) else { return }
             JSCConcurrencyBridge.shared.enqueue { withExtendedLifetime(state) {} }
         }
     }

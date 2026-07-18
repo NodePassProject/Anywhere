@@ -84,7 +84,10 @@ nonisolated extension SudokuMultiplexerRegistry: TransportPool {
 /// Warm pool per `(server, port, direct-dial host, outbound settings)`. One Sudoku session
 /// carries any number of streams, so the pool holds at most one live session and coalesces
 /// cold-start bursts behind a single KIP handshake.
-nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, Bool> {
+nonisolated final class SudokuMultiplexerPool: TransportPool {
+
+    private typealias Base = MultiplexerPool<SudokuMuxClient, Bool>
+    private let pool = Base(extra: false)
 
     /// Single bucket — every session here shares one endpoint + outbound settings.
     private static let bucket = "sudoku"
@@ -111,9 +114,10 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
     init(configuration: ProxyConfiguration, directDialHost: String) {
         self.configuration = configuration
         self.directDialHost = directDialHost
-        super.init(extra: false)
-        startIdleEviction(Self.poolPolicy)
+        pool.startIdleEviction(Self.poolPolicy)
     }
+
+    func reclaim() { closeAll() }
 
     // MARK: - Acquire
 
@@ -134,7 +138,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
     /// Restarts the idle clock at stream end, so a freed session is kept warm for the full
     /// idle timeout (not evicted right after a long transfer).
     func noteStreamEnded(_ multiplexer: SudokuMuxClient) {
-        state.withLock { st in
+        pool.state.withLock { st in
             if st.lastActivity[ObjectIdentifier(multiplexer)] != nil {
                 st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             }
@@ -143,10 +147,10 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
 
     // MARK: - Teardown
 
-    /// Sets `closed` to reject new acquires, then defers to the base.
-    override func closeAll() {
-        state.withLock { $0.extra = true }
-        super.closeAll()
+    /// Sets `closed` to reject new acquires, then defers to the pool engine.
+    func closeAll() {
+        pool.state.withLock { $0.extra = true }
+        pool.closeAll()
     }
 
     // MARK: - Private
@@ -188,7 +192,7 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
     /// Returns the pooled session, pruning corpses that closed before `onClose` was armed
     /// (age-based idle eviction is the base's sweep).
     private func reusableMultiplexer() throws -> SudokuMuxClient? {
-        try state.withLock { st in
+        try pool.state.withLock { st in
             if st.extra { throw SudokuNativeError.closed }
             st.multiplexers[Self.bucket]?.removeAll { multiplexer in
                 guard multiplexer.isClosed else { return false }
@@ -213,14 +217,14 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
         do {
             let client = try SudokuNativeClient(configuration: configuration, factory: factory)
             multiplexer = try await client.openMux(ownsFactory: true) { [weak self] multiplexer in
-                self?.removeMultiplexer(multiplexer, key: Self.bucket)
+                self?.pool.removeMultiplexer(multiplexer, key: Self.bucket)
             }
         } catch {
             factory.closeAll()
             throw error
         }
         // close() re-enters removeMultiplexer via onClose, so it must run off-lock.
-        let wasClosed: Bool = state.withLock { st in
+        let wasClosed: Bool = pool.state.withLock { st in
             if st.extra { return true }
             st.multiplexers[Self.bucket, default: []].append(multiplexer)
             st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now

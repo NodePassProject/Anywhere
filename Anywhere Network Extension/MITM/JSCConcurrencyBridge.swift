@@ -6,6 +6,11 @@
 //
 
 import Foundation
+import JavaScriptCore
+
+extension JSVirtualMachine: @unchecked @retroactive Sendable { }
+extension JSContext: @unchecked @retroactive Sendable { }
+extension JSValue: @unchecked @retroactive Sendable { }
 
 nonisolated final class JSCConcurrencyBridge: @unchecked Sendable {
 

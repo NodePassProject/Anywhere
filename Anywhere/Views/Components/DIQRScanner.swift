@@ -8,10 +8,7 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: Code quality violation - tolerate here temporarily
-nonisolated fileprivate struct SendableCaptureSession: @unchecked Sendable {
-    let session: AVCaptureSession
-}
+extension AVCaptureSession: @unchecked @retroactive Sendable { }
 
 fileprivate struct CameraProperties {
     var session: AVCaptureSession = .init()
@@ -229,11 +226,8 @@ fileprivate struct DIQRScannerView: View {
         }
         
         if !status {
-            // `startRunning`/`stopRunning` are AVFoundation's designated off-main calls; the box
-            // hands the (non-`Sendable`) session to the background task for exactly that call.
-            let box = SendableCaptureSession(session: camera.session)
             Task.detached(priority: .background) {
-                box.session.stopRunning()
+                await camera.session.stopRunning()
             }
         }
     }
@@ -265,9 +259,9 @@ fileprivate class CameraPreviewUIView: UIView {
             connection.videoRotationAngle = videoRotationAngle
         }
     }
-
+    
     private var videoRotationAngle: CGFloat {
-        switch window?.windowScene?.interfaceOrientation {
+        switch window?.windowScene?.effectiveGeometry.interfaceOrientation {
         case .landscapeLeft: return 180
         case .landscapeRight: return 0
         case .portraitUpsideDown: return 270
@@ -336,10 +330,8 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                     device.videoZoomFactor = min(2.0, device.activeFormat.videoMaxZoomFactor)
                 }
                 device.unlockForConfiguration()
-                /// Session must be started on a background thread.
-                let box = SendableCaptureSession(session: session)
                 Task.detached(priority: .background) {
-                    box.session.startRunning()
+                    session.startRunning()
                 }
             } catch {
                 print(error.localizedDescription)

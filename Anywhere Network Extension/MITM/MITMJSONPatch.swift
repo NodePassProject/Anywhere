@@ -22,10 +22,7 @@ nonisolated enum MITMJSONPatch {
 
     // MARK: - Compiled operation
 
-    /// `@unchecked Sendable`: the `Any` payloads are a parsed-JSON value graph (Foundation `NSNumber`/
-    /// `NSString`/`NSArray`/`NSDictionary`), immutable after compilation — `applyAll` deep-copies before
-    /// any document mutation, so the compiled operation is only ever read.
-    // MARK: Code quality violation - tolerate here temporarily
+    /// `@unchecked Sendable` allowed here.
     enum CompiledOperation: @unchecked Sendable {
         case add(path: [PathSegment], value: Any)
         case replace(path: [PathSegment], value: Any)

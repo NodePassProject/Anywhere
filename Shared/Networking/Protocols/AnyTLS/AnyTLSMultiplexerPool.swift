@@ -10,13 +10,16 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerPool")
 
-nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer, AnyTLSMultiplexerPool.Extra> {
-    
+nonisolated final class AnyTLSMultiplexerPool: TransportPool {
+
     struct Extra {
         var sessionCounter: UInt64 = 0
         var closed = false
     }
-    
+
+    private typealias Base = MultiplexerPool<AnyTLSMultiplexer, Extra>
+    private let pool = Base(extra: Extra())
+
     typealias DialOut = @Sendable () async throws -> ProxyConnection
 
     /// Single bucket — every mux here shares one endpoint + password.
@@ -34,17 +37,18 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
     ) {
         self.passwordHash = AnyTLSProtocol.passwordHash(password)
         self.dialOut = dialOut
-        super.init(extra: Extra())
-        startIdleEviction(MultiplexerPolicy(
+        pool.startIdleEviction(MultiplexerPolicy(
             idleTimeout: max(30, idleSessionTimeout),
             idleCheckInterval: max(30, idleSessionCheckInterval),
             minIdleKeep: max(0, minIdleSession)
         ))
     }
 
+    func reclaim() { closeAll() }
+
     /// The opened stream expects a destination address as its first cmdPSH payload.
     func acquireStream() async throws -> AnyTLSStream {
-        let reused: AnyTLSMultiplexer? = try state.withLock { st throws -> AnyTLSMultiplexer? in
+        let reused: AnyTLSMultiplexer? = try pool.state.withLock { st throws -> AnyTLSMultiplexer? in
             if st.extra.closed {
                 logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
                 throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
@@ -62,7 +66,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
         logger.debug("[AnyTLSMultiplexerPool] acquireStream — no idle multiplexer, dialing fresh TLS multiplexer")
 
         let connection = try await dialOut()
-        let multiplexer: AnyTLSMultiplexer = try state.withLock { st throws -> AnyTLSMultiplexer in
+        let multiplexer: AnyTLSMultiplexer = try pool.state.withLock { st throws -> AnyTLSMultiplexer in
             if st.extra.closed {
                 connection.cancel()
                 logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
@@ -75,7 +79,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
                 padding: AnyTLSPaddingScheme.default,
                 seq: st.extra.sessionCounter,
                 onClose: { [weak self] multiplexer in
-                    self?.removeMultiplexer(multiplexer, key: Self.bucket)
+                    self?.pool.removeMultiplexer(multiplexer, key: Self.bucket)
                 }
             )
             // Claim before publishing so a concurrent acquire can't grab it.
@@ -89,10 +93,10 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
         return try await dispatchOpenStream(on: multiplexer)
     }
 
-    /// Sets `closed` to reject new acquires, then defers to the base.
-    override func closeAll() {
-        state.withLock { $0.extra.closed = true }
-        super.closeAll()
+    /// Sets `closed` to reject new acquires, then defers to the pool engine.
+    func closeAll() {
+        pool.state.withLock { $0.extra.closed = true }
+        pool.closeAll()
     }
 
     // MARK: - Private
@@ -105,7 +109,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
             guard let multiplexer else { return }
             multiplexer.releaseReservation()
             guard let self else { return }
-            self.state.withLock { st in
+            self.pool.state.withLock { st in
                 if st.lastActivity[ObjectIdentifier(multiplexer)] != nil {
                     st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
                 }

@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated struct ProxyChain: Identifiable, Codable, Hashable {
+nonisolated struct ProxyChain: Identifiable, Codable, Hashable, SoftDeletable {
     let id: UUID
     var name: String
     /// Ordered proxy IDs. First is the entry (outermost TCP), last is the exit.

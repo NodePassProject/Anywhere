@@ -98,22 +98,13 @@ actor TunnelStack {
         var protocols: [NSNumber] = []
         /// Sole owners of the buffers backing ``packets`` (their ``Data``
         /// uses a `.none` deallocator). Index-aligned with ``packets``;
-        /// releases fire on ``lwipQueue``.
-        var releases: [PendingRelease] = []
+        /// releases fire on ``lwipQueue``. ``LWIPReleaseAction`` is the lwIP bridge's
+        /// Sendable ctx+free bundle, so the buffer holds it directly.
+        var releases: [LWIPReleaseAction] = []
         /// True while ``outputDrainTask`` is draining; appenders only wake it when false.
         var drainInFlight = false
     }
     let outputBuffer = Mutex(OutputBufferState())
-    
-    // MARK: Code quality violation
-    struct PendingRelease: @unchecked Sendable {
-        let ctx: UnsafeMutableRawPointer?
-        let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
-    }
-    
-    /// Release placeholder for Swift-owned output packets; required so
-    /// ``OutputBufferState/releases`` stays index-aligned with ``OutputBufferState/packets``.
-    static let noopRelease = PendingRelease(ctx: nil, fn: { _ in })
 
     /// Settings snapshot read from App Group UserDefaults at start/restart
     /// and live-reloaded via Darwin notification. Owned by ``lwipQueue``;

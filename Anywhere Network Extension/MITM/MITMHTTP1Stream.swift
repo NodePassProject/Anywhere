@@ -9,20 +9,15 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
-nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject {
-    /// `endStream` true ⇒ no body follows (the IR consumer ends the stream on the head).
+nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject, Sendable {
     func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool)
-    /// An interim 1xx informational response (e.g. 103 Early Hints) ahead of the final response:
-    /// forwarded to the client without a body and without ending the stream (RFC 9113 §8.1).
     func http1ResponseInterim(status: Int, headers: [(name: String, value: String)])
     func http1ResponseBody(_ data: Data, endStream: Bool)
-    /// Malformed, oversized, or unbridgeable (101 / CONNECT-2xx) upstream response: reset the stream.
     func http1ResponseReset()
 }
 
-// MARK: Code quality violation
-nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
-
+actor MITMHTTP1Stream {
+    
     /// Cap on bytes buffered awaiting the CRLF CRLF head terminator (Apache's
     /// 64 KiB default); on exceed the stream downgrades to passthrough.
     private static let maxHeadBytes: Int = 64 * 1024
@@ -57,9 +52,16 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
     /// route there too. Request phase only.
     private var effectiveAuthority: String?
 
-    /// Replacement upstream from a transparent rewrite; read by the session's
-    /// deferred-dial pump. Request phase only.
-    private(set) var resolvedUpstream: (host: String, port: UInt16?)?
+    /// Replacement upstream from a transparent rewrite; read by the session's deferred-dial pump
+    /// (on the shared lwIP executor) via the `nonisolated` ``resolvedUpstream`` accessor below.
+    /// Request phase only.
+    private var resolvedUpstreamValue: (host: String, port: UInt16?)?
+
+    /// ``MITMMessageRewriter`` requirement: the session reads it synchronously on the shared lwIP
+    /// executor, so it re-enters isolation via `assumeIsolated`.
+    nonisolated var resolvedUpstream: (host: String, port: UInt16?)? {
+        assumeIsolated { $0.resolvedUpstreamValue }
+    }
 
     /// The request URL as first seen (pre-rewrite), for `ctx.originalUrl` and the request-log
     /// record the response phase reads. Set when the head is parsed, before `applyRewrite`; valid
@@ -127,9 +129,8 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
         /// Originating request for response-phase ctx. Nil on request phase.
         let originatingRequest: MITMRequestLog.Record?
     }
-
-    // MARK: Code quality violation
-    private struct StreamingState: @unchecked Sendable {
+    
+    private struct StreamingState: Sendable {
         let headers: [Header]
         let originatingRequest: MITMRequestLog.Record?
         let startLine: String
@@ -160,8 +161,10 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
         case trailerOrEnd
     }
 
-    // MARK: Code quality violation
-    private enum Mode: @unchecked Sendable {
+    /// Body-processing state machine. Actor-isolated (behind ``mode``); never crosses an isolation
+    /// boundary, so it needn't be `Sendable` even though some payloads (readers, cursors) aren't —
+    /// the only mode *deferred* across a script hop is the payload-free ``ResumeMode``.
+    private enum Mode {
         /// Accumulating the next head in `rxBuffer` until CRLF CRLF.
         case awaitingHead
 
@@ -209,6 +212,21 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
     }
 
     private var mode: Mode = .awaitingHead
+
+    /// The mode to restore once a buffered-script hop resolves. Only the two payload-free terminal
+    /// modes are ever deferred across the hop, so this is trivially `Sendable` and can ride the
+    /// `Task`/`enqueue` closures that carry the resume back onto the lwIP queue — unlike ``Mode``.
+    private enum ResumeMode: Sendable {
+        case awaitingHead
+        case passthrough
+
+        var mode: Mode {
+            switch self {
+            case .awaitingHead: return .awaitingHead
+            case .passthrough: return .passthrough
+            }
+        }
+    }
 
     /// Rewrite-rule selection for one request head, derived from the pre-rewrite verdicts.
     /// Pure selection — committing its state effects happens in `consumeHead`.
@@ -391,8 +409,13 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
         continuation.resume(returning: Data())
     }
 
-    /// Drains client-bound bytes queued by `Anywhere.respond(...)`.
-    func drainPendingClientBytes() -> Data {
+    /// Drains client-bound bytes queued by `Anywhere.respond(...)`. ``MITMMessageRewriter``
+    /// requirement; a `nonisolated` shim re-entering isolation, as the session calls it synchronously
+    /// on the shared lwIP executor.
+    nonisolated func drainPendingClientBytes() -> Data {
+        assumeIsolated { $0.drainPendingClientBytesOnQueue() }
+    }
+    private func drainPendingClientBytesOnQueue() -> Data {
         let bytes = pendingClientBytes
         pendingClientBytes.removeAll(keepingCapacity: false)
         return bytes
@@ -594,14 +617,14 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
             // to the original origin (and the session tears the leg down if it differs from the
             // dialed host) rather than inheriting the prior request's target and `Host`.
             effectiveAuthority = nil
-            resolvedUpstream = nil
+            resolvedUpstreamValue = nil
         }
         switch gates.rewriteSelection {
         case .none:
             rewrittenStartLine = parsed.startLine
         case .transparent(let line, let replacement):
             effectiveAuthority = replacement.authority
-            resolvedUpstream = (host: replacement.host, port: replacement.port)
+            resolvedUpstreamValue = (host: replacement.host, port: replacement.port)
             rewrittenStartLine = line
         case .synthesize(let response):
             return synthesizeRequestResponse(
@@ -754,11 +777,14 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
                     let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
                     guard let self else { return }
                     self.lwipBridge.enqueue {
-                        self.resumeHeadNoBody(
-                            outcome: outcome,
-                            fallbackStartLine: fallback,
-                            originatingMethod: originatingMethod
-                        )
+                        // Runs on the lwIP queue — this actor's executor — so enter isolation.
+                        self.assumeIsolated {
+                            $0.resumeHeadNoBody(
+                                outcome: outcome,
+                                fallbackStartLine: fallback,
+                                originatingMethod: originatingMethod
+                            )
+                        }
                     }
                 }
                 return false // parked
@@ -877,7 +903,8 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
             let table = await MITMGateVerdictTable.resolve(rules: rules, url: url)
             guard let self else { return }
             self.lwipBridge.enqueue {
-                self.resumeGateResolution(slot: slot, table: table)
+                // Runs on the lwIP queue — this actor's executor — so enter isolation.
+                self.assumeIsolated { $0.resumeGateResolution(slot: slot, table: table) }
             }
         }
         return nil
@@ -1385,7 +1412,8 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
             )
             guard let self else { return }
             self.lwipBridge.enqueue {
-                self.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame)
+                // Runs on the lwIP queue — this actor's executor — so enter isolation.
+                self.assumeIsolated { $0.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame) }
             }
         }
         return true
@@ -1514,7 +1542,7 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
         pending: PendingHead,
         rawBody: Data,
         originalSizes: [Int]?,
-        resumeMode: Mode,
+        resumeMode: ResumeMode,
         into output: inout Data
     ) -> Bool {
         let body: Data
@@ -1525,7 +1553,7 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
                     // intact plus the original (still-encoded) body; the client decodes it (rule skipped).
                     emitResponseHead(startLine: pending.startLine, headers: pending.headers, bodyFollows: !rawBody.isEmpty, into: &output)
                     if !rawBody.isEmpty { _ = emitBridgeBody(rawBody, endStream: true) }
-                    mode = resumeMode
+                    mode = resumeMode.mode
                     return false
                 }
                 if phase == .httpRequest {
@@ -1538,7 +1566,7 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
                     output.append(rawBody)
                 }
                 flushSynthAfterResponse(into: &output)
-                mode = resumeMode
+                mode = resumeMode.mode
                 return false
             }
             body = decoded
@@ -1560,7 +1588,8 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
             let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
             guard let self else { return }
             self.lwipBridge.enqueue {
-                self.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode)
+                // Runs on the lwIP queue — this actor's executor — so enter isolation.
+                self.assumeIsolated { $0.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode) }
             }
         }
         return true
@@ -1571,7 +1600,7 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
     private func resumeBufferedBody(
         outcome: MITMScriptTransform.Outcome,
         pending: PendingHead,
-        resumeMode: Mode
+        resumeMode: ResumeMode
     ) {
         guard !torn else { return }
         if resumeIntoForcedPassthroughIfNeeded() { return }
@@ -1605,7 +1634,7 @@ nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
             queueSynthesizedResponse(response)
         }
         flushSynthAfterResponse(into: &resumed)
-        mode = resumeMode
+        mode = resumeMode.mode
         while drive(into: &resumed) { }
         finishDrivePass(resumed)
     }
@@ -2653,6 +2682,7 @@ extension MITMHTTP1Stream: MITMMessageRewriter {
         await transform(data)
     }
 
-    /// HTTP/1 has no flow-control windows; HTTP/2-only concept.
-    func drainPendingServerBytes() -> Data { Data() }
+    /// HTTP/1 has no flow-control windows; HTTP/2-only concept. `nonisolated` (no state) to satisfy
+    /// the synchronous ``MITMMessageRewriter`` requirement.
+    nonisolated func drainPendingServerBytes() -> Data { Data() }
 }

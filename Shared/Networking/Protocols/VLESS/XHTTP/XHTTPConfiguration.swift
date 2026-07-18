@@ -615,7 +615,7 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
 // MARK: - Editor Export
 
-extension XHTTPConfiguration {
+nonisolated extension XHTTPConfiguration {
     var advancedExtraJSON: [String: Any] {
         var dictionary: [String: Any] = [:]
 
@@ -703,7 +703,7 @@ nonisolated struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
 
 // MARK: - URL Export
 
-extension XHTTPConfiguration {
+nonisolated extension XHTTPConfiguration {
     /// XHTTP `xhttpSettings` object for a `vless://` URL's `extra` blob; emits only non-default fields.
     var urlSettingsJSON: [String: Any] {
         var j: [String: Any] = ["host": host]
@@ -729,7 +729,7 @@ extension XHTTPConfiguration {
     }
 }
 
-extension XHTTPDownloadSettings {
+nonisolated extension XHTTPDownloadSettings {
     /// The `downloadSettings` object embedded in a `vless://` URL's `extra` blob. The download
     /// leg carries only its server identity; its advanced fields are inherited from the parent
     /// `extra` on import (the legs must share session/seq/padding placement to correlate).

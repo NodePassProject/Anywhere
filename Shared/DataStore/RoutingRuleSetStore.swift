@@ -17,7 +17,7 @@ nonisolated struct RoutingRuleSet: Identifiable, Equatable {
     var isCustom: Bool = false
 }
 
-nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
+nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftDeletable {
     static let maxRuleCount = 100000
 
     let id: UUID

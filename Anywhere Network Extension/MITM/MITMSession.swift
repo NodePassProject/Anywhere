@@ -223,11 +223,15 @@ actor MITMSession {
 
     private final class BridgeResponseIRSink: MITMHTTP1ResponseIRSink {
         let streamID: UInt32
-        weak var client: MITMBridgeClientLeg?
-        let onReset: (UInt32) -> Void
-        init(streamID: UInt32, client: MITMBridgeClientLeg?, onReset: @escaping (UInt32) -> Void) {
+        /// Weak back-reference to the client leg, boxed so this set-once value stays a `let` and the
+        /// sink is honestly `Sendable` (the leg is an actor = Sendable; a weak load is atomic).
+        private struct WeakClient: Sendable { weak var value: MITMBridgeClientLeg? }
+        private let clientBox: WeakClient
+        private var client: MITMBridgeClientLeg? { clientBox.value }
+        let onReset: @Sendable (UInt32) -> Void
+        init(streamID: UInt32, client: MITMBridgeClientLeg?, onReset: @escaping @Sendable (UInt32) -> Void) {
             self.streamID = streamID
-            self.client = client
+            self.clientBox = WeakClient(value: client)
             self.onReset = onReset
         }
         func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool) {
@@ -365,28 +369,29 @@ actor MITMSession {
     }
 
     private func installStreamHandlers() {
-        // The upgrade must land inline within the current parse pass; the hook fires on the lwIP
-        // queue (the stream self-hops there), so `assumeIsolated` runs it synchronously on the actor.
-        responseStream.onProtocolUpgrade = { [weak self] in
+        // The streams share this actor's lwIP executor, so enter their isolation synchronously to wire
+        // the hooks. Each hook fires later on that same queue and self-hops back via `assumeIsolated`.
+        // The upgrade must land inline within the current parse pass.
+        responseStream.assumeIsolated { $0.onProtocolUpgrade = { [weak self] in
             self?.assumeIsolated { $0.handleResponseUpgrade() }
-        }
+        } }
         // Fail closed on a smuggling/injection head or over-cap body — deferred off the parse pass
         // (via a `Task` hop onto the actor) to avoid re-entrant teardown. The request direction can't
         // cleanly answer the client so it just closes; the response direction answers a 502 first.
-        requestStream.onFatalClose = { [weak self] in
+        requestStream.assumeIsolated { $0.onFatalClose = { [weak self] in
             Task { await self?.cancel(error: nil) }
-        }
-        responseStream.onFatalClose = { [weak self] in
+        } }
+        responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
             Task { await self?.failInnerLegWith502("rejected a malformed or oversized upstream response") }
-        }
+        } }
         // Mid-body chunked framing breakage (head already on the wire): tear down both legs. A 502
         // can't be written over an in-flight response, and a synthesized terminator would frame a
         // truncated body as complete and desync the peer.
         let hardClose: @Sendable () -> Void = { [weak self] in
             Task { await self?.cancel(error: nil) }
         }
-        requestStream.onHardClose = hardClose
-        responseStream.onHardClose = hardClose
+        requestStream.assumeIsolated { $0.onHardClose = hardClose }
+        responseStream.assumeIsolated { $0.onHardClose = hardClose }
     }
 
     private func startPlaintext() {
@@ -429,12 +434,12 @@ actor MITMSession {
         // Best-effort GOAWAY to an h2 client before suppressing writes (`torn`) so it learns the last
         // processed stream and can retry (RFC 9113 §6.8). Idempotent; nil-safe for an h1 inner leg or
         // pre-handshake teardown.
-        bridgeClient?.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.internalError)
+        bridgeClient?.assumeIsolated { $0.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.internalError) }
         torn = true
         // Disarm in-flight script resumes before they can write to torn legs.
-        requestStream.markTorn()
-        responseStream.markTorn()
-        bridgeClient?.markTorn()
+        requestStream.assumeIsolated { $0.markTorn() }
+        responseStream.assumeIsolated { $0.markTorn() }
+        bridgeClient?.assumeIsolated { $0.markTorn() }
         bridgeClient = nil
         h2Upstream?.assumeIsolated { $0.markTorn() }
         h2Upstream = nil
@@ -443,7 +448,7 @@ actor MITMSession {
             bridgeStream.connection?.cancel()
             bridgeStream.proxyClient?.cancel()
             bridgeStream.upstreamRecord?.cancel()
-            bridgeStream.responseStream.markTorn()
+            bridgeStream.responseStream.assumeIsolated { $0.markTorn() }
         }
         bridgeStreams.removeAll()
         sharedUpstreamRecord?.cancel()
@@ -867,7 +872,7 @@ actor MITMSession {
     /// Live evaluation of ``canSwapOuterLeg`` against this session's response stream and request log.
     private func canReconnectOuterLeg() -> Bool {
         Self.canSwapOuterLeg(
-            responseBetweenMessages: responseStream.isBetweenMessages,
+            responseBetweenMessages: responseStream.assumeIsolated { $0.isBetweenMessages },
             http1InFlightCount: requestLog.http1InFlightCount
         )
     }
@@ -959,7 +964,7 @@ actor MITMSession {
     /// 101/CONNECT-2xx: flips the request leg to passthrough and flushes its buffer. HTTP/1 only.
     private func handleResponseUpgrade() {
         guard !torn else { return }
-        let buffered = requestStream.forcePassthrough()
+        let buffered = requestStream.assumeIsolated { $0.forcePassthrough() }
         guard !buffered.isEmpty, let outer = outerRecord else { return }
         sendChunkedCancellingOnError(buffered, via: outer)
     }
@@ -1058,7 +1063,9 @@ extension MITMSession: TLSServerDelegate {
                 flowController: h2FlowController,
                 lwipBridge: lwipBridge
             )
-            client.delegate = self
+            // The leg shares this actor's lwIP executor, so enter its isolation synchronously to
+            // wire the delegate before it's published.
+            client.assumeIsolated { $0.delegate = self }
             bridgeClient = client
             startBridgeInboundPump(inner: record)
             return
@@ -1240,7 +1247,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         pendingRequestEvents.removeAll()
         for event in events {
             if case .head(let head, _, _) = event {
-                bridgeClient?.failStream(streamID: head.clientStreamID, status: 502, message: "Bad Gateway")
+                bridgeClient?.assumeIsolated { $0.failStream(streamID: head.clientStreamID, status: 502, message: "Bad Gateway") }
             }
         }
     }
@@ -1292,14 +1299,17 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         h2Upstream = leg
         // Drain-coupled backpressure: as response bytes reach the client, credit the upstream's
         // per-stream receive window so a slow client throttles the origin (h2 only).
-        bridgeClient?.onResponseDrainedToClient = { [weak self] clientStreamID, n in
-            // Runs on the lwIP queue (the client leg drains there) = the actor's executor.
-            self?.assumeIsolated { $0.h2Upstream?.assumeIsolated { $0.creditDrainedResponse(clientID: clientStreamID, n) } }
+        // The leg shares this actor's executor; enter its isolation to wire the callback/flag.
+        bridgeClient?.assumeIsolated { leg in
+            leg.onResponseDrainedToClient = { [weak self] clientStreamID, n in
+                // Runs on the lwIP queue (the client leg drains there) = the actor's executor.
+                self?.assumeIsolated { $0.h2Upstream?.assumeIsolated { $0.creditDrainedResponse(clientID: clientStreamID, n) } }
+            }
+            // Upload mirror of the response drain-coupling above: as the origin accepts request DATA,
+            // credit the client's upload window by the same amount so a slow origin backpressures the
+            // client. Streams opened from here on are drain-coupled; the first (probe) request stays eager.
+            leg.uploadDrainCoupled = true
         }
-        // Upload mirror of the response drain-coupling above: as the origin accepts request DATA,
-        // credit the client's upload window by the same amount so a slow origin backpressures the
-        // client. Streams opened from here on are drain-coupled; the first (probe) request stays eager.
-        bridgeClient?.uploadDrainCoupled = true
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
         // Read the session-isolated collaborators into locals before entering the leg's isolation
@@ -1313,7 +1323,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             // These leg callbacks fire on the lwIP queue = the actor's executor, so each enters the
             // session's isolation synchronously via `assumeIsolated`; `onFatalError` defers a teardown.
             legSelf.onRequestDrainedToUpstream = { [weak self] clientStreamID, n in
-                self?.assumeIsolated { $0.bridgeClient?.creditUploadDrained(clientStreamID, n) }
+                self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.creditUploadDrained(clientStreamID, n) } }
             }
             legSelf.onUpstreamBytes = { [weak self] bytes in
                 self?.assumeIsolated { me in
@@ -1327,7 +1337,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST,
             // not this connection-level frame) so it redials new streams while in-flight ones finish.
             legSelf.onDraining = { [weak self] in
-                self?.assumeIsolated { $0.bridgeClient?.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.noError) }
+                self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.noError) } }
             }
             for event in events {
                 switch event {
@@ -1388,7 +1398,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         let streamID = head.clientStreamID
         guard bridgeStreams.count < Self.maxConcurrentBridgeStreams else {
             logger.warning("\(dstHost): bridge concurrent-stream cap reached; refusing stream \(streamID)")
-            bridgeClient?.rejectStream(streamID, errorCode: MITMHTTP2FrameCodec.ErrorCode.refusedStream)
+            bridgeClient?.assumeIsolated { $0.rejectStream(streamID, errorCode: MITMHTTP2FrameCodec.ErrorCode.refusedStream) }
             return
         }
         let responseLog = MITMRequestLog()
@@ -1398,18 +1408,18 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipBridge: lwipBridge
         )
         // A malformed / oversized upstream response fails just this stream (RST), not the whole
-        // multiplexed h2 connection.
-        responseStream.onFatalClose = { [weak self] in
+        // multiplexed h2 connection. The stream shares this actor's executor; enter its isolation.
+        responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
             Task { await self?.abortBridgeStream(streamID, acceptResponseAborted: true) }
-        }
+        } }
         let bs = BridgeStream(clientStreamID: streamID, responseStream: responseStream, responseLog: responseLog)
         let irSink = BridgeResponseIRSink(streamID: streamID, client: bridgeClient) { [weak self] sid in
             // RST the client stream now (fires on the lwIP queue = the actor's executor); free the
             // dead h1 upstream after the current `transform` returns via a deferred task.
-            self?.assumeIsolated { $0.bridgeClient?.acceptResponseAborted(streamID: sid) }
+            self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: sid) } }
             Task { await self?.abortBridgeStream(sid, acceptResponseAborted: false) }
         }
-        responseStream.responseIRSink = irSink
+        responseStream.assumeIsolated { $0.responseIRSink = irSink }
         bs.responseIRSink = irSink
         bs.framing = head.framing
         bs.pendingToUpstream = MITMHTTP1Serializer.requestHead(head, host: dstHost)
@@ -1452,7 +1462,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 // hides a transient upstream-connect failure.
                 logger.warning("\(dstHost): h1 upstream dial failed for stream \(streamID): \(error)")
                 bridgeAbortStream(streamID)
-                bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
+                await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
             }
         }
     }
@@ -1473,7 +1483,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         bs.unsentUpstreamBytes += out.count
         if bs.unsentUpstreamBytes > Self.maxBridgeUpstreamBufferedBytes {
             logger.warning("\(dstHost): bridge stream \(streamID) upstream-bound backlog \(bs.unsentUpstreamBytes) B over cap; resetting stream")
-            bridgeClient?.acceptResponseAborted(streamID: streamID)
+            bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) }
             bridgeAbortStream(streamID)
             return
         }
@@ -1499,7 +1509,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     private func noteBridgeUpstreamDrained(streamID: UInt32, count: Int, sendError: Error?) {
         guard !torn else { return }
         bridgeStreams[streamID]?.unsentUpstreamBytes -= count
-        if sendError != nil { bridgeClient?.acceptResponseAborted(streamID: streamID) }
+        if sendError != nil { bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) } }
     }
 
     private func bridgeAbortStream(_ streamID: UInt32) {
@@ -1511,14 +1521,14 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             legWriters.removeValue(forKey: ObjectIdentifier(record))?.finish()
             record.cancel()
         }
-        bs.responseStream.markTorn()
+        bs.responseStream.assumeIsolated { $0.markTorn() }
     }
 
     /// Deferred abort of a bridge stream, hopped onto the actor from a stream hook. When
     /// `acceptResponseAborted` is set it also notifies the client leg (response-fatal path).
     private func abortBridgeStream(_ streamID: UInt32, acceptResponseAborted: Bool) {
         bridgeAbortStream(streamID)
-        if acceptResponseAborted { bridgeClient?.acceptResponseAborted(streamID: streamID) }
+        if acceptResponseAborted { bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) } }
     }
 
     /// Per-stream upstream TLS handshake (offers only http/1.1 — the origin is known h1).
@@ -1562,7 +1572,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 } else {
                     logger.warning("\(dstHost): bridge upstream TLS failed for stream \(streamID): \(error)")
                     bridgeAbortStream(streamID)
-                    bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
+                    await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
                 }
             }
         }
@@ -1573,7 +1583,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard !torn else { return }
         logger.warning("\(dstHost): bridge upstream TLS timed out for stream \(streamID); answering 502")
         bridgeAbortStream(streamID)
-        bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
+        bridgeClient?.assumeIsolated { $0.failStream(streamID: streamID, status: 502, message: "Bad Gateway") }
     }
 
     /// Reads the upstream response, runs it through the per-stream response rewriter,
@@ -1593,7 +1603,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             } else if let bs = bridgeStreams[streamID], let client = bridgeClient {
                 if let error {
                     logger.warning("\(dstHost): bridge upstream read error for stream \(streamID): \(error)")
-                    client.acceptResponseAborted(streamID: streamID)
+                    await client.acceptResponseAborted(streamID: streamID)
                     bridgeAbortStream(streamID) // a reset doesn't notify us; free the dead upstream
                     step = .stop
                 } else if let data, !data.isEmpty {

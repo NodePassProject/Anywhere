@@ -491,7 +491,7 @@ nonisolated struct MITMParameter: Codable, Equatable, Identifiable {
     }
 }
 
-nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable {
+nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable {
     static let maxRuleCount = 10000
     static let maxParameterCount = 256
 

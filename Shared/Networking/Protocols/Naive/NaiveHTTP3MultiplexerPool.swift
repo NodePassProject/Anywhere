@@ -10,9 +10,13 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "NaiveHTTP3MultiplexerPool")
 
-nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiplexer, Void> {
+nonisolated final class NaiveHTTP3MultiplexerPool: TransportPool {
 
     static let shared = NaiveHTTP3MultiplexerPool()
+
+    private typealias Base = MultiplexerPool<HTTP3Multiplexer, Void>
+    private typealias PoolState = Base.PoolState
+    private let pool = Base(extra: ())
 
     private static let poolPolicy = MultiplexerPolicy(
         idleTimeout: 60,
@@ -22,9 +26,10 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
     )
 
     private init() {
-        super.init(extra: ())
-        startIdleEviction(Self.poolPolicy)
+        pool.startIdleEviction(Self.poolPolicy)
     }
+
+    func reclaim() { pool.closeAll() }
 
     // MARK: - Acquire
 
@@ -35,13 +40,13 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         configuration: NaiveConfiguration,
         destination: String
     ) async throws -> NaiveHTTP3Stream {
-        let key = Self.makeKey(host: host, port: port, sni: sni)
+        let key = Base.makeKey(host: host, port: port, sni: sni)
 
         // A soft-cap eviction must close its victim off-lock (close() re-enters
         // removeMultiplexer via onClose), so that path splits into two lock holds;
         // every other path stays in a single hold, matching the original.
         enum Plan { case ready(HTTP3Multiplexer); case closeVictimThenCreate(HTTP3Multiplexer) }
-        let plan: Plan = state.withLock { st in
+        let plan: Plan = pool.state.withLock { st in
             // Prune dead/stream-blocked muxes here; age-based idle eviction is the base's sweep.
             pruneDead(key: key, &st)
 
@@ -69,7 +74,7 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
             multiplexer = ready
         case .closeVictimThenCreate(let victim):
             victim.close()
-            multiplexer = state.withLock { st in
+            multiplexer = pool.state.withLock { st in
                 st.multiplexers[key]?.removeAll { $0 === victim }
                 st.lastActivity.removeValue(forKey: ObjectIdentifier(victim))
                 return makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni, &st)
@@ -85,7 +90,7 @@ nonisolated final class NaiveHTTP3MultiplexerPool: MultiplexerPool<HTTP3Multiple
         let new = HTTP3Multiplexer(host: host, port: port, serverName: sni)
         new.setOnClose { [weak self, weak new] in
             guard let self, let new else { return }
-            self.removeMultiplexer(new, key: key)
+            self.pool.removeMultiplexer(new, key: key)
         }
         st.multiplexers[key, default: []].append(new)
         st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now

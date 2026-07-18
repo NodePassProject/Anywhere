@@ -11,10 +11,6 @@ import CryptoKit
 import Security
 import Synchronization
 
-extension JSVirtualMachine: @unchecked @retroactive Sendable { }
-extension JSContext: @unchecked @retroactive Sendable { }
-extension JSValue: @unchecked @retroactive Sendable { }
-
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptEngine")
 
 /// Input-body bytes pinned by suspended async invocations, summed across all engines.
@@ -32,7 +28,7 @@ actor MITMScriptEngine {
     typealias Message = HTTPMessage
 
     /// Produced by `Anywhere.respond(...)`: the request is dropped and this response goes to the client.
-    struct SynthesizedResponse {
+    struct SynthesizedResponse: Sendable {
         let status: Int
         let headers: [(name: String, value: String)]
         let body: Data
@@ -70,14 +66,15 @@ actor MITMScriptEngine {
         case exit
     }
 
-    /// Set by `Anywhere.done/exit/respond` during a span; read at settlement.
-    fileprivate enum Directive {
+    /// Set by `Anywhere.done/exit/respond` during a span; read at settlement. `Sendable` (a pure
+    /// value type) so the nonisolated control blocks can carry it into isolation via `assumeIsolated`.
+    fileprivate enum Directive: Sendable {
         case done
         case exit
         case respond(SynthesizedResponse)
     }
-
-    // MARK: Code quality violation
+    
+    // MARK: Code quality concerns
     fileprivate final class Invocation: @unchecked Sendable {
         let scope: UUID?
         /// False on ``applyFrame`` (head is already on the wire).
@@ -123,25 +120,35 @@ actor MITMScriptEngine {
         let byteCount: Int
         let function: JSValue
     }
-    
-    private struct EngineState {
-        var currentInvocation: Invocation?
-        var compiled: [Int: CompiledEntry] = [:]
-    }
-    private let stateLock = Mutex(EngineState())
-    
+
+    /// Compiled-function cache, keyed by rule source hash. Actor-isolated: touched only by the
+    /// engine's own methods on the JSC queue.
+    private var compiled: [Int: CompiledEntry] = [:]
+
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
-    
+
     /// Suspended async invocations, retained until delivery so weak captures in fetch/settle closures
     /// stay valid. Script-queue-confined (all engine methods run on `MITMScriptTransform.scriptQueue`).
     private var liveInvocations: [ObjectIdentifier: Invocation] = [:]
 
-    /// The span whose JS is executing right now, read (re-entrantly) by the Anywhere.* blocks.
-    /// `nonisolated`: backed by `stateLock`, not actor state, so JSC's synchronous native callbacks
-    /// read/set it without re-entering the actor.
-    nonisolated private var activeInvocation: Invocation? { stateLock.withLock { $0.currentInvocation } }
-    nonisolated private func setActiveInvocation(_ invocation: Invocation?) {
-        stateLock.withLock { $0.currentInvocation = invocation }
+    /// The span whose JS is executing right now. Actor-isolated: the engine methods set it around a
+    /// `function.call`, and the Anywhere.* native blocks read/mutate it re-entrantly from JSC — always
+    /// on the actor's executor — so they reach it through `assumeIsolated` (see ``activeScope()`` /
+    /// ``setActiveDirective(_:)``) rather than a lock.
+    private var currentInvocation: Invocation?
+
+    /// Scope of the invocation whose JS is running, for the Anywhere.store / Anywhere.params blocks.
+    /// `nonisolated`: called re-entrantly by JSC while a `function.call` sits on the actor's stack, so
+    /// it enters isolation directly on the same executor.
+    nonisolated private func activeScope() -> UUID? {
+        assumeIsolated { $0.currentInvocation?.scope }
+    }
+
+    /// Records a control directive (`done`/`exit`/`respond`) on the running invocation, for the
+    /// Anywhere.done / .exit / .respond blocks. `nonisolated` for the same re-entrant reason as
+    /// ``activeScope()``.
+    nonisolated private func setActiveDirective(_ directive: Directive) {
+        assumeIsolated { $0.currentInvocation?.directive = directive }
     }
 
     /// Ceiling on input-body bytes pinned by concurrently-suspended async invocations. A new
@@ -259,8 +266,8 @@ actor MITMScriptEngine {
         }
     }
 
-    /// Runs on `scriptQueue`. Never holds `stateLock` across the JSC `function.call` (JSC re-enters the
-    /// Anywhere.* blocks, which read `currentInvocation` through the same lock).
+    /// Runs on `scriptQueue`. `currentInvocation` is published only around the `function.call` (JSC
+    /// re-enters the Anywhere.* blocks, which read it via `assumeIsolated` on this same executor).
     private func runApply(
         _ message: Message,
         source: String,
@@ -283,10 +290,10 @@ actor MITMScriptEngine {
         }
         let contextValue = makeContextValue(message)
         inv.ctxValue = contextValue
-        setActiveInvocation(inv)
+        currentInvocation = inv
         let returned = runUserScript(source) { function.call(withArguments: [contextValue]) }
         guard let returned, isThenable(returned) else {
-            setActiveInvocation(nil)
+            currentInvocation = nil
             let updated = readBack(message, from: contextValue)
             deliver(finalize(original: message, updated: updated, directive: inv.directive), for: inv)
             return
@@ -297,7 +304,7 @@ actor MITMScriptEngine {
         Self.addSuspendedBodyBytes(bodyBytes)
         inv.resultPromise = returned
         liveInvocations[ObjectIdentifier(inv)] = inv
-        setActiveInvocation(nil)
+        currentInvocation = nil
         // Arm first: an already-settled promise delivers synchronously and deliver() cancels the timer.
         armWatchdog(for: inv)
         attachSettleHandlers(to: returned, for: inv)
@@ -404,9 +411,9 @@ actor MITMScriptEngine {
             return .modified(body: frame, state: state)
         }
         let inv = Invocation(scope: frameContext.ruleSetID, allowsHTTP: false)
-        // Set/clear around the JSC call only; `stateLock` is never held across `function.call`.
-        setActiveInvocation(inv)
-        defer { setActiveInvocation(nil) }
+        // Publish around the JSC call only; the Anywhere.* blocks read it via `assumeIsolated`.
+        currentInvocation = inv
+        defer { currentInvocation = nil }
         let ctxArg = makeFrameContextValue(frameContext, frame: frame, state: state)
         _ = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         // Ignore mutations to method/url/status/headers — HEADERS are on the wire.
@@ -448,32 +455,26 @@ actor MITMScriptEngine {
     /// Drops cache entries not in ``keep``. Must be called on the script queue
     /// so dropped JSValues release on the VM-owning queue.
     func pruneCompiled(keeping keep: Set<Int>) {
-        stateLock.withLock { state in
-            let stale = state.compiled.keys.filter { !keep.contains($0) }
-            for key in stale { state.compiled.removeValue(forKey: key) }
-        }
+        let stale = compiled.keys.filter { !keep.contains($0) }
+        for key in stale { compiled.removeValue(forKey: key) }
     }
 
     /// Reload reset. Script-queue only.
     fileprivate func resetOnReload(keepingCompiled keep: Set<Int>) {
-        let inSpan = stateLock.withLock { $0.currentInvocation != nil }
-        guard !inSpan, liveInvocations.isEmpty else {
-            stateLock.withLock { state in
-                let stale = state.compiled.keys.filter { !keep.contains($0) }
-                for key in stale { state.compiled.removeValue(forKey: key) }
-            }
+        guard currentInvocation == nil, liveInvocations.isEmpty else {
+            pruneCompiled(keeping: keep)
             return
         }
-        stateLock.withLock { $0.compiled.removeAll() }
+        compiled.removeAll()
         context = JSContext(virtualMachine: Self.sharedVM)
         configureContext(context)
     }
 
-    /// Script-queue only. Never holds `stateLock` across `evaluateScript` — a script's top-level code
-    /// runs there and re-enters the Anywhere.* blocks, which read `currentInvocation` through the lock.
+    /// Script-queue only. `evaluateScript` runs a script's top-level code, which re-enters the
+    /// Anywhere.* blocks; they reach isolated state via `assumeIsolated` on this same executor.
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
         let byteCount = source.utf8.count
-        if let cached = stateLock.withLock({ $0.compiled[key] }) {
+        if let cached = compiled[key] {
             // 64-bit hash collision guard — a byte-count mismatch recompiles.
             if cached.byteCount == byteCount { return cached.function }
             logger.warning("[MITM][JS] cache-key collision: recompiling under same key")
@@ -499,7 +500,7 @@ actor MITMScriptEngine {
             logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
             return nil
         }
-        stateLock.withLock { $0.compiled[key] = CompiledEntry(byteCount: byteCount, function: value) }
+        compiled[key] = CompiledEntry(byteCount: byteCount, function: value)
         return value
     }
 
@@ -1354,14 +1355,14 @@ actor MITMScriptEngine {
         let store = JSValue(newObjectIn: context)!
         let storeGet: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.activeInvocation?.scope,
+            guard let scope = self?.activeScope(),
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk)
             else { return JSValue(undefinedIn: context) }
             return Self.makeUint8Array(in: context, from: bytes)
         }
         let storeGetString: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.activeInvocation?.scope,
+            guard let scope = self?.activeScope(),
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk),
                   let string = String(data: bytes, encoding: .utf8)
             else { return JSValue(undefinedIn: context) }
@@ -1369,7 +1370,7 @@ actor MITMScriptEngine {
         }
         let storeSet: @convention(block) (String, JSValue, Bool) -> Void = { [weak self] key, val, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.activeInvocation?.scope else { return }
+            guard let scope = self?.activeScope() else { return }
             let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             do {
                 try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes, onDisk: onDisk)
@@ -1389,11 +1390,11 @@ actor MITMScriptEngine {
             }
         }
         let storeDelete: @convention(block) (String, Bool) -> Void = { [weak self] key, onDisk in
-            guard let scope = self?.activeInvocation?.scope else { return }
+            guard let scope = self?.activeScope() else { return }
             MITMScriptStore.shared.delete(scope: scope, key: key, onDisk: onDisk)
         }
         let storeKeys: @convention(block) (Bool) -> [String] = { [weak self] onDisk in
-            guard let scope = self?.activeInvocation?.scope else { return [] }
+            guard let scope = self?.activeScope() else { return [] }
             return MITMScriptStore.shared.keys(scope: scope, onDisk: onDisk)
         }
         store.setObject(storeGet, forKeyedSubscript: "get" as NSString)
@@ -1409,17 +1410,17 @@ actor MITMScriptEngine {
         let params = JSValue(newObjectIn: context)!
         let paramsGet: @convention(block) (String) -> JSValue = { [weak self] key in
             let context = JSContext.current()!
-            guard let scope = self?.activeInvocation?.scope,
+            guard let scope = self?.activeScope(),
                   let value = MITMParamStore.shared.get(scope: scope, key: key)
             else { return JSValue(undefinedIn: context) }
             return JSValue(object: value, in: context)
         }
         let paramsKeys: @convention(block) () -> [String] = { [weak self] in
-            guard let scope = self?.activeInvocation?.scope else { return [] }
+            guard let scope = self?.activeScope() else { return [] }
             return MITMParamStore.shared.keys(scope: scope)
         }
         let paramsAll: @convention(block) () -> [String: String] = { [weak self] in
-            guard let scope = self?.activeInvocation?.scope else { return [:] }
+            guard let scope = self?.activeScope() else { return [:] }
             return MITMParamStore.shared.all(scope: scope)
         }
         params.setObject(paramsGet, forKeyedSubscript: "get" as NSString)
@@ -1451,10 +1452,10 @@ actor MITMScriptEngine {
 
     nonisolated private func installControlGlobals(on anywhere: JSValue, context: JSContext) {
         let doneBlock: @convention(block) () -> Void = { [weak self] in
-            self?.activeInvocation?.directive = .done
+            self?.setActiveDirective(.done)
         }
         let exitBlock: @convention(block) () -> Void = { [weak self] in
-            self?.activeInvocation?.directive = .exit
+            self?.setActiveDirective(.exit)
         }
         anywhere.setObject(doneBlock, forKeyedSubscript: "done" as NSString)
         anywhere.setObject(exitBlock, forKeyedSubscript: "exit" as NSString)
@@ -1462,9 +1463,9 @@ actor MITMScriptEngine {
         let respondBlock: @convention(block) (JSValue) -> Void = { [weak self] spec in
             guard let self else { return }
             guard !spec.isUndefined, !spec.isNull else {
-                self.activeInvocation?.directive = .respond(
+                self.setActiveDirective(.respond(
                     SynthesizedResponse(status: 200, headers: [], body: Data())
-                )
+                ))
                 return
             }
             // Clamp to 100…599: out-of-range status emits malformed HTTP/1 or HPACK.
@@ -1498,9 +1499,9 @@ actor MITMScriptEngine {
             } else {
                 body = Data()
             }
-            self.activeInvocation?.directive = .respond(
+            self.setActiveDirective(.respond(
                 SynthesizedResponse(status: status, headers: headers, body: body)
-            )
+            ))
         }
         anywhere.setObject(respondBlock, forKeyedSubscript: "respond" as NSString)
     }
@@ -1535,7 +1536,7 @@ actor MITMScriptEngine {
     }
 
     private func startHTTP(defaultMethod: String, urlVal: JSValue, optsVal: JSValue, in ctx: JSContext) -> JSValue {
-        guard let inv = activeInvocation, inv.allowsHTTP else {
+        guard let inv = currentInvocation, inv.allowsHTTP else {
             return Self.rejected(
                 "Anywhere.http is only available inside a buffered `script` rule — an `async function process(ctx)` that awaits it. It is unavailable in stream-script.",
                 in: ctx
@@ -1670,14 +1671,14 @@ actor MITMScriptEngine {
         reject: JSValue?,
         result: Result<MITMScriptHTTPClient.Response, Error>
     ) {
-        // Runs on `scriptQueue`; `stateLock` is never held across the JSC continuation call below.
+        // Runs on `scriptQueue` (this actor's executor).
         if inv.inFlightFetches > 0 { inv.inFlightFetches -= 1 }
         // Progress: re-arm the watchdog for the continuation window.
         if !inv.delivered { armWatchdog(for: inv) }
         // Settle even if already delivered: a no-op in JS, but a `Promise.all`
         // still needs all legs settled to release JSC references.
-        setActiveInvocation(inv)
-        defer { setActiveInvocation(nil) }
+        currentInvocation = inv
+        defer { currentInvocation = nil }
         // The continuation runs synchronously — guard it: a `while(true)` after an await wedges here.
         _ = runUserScript("async script (Anywhere.http resume continuation)") {
             switch result {
@@ -2194,7 +2195,7 @@ extension MITMScriptEngine {
     }
 
     /// Per-session lazy handle to the shared engine for a rule set.
-    final class Provider {
+    final class Provider: Sendable {
         private let scope: UUID?
         init(scope: UUID?) { self.scope = scope }
         func get() -> MITMScriptEngine { MITMScriptEngine.sharedEngine(forScope: scope) }

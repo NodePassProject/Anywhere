@@ -7,64 +7,71 @@
 
 import Foundation
 import SQLite3
+import Synchronization
 import AnywhereRules
 
 nonisolated private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
-// MARK: Code quality violation - tolerate here temporarily
-nonisolated final class RoutingRulesDatabase: @unchecked Sendable {
+nonisolated final class RoutingRulesDatabase: Sendable {
     static let shared = RoutingRulesDatabase()
-
-    private var databaseHandle: OpaquePointer?
+    
+    private let databaseHandle: Mutex<OpaquePointer?>
 
     private init() {
         guard let url = AnywhereRules.databaseURL else {
             logger.error("[RoutingRulesDatabase] Rules.db not found in AnywhereRules bundle")
+            self.databaseHandle = Mutex(nil)
             return
         }
-        if sqlite3_open_v2(url.path, &databaseHandle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
+        var handle: OpaquePointer?
+        if sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
             logger.error("[RoutingRulesDatabase] Failed to open Rules.db")
-            databaseHandle = nil
+            handle = nil
         }
+        self.databaseHandle = Mutex(handle)
     }
 
     // MARK: - Queries
 
     func loadRules(for source: String) -> [RoutingRule] {
-        guard let databaseHandle else { return [] }
+        databaseHandle.withLock { databaseHandle in
+            guard let databaseHandle else { return [] }
 
-        var statementHandle: OpaquePointer?
-        defer { sqlite3_finalize(statementHandle) }
+            var statementHandle: OpaquePointer?
+            defer { sqlite3_finalize(statementHandle) }
 
-        guard sqlite3_prepare_v2(databaseHandle, "SELECT type, value FROM rules WHERE source = ?", -1, &statementHandle, nil) == SQLITE_OK else {
-            return []
+            guard sqlite3_prepare_v2(databaseHandle, "SELECT type, value FROM rules WHERE source = ?", -1, &statementHandle, nil) == SQLITE_OK else {
+                return []
+            }
+            sqlite3_bind_text(statementHandle, 1, source, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+
+            var rules: [RoutingRule] = []
+            while sqlite3_step(statementHandle) == SQLITE_ROW {
+                let type = Int(sqlite3_column_int(statementHandle, 0))
+                guard let columnTextPointer = sqlite3_column_text(statementHandle, 1),
+                      let ruleType = RoutingRuleType(rawValue: type) else { continue }
+                rules.append(RoutingRule(type: ruleType, value: String(cString: columnTextPointer)))
+            }
+            return rules
         }
-        sqlite3_bind_text(statementHandle, 1, source, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-
-        var rules: [RoutingRule] = []
-        while sqlite3_step(statementHandle) == SQLITE_ROW {
-            let type = Int(sqlite3_column_int(statementHandle, 0))
-            guard let columnTextPointer = sqlite3_column_text(statementHandle, 1),
-                  let ruleType = RoutingRuleType(rawValue: type) else { continue }
-            rules.append(RoutingRule(type: ruleType, value: String(cString: columnTextPointer)))
-        }
-        return rules
     }
 
     func loadMetadata(_ key: String) -> String? {
-        guard let databaseHandle else { return nil }
+        databaseHandle.withLock { databaseHandle in
+            guard let databaseHandle else { return nil }
 
-        var statementHandle: OpaquePointer?
-        defer { sqlite3_finalize(statementHandle) }
+            var statementHandle: OpaquePointer?
+            defer { sqlite3_finalize(statementHandle) }
 
-        guard sqlite3_prepare_v2(databaseHandle, "SELECT value FROM metadata WHERE key = ?", -1, &statementHandle, nil) == SQLITE_OK else {
-            return nil
+            guard sqlite3_prepare_v2(databaseHandle, "SELECT value FROM metadata WHERE key = ?", -1, &statementHandle, nil) == SQLITE_OK else {
+                return nil
+            }
+            sqlite3_bind_text(statementHandle, 1, key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+
+            guard sqlite3_step(statementHandle) == SQLITE_ROW,
+                  let columnTextPointer = sqlite3_column_text(statementHandle, 0) else { return nil }
+            return String(cString: columnTextPointer)
         }
-        sqlite3_bind_text(statementHandle, 1, key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-
-        guard sqlite3_step(statementHandle) == SQLITE_ROW,
-              let columnTextPointer = sqlite3_column_text(statementHandle, 0) else { return nil }
-        return String(cString: columnTextPointer)
     }
 
     func loadStringArray(_ key: String) -> [String] {

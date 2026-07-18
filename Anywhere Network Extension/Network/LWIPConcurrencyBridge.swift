@@ -14,18 +14,16 @@ protocol LWIPBridgeHost: Actor {
     /// lwIP has an IP packet to write back to the TUN. `packet` aliases lwIP's own memory
     /// with a `.none` deallocator; it stays valid until `release(releaseCtx)` runs, which
     /// must happen on the bridge queue (`pbuf_free`/`mem_free` are unlocked under NO_SYS=1).
-    func lwipDidOutput(_ packet: Data, isIPv6: Bool,
-                       releaseCtx: UnsafeMutableRawPointer?,
-                       release: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void)
+    func lwipDidOutput(_ packet: Data, isIPv6: Bool, release: LWIPReleaseAction)
 
     /// Verdict for an incoming SYN before lwIP allocates a pcb — one of the
     /// `LWIP_BRIDGE_SYN_*` values. `dstIP` is raw address bytes valid for this call only.
     func lwipSynVerdict(dstIP: UnsafeRawPointer, dstPort: UInt16, isIPv6: Bool) -> Int32
 
     /// The connection to adopt for a just-accepted pcb, or `nil` to abort it (RST).
-    /// `dstIP` is raw address bytes valid for this call only; the returned connection is
-    /// handed a retained reference lwIP stores as the pcb's `tcp_arg`.
-    func lwipAccept(pcb: LWIPPCBHandle, dstIP: UnsafeRawPointer,
+    /// `pcb` and `dstIP` are raw pointers valid on the lwIP queue only; the returned connection
+    /// is handed a retained reference lwIP stores as the pcb's `tcp_arg`.
+    func lwipAccept(pcb: UnsafeMutableRawPointer, dstIP: UnsafeRawPointer,
                     dstPort: UInt16, isIPv6: Bool) -> TCPConnection?
 }
 
@@ -36,11 +34,25 @@ protocol LWIPBridgeHost: Actor {
 struct LWIPRawPointer: @unchecked Sendable { let raw: UnsafeRawPointer }
 struct LWIPOptRawPointer: @unchecked Sendable { let raw: UnsafeMutableRawPointer? }
 
+/// Carries a just-accepted lwIP pcb pointer across the `assumeIsolated` hop from the accept
+/// callback into ``TunnelStack``. Like ``LWIPRawPointer``, it only quiets region isolation for
+/// the crossing; the host unwraps it to a raw pointer, which is valid solely on the lwIP queue.
+struct LWIPPCBHandle: @unchecked Sendable { let raw: UnsafeMutableRawPointer }
+
 /// The lwIP output-buffer release: a raw context plus its `@convention(c)` free function, bundled so
-/// the isolated hop into ``TunnelStack`` captures a single `Sendable` value. Runs on the lwIP queue.
+/// the isolated hop into ``TunnelStack`` — and the batched, index-aligned release queue it stashes
+/// them in — carry a single `Sendable` value instead of a bare `@convention(c)` capture. The `fn`
+/// runs on the lwIP queue once utun has copied the packet, freeing lwIP's aliased memory.
 struct LWIPReleaseAction: @unchecked Sendable {
     let ctx: UnsafeMutableRawPointer?
     let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
+
+    /// Placeholder for Swift-owned output packets (their `Data` frees itself). Keeps the release
+    /// queue index-aligned with the packet queue without a real lwIP free to run.
+    static let noop = LWIPReleaseAction(ctx: nil, fn: { _ in })
+
+    /// Runs the underlying lwIP free. Call on the lwIP queue.
+    func run() { fn(ctx) }
 }
 
 nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
@@ -140,7 +152,7 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
             // capture). The release still runs on the lwIP queue via `assumeIsolated`.
             let releaseAction = LWIPReleaseAction(ctx: releaseCtx, fn: release)
             host.assumeIsolated {
-                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, releaseCtx: releaseAction.ctx, release: releaseAction.fn)
+                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, release: releaseAction)
             }
         }
 
@@ -161,7 +173,7 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
             let pcbHandle = LWIPPCBHandle(raw: pcb)
             let dstIPBox = LWIPRawPointer(raw: dstIP)
             guard let connection = host.assumeIsolated({
-                $0.lwipAccept(pcb: pcbHandle, dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0)
+                $0.lwipAccept(pcb: pcbHandle.raw, dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0)
             }) else {
                 return nil
             }
