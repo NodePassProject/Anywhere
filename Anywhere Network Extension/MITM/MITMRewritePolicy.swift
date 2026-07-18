@@ -138,7 +138,7 @@ nonisolated struct CompiledMITMRuleSet {
     let rules: [CompiledMITMRule]
 }
 
-nonisolated final class MITMRewritePolicy {
+nonisolated final class MITMRewritePolicy: Sendable {
     private struct PolicyState {
         var trie = FlatLabelTrie<Int16>()
         var compiledSets: [CompiledMITMRuleSet] = []

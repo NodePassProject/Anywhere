@@ -22,8 +22,7 @@ extension XHTTPConnection {
         switch role {
         case .uploadOnly:
             // POST is stream 1; no download stream, so reads are only a flow-control/response drain.
-            h2UploadStreamId = 1
-            h2DownloadStreamId = .max
+            configureH2StreamIDs(upload: 1, download: .max)
             if mode == .streamUp {
                 let uploadHeaders = encodeH2UploadHeaders(seq: nil)
                 initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: h2UploadStreamId, payload: uploadHeaders))

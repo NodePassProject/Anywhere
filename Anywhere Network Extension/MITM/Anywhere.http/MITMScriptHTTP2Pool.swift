@@ -56,12 +56,13 @@ nonisolated final class MITMScriptHTTP2Pool: MultiplexerPool<MITMScriptHTTP2Conn
                 st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
                 return existing
             } else {
-                let new = MITMScriptHTTP2Connection(host: host, port: port, insecure: insecure)
-                new.onClose = { [weak self, weak new] in
-                    guard let self, let new else { return }
-                    self.removeMultiplexer(new, key: key)
-                }
-                new.onNegotiatedHTTP1 = { [weak self] in self?.markHTTP1(key) }
+                let new = MITMScriptHTTP2Connection(
+                    host: host, port: port, insecure: insecure,
+                    onClose: { [weak self] connection in
+                        self?.removeMultiplexer(connection, key: key)
+                    },
+                    onNegotiatedHTTP1: { [weak self] in self?.markHTTP1(key) }
+                )
                 _ = new.tryReserveStream()   // fresh connection always has capacity
                 st.multiplexers[key, default: []].append(new)
                 st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now

@@ -212,14 +212,12 @@ nonisolated final class SudokuMultiplexerPool: MultiplexerPool<SudokuMuxClient, 
         let multiplexer: SudokuMuxClient
         do {
             let client = try SudokuNativeClient(configuration: configuration, factory: factory)
-            multiplexer = try await client.openMux(ownsFactory: true)
+            multiplexer = try await client.openMux(ownsFactory: true) { [weak self] multiplexer in
+                self?.removeMultiplexer(multiplexer, key: Self.bucket)
+            }
         } catch {
             factory.closeAll()
             throw error
-        }
-        multiplexer.onClose = { [weak self, weak multiplexer] in
-            guard let self, let multiplexer else { return }
-            self.removeMultiplexer(multiplexer, key: Self.bucket)
         }
         // close() re-enters removeMultiplexer via onClose, so it must run off-lock.
         let wasClosed: Bool = state.withLock { st in

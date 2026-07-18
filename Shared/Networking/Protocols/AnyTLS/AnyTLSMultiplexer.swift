@@ -37,6 +37,11 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
         var synDoneTask: Task<Void, Never>?
 
+        /// The inner-transport read loop. Strong self: the loop owns the multiplexer while
+        /// receiving; `close(error:)` cancels it and the inner transport, ending the parked
+        /// receive so ARC reclaims the multiplexer.
+        var readTask: Task<Void, Never>?
+
         /// Buffer for partial inbound frames (TLS records don't align with AnyTLS frames).
         var recvBuffer = Data()
 
@@ -53,16 +58,22 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     private let lock: Mutex<State>
 
-    var seq: UInt64 = 0
+    /// Pool-assigned sequence number, fixed at creation (log identity only).
+    let seq: UInt64
 
-    var onClose: (() -> Void)?
+    /// Fires once from `close(error:)` so the pool can evict this multiplexer. Immutable —
+    /// installed at creation, before the multiplexer is shared.
+    private let onClose: (@Sendable (AnyTLSMultiplexer) -> Void)?
 
     // MARK: - Init
 
-    init(inner: ProxyConnection, passwordHash: Data, padding: AnyTLSPaddingScheme) {
+    init(inner: ProxyConnection, passwordHash: Data, padding: AnyTLSPaddingScheme,
+         seq: UInt64 = 0, onClose: (@Sendable (AnyTLSMultiplexer) -> Void)? = nil) {
         self.inner = inner
         self.outerTLSVersion = inner.outerTLSVersion
         self.passwordHash = passwordHash
+        self.seq = seq
+        self.onClose = onClose
         self.lock = Mutex(State(padding: padding))
     }
 
@@ -153,7 +164,9 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     /// Opens a new logical stream; the caller's first write (the destination address)
     /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
-    func openStream() async -> AnyTLSStream? {
+    /// `onEnd` fires exactly once when the stream ends (used by the pool to reclaim idle muxes);
+    /// installed at creation so the stream carries no mutable hook.
+    func openStream(onEnd: (() -> Void)? = nil) async -> AnyTLSStream? {
         typealias Opened = (stream: AnyTLSStream, sid: UInt32, armWatchdog: Bool,
                             bufferedBytes: Int, peerVersion: UInt8)
         let opened: Opened? = lock.withLock { (state: inout State) -> Opened? in
@@ -163,7 +176,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             state.nextStreamID &+= 1
             if state.nextStreamID == 0 { state.nextStreamID = 1 }    // skip 0 (reserved for control)
             let sid = state.nextStreamID
-            let stream = AnyTLSStream(sid: sid, multiplexer: self, outerTLSVersion: outerTLSVersion)
+            let stream = AnyTLSStream(sid: sid, multiplexer: self, outerTLSVersion: outerTLSVersion,
+                                      onEnd: onEnd)
             state.streams[sid] = stream
 
             // v2 watchdog: close the multiplexer if no SYNACK within 3 s (cleared on cmdSYNACK).
@@ -197,7 +211,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
         guard let stream = removed else { return }
 
         let finFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdFIN, sid: sid, length: 0)
-        Task { [weak self] in try? await self?.writeConnLocked(finFrame) }
+        // Strong self: the short-lived send task owns the mux until the FIN settles.
+        Task { try? await writeConnLocked(finFrame) }
 
         // Surface a clean EOF locally so any waiting receive unblocks.
         stream.deliverClose(error: nil)
@@ -346,22 +361,24 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     private func startReadLoop() {
         logger.debug("[AnyTLSMultiplexer] recv loop started")
-        Task { [weak self] in
+        // Strong self: the loop owns the multiplexer while receiving; `close(error:)`
+        // cancels this task and the inner transport, which ends the parked receive.
+        let task = Task {
             do {
                 while true {
-                    guard let self else { return }
-                    guard let data = try await self.inner.receive() else {
+                    guard let data = try await inner.receive() else {
                         logger.debug("[AnyTLSMultiplexer] inner transport EOF")
-                        self.handleTransportEOF()
+                        handleTransportEOF()
                         return
                     }
-                    await self.handleInbound(data)
+                    await handleInbound(data)
                 }
             } catch {
                 logger.debug("[AnyTLSMultiplexer] inner transport error: \(error.localizedDescription)")
-                self?.handleTransportFailure(error)
+                handleTransportFailure(error)
             }
         }
+        lock.withLock { $0.readTask = task }
     }
 
     private func handleTransportEOF() {
@@ -466,7 +483,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
 
     /// Idempotent; a non-nil error propagates to every live stream.
     func close(error: Error? = nil) {
-        let liveStreams: [AnyTLSStream]? = lock.withLock { (state: inout State) -> [AnyTLSStream]? in
+        typealias Teardown = (liveStreams: [AnyTLSStream], readTask: Task<Void, Never>?)
+        let teardown: Teardown? = lock.withLock { (state: inout State) -> Teardown? in
             guard !state.closed else { return nil }
             state.closed = true
             state.reserved = false
@@ -474,17 +492,21 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
             let live = Array(state.streams.values)
             state.streams.removeAll(keepingCapacity: false)
             state.outboundBuffer.removeAll(keepingCapacity: false)
-            return live
+            let read = state.readTask
+            state.readTask = nil
+            return (live, read)
         }
-        guard let liveStreams else { return }
+        guard let (liveStreams, readTask) = teardown else { return }
 
         let reasonText = error.map { $0.localizedDescription } ?? "clean"
         logger.debug("[AnyTLSMultiplexer] close seq=\(seq) streams=\(liveStreams.count) reason=\(reasonText)")
         for stream in liveStreams {
             stream.deliverClose(error: error)
         }
+        // Cancel the read loop, then the transport it is parked on; its strong self dies with it.
+        readTask?.cancel()
         inner.cancel()
-        onClose?()
+        onClose?(self)
     }
 
     deinit {

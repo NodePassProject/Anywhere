@@ -314,9 +314,10 @@ actor TCPConnection {
             // timer, so without this it looks idle and is torn down mid-stream — the non-MITM upload
             // path refreshes the timer on every accepted chunk for the same reason.
             markActivity()
-            // Ack to lwIP up-front; MITMSession owns inner-leg flow control.
+            // Ack to lwIP up-front; MITMSession owns inner-leg flow control. The session shares this
+            // actor's lwIP executor, entered synchronously via `assumeIsolated`.
             acknowledgeReceivedBytes(count)
-            mitmSession.feedClientBytes(chunk)
+            mitmSession.assumeIsolated { $0.feedClientBytes(chunk) }
             return
         }
 
@@ -444,8 +445,8 @@ actor TCPConnection {
             beginConnecting()
         }
 
-        // Propagate the orderly close through the inner TLS leg.
-        mitmSession?.clientDidClose()
+        // Propagate the orderly close through the inner TLS leg (shared lwIP executor).
+        mitmSession?.assumeIsolated { $0.clientDidClose() }
 
         uplinkDone = true
         if let stream {
@@ -623,7 +624,9 @@ actor TCPConnection {
         let transport = TCPTransport(host: dstHost, port: dstPort)
         let connection = DirectProxyConnection(transport: transport)
         self.proxyConnection = connection
-        Task { [weak self] in
+        // Strong self, stored like the proxy dial: teardown cancels this task so a still-connecting
+        // transport unwinds; the finish handler's `closed` guard releases a late-delivered dial.
+        proxyDialTask = Task {
             let error: Error?
             do {
                 try await transport.connect()
@@ -631,14 +634,15 @@ actor TCPConnection {
             } catch let dialError {
                 error = dialError
             }
-            guard let self else { return }
-            await self.finishDirectConnect(connection: connection, error: error, initialData: initialData)
+            // Same-actor call (the Task inherits this actor's executor); no hop, no await.
+            self.finishDirectConnect(connection: connection, error: error, initialData: initialData)
         }
     }
 
     /// Completes a direct dial on the actor: wires the activity timer and starts the relay.
     private func finishDirectConnect(connection: DirectProxyConnection, error: Error?, initialData: Data?) {
         proxyConnecting = false
+        proxyDialTask = nil
         guard !closed else { return }
 
         if let error {
@@ -687,18 +691,17 @@ actor TCPConnection {
 
         let host = dstHost
         let port = dstPort
-        proxyDialTask = Task { [weak self] in
+        // Strong self: teardown cancels this task (unwinding a still-connecting handshake); the
+        // finish handler's `closed` guard cancels a connection delivered after a mid-dial close.
+        proxyDialTask = Task {
             let result: Result<ProxyConnection, Error>
             do {
                 result = .success(try await client.connect(to: host, port: port, initialData: initialData))
             } catch {
                 result = .failure(error)
             }
-            guard let self else {
-                if case .success(let connection) = result { connection.cancel() }
-                return
-            }
-            await self.finishProxyConnect(result: result, initialData: initialData)
+            // Same-actor call (the Task inherits this actor's executor); no hop, no await.
+            self.finishProxyConnect(result: result, initialData: initialData)
         }
     }
 
@@ -812,13 +815,9 @@ actor TCPConnection {
         let cache: MITMLeafCertCache?
         if mitmPlaintext {
             cache = nil
-        } else if let existing = stack.mitmLeafCache {
-            cache = existing
         } else {
             do {
-                let made = try MITMLeafCertCache(store: stack.mitmCertificateStore)
-                stack.mitmLeafCache = made
-                cache = made
+                cache = try stack.mitmLeafCacheCreatingIfNeeded()
             } catch {
                 reportFailure("MITM leaf cache", error: error)
                 abort()
@@ -848,26 +847,30 @@ actor TCPConnection {
         // relay bridge — the backlog, backpressure, and `tcp_*` writes are confined there.
         let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
         self.stream = stream
-        session.onSendToClient = { [weak self] data in
-            guard let self else { return }
-            self.bridge.enqueue {
-                self.assumeIsolated { me in
-                    guard !me.closed, let stream = me.stream else { return }
-                    me.markActivity()
-                    stream.assumeIsolated { $0.deliverDownload(data) }
+        // The session is an actor on this same lwIP executor; wire its callbacks and kick it off via
+        // `assumeIsolated` (we are already on the queue), the same seam its own legs use.
+        session.assumeIsolated { s in
+            s.onSendToClient = { [weak self] data in
+                guard let self else { return }
+                self.bridge.enqueue {
+                    self.assumeIsolated { me in
+                        guard !me.closed, let stream = me.stream else { return }
+                        me.markActivity()
+                        stream.assumeIsolated { $0.deliverDownload(data) }
+                    }
                 }
             }
-        }
-        session.onTeardown = { [weak self] error in
-            guard let self else { return }
-            self.bridge.enqueue {
-                self.assumeIsolated { me in
-                    guard !me.closed else { return }
-                    if let error {
-                        me.reportFailure("MITM", error: error)
-                        me.abort()
-                    } else {
-                        me.closeWhenDrained()
+            s.onTeardown = { [weak self] error in
+                guard let self else { return }
+                self.bridge.enqueue {
+                    self.assumeIsolated { me in
+                        guard !me.closed else { return }
+                        if let error {
+                            me.reportFailure("MITM", error: error)
+                            me.abort()
+                        } else {
+                            me.closeWhenDrained()
+                        }
                     }
                 }
             }
@@ -879,7 +882,7 @@ actor TCPConnection {
             acknowledgeReceivedBytes(initialClientHello.count)
         }
 
-        session.start(sni: sni)
+        session.assumeIsolated { $0.start(sni: sni) }
     }
 
     private enum UpstreamRoute {
@@ -985,12 +988,14 @@ actor TCPConnection {
     }
 
     private func defaultUpstreamRoute() -> UpstreamRoute {
-        guard let stack,
-              case .proxy = stack.defaultRouteTarget,
-              let configuration = stack.configuration else {
+        // Read the default route/configuration from the stack's published UDP-config snapshot
+        // (nonisolated), so this stays synchronous without hopping onto the stack actor.
+        guard let config = stack?.udpConfig(),
+              case .proxy = config.defaultRouteTarget,
+              let configuration = config.configuration else {
             return .direct
         }
-        return .proxy(routeTarget: stack.defaultRouteTarget, configuration: configuration)
+        return .proxy(routeTarget: config.defaultRouteTarget, configuration: configuration)
     }
 
     private func dialDirectUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
@@ -1133,7 +1138,7 @@ actor TCPConnection {
         self.relayTask = nil
         pendingData = Data()
         mitmSession = nil
-        session?.cancel(error: nil)
+        session?.assumeIsolated { $0.cancel(error: nil) }
         // Stop the relay loops (their stream awaits return) and cancel the group, then tear the
         // proxy leg down so any in-flight send/receive unwinds.
         stream?.assumeIsolated { $0.terminate() }

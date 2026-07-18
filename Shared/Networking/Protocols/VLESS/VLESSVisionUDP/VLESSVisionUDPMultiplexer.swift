@@ -37,6 +37,10 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
         /// Tail of the wire-send chain: each frame links after the previous and runs only once it
         /// finishes, so frames never interleave on the shared connection — no lock held across the write.
         var sendTail: Task<Void, Error>?
+
+        /// The connection read loop. Strong self: the loop owns the mux while receiving;
+        /// `close(error:)` cancels it and the connection, ending the parked receive.
+        var readTask: Task<Void, Never>?
     }
 
     private let lock = Mutex(State())
@@ -44,13 +48,16 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
     private static let idleTimeout: TimeInterval = 16
 
     /// Called once when the mux becomes permanently unusable (idle timeout, transport failure,
-    /// or explicit close) so the pool can evict it. Set once by the pool right after creation.
-    var onClose: (() -> Void)?
+    /// or explicit close) so the pool can evict it. Immutable — installed at creation, before
+    /// the mux is shared; fires off the pool's lock.
+    private let onClose: (@Sendable (VLESSVisionUDPMultiplexer) -> Void)?
 
     // MARK: - Init
 
-    init(configuration: ProxyConfiguration) {
+    init(configuration: ProxyConfiguration,
+         onClose: (@Sendable (VLESSVisionUDPMultiplexer) -> Void)? = nil) {
         self.configuration = configuration
+        self.onClose = onClose
     }
 
     // MARK: - Capacity
@@ -245,19 +252,22 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
     // MARK: - Read Loop
 
     private func startReadLoop(_ connection: ProxyConnection) {
-        Task { [weak self] in
+        // Strong self: the loop owns the mux while receiving; `close(error:)` cancels this
+        // task and the connection, which ends the parked receive so ARC reclaims the mux.
+        let task = Task {
             do {
                 while true {
                     guard let data = try await connection.receive(), !data.isEmpty else {
-                        self?.handleReadEnd(error: nil)   // clean EOF
+                        handleReadEnd(error: nil)   // clean EOF
                         return
                     }
-                    self?.handleInbound(data)
+                    handleInbound(data)
                 }
             } catch {
-                self?.handleReadEnd(error: error)
+                handleReadEnd(error: error)
             }
         }
+        lock.withLock { $0.readTask = task }
     }
 
     private func handleReadEnd(error: Error?) {
@@ -318,6 +328,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
             var client: ProxyClient?
             var idleTask: Task<Void, Never>?
             var readyTask: Task<Void, Error>?
+            var readTask: Task<Void, Never>?
         }
 
         let teardown: Teardown? = lock.withLock { state in
@@ -329,24 +340,24 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
                 connection: state.proxyConnection,
                 client: state.proxyClient,
                 idleTask: state.idleTask,
-                readyTask: state.readyTask
+                readyTask: state.readyTask,
+                readTask: state.readTask
             )
             state.streams.removeAll()
             state.proxyConnection = nil
             state.proxyClient = nil
             state.idleTask = nil
             state.readyTask = nil
+            state.readTask = nil
             state.frameParser.reset()
             return snapshot
         }
         guard let teardown else { return }
 
-        // Captured before teardown; fired last so the pool evicts exactly once (the
-        // `closed` guard above makes close() idempotent). Set once by the pool at creation.
-        let notifyClose = onClose
-        onClose = nil
-
         teardown.idleTask?.cancel()
+        // Cancel the read loop, then (below) the connection it is parked on; its strong self
+        // dies with it.
+        teardown.readTask?.cancel()
 
         for stream in teardown.streams {
             stream.deliverClose(error: error)
@@ -360,6 +371,8 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
         // shared task. In-flight/queued sends fail fast on their own because the connection is cancelled.
         teardown.readyTask?.cancel()
 
-        notifyClose?()
+        // Fired last so the pool evicts exactly once (the `closed` guard above makes close()
+        // idempotent).
+        onClose?(self)
     }
 }

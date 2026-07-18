@@ -30,13 +30,14 @@ nonisolated final class VLESSVisionUDPMultiplexerPool {
                 return reusable
             }
 
-            let created = VLESSVisionUDPMultiplexer(configuration: configuration)
             // Self-eviction: a mux that idle-times-out or fails removes itself here instead of
             // lingering until the next acquire. `onClose` fires off this lock.
-            created.onClose = { [weak self, weak created] in
-                guard let self, let created else { return }
-                self.multiplexers.withLock { $0.removeAll { $0 === created } }
-            }
+            let created = VLESSVisionUDPMultiplexer(
+                configuration: configuration,
+                onClose: { [weak self] multiplexer in
+                    self?.multiplexers.withLock { $0.removeAll { $0 === multiplexer } }
+                }
+            )
             multiplexers.append(created)
             return created
         }

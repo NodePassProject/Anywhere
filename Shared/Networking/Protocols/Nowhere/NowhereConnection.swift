@@ -689,13 +689,15 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             return true
         }
         guard shouldRead else { return }
-        Task { [weak self, weak connection] in
-            guard let self, let connection else { return }
+        // Strong captures: the one-shot read task owns the connection until this single
+        // `receiveRaw` settles (teardown cancels the transport, failing it); the
+        // `state.inner === connection` guard in `handleTransportRead` drops stale results.
+        Task {
             do {
                 let data = try await connection.receiveRaw()
-                self.handleTransportRead(connection: connection, data: data, error: nil)
+                handleTransportRead(connection: connection, data: data, error: nil)
             } catch {
-                self.handleTransportRead(connection: connection, data: nil, error: error)
+                handleTransportRead(connection: connection, data: nil, error: error)
             }
         }
     }
@@ -842,31 +844,27 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     static func bufferedUOTTerminationStep(buffer: Data) -> BufferedUOTTerminationStep {
-        var offset = 0
-        while offset < buffer.count {
-            let available = buffer.count - offset
-            guard available >= 3 else { return .none }
-            let length = (Int(buffer[offset + 1]) << 8) | Int(buffer[offset + 2])
-            guard available >= 3 + length else { return .none }
-            guard let (message, consumed) = NowhereProtocol.decodeUDPStreamFrame(
-                buffer,
-                offset: offset
-            ) else { return .invalidControl }
-            switch message.type {
-            case .data:
-                return .invalidControl
-            case .close:
-                return .close
-            case .reject:
-                guard let code = NowhereProtocol.FlowRejectCode(rawValue: message.payload[0]) else {
-                    return .invalidControl
-                }
-                return .reject(code)
-            case .ready:
+        // Only the first buffered frame decides the outcome — every branch is terminal.
+        guard buffer.count >= 3 else { return .none }
+        let length = (Int(buffer[1]) << 8) | Int(buffer[2])
+        guard buffer.count >= 3 + length else { return .none }
+        guard let (message, _) = NowhereProtocol.decodeUDPStreamFrame(
+            buffer,
+            offset: 0
+        ) else { return .invalidControl }
+        switch message.type {
+        case .data:
+            return .invalidControl
+        case .close:
+            return .close
+        case .reject:
+            guard let code = NowhereProtocol.FlowRejectCode(rawValue: message.payload[0]) else {
                 return .invalidControl
             }
+            return .reject(code)
+        case .ready:
+            return .invalidControl
         }
-        return .none
     }
 
     /// A prepared connection can already have a transport read in flight when

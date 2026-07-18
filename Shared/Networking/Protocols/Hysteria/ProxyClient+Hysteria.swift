@@ -39,7 +39,7 @@ extension ProxyClient {
         if let chainTunnel = tunnel {
             // Chain link: wrap the inbound UDP-relay tunnel as a per-flow client.
             let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
-            self.tunnel = nil
+            setChainTunnel(nil)
             let client = HysteriaClient.chained(configuration: hysteriaConfiguration, transport: transport)
             return try await dispatchHysteria(client: client, command: command, destination: destination)
         }

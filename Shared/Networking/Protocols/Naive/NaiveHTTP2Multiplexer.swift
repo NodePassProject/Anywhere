@@ -72,8 +72,9 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
         /// 50 ms flow-control retry poll.
         var flowGate = H2FlowGate()
 
-        /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
-        var onClose: (() -> Void)?
+        /// The transport read loop. Strong self: the loop owns the multiplexer while receiving;
+        /// `teardown` cancels it and the transport, ending the parked receive.
+        var readTask: Task<Void, Never>?
     }
     private let lock = Mutex(State())
 
@@ -94,20 +95,20 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
 
-    /// Called when the multiplexer becomes permanently unusable so the pool can evict it.
-    var onClose: (() -> Void)? {
-        get { lock.withLock { $0.onClose } }
-        set { lock.withLock { $0.onClose = newValue } }
-    }
+    /// Called once from `teardown` when the multiplexer becomes permanently unusable so the
+    /// pool can evict it. Immutable — installed at creation, before the multiplexer is shared.
+    private let onClose: (@Sendable (NaiveHTTP2Multiplexer) -> Void)?
 
     // MARK: - Initialization
 
     init(host: String, port: UInt16, sni: String, tunnel: ProxyConnection?,
-         connectHeaders: @escaping @Sendable () -> [(name: String, value: String)]) {
+         connectHeaders: @escaping @Sendable () -> [(name: String, value: String)],
+         onClose: (@Sendable (NaiveHTTP2Multiplexer) -> Void)? = nil) {
         self.host = host
         self.port = port
         self.sni = sni
         self.connectHeaders = connectHeaders
+        self.onClose = onClose
         self.transport = TLSStreamTransport(
             host: host,
             port: port,
@@ -192,20 +193,21 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
     }
 
     private func beginSetup() {
-        Task { [weak self] in
-            guard let self else { return }
+        // Strong self: the setup task owns the multiplexer until the connect settles —
+        // bounded by the transport (a teardown cancels it, failing `connect`).
+        Task {
             do {
-                try await self.transport.connect()
-                self.sendConnectionPreface()
+                try await transport.connect()
+                sendConnectionPreface()
             } catch {
-                let readyFail: Bool = self.lock.withLock { state in
+                let readyFail: Bool = lock.withLock { state in
                     guard state.phase != .closed else { return false }
                     state.phase = .closed
                     return true
                 }
                 if readyFail {
-                    self.refreshPoolSnapshot()
-                    self.completeReadyContinuations(error)
+                    refreshPoolSnapshot()
+                    completeReadyContinuations(error)
                 }
             }
         }
@@ -278,31 +280,32 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
         data.append(windowUpdate.serialized)
 
         let prefaceSend = chainSend(data)
-        Task { [weak self] in
-            guard let self else { return }
+        // Strong self: the preface task owns the multiplexer until the preface settles —
+        // bounded by the transport (a teardown cancels the transport, failing the send).
+        Task {
             do {
                 try await prefaceSend.value()
             } catch {
-                let failed: Bool = self.lock.withLock { state in
+                let failed: Bool = lock.withLock { state in
                     guard state.phase != .closed else { return false }
                     state.phase = .closed
                     return true
                 }
                 if failed {
-                    self.transport.cancel()
-                    self.refreshPoolSnapshot()
-                    self.completeReadyContinuations(error)
+                    transport.cancel()
+                    refreshPoolSnapshot()
+                    completeReadyContinuations(error)
                 }
                 return
             }
-            let proceed: Bool = self.lock.withLock { state in
+            let proceed: Bool = lock.withLock { state in
                 guard state.phase == .connecting else { return false }
                 state.phase = .prefaceSent
                 return true
             }
             guard proceed else { return }
-            self.refreshPoolSnapshot()
-            self.startReadLoop()
+            refreshPoolSnapshot()
+            startReadLoop()
         }
     }
 
@@ -312,25 +315,26 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
     /// transport chunk, appends it, and drains every complete frame (replacing the former per-read
     /// recursive `Task` + `queue.async`).
     private func startReadLoop() {
-        Task { [weak self] in
+        // Strong self: the loop owns the multiplexer while receiving; `teardown` cancels this
+        // task and the transport, which ends the parked receive so ARC reclaims the multiplexer.
+        let task = Task {
             // Connection-scoped HPACK decoder; the dynamic table is shared across all HEADERS frames on
             // this connection (RFC 7541 §2.2). Owned by this single read-loop task as a local, so it is
             // touched from exactly one place and needs no lock.
             let hpackDecoder = HPACKDecoder()
             while true {
-                guard let self else { return }
-                if self.lock.withLock({ $0.phase == .closed }) { return }
+                if lock.withLock({ $0.phase == .closed }) { return }
 
                 let data: Data?
-                do { data = try await self.transport.receive() }
-                catch { self.handleSessionError(error); return }
+                do { data = try await transport.receive() }
+                catch { handleSessionError(error); return }
 
                 guard let data, !data.isEmpty else {
-                    self.handleSessionError(NaiveHTTP2Error.connectionFailed("Connection closed"))
+                    handleSessionError(NaiveHTTP2Error.connectionFailed("Connection closed"))
                     return
                 }
 
-                let overflow: Bool = self.lock.withLock { state in
+                let overflow: Bool = lock.withLock { state in
                     guard state.phase != .closed else { return false }
                     state.receiveBuffer.append(data)
                     if state.receiveBuffer.count > Self.maxReceiveBufferSize {
@@ -340,13 +344,14 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
                     return false
                 }
                 if overflow {
-                    self.handleSessionError(NaiveHTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    handleSessionError(NaiveHTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
                     return
                 }
 
-                self.drainFrames(hpackDecoder: hpackDecoder)
+                drainFrames(hpackDecoder: hpackDecoder)
             }
         }
+        lock.withLock { $0.readTask = task }
     }
 
     /// Pops and routes each complete frame from the receive buffer. Runs on the read-loop task, so
@@ -625,24 +630,26 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
     /// Central close/teardown: flips to `.closed`, cancels the transport/pump, and fails every
     /// waiter, park, and live stream. Idempotent.
     private func teardown(reason: Error) {
-        var victims: [NaiveHTTP2Stream] = []
-        let closeCallback: (() -> Void)? = lock.withLock { state in
+        typealias Teardown = (victims: [NaiveHTTP2Stream], readTask: Task<Void, Never>?)
+        let teardownState: Teardown? = lock.withLock { state in
             guard state.phase != .closed else { return nil }
             state.phase = .closed
             state.flowGate.wakeAll()
-            victims = Array(state.streams.values)
+            let victims = Array(state.streams.values)
             state.streams.removeAll()
             state.sendWindows.removeAll()
-            let callback = state.onClose
-            state.onClose = nil
-            return callback ?? {}
+            let read = state.readTask
+            state.readTask = nil
+            return (victims, read)
         }
-        guard let closeCallback else { return }
+        guard let (victims, readTask) = teardownState else { return }
 
+        // Cancel the read loop, then the transport it is parked on; its strong self dies with it.
+        readTask?.cancel()
         transport.cancel()
         completeReadyContinuations(reason)
         for stream in victims { stream.handleSessionError(reason) }
         refreshPoolSnapshot()
-        closeCallback()
+        onClose?(self)
     }
 }

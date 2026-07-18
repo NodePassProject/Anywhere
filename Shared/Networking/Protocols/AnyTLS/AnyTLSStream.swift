@@ -29,15 +29,18 @@ actor AnyTLSStream {
 
     private struct EndState {
         var endFired = false
-        /// Fires exactly once when the stream ends; used to return the multiplexer to the idle pool.
+        /// Fires exactly once when the stream ends; used to return the multiplexer to the idle
+        /// pool. Installed at creation; nilled after firing so the hook's captures release.
         var onEnd: (() -> Void)?
     }
-    private let endState = Mutex(EndState())
+    private let endState: Mutex<EndState>
 
-    init(sid: UInt32, multiplexer: AnyTLSMultiplexer, outerTLSVersion: TLSVersion?) {
+    init(sid: UInt32, multiplexer: AnyTLSMultiplexer, outerTLSVersion: TLSVersion?,
+         onEnd: (() -> Void)? = nil) {
         self.sid = sid
         self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
+        self.endState = Mutex(EndState(onEnd: onEnd))
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         self.inbox = continuation
         self.inboxIterator = stream.makeAsyncIterator()
@@ -48,12 +51,6 @@ actor AnyTLSStream {
 
     /// Set by `cancel()` so the multiplexer does not echo a FIN back to itself.
     nonisolated var locallyCancelled: Bool { _locallyCancelled.load(ordering: .relaxed) }
-
-    /// Fires exactly once when the stream ends; used to return the multiplexer to the idle pool.
-    nonisolated var onEnd: (() -> Void)? {
-        get { endState.withLock { $0.onEnd } }
-        set { endState.withLock { $0.onEnd = newValue } }
-    }
 
     // MARK: - Send
 

@@ -20,6 +20,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
     private var pathMonitorTask: Task<Void, Never>?
 
+    /// Consumes the stack's tunnel-settings-reapply signal and drives `setTunnelNetworkSettings`
+    /// on the provider (routes/DNS change). Cancelled in `stopTunnel`.
+    private var reapplySettingsTask: Task<Void, Never>?
+
     /// Edge-transition tracker for the path loop; single-task-confined, so a plain value type.
     private struct PathTransition {
         var lastStatus: Network.NWPath.Status?
@@ -73,10 +77,14 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
             throw NSError(domain: AWCore.Identifier.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"])
         }
         
-        tunnelStack.onTunnelSettingsNeedReapply = { [weak self] in
-            self?.reapplyTunnelSettings()
+        // Drive `setTunnelNetworkSettings` whenever the stack signals a routes/DNS change.
+        let reapplySignal = tunnelStack.reapplySettingsSignal
+        reapplySettingsTask = Task { [weak self] in
+            for await _ in reapplySignal {
+                self?.reapplyTunnelSettings()
+            }
         }
-        
+
         let settings = buildTunnelSettings()
 
         // Await directly (not a detached Task): the OS must observe the real outcome
@@ -93,7 +101,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
         ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
 
-        tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
+        await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
         startMonitoringPath()
         statsRecorder.start { [weak self] in
             return StatsRecorder.RawValues(
@@ -239,6 +247,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
         
         statsRecorder.stop()
         stopMonitoringPath()
+        reapplySettingsTask?.cancel()
+        reapplySettingsTask = nil
         logTunnelStop(reason: reason)
         await tunnelStack.stop()
     }
@@ -252,7 +262,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch message {
         case .setConfiguration(let configuration):
-            tunnelStack.switchConfiguration(configuration)
+            await tunnelStack.switchConfiguration(configuration)
             return nil
 
         case .testLatency(let configuration):
@@ -287,12 +297,12 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func sleep() async {
         statsRecorder.noteSleep()
-        tunnelStack.suspendOutbound()
+        await tunnelStack.suspendOutbound()
     }
 
     override func wake() {
         statsRecorder.noteWake()
-        tunnelStack.handleWake()
+        Task { await tunnelStack.handleWake() }
     }
 
     // MARK: - Path Monitoring
@@ -324,11 +334,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
             // Requires the "Access WiFi Information" entitlement; otherwise `ssid`
             // is nil and the network is treated as untrusted.
             let ssid = await pathMonitorBridge.currentWiFiSSID()
-            tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: ssid)
+            await tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: ssid)
             return
         }
 #endif
-        tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
+        await tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
     }
 
     /// Applies the trusted-network policy, releases upstream transports while the
@@ -346,7 +356,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
             case .restored:
                 // Up edge: rebuild the transports suspendOutbound released; flush stale DNS.
                 logger.info("[VPN] Network path restored: \(Self.pathSummary(path))")
-                tunnelStack.resumeOutbound()
+                await tunnelStack.resumeOutbound()
             case .ready:
                 logger.info("[VPN] Network path ready: \(Self.pathSummary(path))")
             default:
@@ -371,7 +381,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider {
             logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path))")
             reasserting = true
             // Down edge: release dead upstream transports; rebuilt on the up edge.
-            tunnelStack.suspendOutbound()
+            await tunnelStack.suspendOutbound()
 
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly")

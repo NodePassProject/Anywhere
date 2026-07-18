@@ -843,8 +843,8 @@ extension TLSClient {
             initialClientSeqNum: 1,
             initialServerSeqNum: 1
         )
-        tlsConnection.connection = self.connection
-        tlsConnection.negotiatedALPN = self.negotiatedALPN
+        tlsConnection.adoptTransport(self.connection)
+        tlsConnection.publishNegotiatedALPN(self.negotiatedALPN)
         self.connection = nil
 
         if let remaining = remainingBuffer, !remaining.isEmpty {

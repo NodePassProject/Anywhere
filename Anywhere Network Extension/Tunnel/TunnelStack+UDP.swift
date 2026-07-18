@@ -33,7 +33,7 @@ extension TunnelStack {
     /// Answers `datagram` with ICMP port-unreachable — sourced from the
     /// original destination — so the sender abandons the destination fast
     /// (QUIC fallback, stale fake IPs, blocked UDP). Callable from anywhere.
-    func sendICMPPortUnreachable(rejecting datagram: UDPPacket.Inbound) {
+    nonisolated func sendICMPPortUnreachable(rejecting datagram: UDPPacket.Inbound) {
         guard let packet = ICMPPacket.portUnreachable(
             srcIP: datagram.srcIPData,
             srcPort: datagram.srcPort,
@@ -47,7 +47,7 @@ extension TunnelStack {
 
     /// Builds a UDP packet and queues it to the TUN output; callers pass the
     /// original 5-tuple swapped. Callable from anywhere.
-    func writeOutboundUDP(srcIP: Data, srcPort: UInt16,
+    nonisolated func writeOutboundUDP(srcIP: Data, srcPort: UInt16,
                           dstIP: Data, dstPort: UInt16,
                           isIPv6: Bool, payload: Data) {
         guard let packet = UDPPacket.build(

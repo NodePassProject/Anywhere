@@ -23,11 +23,15 @@ nonisolated final class ProxyClient: Sendable {
 
     private let state: Mutex<State>
 
-    /// Proxy tunnel from a previous chain link (for proxy chaining). Backed by ``state``
-    /// (the mutex is private; access always goes through this synchronized accessor).
-    var tunnel: ProxyConnection? {
-        get { state.withLock { $0.tunnel } }
-        set { state.withLock { $0.tunnel = newValue } }
+    /// Proxy tunnel from a previous chain link (for proxy chaining). Read-only snapshot backed
+    /// by ``state``; the late writes (installing a chain tunnel, or clearing it once consumed)
+    /// go through ``setChainTunnel(_:)``, and teardown clears it inline under the lock.
+    var tunnel: ProxyConnection? { state.withLock { $0.tunnel } }
+
+    /// Installs (or, with `nil`, clears once consumed) the chain tunnel for this link. Called at
+    /// chain setup and by protocol adapters that adopt the tunnel into a per-flow transport.
+    func setChainTunnel(_ tunnel: ProxyConnection?) {
+        state.withLock { $0.tunnel = tunnel }
     }
 
     /// For a chain link, the chain prefix leading to this link's server, so it can rebuild
@@ -200,7 +204,7 @@ nonisolated final class ProxyClient: Sendable {
         let chainTunnel = try await buildChainTunnel(
             chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands
         )
-        self.tunnel = chainTunnel
+        setChainTunnel(chainTunnel)
         return try await connectWithCommand(
             command: command,
             destinationHost: destinationHost,
@@ -947,7 +951,7 @@ nonisolated final class ProxyClient: Sendable {
 
         // Download leg is the coordinator; it owns the upload leg (`uploadChannel`), so cancelling
         // it cascades to the upload leg too.
-        downloadLeg.uploadChannel = uploadLeg
+        downloadLeg.attachUploadChannel(uploadLeg)
         do {
             return try await performXHTTPSetup(
                 xhttpConnection: downloadLeg, command: command,
@@ -1062,7 +1066,7 @@ nonisolated final class ProxyClient: Sendable {
                 h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
             )
         }
-        connection.role = role
+        connection.configureRole(role)
         return connection
     }
 
@@ -1092,8 +1096,8 @@ nonisolated final class ProxyClient: Sendable {
         let connection = XHTTPConnection(
             h3Multiplexer: session, configuration: xhttp, mode: mode, sessionId: sessionId
         )
-        connection.role = role
-        connection.xmuxLease = lease
+        connection.configureRole(role)
+        connection.configureXMUXLease(lease)
         return connection
     }
 
@@ -1121,8 +1125,8 @@ nonisolated final class ProxyClient: Sendable {
             throw ProxyError.connectionFailed("xmux H2 connection acquisition failed")
         }
         let connection = XHTTPConnection(sharedH2: shared, configuration: xhttp, mode: mode, sessionId: sessionId)
-        connection.role = role
-        connection.xmuxLease = lease
+        connection.configureRole(role)
+        connection.configureXMUXLease(lease)
         return connection
     }
 
@@ -1276,7 +1280,7 @@ nonisolated final class ProxyClient: Sendable {
                 guard let lease = await manager.acquire(), let connection = lease.connection as? XHTTPH1Multiplexer else {
                     throw ProxyError.connectionFailed("xmux H1 upload acquisition failed")
                 }
-                connection.lease = lease
+                connection.adoptLease(lease)
                 return connection.sessionTransport
             }
         }

@@ -329,7 +329,7 @@ nonisolated extension TLSServer {
             initialServerSeqNum: 1,
             direction: .server
         )
-        connection.negotiatedALPN = negotiatedALPN
+        connection.publishNegotiatedALPN(negotiatedALPN)
 
         let trailer = rxBuffer
         rxBuffer = Data()

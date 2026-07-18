@@ -10,7 +10,9 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Callbacks")
 
-nonisolated private final class RejectFloodTracker {
+/// Per-host SYN-reject flood tracker. Not `Sendable`: it is owned by ``TunnelStack`` as isolated
+/// state and touched only by the isolated SYN-filter callback (on the lwIP queue).
+final class RejectFloodTracker {
     private let threshold: Int
     private let window: CFAbsoluteTime
     private var timestamps: [String: [CFAbsoluteTime]] = [:]
@@ -38,8 +40,6 @@ nonisolated private final class RejectFloodTracker {
         return times.count > threshold
     }
 }
-
-private let rejectFloodTracker = RejectFloodTracker()
 
 extension TunnelStack: LWIPBridgeHost {
 
