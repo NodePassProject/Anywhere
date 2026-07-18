@@ -156,6 +156,7 @@ actor QUICDatagramCarrier {
         weak var value: QUICDatagramCarrier?
     }
     
+    @concurrent
     private static func runDriver(
         endpoint: NWEndpoint,
         sendStream: AsyncStream<Data>,

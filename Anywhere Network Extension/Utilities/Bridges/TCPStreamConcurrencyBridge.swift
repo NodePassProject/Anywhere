@@ -116,13 +116,15 @@ actor TCPStreamConcurrencyBridge {
     // MARK: - Upload async surface (single upload relay)
 
     /// The next coalesced upload chunk (≤ `uploadChunkSize`), or `nil` once the app's FIN is
-    /// reached and the buffer is drained.
+    /// reached and the buffer is drained. Termination wins over buffered data — a torn-down
+    /// connection's residue must not reach the upstream, and the relay must exit promptly.
     func receiveUpload() async -> Data? {
         while true {
+            if terminated { return nil }
             if uploadCount > 0 {
                 return sliceUpload(min(uploadCount, TunnelConstants.uploadChunkSize))
             }
-            if uploadEOF || terminated { return nil }
+            if uploadEOF { return nil }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 uploadWaiter = continuation
             }

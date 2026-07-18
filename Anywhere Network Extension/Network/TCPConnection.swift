@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
@@ -86,54 +87,32 @@ actor TCPConnection {
     private var httpSniffer: HTTPRequestSniffer?
 
     // MARK: Relay
-    //
-    // The upload and download copy loops run inside one structured task group (``relayTask``)
-    // over the proxy connection's async surface and the per-connection
-    // ``TCPStreamConcurrencyBridge``, which owns all coalescing/backlog buffering, backpressure,
-    // wake continuations, and `tcp_*` window/write calls. Teardown is `stream.terminate()` +
-    // `relayTask.cancel()` — no `withTaskCancellationHandler`, no manual pump.
-
-    /// The per-connection byte-relay bridge, created at establishment (both the non-MITM relay
-    /// and the MITM downlink ride it); `nil` before the dial resolves.
+    
     private var stream: TCPStreamConcurrencyBridge?
-
-    /// The connection-lifetime relay task (the structured upload+download group); cancelled by
-    /// ``releaseProxy(abortive:)``.
+    
     private var relayTask: Task<Void, Never>?
 
-    // MARK: Actor-isolated idle timer (replaces ActivityTimer)
-    //
-    // No queue+closure timer: the connection stores `lastActivityTick` and re-checks on the actor.
-    // `close()` fires when the connection has been quiet for `idleTimeout`.
+    // MARK: Actor-isolated idle timer
+    
     private var idleActive = false
     private var idleTimeout: TimeInterval = 0
-    private var lastActivityTick: TimeInterval = 0
+    private nonisolated let lastActivityTick = Atomic<TimeInterval>(0)
     private var idleCheckTask: Task<Void, Never>?
-
-    /// Bounds sniff/dial/handshake; cancelled on the first outbound leg or teardown. Actor-isolated.
+    
     private var handshakeTimeoutTask: Task<Void, Never>?
-    /// Per-dial teardown handle: cancels the in-flight transport/client, one instance per dial so the
-    /// bridge's concurrent per-stream dials don't cross-wire cancels. The deadline is a `Task.sleep`
-    /// raced inside ``raceHandshakeDeadline`` rather than a per-dial timer.
     private final class InFlightDial {
         var cancel: (() -> Void)?
     }
-    /// Dials awaiting resolution; `releaseProxy` cancels every one on teardown.
+    
     private var inFlightDials: [InFlightDial] = []
-    /// Commits the IP-based route if the sniff doesn't resolve in time. Actor-isolated.
     private var sniffDeadlineTask: Task<Void, Never>?
     private var uplinkDone = false
     private var downlinkDone = false
     private var closePending = false
-    /// Waits out the downlink drain before a deferred close; owned here so ``releaseProxy``
-    /// cancels it symmetrically with the other lifecycle tasks.
     private var deferredCloseTask: Task<Void, Never>?
-
-    /// Logs this connection's terminal failure at most once.
+    
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
-
-    /// Whether this connection is counted in `FlowGauge.pendingTCP`; settled
-    /// exactly once by `settlePendingAdmission()`.
+    
     private var pendingAdmissionCounted = true
 
     // MARK: Lifecycle
@@ -162,9 +141,7 @@ actor TCPConnection {
             self.sniffer = TLSClientHelloSniffer()
         }
     }
-
-    /// Arms the handshake timer and either begins dialing or waits for the sniff deadline.
-    /// The bridge's accept trampoline calls this once, on the lwIP queue, right after `init`.
+    
     func start() {
         handshakeTimeoutTask = Task {
             try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
@@ -182,8 +159,7 @@ actor TCPConnection {
             }
         }
     }
-
-    /// Fires on the actor when the sniff/dial handshake overran its bound; aborts if still establishing.
+    
     private func handshakeTimedOut() {
         guard !closed, isEstablishing else { return }
         let phase = isSniffing ? "protocol sniff" : (bypass ? "direct dial" : "proxy dial")
@@ -195,8 +171,7 @@ actor TCPConnection {
         )
         abort()
     }
-
-    /// Fires on the actor when the sniff deadline elapsed with no client bytes; commits the IP route.
+    
     private func sniffDeadlineFired() {
         guard !closed, isSniffing else { return }
         sniffer = nil
@@ -214,13 +189,11 @@ actor TCPConnection {
         sniffDeadlineTask?.cancel()
         sniffDeadlineTask = nil
     }
-
-    /// Appends to `pendingData`; aborts and returns `false` if the cap would be exceeded.
+    
     @discardableResult
     private func appendPendingData(bytes ptr: UnsafePointer<UInt8>, count: Int) -> Bool {
         if pendingData.count + count > TunnelConstants.tcpMaxPendingDataSize {
             logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
-            // The warning above already covers this abort; suppress duplicates.
             failureReporter.markReported()
             abort()
             return false
@@ -228,8 +201,7 @@ actor TCPConnection {
         pendingData.append(ptr, count: count)
         return true
     }
-
-    /// Still sniffing or dialing the proxy; drives the handshake timer.
+    
     private var isEstablishing: Bool {
         proxyConnecting || isSniffing
     }
@@ -237,8 +209,7 @@ actor TCPConnection {
     private var isSniffing: Bool {
         sniffer != nil || httpSniffer != nil
     }
-
-    /// Starts on the tighter response-wait timeout when the app FIN'd during setup.
+    
     private var initialIdleTimeout: TimeInterval {
         uplinkDone ? TunnelConstants.downlinkOnlyTimeout : TunnelConstants.connectionIdleTimeout
     }
@@ -247,17 +218,14 @@ actor TCPConnection {
         stack?.mitmEnabled == true
     }
 
-    // MARK: - lwIP Callbacks (entered from the bridge via assumeIsolated, on the lwIP queue)
-
-    /// Upload path: data from the local app via lwIP.
+    // MARK: - lwIP Callbacks
+    
     func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
         guard !closed, count > 0 else { return }
         markActivity()
 
         let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
-
-        // The sniffer and appendPendingData both copy eagerly, so a bytesNoCopy
-        // wrapper is safe — the Data never outlives this function.
+        
         if sniffer != nil {
             let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: ptr), count: count, deallocator: .none)
             if let state = sniffer?.feed(data) {
@@ -306,17 +274,10 @@ actor TCPConnection {
             _ = appendPendingData(bytes: bytePtr, count: count)
             return
         }
-
-        // MITM: client bytes feed the inner TLS leg; the upload pipeline stays untouched.
+        
         if let mitmSession {
             let chunk = Data(bytes: bytePtr, count: count)
-            // Count client→inner-leg bytes as uplink activity. A long upload with no server response
-            // yet (a large POST/PUT, or a slow upstream) produces no downlink to refresh the idle
-            // timer, so without this it looks idle and is torn down mid-stream — the non-MITM upload
-            // path refreshes the timer on every accepted chunk for the same reason.
             markActivity()
-            // Ack to lwIP up-front; MITMSession owns inner-leg flow control. The session shares this
-            // actor's lwIP executor, entered synchronously via `assumeIsolated`.
             acknowledgeReceivedBytes(count)
             mitmSession.assumeIsolated { $0.feedClientBytes(chunk) }
             return
@@ -327,85 +288,89 @@ actor TCPConnection {
             beginConnecting()
             return
         }
-
-        // Copy on this (shared lwIP) executor before the hop; `ptr` is valid only for this call and
-        // the copy is the same one `deliverUpload` did — it just moves ahead of the actor boundary.
+        
         let uploadChunk = Data(bytes: ptr, count: count)
         stream.assumeIsolated { $0.deliverUpload(uploadChunk) }
     }
 
     // MARK: - Relay
-
-    /// Creates the byte-relay bridge, seeds any bytes buffered during sniff/dial, and starts the
-    /// structured upload+download group. Both legs run to their own EOF — half-close is removed,
-    /// so no directional FIN is sent; the connection full-closes once both directions have ended.
+    
     private func startRelay(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) {
         if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
         if uplinkDone { stream.assumeIsolated { $0.deliverUploadEOF() } }
-        // Strong self: the relay group owns the connection while copying. `releaseProxy` terminates
-        // the stream and cancels the proxy leg, so both loops unwind promptly and the task finishes,
-        // letting ARC reclaim — the holder drives teardown, no `[weak self]` cycle-guard needed.
+        let context = RelayContext(stack: stack, routeTarget: routeTarget)
         relayTask = Task {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await self.runUploadRelay(connection, stream) }
-                group.addTask { await self.runDownloadRelay(connection, stream) }
-            }
-            self.relayFinished()
+            await self.runRelay(connection, stream: stream, context: context)
         }
     }
-
-    /// Uplink copy loop: coalesced app bytes → proxy leg, one `await send` at a time, acking each
-    /// chunk back to lwIP only after the upstream accepts it (throttle to the upstream's rate).
-    /// Returns at the app's FIN.
-    private func runUploadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge) async {
+    
+    private struct RelayContext: Sendable {
+        weak var stack: TunnelStack?
+        let routeTarget: RouteTarget
+    }
+    
+    @concurrent
+    private nonisolated func runRelay(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, context: RelayContext) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.runUploadRelay(connection, stream, context: context) }
+            group.addTask { await self.runDownloadRelay(connection, stream, context: context) }
+        }
+        await relayFinished()
+    }
+    
+    @concurrent
+    private nonisolated func runUploadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge, context: RelayContext) async {
         while let chunk = await stream.receiveUpload() {
             do {
                 try await connection.send(chunk)
             } catch {
-                if !closed { reportFailure("Send", error: error); abort() }
+                await relayFailed("Send", error: error)
                 return
             }
-            if closed { return }
             markActivity()
-            stack?.addBytesOut(Int64(chunk.count), target: routeTarget)
+            context.stack?.addBytesOut(Int64(chunk.count), target: context.routeTarget)
+            // No-op once teardown has terminated the stream, so a late ack never touches the pcb.
             await stream.ackUpload(chunk.count)
         }
     }
-
-    /// Downlink copy loop: proxy leg → lwIP via the bridge's backpressured send. At the upstream
-    /// EOF it waits for the backlog to drain (so the full close doesn't truncate the tail), then
-    /// returns — no `tcp_shutdown_tx` is sent.
-    private func runDownloadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge) async {
+    
+    @concurrent
+    private nonisolated func runDownloadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge, context: RelayContext) async {
         while true {
             let data: Data?
             do {
                 data = try await connection.receive()
             } catch {
-                if !closed { reportFailure("Receive", error: error); abort() }
+                await relayFailed("Receive", error: error)
                 return
             }
-            // nil and empty both mean EOF; transports never deliver zero-byte data.
             guard let data, !data.isEmpty else { break }
-            if closed { return }
-            markActivity()
-            stack?.addBytesIn(Int64(data.count), target: routeTarget)
             do {
                 try await stream.sendDownload(data)
             } catch {
-                if !closed, case TCPStreamConcurrencyBridge.StreamError.writeFailed = error {
-                    reportFailure("Write", error: error)
-                    abort()
+                if case TCPStreamConcurrencyBridge.StreamError.writeFailed = error {
+                    await relayFailed("Write", error: error)
                 }
                 return
             }
+            markActivity()
+            context.stack?.addBytesIn(Int64(data.count), target: context.routeTarget)
         }
-        if closed { return }
-        downlinkDone = true
-        if !uplinkDone { setIdleTimeout(TunnelConstants.uplinkOnlyTimeout) }
+        await downlinkReachedEOF()
         await stream.awaitDownloadDrained()
     }
-
-    /// Both relay directions ended (EOF'd + drained): full-close the connection.
+    
+    private func relayFailed(_ operation: String, error: Error) {
+        guard !closed else { return }
+        reportFailure(operation, error: error)
+        abort()
+    }
+    private func downlinkReachedEOF() {
+        guard !closed else { return }
+        downlinkDone = true
+        if !uplinkDone { setIdleTimeout(TunnelConstants.uplinkOnlyTimeout) }
+    }
+    
     private func relayFinished() {
         guard !closed else { return }
         close()
@@ -749,14 +714,15 @@ actor TCPConnection {
     /// Arms the idle timer at `initialIdleTimeout`; `close()` fires once the connection is quiet that long.
     private func startIdleTimer() {
         idleTimeout = initialIdleTimeout
-        lastActivityTick = MonotonicClock.now
+        markActivity()
         idleActive = true
         scheduleIdleCheck(after: idleTimeout)
     }
 
-    /// Records traffic so the idle check sees the connection as active.
-    private func markActivity() {
-        lastActivityTick = MonotonicClock.now
+    /// Records traffic so the idle check sees the connection as active. Callable off-actor
+    /// (the relay loops stamp it from the concurrent pool).
+    private nonisolated func markActivity() {
+        lastActivityTick.store(MonotonicClock.now, ordering: .relaxed)
     }
 
     /// Changes the idle window (e.g. tightened after a half-close). `<= 0`, or a window already
@@ -769,7 +735,7 @@ actor TCPConnection {
             return
         }
         idleTimeout = timeout
-        let elapsed = MonotonicClock.now - lastActivityTick
+        let elapsed = MonotonicClock.now - lastActivityTick.load(ordering: .relaxed)
         if elapsed >= timeout {
             cancelIdleTimer()
             close()
@@ -797,7 +763,7 @@ actor TCPConnection {
     /// Runs on the actor: closes if idle past `idleTimeout`, else re-arms for the remaining window.
     private func checkIdle() {
         guard !closed, idleActive, idleTimeout > 0 else { return }
-        let elapsed = MonotonicClock.now - lastActivityTick
+        let elapsed = MonotonicClock.now - lastActivityTick.load(ordering: .relaxed)
         if elapsed >= idleTimeout {
             idleActive = false
             idleCheckTask = nil
