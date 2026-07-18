@@ -42,6 +42,10 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
     /// (the raw closure isn't `Sendable`).
     private let receiveHandler = Mutex<((Data) -> Void)?>(nil)
 
+    /// The receive loop. Strong self: the loop owns the transport while receiving; `cancel()`
+    /// cancels it and the connection, ending the parked receive so ARC reclaims the transport.
+    private let receiveTask = Mutex<Task<Void, Never>?>(nil)
+
     init(connection: ProxyConnection) {
         self.connection = connection
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
@@ -106,20 +110,22 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
                         errorHandler: @escaping (Error?) -> Void) {
         failureState.withLock { $0.handler = errorHandler }
         receiveHandler.withLock { $0 = handler }
-        Task { [weak self] in
-            guard let self else { return }
+        // Strong self: the loop owns the transport while receiving; `cancel()` cancels this
+        // task and the connection, which ends the parked receive.
+        let task = Task {
             do {
                 while true {
-                    guard let data = try await self.connection.receive() else {
-                        self.surfaceFailure(nil)   // clean EOF
+                    guard let data = try await connection.receive() else {
+                        surfaceFailure(nil)   // clean EOF
                         return
                     }
-                    self.receiveHandler.withLock { $0 }?(data)
+                    receiveHandler.withLock { $0 }?(data)
                 }
             } catch {
-                self.surfaceFailure(error)
+                surfaceFailure(error)
             }
         }
+        receiveTask.withLock { $0 = task }
     }
 
     func cancel() {
@@ -127,6 +133,12 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
         // connection is cancelled, so it isn't surfaced as a spurious transport failure.
         failureState.withLock { $0.failed = true; $0.handler = nil }
         outbound.finish()   // ends the writer task's drain loop
+        // Cancel the receive loop, then the connection it is parked on; its strong self dies with it.
+        let receive = receiveTask.withLock { task -> Task<Void, Never>? in
+            defer { task = nil }
+            return task
+        }
+        receive?.cancel()
         connection.cancel()
     }
 

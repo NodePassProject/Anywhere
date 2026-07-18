@@ -9,11 +9,11 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
 
-/// One multiplexed HTTP/2 upstream connection. Dedicated 1:1 to one client connection but
-/// assigns its own monotonically-increasing upstream stream IDs (client requests can arrive
-/// reordered, and RFC 9113 §5.1.1 forbids opening a lower ID after a higher one).
-/// lwIP-queue-confined.
-nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
+actor MITMHTTP2UpstreamLeg {
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        lwipBridge.executor.asUnownedSerialExecutor()
+    }
 
     weak var sink: MITMResponseSink?
     var onUpstreamBytes: ((Data) -> Void)?
@@ -546,18 +546,13 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
 
     // MARK: - Upstream h2 → response IR
 
-    /// Parked lwIP-queue seam: hands the continuation to `body` on the lwIP queue; `body` resumes it
-    /// inline or stashes it (`parkedContinuation`) for a later script hop to resolve. The continuation
-    /// itself lives in ``LWIPConcurrencyBridge``.
-    private func onLwipParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await lwipBridge.runParked(body)
-    }
-
-    /// Feeds one inbound chunk; suspends across a streaming-script (per-frame) hop. lwIP-queue-confined,
-    /// so it self-hops onto that queue.
+    /// Feeds one inbound chunk; suspends across a streaming-script (per-frame) hop. The parked
+    /// continuation is handed out by ``LWIPConcurrencyBridge`` and stashed in `parkedContinuation`
+    /// for a later script hop to resolve. The runParked body runs on the lwIP queue — this actor's
+    /// executor — so it re-enters isolation synchronously via `assumeIsolated`.
     func feed(_ data: Data) async {
-        await onLwipParked { (continuation: CheckedContinuation<Void, Never>) in
-            self.feedOnQueue(data, continuation: continuation)
+        await lwipBridge.runParked { (continuation: CheckedContinuation<Void, Never>) in
+            self.assumeIsolated { $0.feedOnQueue(data, continuation: continuation) }
         }
     }
 
@@ -1114,23 +1109,26 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
             let outcome = await rewriter.applyScripts(message, phase: .httpResponse)
             guard let self else { return }
             self.lwipBridge.enqueue {
-                guard !self.torn else { return }
-                let regular = scriptedHeaders.filter { !$0.name.hasPrefix(":") }
-                switch outcome {
-                case .message(let updated):
-                    var body = updated.body
-                    if body.count > plaintext.count, body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
-                        logger.warning("h2-upstream \(self.host) stream \(streamID): response grew over cap; using original body")
-                        body = plaintext
+                // The enqueue body runs on the lwIP queue = this actor's executor.
+                self.assumeIsolated { leg in
+                    guard !leg.torn else { return }
+                    let regular = scriptedHeaders.filter { !$0.name.hasPrefix(":") }
+                    switch outcome {
+                    case .message(let updated):
+                        var body = updated.body
+                        if body.count > plaintext.count, body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
+                            logger.warning("h2-upstream \(leg.host) stream \(streamID): response grew over cap; using original body")
+                            body = plaintext
+                        }
+                        leg.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: body, trailers: trailers, neverIndexed: buffer.neverIndexed)
+                    case .synthesizedResponse:
+                        // Anywhere.respond is request-phase only; ignore on response and emit original.
+                        leg.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buffer.neverIndexed)
                     }
-                    self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: body, trailers: trailers, neverIndexed: buffer.neverIndexed)
-                case .synthesizedResponse:
-                    // Anywhere.respond is request-phase only; ignore on response and emit original.
-                    self.deliverFinalResponse(streamID: streamID, status: buffer.status, headers: regular, body: plaintext, trailers: trailers, neverIndexed: buffer.neverIndexed)
+                    // Non-blocking: the stream is already released and the pump kept running, so just
+                    // deliver. Out-of-order delivery is valid (h2 streams complete independently) and keeps
+                    // a slow/async response script from stalling the other multiplexed streams.
                 }
-                // Non-blocking: the stream is already released and the pump kept running, so just
-                // deliver. Out-of-order delivery is valid (h2 streams complete independently) and keeps
-                // a slow/async response script from stalling the other multiplexed streams.
             }
         }
         // Don't park: a buffered response script runs at END_STREAM after the stream is released, so
@@ -1178,11 +1176,14 @@ nonisolated final class MITMHTTP2UpstreamLeg: MITMUpstreamLeg, Sendable {
             )
             guard let self else { return }
             self.lwipBridge.enqueue {
-                // Torn resumes the parked feed via markTorn; here just don't touch stream state.
-                guard !self.torn else { return }
-                self.advanceStreaming(streamID, growth: result.body.count - body.count)
-                self.deliverStreamingFrame(streamID: streamID, body: result.body, endStream: endStream, trailers: trailers)
-                self.resumeAfterScript()
+                // The enqueue body runs on the lwIP queue = this actor's executor.
+                self.assumeIsolated { leg in
+                    // Torn resumes the parked feed via markTorn; here just don't touch stream state.
+                    guard !leg.torn else { return }
+                    leg.advanceStreaming(streamID, growth: result.body.count - body.count)
+                    leg.deliverStreamingFrame(streamID: streamID, body: result.body, endStream: endStream, trailers: trailers)
+                    leg.resumeAfterScript()
+                }
             }
         }
         return true

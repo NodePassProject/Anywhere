@@ -33,26 +33,25 @@ nonisolated final class XHTTPConnection: Sendable {
     // Upload transport factory (packet-up and stream-up), async-native.
     let uploadConnectionFactory: (@Sendable () async throws -> any ByteTransport)?
 
-    // The seven setup values below are written once during `performSetup` and read on the
-    // send/receive path; their storage lives in `state` (see `State`), and these forwarders keep
-    // that move transparent to callers. Reads inside an existing `withLock` use the `state` fields
-    // directly to avoid re-entering the lock; hot loops snapshot once per operation.
-    var role: XHTTPChannelRole {
-        get { state.withLock { $0.role } }
-        set { state.withLock { $0.role = newValue } }
-    }
+    // The seven setup values below are written once at setup and read on the send/receive path;
+    // their storage lives in `state` (see `State`). Reads are read-only atomic snapshots; the
+    // one-time writes go through the explicit `configure…`/`adopt…` methods so no caller mistakes
+    // a lock-guarded field for a plain settable variable. Reads inside an existing `withLock` use
+    // the `state` fields directly to avoid re-entering the lock.
+    var role: XHTTPChannelRole { state.withLock { $0.role } }
+    /// Sets the channel role. Called once by the coordinator before the leg goes on the wire.
+    func configureRole(_ role: XHTTPChannelRole) { state.withLock { $0.role = role } }
+
     /// Upload leg owned by this download leg when detached; sends are delegated to it.
-    var uploadChannel: XHTTPConnection? {
-        get { state.withLock { $0.uploadChannel } }
-        set { state.withLock { $0.uploadChannel = newValue } }
-    }
+    var uploadChannel: XHTTPConnection? { state.withLock { $0.uploadChannel } }
+    /// Attaches the owned upload leg. Called once by the coordinator during detached setup.
+    func attachUploadChannel(_ channel: XHTTPConnection?) { state.withLock { $0.uploadChannel = channel } }
 
     /// Non-nil when the transport is a pooled, shared xmux connection; teardown then
     /// releases the lease instead of closing the shared transport (others may still use it).
-    var xmuxLease: XHTTPXMUXMultiplexerLease? {
-        get { state.withLock { $0.xmuxLease } }
-        set { state.withLock { $0.xmuxLease = newValue } }
-    }
+    var xmuxLease: XHTTPXMUXMultiplexerLease? { state.withLock { $0.xmuxLease } }
+    /// Records the xmux pool lease. Called once by the coordinator at acquisition.
+    func configureXMUXLease(_ lease: XHTTPXMUXMultiplexerLease) { state.withLock { $0.xmuxLease = lease } }
 
     // Packet-up: one POST at a time, no more often than `scMinPostsIntervalMs` apart. Each POST
     // runs in submission order on this serializer, so they go strictly one at a time (rate-limit
@@ -67,32 +66,28 @@ nonisolated final class XHTTPConnection: Sendable {
     /// Caps the H2 frame reader's buffer to bound memory growth.
     static let maxH2ReadBufferSize = 2_097_152
 
-    // HTTP/2 multiplexing stream IDs (set at setup, read on the send/receive path).
-    var h2UploadStreamId: UInt32 {      // Fixed upload stream for stream-up
-        get { state.withLock { $0.h2UploadStreamId } }
-        set { state.withLock { $0.h2UploadStreamId = newValue } }
-    }
+    // HTTP/2 multiplexing stream IDs (set at H2 setup, read on the send/receive path).
+    var h2UploadStreamId: UInt32 { state.withLock { $0.h2UploadStreamId } }      // Fixed upload stream for stream-up
     /// Download (GET) stream id when reading H2 frames; set out of range on an
     /// `.uploadOnly` leg so its POST responses are drained, not delivered.
-    var h2DownloadStreamId: UInt32 {
-        get { state.withLock { $0.h2DownloadStreamId } }
-        set { state.withLock { $0.h2DownloadStreamId = newValue } }
+    var h2DownloadStreamId: UInt32 { state.withLock { $0.h2DownloadStreamId } }
+    /// Sets both H2 stream ids together at H2 setup, so they publish as one unit.
+    func configureH2StreamIDs(upload: UInt32, download: UInt32) {
+        state.withLock { $0.h2UploadStreamId = upload; $0.h2DownloadStreamId = download }
     }
 
     // HTTP/3 state (modes multiplexed onto QUIC streams via HTTP3Multiplexer)
-    var h3Multiplexer: HTTP3Multiplexer? {
-        get { state.withLock { $0.h3Multiplexer } }
-        set { state.withLock { $0.h3Multiplexer = newValue } }
-    }
+    var h3Multiplexer: HTTP3Multiplexer? { state.withLock { $0.h3Multiplexer } }
+    /// Adopts the pooled H3 session. Called once from the convenience init before the leg is shared.
+    func adoptH3Multiplexer(_ multiplexer: HTTP3Multiplexer) { state.withLock { $0.h3Multiplexer = multiplexer } }
 
     var useHTTP3: Bool { h3Multiplexer != nil }
 
     // Pooled shared-H2 multiplexing state (xmux). When `sharedH2` is set, this session's
     // streams ride a shared connection instead of running its own 1:1 H2 framing.
-    var sharedH2: XHTTPH2Multiplexer? {
-        get { state.withLock { $0.sharedH2 } }
-        set { state.withLock { $0.sharedH2 = newValue } }
-    }
+    var sharedH2: XHTTPH2Multiplexer? { state.withLock { $0.sharedH2 } }
+    /// Adopts the shared xmux H2 connection. Called once from the convenience init before sharing.
+    func adoptSharedH2(_ multiplexer: XHTTPH2Multiplexer) { state.withLock { $0.sharedH2 = multiplexer } }
 
     var usesSharedH2: Bool { sharedH2 != nil }
 
@@ -345,14 +340,14 @@ nonisolated final class XHTTPConnection: Sendable {
     /// Over HTTP/3, byte I/O is multiplexed by the session, so the download closures are the no-op `.unused`.
     convenience init(h3Multiplexer: HTTP3Multiplexer, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
         self.init(download: NullByteTransport(), configuration: configuration, mode: mode, sessionId: sessionId)
-        self.h3Multiplexer = h3Multiplexer
+        adoptH3Multiplexer(h3Multiplexer)
     }
 
     /// Over a shared multiplexing H2 connection (xmux), streams are virtual, so the download
     /// closures are the no-op `.unused` and `useHTTP2` stays false (the shared path is used instead).
     convenience init(sharedH2: XHTTPH2Multiplexer, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
         self.init(download: NullByteTransport(), configuration: configuration, mode: mode, sessionId: sessionId)
-        self.sharedH2 = sharedH2
+        adoptSharedH2(sharedH2)
     }
 
     // MARK: - Setup
@@ -1451,11 +1446,12 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
 
     private let state = Mutex(State())
 
-    /// Lease for the current session; refreshed on each pool acquire. Storage lives in `state`.
-    var lease: XHTTPXMUXMultiplexerLease? {
-        get { state.withLock { $0.lease } }
-        set { state.withLock { $0.lease = newValue } }
-    }
+    /// Lease for the current session; read-only snapshot. Installed via ``adoptLease(_:)`` on each
+    /// pool acquire and cleared inline under the lock on pool release.
+    var lease: XHTTPXMUXMultiplexerLease? { state.withLock { $0.lease } }
+
+    /// Records the pool lease backing this session. Called once per acquire by the coordinator.
+    func adoptLease(_ lease: XHTTPXMUXMultiplexerLease) { state.withLock { $0.lease = lease } }
 
     init(transport: any ByteTransport) {
         self.transport = transport

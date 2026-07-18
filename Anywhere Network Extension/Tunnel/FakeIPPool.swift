@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "FakeIPPool")
 
-nonisolated class FakeIPPool {
+nonisolated final class FakeIPPool: Sendable {
 
     struct Entry {
         let domain: String

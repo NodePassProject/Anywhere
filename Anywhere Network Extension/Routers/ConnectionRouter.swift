@@ -40,7 +40,7 @@ nonisolated struct RouteDecision {
     }
 }
 
-nonisolated final class ConnectionRouter {
+nonisolated final class ConnectionRouter: Sendable {
     let fakeIPPool: FakeIPPool
     let domainRouter: DomainRouter
 

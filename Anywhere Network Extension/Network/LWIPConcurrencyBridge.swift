@@ -9,7 +9,7 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "LWIPConcurrencyBridge")
 
-nonisolated protocol LWIPBridgeHost: AnyObject {
+protocol LWIPBridgeHost: Actor {
 
     /// lwIP has an IP packet to write back to the TUN. `packet` aliases lwIP's own memory
     /// with a `.none` deallocator; it stays valid until `release(releaseCtx)` runs, which
@@ -79,6 +79,14 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         }
     }
 
+    /// Opens a parked continuation *without* a queue hop — for a caller already isolated to this
+    /// bridge's queue (e.g. an actor adopting its executor) that must suspend until a later
+    /// completion resumes it. `body` runs synchronously in the caller's context and hands off the
+    /// continuation; the continuation scaffolding still lives here in the bridge. Resumed once.
+    func parkThrowing<T>(_ body: (CheckedContinuation<T, Error>) -> Void) async throws -> T {
+        try await withCheckedThrowingContinuation(body)
+    }
+
     /// Runs `body` synchronously on the lwIP queue from an off-queue caller (e.g. the provider's
     /// `stop()` thread), completing before returning. Delegates to the executor's guarded
     /// primitive, which precondition-checks it isn't already on the queue (that would deadlock).
@@ -105,11 +113,17 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         // Output: lwIP → tunnel packet flow. `Data(bytesNoCopy:)` with a `.none`
         // deallocator lets the host's writePackets read lwIP's memory directly; the host
         // owns the release and must run it on ``queue``.
+        // The host is an `actor` on *this* bridge's queue, so every callback below — fired by lwIP
+        // synchronously on that queue — enters the host's isolated state through `assumeIsolated`,
+        // validated against the queue with no hop. The isolation entry is wrapped here in the
+        // bridge, exactly as the per-connection `tcp_*` callbacks enter ``TCPConnection``.
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let host = LWIPConcurrencyBridge.host(), let data, let release else { return }
             let packet = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
                               count: Int(len), deallocator: .none)
-            host.lwipDidOutput(packet, isIPv6: isIPv6 != 0, releaseCtx: releaseCtx, release: release)
+            host.assumeIsolated {
+                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, releaseCtx: releaseCtx, release: release)
+            }
         }
 
         // TCP SYN filter: decide drop/reset/pass before lwIP allocates a pcb.
@@ -117,19 +131,17 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
             guard let host = LWIPConcurrencyBridge.host(), let dstIP else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
             }
-            return host.lwipSynVerdict(dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6 != 0)
+            return host.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6 != 0) }
         }
 
         // TCP accept: build a connection per incoming pcb (or abort). A non-nil result is
         // handed to lwIP as a retained `tcp_arg`; the terminal `tcp_err` or Swift teardown
         // balances it (see ``TCPConnection`` / ``discard(_:)``).
-        // The recovered connection is an `actor` whose executor is *this* bridge's queue, so
-        // these callbacks — which lwIP fires synchronously on that queue — enter its isolated
-        // state through `assumeIsolated` (validated against the queue, no hop).
         lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb in
             guard let host = LWIPConcurrencyBridge.host(), let pcb, let dstIP else { return nil }
-            guard let connection = host.lwipAccept(pcb: pcb, dstIP: dstIP,
-                                                   dstPort: dstPort, isIPv6: isIPv6 != 0) else {
+            guard let connection = host.assumeIsolated({
+                $0.lwipAccept(pcb: pcb, dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6 != 0)
+            }) else {
                 return nil
             }
             connection.assumeIsolated { $0.start() }

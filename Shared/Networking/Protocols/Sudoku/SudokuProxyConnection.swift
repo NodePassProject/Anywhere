@@ -2160,12 +2160,13 @@ nonisolated final class SudokuNativeClient {
 
     /// `ownsFactory` hands the client's factory to the mux session so pooled sessions tear
     /// down their own transport; leave it false when the caller owns the factory.
-    func openMux(ownsFactory: Bool = false) async throws -> SudokuMuxClient {
+    func openMux(ownsFactory: Bool = false,
+                 onClose: (@Sendable (SudokuMuxClient) -> Void)? = nil) async throws -> SudokuMuxClient {
         let record = try await connectBase()
         do {
             try await writeKIP(record: record, type: 0x11, payload: Data())
             try await record.waitHTTPMaskReady(timeout: 30)
-            return SudokuMuxClient(record: record, factory: ownsFactory ? factory : nil)
+            return SudokuMuxClient(record: record, factory: ownsFactory ? factory : nil, onClose: onClose)
         } catch {
             record.close()
             throw error
@@ -2433,23 +2434,22 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
     /// Non-nil when the session owns its transport (pooled sessions); torn down on close.
     private let factory: SudokuConnectionFactory?
 
+    /// Called once when the session becomes permanently unusable so the pool can evict it.
+    /// Immutable — installed at creation, before the client is shared.
+    private let onClose: (@Sendable (SudokuMuxClient) -> Void)?
+
     private struct State {
         var streams: [UInt32: SudokuMuxStream] = [:]
         var nextStreamID: UInt32 = 0
         var lastWrite: ContinuousClock.Instant = ContinuousClock.now
         var closed = false
-        /// Called once when the session becomes permanently unusable so the pool can evict it.
-        var onClose: (() -> Void)?
         /// The 15s keepalive loop; cancelled on close.
         var keepaliveTask: Task<Void, Never>?
+        /// The frame reader loop. Strong self: the loop owns the client while reading; `close`
+        /// cancels it and the record it is parked on, ending the loop.
+        var readerTask: Task<Void, Never>?
     }
     private let state = Mutex(State())
-
-    /// Called once when the session becomes permanently unusable so the pool can evict it.
-    var onClose: (() -> Void)? {
-        get { state.withLock { $0.onClose } }
-        set { state.withLock { $0.onClose = newValue } }
-    }
 
     var isClosed: Bool {
         state.withLock { $0.closed }
@@ -2460,9 +2460,13 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
         state.withLock { $0.streams.count }
     }
 
-    init(record: SudokuRecordStream, factory: SudokuConnectionFactory? = nil) {
+    init(record: SudokuRecordStream, factory: SudokuConnectionFactory? = nil,
+         onClose: (@Sendable (SudokuMuxClient) -> Void)? = nil) {
         self.record = record
         self.factory = factory
+        self.onClose = onClose
+        // Keepalive stays weak-self: it's a periodic timer, so a strong capture would pin the
+        // client across an idle interval after close (which cancels it).
         let keepaliveTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.keepaliveInterval))
@@ -2470,8 +2474,13 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
                 self?.sendKeepaliveIfIdle()
             }
         }
-        state.withLock { $0.keepaliveTask = keepaliveTask }
-        Task { [weak self] in await self?.readerLoop() }
+        // Strong self: the reader owns the client while reading; `close` cancels this task and
+        // closes the record it is parked on, ending the loop so ARC reclaims the client.
+        let readerTask = Task { await self.readerLoop() }
+        state.withLock {
+            $0.keepaliveTask = keepaliveTask
+            $0.readerTask = readerTask
+        }
     }
 
     func dialTCP(host: String, port: UInt16) async throws -> SudokuMuxStream {
@@ -2517,25 +2526,28 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
 
     /// `error` non-nil for transport failure, nil for clean close.
     func close(error: Error? = nil) {
-        let drained: (streams: [SudokuMuxStream], callback: (() -> Void)?, keepalive: Task<Void, Never>?)? = state.withLock { state in
+        typealias Drained = (streams: [SudokuMuxStream], keepalive: Task<Void, Never>?, reader: Task<Void, Never>?)
+        let drained: Drained? = state.withLock { state in
             if state.closed { return nil }
             state.closed = true
             let streamsToClose = Array(state.streams.values)
             state.streams.removeAll()
-            let closeCallback = state.onClose
-            state.onClose = nil
             let keepalive = state.keepaliveTask
             state.keepaliveTask = nil
-            return (streamsToClose, closeCallback, keepalive)
+            let reader = state.readerTask
+            state.readerTask = nil
+            return (streamsToClose, keepalive, reader)
         }
         guard let drained else { return }
         drained.keepalive?.cancel()
+        // Cancel the reader, then close the record it is parked on; its strong self dies with it.
+        drained.reader?.cancel()
         for stream in drained.streams {
             stream.markClosed(discardQueuedData: true)
         }
         record.close()
         factory?.closeAll()
-        drained.callback?()
+        onClose?(self)
     }
 
     private func allocateStreamID() -> UInt32 {

@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class RequestLog {
+nonisolated final class RequestLog: Sendable {
 
     typealias Entry = TunnelRequestEntry
 

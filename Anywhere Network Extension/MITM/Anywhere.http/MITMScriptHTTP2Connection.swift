@@ -106,6 +106,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         var flowGate = H2FlowGate()
 
         var negotiatedHTTP1 = false
+
+        /// The transport read loop. Strong self: the loop owns the connection while receiving;
+        /// `teardown` cancels it and the transport, ending the parked receive.
+        var readTask: Task<Void, Never>?
     }
     private let lock = Mutex(State())
 
@@ -120,10 +124,12 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// Touched only by the single read-loop task (setup → `ingest`), so it needs no separate lock.
     private let hpackDecoder = HPACKDecoder()
 
-    /// Called when the connection becomes permanently unusable, so the pool can evict it.
-    var onClose: (() -> Void)?
+    /// Called once when the connection becomes permanently unusable, so the pool can evict it.
+    /// Immutable — installed at creation, before the connection is shared.
+    private let onClose: (@Sendable (MITMScriptHTTP2Connection) -> Void)?
     /// Called once when the origin is discovered to be HTTP/1.1-only, so the pool can cache it.
-    var onNegotiatedHTTP1: (() -> Void)?
+    /// Immutable — installed at creation.
+    private let onNegotiatedHTTP1: (@Sendable () -> Void)?
 
     // MARK: Pool-visible snapshot (held in a Mutex, read off-lock by the pool)
 
@@ -138,10 +144,14 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
 
     // MARK: Init
 
-    init(host: String, port: UInt16, insecure: Bool) {
+    init(host: String, port: UInt16, insecure: Bool,
+         onClose: (@Sendable (MITMScriptHTTP2Connection) -> Void)? = nil,
+         onNegotiatedHTTP1: (@Sendable () -> Void)? = nil) {
         self.host = host
         self.port = port
         self.insecure = insecure
+        self.onClose = onClose
+        self.onNegotiatedHTTP1 = onNegotiatedHTTP1
         let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.readySignal = readySignal
         self.readyTask = Task { for try await _ in readyStream {} }
@@ -272,17 +282,18 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     }
 
     private func beginSetup() {
-        Task { [weak self] in
-            guard let self else { return }
+        // Strong self: the setup task owns the connection until the dial settles — bounded by
+        // the dial's own timeout; a mid-dial teardown is resolved by the `proceed` guard below.
+        Task {
             do {
-                let dialed = try await OutboundConnector.dial(host: self.host, port: self.port)
-                let proceed = self.lock.withLock { state -> Bool in
+                let dialed = try await OutboundConnector.dial(host: host, port: port)
+                let proceed = lock.withLock { state -> Bool in
                     guard state.phase == .connecting else { return false }
                     state.dialed = dialed
                     return true
                 }
                 if proceed {
-                    self.startTLS(dialed: dialed)
+                    startTLS(dialed: dialed)
                 } else {
                     // Closed mid-dial: drop the orphaned transport instead of leaking the socket.
                     dialed.connection.cancel()
@@ -298,13 +309,14 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         let configuration = TLSConfiguration(serverName: host, alpn: ["h2", "http/1.1"], insecureSkipVerify: insecure)
         let client = TLSClient(configuration: configuration)
         lock.withLock { $0.tlsClient = client }
-        Task { [weak self] in
-            guard let self else { return }
+        // Strong self: the setup task owns the connection until the TLS handshake settles —
+        // bounded by the client (a teardown cancels it, failing `connect`).
+        Task {
             do {
                 let tlsConnection = try await client.connect(overTunnel: dialed.connection)
 
                 enum TLSOutcome { case stale; case http1; case proceed }
-                let outcome: TLSOutcome = self.lock.withLock { state in
+                let outcome: TLSOutcome = lock.withLock { state in
                     guard state.phase == .connecting else { return .stale }
                     guard client.negotiatedALPN == "h2" else {
                         // HTTP/1.1-only origin: cache it and fail waiters over to the HTTP/1.1 path —
@@ -320,13 +332,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
                 case .stale:
                     break
                 case .http1:
-                    self.onNegotiatedHTTP1?()
-                    self.failSetup(MITMScriptHTTP2Error.needsHTTP1Fallback)
+                    onNegotiatedHTTP1?()
+                    failSetup(MITMScriptHTTP2Error.needsHTTP1Fallback)
                 case .proceed:
-                    self.sendConnectionPreface()
+                    sendConnectionPreface()
                 }
             } catch {
-                self.failSetup(error)
+                failSetup(error)
             }
         }
     }
@@ -349,22 +361,23 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
         data.append(NaiveHTTP2Framer.windowUpdateFrame(streamID: 0, increment: bump).serialized)
 
         let payload = data
-        Task { [weak self] in
+        // Strong self: the preface task owns the connection until the send settles —
+        // bounded by the transport (a teardown cancels it, failing `send`).
+        Task {
             let sendError: Error?
             do { try await transport.send(payload); sendError = nil }
             catch { sendError = error }
-            guard let self else { return }
 
-            if let sendError { self.failSetup(sendError); return }
+            if let sendError { failSetup(sendError); return }
 
-            let started = self.lock.withLock { state -> Bool in
+            let started = lock.withLock { state -> Bool in
                 guard state.phase == .connecting else { return false }
                 state.phase = .prefaceSent
                 return true
             }
             guard started else { return }
-            self.refreshPoolSnapshot()
-            self.startReadLoop()
+            refreshPoolSnapshot()
+            startReadLoop()
         }
     }
 
@@ -373,36 +386,38 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// One persistent task that pulls transport bytes, appends to the receive buffer, and drains
     /// every complete frame each pass (replacing the former per-read recursive `Task` + `queue.async`).
     private func startReadLoop() {
-        Task { [weak self] in
+        // Strong self: the loop owns the connection while receiving; `teardown` cancels this
+        // task and the transport, which ends the parked receive so ARC reclaims the connection.
+        let task = Task {
             while true {
-                guard let self else { return }
-                let transport: ProxyConnection? = self.lock.withLock { $0.phase != .closed ? $0.connection : nil }
+                let transport: ProxyConnection? = lock.withLock { $0.phase != .closed ? $0.connection : nil }
                 guard let transport else { return }
 
                 let data: Data?
                 do { data = try await transport.receive() }
-                catch { self.handleSessionError(error); return }
+                catch { handleSessionError(error); return }
 
                 guard let data, !data.isEmpty else {
-                    self.handleSessionError(MITMScriptHTTP2Error.connectionClosed("connection closed by peer"))
+                    handleSessionError(MITMScriptHTTP2Error.connectionClosed("connection closed by peer"))
                     return
                 }
 
-                let overflow: Bool = self.lock.withLock { state in
+                let overflow: Bool = lock.withLock { state in
                     guard state.phase != .closed else { return false }
                     state.receiveBuffer.append(data)
                     return state.receiveBuffer.count > Self.maxReceiveBufferSize
                 }
                 if overflow {
                     // The loop drains fully each pass, so this only trips if a single frame is absurd.
-                    self.handleSessionError(MITMScriptHTTP2Error.protocolError("receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    handleSessionError(MITMScriptHTTP2Error.protocolError("receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
                     return
                 }
 
-                self.drainFrames()
-                if self.lock.withLock({ $0.phase == .closed }) { return }
+                drainFrames()
+                if lock.withLock({ $0.phase == .closed }) { return }
             }
         }
+        lock.withLock { $0.readTask = task }
     }
 
     /// Pops and routes each complete frame from the receive buffer. Runs on the read-loop task, so
@@ -825,25 +840,29 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
     /// Central close/teardown: flips to `.closed`, tears down the transport, and fails every waiter
     /// and live stream. Idempotent.
     private func teardown(reason: Error) {
-        var victims: [MITMScriptHTTP2Stream] = []
-        let proceed: Bool = lock.withLock { state in
-            guard state.phase != .closed else { return false }
+        typealias Teardown = (victims: [MITMScriptHTTP2Stream], readTask: Task<Void, Never>?)
+        let teardownState: Teardown? = lock.withLock { state in
+            guard state.phase != .closed else { return nil }
             state.phase = .closed
             state.flowGate.wakeAll()
-            victims = Array(state.streams.values)
+            let victims = Array(state.streams.values)
             state.streams.removeAll()
             state.sendWindows.removeAll()
             state.pendingHeaders = nil
-            return true
+            let read = state.readTask
+            state.readTask = nil
+            return (victims, read)
         }
-        guard proceed else { return }
+        guard let (victims, readTask) = teardownState else { return }
 
+        // Cancel the read loop, then the transport it is parked on; its strong self dies with it.
+        readTask?.cancel()
         teardownTransport()
         // A pre-ready teardown fails every awaiter; finishing after `.ready` is a harmless no-op.
         readySignal.finish(throwing: reason)
         refreshPoolSnapshot()
         for stream in victims { stream.failFromSession(reason) }
-        onClose?()
+        onClose?(self)
     }
 
     /// The TLS wrapper, TLS client, and dialed proxy transport are separate objects —

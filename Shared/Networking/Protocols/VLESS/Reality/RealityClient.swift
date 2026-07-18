@@ -517,7 +517,7 @@ nonisolated class RealityClient {
                 clientAppSecret: appKeys.clientTrafficSecret,
                 serverAppSecret: appKeys.serverTrafficSecret
             )
-            realityConnection.connection = self.connection
+            realityConnection.adoptTransport(self.connection)
             self.connection = nil
 
             let remaining = buffer.subdata(in: processedOffset..<buffer.count)

@@ -317,7 +317,7 @@ nonisolated extension ProxyClient {
                 tunnel: tunnel
             )
             guard !isCancelled else {
-                tunnel = nil
+                setChainTunnel(nil)
                 connection.cancel()
                 throw ProxyError.connectionFailed("Client released during connect")
             }
@@ -325,7 +325,7 @@ nonisolated extension ProxyClient {
                 connection.cancel()
                 throw NowhereError.streamClosed
             }
-            tunnel = nil
+            setChainTunnel(nil)
             do {
                 try await connection.openFresh(
                     destination: destination,
@@ -350,7 +350,7 @@ nonisolated extension ProxyClient {
 
         if let chainTunnel = tunnel {
             let transport = ProxyConnectionDatagramTransport(connection: chainTunnel)
-            self.tunnel = nil
+            setChainTunnel(nil)
             let client = NowhereClient.chained(configuration: nwConfig, transport: transport)
             return try await dispatchNowhere(
                 client: client,

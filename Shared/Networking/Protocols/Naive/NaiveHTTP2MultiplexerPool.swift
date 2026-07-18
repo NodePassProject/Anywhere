@@ -41,15 +41,14 @@ nonisolated final class NaiveHTTP2MultiplexerPool:
         if tunnel != nil {
             let multiplexer = NaiveHTTP2Multiplexer(
                 host: host, port: port, sni: sni,
-                tunnel: tunnel, connectHeaders: connectHeaders
+                tunnel: tunnel, connectHeaders: connectHeaders,
+                onClose: { [weak self] multiplexer in
+                    guard let self else { return }
+                    self.state.withLock { _ = $0.extra.removeValue(forKey: ObjectIdentifier(multiplexer)) }
+                    logger.debug("[NaiveHTTP2Pool] Evicted dedicated multiplexer")
+                }
             )
-            let multiplexerID = ObjectIdentifier(multiplexer)
-            state.withLock { $0.extra[multiplexerID] = multiplexer }
-            multiplexer.onClose = { [weak self] in
-                guard let self else { return }
-                self.state.withLock { _ = $0.extra.removeValue(forKey: multiplexerID) }
-                logger.debug("[NaiveHTTP2Pool] Evicted dedicated multiplexer")
-            }
+            state.withLock { $0.extra[ObjectIdentifier(multiplexer)] = multiplexer }
             return openStream(on: multiplexer, destination: destination)
         }
 
@@ -70,15 +69,14 @@ nonisolated final class NaiveHTTP2MultiplexerPool:
                 st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
                 return existing
             } else {
+                let capturedKey = key
                 let new = NaiveHTTP2Multiplexer(
                     host: host, port: port, sni: sni,
-                    tunnel: nil, connectHeaders: connectHeaders
+                    tunnel: nil, connectHeaders: connectHeaders,
+                    onClose: { [weak self] multiplexer in
+                        self?.removeMultiplexer(multiplexer, key: capturedKey)
+                    }
                 )
-                let capturedKey = key
-                new.onClose = { [weak self, weak new] in
-                    guard let self, let new else { return }
-                    self.removeMultiplexer(new, key: capturedKey)
-                }
                 st.multiplexers[key, default: []].append(new)
                 st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
                 return new

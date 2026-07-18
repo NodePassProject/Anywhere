@@ -23,10 +23,15 @@ nonisolated final class TLSRecordConnection: Sendable {
     private let connectionBox = Mutex<(any ByteTransport)?>(nil)
 
     /// The underlying async byte transport. `nil` after ``cancel()``. Every write is serialized
-    /// through the send chain so records reach the wire in submission order.
-    var connection: (any ByteTransport)? {
-        get { connectionBox.withLock { $0 } }
-        set { connectionBox.withLock { $0 = newValue } }
+    /// through the send chain so records reach the wire in submission order. Read-only snapshot;
+    /// the handshake driver hands the transport over via ``adoptTransport(_:)``, and ``cancel()``
+    /// does the atomic take-and-clear on ``connectionBox``.
+    var connection: (any ByteTransport)? { connectionBox.withLock { $0 } }
+
+    /// Adopts the handshake's transport. Called once by the handshake driver
+    /// (TLSClient/TLSServer/RealityClient) when it hands the connection over.
+    func adoptTransport(_ transport: (any ByteTransport)?) {
+        connectionBox.withLock { $0 = transport }
     }
 
     /// Ordered wire-send pipeline shared by the async `send`/`sendRaw` surface and the internal
@@ -47,11 +52,14 @@ nonisolated final class TLSRecordConnection: Sendable {
     /// publication to whichever task later reads it.
     private let negotiatedALPNBox = Mutex<String>("")
 
-    /// The value of the ALPN sent by the peer; empty when the peer selected none. Written once
-    /// by the handshake driver (TLSClient/TLSServer/RealityClient), read after.
-    var negotiatedALPN: String {
-        get { negotiatedALPNBox.withLock { $0 } }
-        set { negotiatedALPNBox.withLock { $0 = newValue } }
+    /// The value of the ALPN sent by the peer; empty when the peer selected none. Read-only
+    /// snapshot; written once via ``publishNegotiatedALPN(_:)``.
+    var negotiatedALPN: String { negotiatedALPNBox.withLock { $0 } }
+
+    /// Publishes the handshake's ALPN outcome. Called once by the handshake driver
+    /// (TLSClient/TLSServer/RealityClient); reads observe it via ``negotiatedALPN``.
+    func publishNegotiatedALPN(_ alpn: String) {
+        negotiatedALPNBox.withLock { $0 = alpn }
     }
 
     let cipherSuite: UInt16

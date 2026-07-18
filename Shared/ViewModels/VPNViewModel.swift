@@ -362,7 +362,7 @@ class VPNViewModel {
 
     private func setupStatusObserver() {
         // The enclosing type is @MainActor, so this Task and `handleStatusChange` run on the
-        // main actor — matching the former `.receive(on: DispatchQueue.main)`.
+        // main actor.
         statusObserver = Task { [weak self] in
             for await note in NotificationCenter.default.notifications(named: .NEVPNStatusDidChange) {
                 guard !Task.isCancelled, let self else { return }
@@ -545,11 +545,7 @@ class VPNViewModel {
             }
 
             guard let data = try? JSONEncoder().encode(TunnelMessage.setConfiguration(resolved)) else { return }
-            do {
-                try session.sendProviderMessage(data) { _ in }
-            } catch {
-                logger.warning("Failed to send configuration to tunnel: \(error.localizedDescription)")
-            }
+            _ = await ProviderMessageConcurrencyBridge.send(data, over: session)
         }
     }
 

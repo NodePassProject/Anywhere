@@ -58,9 +58,11 @@ actor UDPFlow {
     // Non-mux path
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
-    /// The in-flight proxy dial. Teardown cancels it so a still-connecting handshake unwinds
-    /// (its `CancellationError` runs the connect path's cleanup) instead of lingering until it
-    /// completes — `client.cancel()` alone only tears down an already-delivered connection.
+    /// The in-flight dial (proxy / mux / SS register / direct). Teardown cancels it so a
+    /// still-connecting handshake unwinds (its `CancellationError` runs the connect path's
+    /// cleanup) instead of lingering until it completes — `client.cancel()` alone only tears
+    /// down an already-delivered connection. Every dial task captures the flow strongly; a
+    /// close racing the dial is resolved by the finish handlers' `closed` guards.
     private var proxyDialTask: Task<Void, Never>?
 
     // Shared SS UDP session owned by TunnelStack; borrowed only.
@@ -69,6 +71,11 @@ actor UDPFlow {
 
     // Mux path
     private var udpStream: VLESSVisionUDPStream?
+
+    /// The single downlink receive loop (mux / SS / proxy / direct — one per flow). Strong self:
+    /// the loop owns the flow while receiving; ``releaseProxy`` cancels it and tears down the
+    /// underlying transport, which ends the iteration and lets ARC reclaim the flow.
+    private var receiveTask: Task<Void, Never>?
 
     private var proxyConnecting = false
 
@@ -233,13 +240,14 @@ actor UDPFlow {
     /// Fire-and-forget async send to the proxy connection. Datagrams are independent, so
     /// each send is its own task; the connection serializes its own framed writes, so
     /// concurrent tasks can't interleave frames on a stream transport. A terminal send
-    /// error closes the flow; transient ones just log (UDP is lossy).
+    /// error closes the flow; transient ones just log (UDP is lossy). Strong self: the
+    /// short-lived send task owns the flow until the send settles, then ARC releases it.
     private func sendToProxyConnection(_ payload: Data, connection: ProxyConnection) {
-        Task { [weak self] in
+        Task {
             do {
                 try await connection.send(payload)
             } catch {
-                await self?.handleProxySendError(error, connection: connection)
+                await self.handleProxySendError(error, connection: connection)
             }
         }
     }
@@ -298,7 +306,10 @@ actor UDPFlow {
         let globalID = VLESSVisionUDPGlobalID.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)")
         let host = dstHost
         let port = dstPort
-        Task { [weak self] in
+        // Strong self: the dial task owns the flow until the finish handler settles; a close
+        // during the dial cancels this task and the finish handler's `closed` guard releases
+        // whatever the dial delivered.
+        proxyDialTask = Task {
             let result: Result<VLESSVisionUDPStream, Error>
             do {
                 result = .success(try await udpMultiplexerPool.acquireStream(
@@ -306,16 +317,13 @@ actor UDPFlow {
             } catch {
                 result = .failure(error)
             }
-            guard let self else {
-                if case .success(let session) = result { session.close() }
-                return
-            }
             await self.finishMultiplexerConnect(result)
         }
     }
 
     private func finishMultiplexerConnect(_ result: Result<VLESSVisionUDPStream, Error>) async {
         proxyConnecting = false
+        proxyDialTask = nil
         guard !closed else {
             if case .success(let session) = result { session.close() }
             return
@@ -340,12 +348,12 @@ actor UDPFlow {
             pendingBufferSize = 0
             if !buffered.isEmpty {
                 // Drain in order in a single task so the XUDP New frame precedes Keeps.
-                Task { [weak self] in
+                Task {
                     for payload in buffered {
                         do {
                             try await session.send(data: payload)
                         } catch {
-                            self?.logTransientSendFailure(error)
+                            self.logTransientSendFailure(error)
                         }
                     }
                 }
@@ -361,16 +369,18 @@ actor UDPFlow {
     }
 
     /// Drives the mux stream's inbound datagrams: EOF closes cleanly, an error reports and closes.
+    /// Strong self: the loop owns the flow while receiving; `releaseProxy` cancels the task and
+    /// closes the stream, ending the iteration so ARC reclaims the flow.
     private func startMuxReceiving(session: VLESSVisionUDPStream) {
-        Task { [weak self] in
+        receiveTask = Task {
             do {
                 while let data = try await session.receive() {
-                    await self?.handleProxyData(data)
+                    handleProxyData(data)
                 }
                 // Clean EOF (End frame / normal close): close without reporting a failure.
-                await self?.receiveClosed(operation: "Mux", error: nil)
+                await receiveClosed(operation: "Mux", error: nil)
             } catch {
-                await self?.receiveClosed(operation: "Mux", error: error)
+                await receiveClosed(operation: "Mux", error: error)
             }
         }
     }
@@ -384,16 +394,14 @@ actor UDPFlow {
 
         let host = dstHost
         let port = dstPort
-        proxyDialTask = Task { [weak self] in
+        // Strong self: as in `connectViaMultiplexer`, the finish handler's `closed` guard
+        // releases a connection delivered after a mid-dial close.
+        proxyDialTask = Task {
             let result: Result<ProxyConnection, Error>
             do {
                 result = .success(try await client.connectUDP(to: host, port: port))
             } catch {
                 result = .failure(error)
-            }
-            guard let self else {
-                if case .success(let connection) = result { connection.cancel() }
-                return
             }
             await self.finishProxyClientConnect(result)
         }
@@ -459,16 +467,14 @@ actor UDPFlow {
         let host = dstHost
         let port = dstPort
 
-        Task { [weak self] in
+        // Strong self: registration is a short actor call; a close racing it is handled by the
+        // finish handler's `closed` guard, which unregisters the just-delivered token.
+        proxyDialTask = Task {
             let (token, stream) = await session.register(
                 dstHost: host, dstPort: port, responseHostHints: cachedHints
             )
-            guard let self else {
-                await session.unregister(token: token)
-                return
-            }
-            await self.finishShadowsocksConnect(session: session, token: token, stream: stream,
-                                                 host: host, port: port, cachedHints: cachedHints)
+            self.finishShadowsocksConnect(session: session, token: token, stream: stream,
+                                          host: host, port: port, cachedHints: cachedHints)
         }
     }
 
@@ -477,6 +483,7 @@ actor UDPFlow {
                                           stream: AsyncThrowingStream<Data, Error>,
                                           host: String, port: UInt16, cachedHints: [String]) {
         proxyConnecting = false
+        proxyDialTask = nil
         guard !closed else {
             Task { await session.unregister(token: token) }
             return
@@ -491,12 +498,12 @@ actor UDPFlow {
         pendingData.removeAll()
         pendingBufferSize = 0
         if !buffered.isEmpty {
-            Task { [weak self] in
+            Task {
                 for payload in buffered {
                     do {
                         try await session.send(token: token, dstHost: host, dstPort: port, payload: payload)
                     } catch {
-                        self?.logTransientSendFailure(error)
+                        self.logTransientSendFailure(error)
                     }
                 }
             }
@@ -516,16 +523,17 @@ actor UDPFlow {
     }
 
     /// Drives the SS session's per-flow inbound datagram stream: data pushes to the flow,
-    /// a thrown error reports and closes.
+    /// a thrown error reports and closes. Strong self: `releaseProxy` cancels the task and
+    /// unregisters the token, which EOFs this flow's inbox and ends the iteration.
     private func startShadowsocksReceiving(stream: AsyncThrowingStream<Data, Error>) {
-        Task { [weak self] in
+        receiveTask = Task {
             do {
                 for try await data in stream {
-                    await self?.handleProxyData(data)
+                    handleProxyData(data)
                 }
                 // Clean EOF (unregister) — the flow is already tearing down; nothing to do.
             } catch {
-                await self?.receiveClosed(operation: "Receive", error: error)
+                await receiveClosed(operation: "Receive", error: error)
             }
         }
     }
@@ -552,7 +560,9 @@ actor UDPFlow {
         // One connection per peer 5-tuple.
         let transport = UDPTransport(host: dstHost, port: dstPort)
         self.directTransport = transport
-        Task { [weak self] in
+        // Strong self: a close during the dial cancels the transport via releaseProxy, which
+        // makes `connect()` throw and the finish handler's `closed` guard end the task.
+        proxyDialTask = Task {
             let connectError: Error?
             do {
                 try await transport.connect()
@@ -560,12 +570,13 @@ actor UDPFlow {
             } catch {
                 connectError = error
             }
-            await self?.finishDirectConnect(transport: transport, connectError: connectError)
+            await self.finishDirectConnect(transport: transport, connectError: connectError)
         }
     }
 
     private func finishDirectConnect(transport: UDPTransport, connectError: Error?) async {
         proxyConnecting = false
+        proxyDialTask = nil
         // A close during the dial already cancelled the transport via releaseProxy.
         guard !closed else { return }
 
@@ -590,28 +601,30 @@ actor UDPFlow {
 
         // Drive the datagram downlink with a native `for await` receive loop;
         // a non-EAGAIN recv error closes the flow so we don't sit on a dead transport.
-        Task { [weak self] in
+        // Strong self: `releaseProxy` cancels the task and the transport, ending the loop.
+        receiveTask = Task {
             do {
                 while true {
                     let datagram = try await transport.receive()
-                    await self?.handleProxyData(datagram)
+                    handleProxyData(datagram)
                 }
             } catch {
-                await self?.receiveClosed(operation: "Receive", error: error)
+                await receiveClosed(operation: "Receive", error: error)
             }
         }
     }
 
+    /// Strong self: `releaseProxy` cancels the task and the connection, ending the loop.
     private func startProxyReceiving(proxyConnection: ProxyConnection) {
-        Task { [weak self] in
+        receiveTask = Task {
             do {
                 while let data = try await proxyConnection.receive() {
-                    await self?.handleProxyData(data)
+                    handleProxyData(data)
                 }
                 // Clean EOF: close without reporting a failure.
-                await self?.receiveClosed(operation: "Receive", error: nil)
+                await receiveClosed(operation: "Receive", error: nil)
             } catch {
-                await self?.receiveClosed(operation: "Receive", error: error)
+                await receiveClosed(operation: "Receive", error: error)
             }
         }
     }
@@ -658,6 +671,7 @@ actor UDPFlow {
         let connection = proxyConnection
         let client = proxyClient
         let dial = proxyDialTask
+        let receive = receiveTask
         let session = udpStream
         directTransport = nil
         ssUDPSession = nil
@@ -665,10 +679,14 @@ actor UDPFlow {
         proxyConnection = nil
         proxyClient = nil
         proxyDialTask = nil
+        receiveTask = nil
         udpStream = nil
         proxyConnecting = false
         pendingData.removeAll()
         pendingBufferSize = 0
+        // Cancel the downlink loop first, then tear down its transport below so the
+        // iteration it is parked on ends; the task's strong self dies with it.
+        receive?.cancel()
         transport?.cancel()
         // The SS session is shared and owned by TunnelStack; unregister, never cancel.
         // Actor-isolated now — fire-and-forget; it EOFs this flow's inbox so its reader unwinds.

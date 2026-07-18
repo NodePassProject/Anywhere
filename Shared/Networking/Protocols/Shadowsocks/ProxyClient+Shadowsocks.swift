@@ -42,7 +42,7 @@ nonisolated extension ProxyClient {
                     "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."
                 )
             }
-            self.tunnel = nil
+            setChainTunnel(nil)
             udpInner = tunnel
         } else {
             let transport = UDPTransport(host: directDialHost, port: configuration.serverPort)

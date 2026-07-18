@@ -35,12 +35,19 @@ nonisolated struct TrafficByteCounts {
 
 // MARK: - TunnelStack
 
-nonisolated class TunnelStack {
+actor TunnelStack {
 
-    // MARK: Properties
-    
-    let lwipBridge = LWIPConcurrencyBridge(label: AWCore.Identifier.lwipQueue)
-    
+    /// Pins this actor to the lwIP serial queue, so C callbacks entering via `assumeIsolated`
+    /// validate against — and run on — the same executor as the actor's isolated methods.
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        lwipBridge.executor.asUnownedSerialExecutor()
+    }
+
+    nonisolated let lwipBridge = LWIPConcurrencyBridge(label: AWCore.Identifier.lwipQueue)
+
+    /// The UDP data plane; holds the stack `unowned`. Created in ``start(packetFlow:configuration:)``
+    /// (not ``init``) so the back-reference sees a fully-formed actor. Actor-isolated: the off-actor
+    /// read loop captures its value at spawn rather than reading it live.
     var udpPlane: UDPPlane!
 
     /// Wakes ``drainOutputLoop`` when a producer buffers packets while no drain is in flight.
@@ -123,16 +130,38 @@ nonisolated class TunnelStack {
     var networkContext = NetworkContext()
 
     // MARK: MITM
-    var mitmEnabled: Bool = false
-    let mitmPolicy = MITMRewritePolicy()
-    var mitmLeafCache: MITMLeafCertCache?
-    let mitmCertificateStore = MITMCertificateStore()
+    //
+    // `mitmEnabled` is an `Atomic` (not actor-isolated) so the lwIP accept callback and
+    // ``TCPConnection`` — both off the actor's method-call graph — read it without a hop; the
+    // actor publishes it in ``loadMITMSetting``. The leaf cache is lazily created by whichever
+    // ``TCPConnection`` first needs it, so it lives behind a `Mutex`, not in actor state.
+    private let _mitmEnabled = Atomic<Bool>(false)
+    nonisolated var mitmEnabled: Bool { _mitmEnabled.load(ordering: .relaxed) }
+    nonisolated let mitmPolicy = MITMRewritePolicy()
+    private let _mitmLeafCache = Mutex<MITMLeafCertCache?>(nil)
+    nonisolated let mitmCertificateStore = MITMCertificateStore()
 
-    var running = false
+    /// Returns the shared MITM leaf-cert cache, creating it on first use. Called by
+    /// ``TCPConnection`` on the lwIP queue; the `Mutex` keeps the lazy init single-flighted.
+    nonisolated func mitmLeafCacheCreatingIfNeeded() throws -> MITMLeafCertCache {
+        try _mitmLeafCache.withLock { cache in
+            if let cache { return cache }
+            let made = try MITMLeafCertCache(store: mitmCertificateStore)
+            cache = made
+            return made
+        }
+    }
 
-    /// True during a deliberate full-stack TCP teardown so the resulting
-    /// ERR_ABRT flood is demoted to debug while lwIP's own aborts still warn.
-    var isTearingDown = false
+    /// True while the stack is live. An `Atomic` (not actor state) because the off-actor read
+    /// loop, drain loop, and periodic scheduler all gate on it.
+    let _running = Atomic<Bool>(false)
+    nonisolated var running: Bool { _running.load(ordering: .relaxed) }
+
+    /// True during a deliberate full-stack TCP teardown so the resulting ERR_ABRT flood is demoted
+    /// to debug while lwIP's own aborts still warn. An `Atomic` because ``TCPConnection`` reads it
+    /// from its own actor to classify errors.
+    let _isTearingDown = Atomic<Bool>(false)
+    nonisolated var isTearingDown: Bool { _isTearingDown.load(ordering: .relaxed) }
 
     /// Timestamp of the last completed stack restart (used for throttling).
     var lastRestartTime: CFAbsoluteTime = 0
@@ -143,7 +172,7 @@ nonisolated class TunnelStack {
 
     /// Recurring stack-lifetime tasks. Centralizes their lifecycle and reconciles them
     /// on device wake.
-    let scheduler = TunnelScheduler()
+    nonisolated let scheduler = TunnelScheduler()
 
     /// lwIP's periodic timeout tick (retransmit, persist, TIME_WAIT), vended by ``lwipBridge`` so
     /// the `DispatchSourceTimer` stays in the bridge layer. Self-suspends when lwIP's timeout list
@@ -152,14 +181,14 @@ nonisolated class TunnelStack {
     var lwipTick: BridgeTimer?
     
     private let _byteCounts = Mutex(TrafficByteCounts())
-    func addBytesIn(_ n: Int64, target: RouteTarget) {
+    nonisolated func addBytesIn(_ n: Int64, target: RouteTarget) {
         _byteCounts.withLock { $0.add(bytesIn: n, target: target) }
     }
-    func addBytesOut(_ n: Int64, target: RouteTarget) {
+    nonisolated func addBytesOut(_ n: Int64, target: RouteTarget) {
         _byteCounts.withLock { $0.add(bytesOut: n, target: target) }
     }
     /// Snapshot of all per-target counters, read once per stats poll.
-    var byteCounts: TrafficByteCounts { _byteCounts.withLock { $0 } }
+    nonisolated var byteCounts: TrafficByteCounts { _byteCounts.withLock { $0 } }
 
     // MARK: - Log Buffer
     //
@@ -168,7 +197,7 @@ nonisolated class TunnelStack {
 
     private let logEntries = Mutex<[TunnelLogEntry]>([])
 
-    func appendLog(_ message: String, level: TunnelLogLevel) {
+    nonisolated func appendLog(_ message: String, level: TunnelLogLevel) {
         let now = CFAbsoluteTimeGetCurrent()
         logEntries.withLock { entries in
             entries.append(TunnelLogEntry(timestamp: now, level: level, message: message))
@@ -176,7 +205,7 @@ nonisolated class TunnelStack {
         }
     }
 
-    func fetchLogs() -> [TunnelLogEntry] {
+    nonisolated func fetchLogs() -> [TunnelLogEntry] {
         let now = CFAbsoluteTimeGetCurrent()
         return logEntries.withLock { entries in
             Self.compactLogs(&entries, now: now)
@@ -223,10 +252,10 @@ nonisolated class TunnelStack {
     ))
 
     /// Current UDP config snapshot; callable from any queue.
-    func udpConfig() -> UDPConfig { _udpConfig.withLock { $0 } }
+    nonisolated func udpConfig() -> UDPConfig { _udpConfig.withLock { $0 } }
 
     /// Whether `id` is the default outbound configuration; safe from any queue.
-    func isDefaultConfiguration(_ id: UUID) -> Bool {
+    nonisolated func isDefaultConfiguration(_ id: UUID) -> Bool {
         udpConfig().configurationID == id
     }
 
@@ -250,7 +279,7 @@ nonisolated class TunnelStack {
     private let _reflector = Mutex(Reflector.inactive)
 
     /// Current reflector snapshot; callable from any queue.
-    func reflector() -> Reflector { _reflector.withLock { $0 } }
+    nonisolated func reflector() -> Reflector { _reflector.withLock { $0 } }
 
     /// Publishes the routing context that detached script `Anywhere.http`
     /// fetches dial against. Must be called on ``lwipQueue``.
@@ -295,18 +324,25 @@ nonisolated class TunnelStack {
     /// Owned by ``lwipQueue``.
     var flowShedWarned = false
 
+    /// Per-host SYN-reject flood tracker; consulted only by the isolated SYN-filter callback, so
+    /// it is actor state rather than a shared global.
+    let rejectFloodTracker = RejectFloodTracker()
+
+    // These four are `Sendable` (all state behind Mutex/Atomic) and `nonisolated`, so the off-actor
+    // read loop, the UDP plane, and the TCP connections reach them without hopping the stack actor.
+
     /// Domain-based DNS routing (loaded from App Group routing.json).
-    let domainRouter: DomainRouter
+    nonisolated let domainRouter: DomainRouter
 
     /// Recent per-connection routing decisions, shown in the app's Requests view.
-    let requestLog = RequestLog()
+    nonisolated let requestLog = RequestLog()
 
     /// Fake-IP pool for mapping domains to synthetic IPs.
-    let fakeIPPool: FakeIPPool
+    nonisolated let fakeIPPool: FakeIPPool
 
     /// Connection-time routing decisions (fake-IP pool + domain + IP rules),
     /// shared by the TCP SYN filter, TCP accept, and UDP paths.
-    let connectionRouter: ConnectionRouter
+    nonisolated let connectionRouter: ConnectionRouter
 
     init() {
         let fakeIPPool = FakeIPPool()
@@ -320,29 +356,41 @@ nonisolated class TunnelStack {
         let (commandStream, commandContinuation) = AsyncStream.makeStream(of: UDPPlaneCommand.self)
         self.planeCommands = commandStream
         self.planeCommandContinuation = commandContinuation
-        // Assigned last: the plane back-references the (now fully-initialized) stack.
-        self.udpPlane = UDPPlane(stack: self)
+        let (reapplyStream, reapplyContinuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        self.reapplySettingsSignal = reapplyStream
+        self.reapplySettingsContinuation = reapplyContinuation
+        // `udpPlane` is created in `start()`, where `self` is fully formed and the back-reference
+        // is safe.
     }
 
-    /// Kicks the output-drain consumer. Called by producers that flipped ``drainInFlight`` true.
-    func kickOutputDrain() {
+    /// Kicks the output-drain consumer. Called by producers that flipped ``drainInFlight`` true
+    /// (the lwIP output callback and the off-actor UDP/reflection paths), so it is `nonisolated`.
+    nonisolated func kickOutputDrain() {
         outputKickContinuation.yield(())
     }
 
     /// Submits a mux/reclaim command to the ordered plane driver. Call on ``lwipQueue`` so commands
-    /// stay ordered relative to each other.
-    func submitPlaneCommand(_ command: UDPPlaneCommand) {
+    /// stay ordered relative to each other. `nonisolated`: only touches the ordered continuation.
+    nonisolated func submitPlaneCommand(_ command: UDPPlaneCommand) {
         planeCommandContinuation.yield(command)
     }
 
     /// Ends the plane-command channel so the driver drains its buffered commands and finishes.
-    func finishPlaneCommands() {
+    nonisolated func finishPlaneCommands() {
         planeCommandContinuation.finish()
     }
 
-    /// Re-applies tunnel network settings via `setTunnelNetworkSettings`,
-    /// resetting the virtual interface and flushing the OS DNS cache.
-    var onTunnelSettingsNeedReapply: (() -> Void)?
+    /// Signals the provider to re-apply tunnel network settings (routes/DNS) via
+    /// `setTunnelNetworkSettings`, resetting the virtual interface and flushing the OS DNS cache.
+    /// An `AsyncStream` rather than a stored cross-actor closure: the provider consumes it on its
+    /// own async context. `.bufferingNewest(1)` coalesces bursts — one reapply subsumes a prior one.
+    nonisolated let reapplySettingsSignal: AsyncStream<Void>
+    private nonisolated let reapplySettingsContinuation: AsyncStream<Void>.Continuation
+
+    /// Requests a tunnel-settings reapply; safe from any domain.
+    nonisolated func requestReapplyTunnelSettings() {
+        reapplySettingsContinuation.yield(())
+    }
 
     // MARK: - Runtime Configuration
 
@@ -409,11 +457,11 @@ nonisolated class TunnelStack {
     func loadMITMSetting() {
         guard let data = AWCore.getMITMData(),
               let snapshot = MITMBinaryReader.decode(data) else {
-            mitmEnabled = false
+            _mitmEnabled.store(false, ordering: .relaxed)
             mitmPolicy.reset()
             return
         }
-        mitmEnabled = snapshot.enabled
+        _mitmEnabled.store(snapshot.enabled, ordering: .relaxed)
         if snapshot.enabled {
             mitmPolicy.load(ruleSets: snapshot.ruleSets)
         } else {

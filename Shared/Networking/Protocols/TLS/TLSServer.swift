@@ -434,7 +434,7 @@ nonisolated final class TLSServer {
             serverAppSecret: applicationKeys.serverTrafficSecret,
             direction: .server
         )
-        record.negotiatedALPN = negotiatedALPN
+        record.publishNegotiatedALPN(negotiatedALPN)
         let trailer = rxBuffer
         rxBuffer = Data()
 
