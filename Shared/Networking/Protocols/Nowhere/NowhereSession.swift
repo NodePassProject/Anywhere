@@ -58,7 +58,7 @@ nonisolated final class NowhereUDPBudgetReservation: @unchecked Sendable {
 }
 
 /// Shared QUIC carrier. The first business stream carries AUTH followed immediately by
-/// its FLOW request; later streams wait for the Portal's post-auth stream credit.
+/// its FLOW request.
 actor NowhereSession {
     nonisolated var unownedExecutor: UnownedSerialExecutor { quic.unownedExecutor }
 
@@ -397,7 +397,11 @@ actor NowhereSession {
 
         try await authTask.value
         guard state == .ready else { throw NowhereError.streamClosed }
-        let sid = try await quic.awaitBidiStream()
+        guard let sid = quic.openBidiStream() else {
+            let error = NowhereError.connectionFailed("Failed to open QUIC stream")
+            failSession(error)
+            throw NowhereError.streamClosed
+        }
         do {
             try Task.checkCancellation()
         } catch {

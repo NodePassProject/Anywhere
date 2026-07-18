@@ -198,12 +198,6 @@ actor QUICConnection {
         let completion: (Error?) -> Void
     }
 
-    private struct BidiStreamWaiter {
-        let id: UUID
-        let continuation: CheckedContinuation<Int64, Error>
-    }
-    private var bidiStreamWaiters: [BidiStreamWaiter] = []
-
     /// Heap copies of stream bytes per stream, ascending end-offset order. ngtcp2's
     /// `writev_stream` is zero-copy and re-reads the pointer on every retransmission,
     /// so bytes must stay valid until acked. Touched only on `queue`.
@@ -315,59 +309,6 @@ actor QUICConnection {
             guard me.state == .connected, let conn = me.connectionOpaquePointer else { return nil }
             return me.bridge.openBidiStream(conn)
         }
-    }
-
-    /// Waits fairly for peer bidirectional-stream credit instead of treating temporary
-    /// exhaustion as a connection failure.
-    nonisolated func awaitBidiStream() async throws -> Int64 {
-        let waiterID = UUID()
-        let cancelled = Mutex(false)
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                bridge.enqueue { [weak self] in
-                    guard let self else {
-                        continuation.resume(throwing: QUICError.closed)
-                        return
-                    }
-                    self.assumeIsolated { connection in
-                        if cancelled.withLock({ $0 }) || Task.isCancelled {
-                            continuation.resume(throwing: CancellationError())
-                        } else if let streamID = connection.openBidiStream() {
-                            continuation.resume(returning: streamID)
-                        } else if connection.state == .connected {
-                            connection.bidiStreamWaiters.append(
-                                BidiStreamWaiter(id: waiterID, continuation: continuation)
-                            )
-                        } else {
-                            continuation.resume(throwing: QUICError.closed)
-                        }
-                    }
-                }
-            }
-        } onCancel: {
-            cancelled.withLock { $0 = true }
-            bridge.enqueue { [weak self] in
-                self?.assumeIsolated { $0.cancelBidiStreamWaiter(waiterID) }
-            }
-        }
-    }
-
-    private func cancelBidiStreamWaiter(_ id: UUID) {
-        guard let index = bidiStreamWaiters.firstIndex(where: { $0.id == id }) else { return }
-        let waiter = bidiStreamWaiters.remove(at: index)
-        waiter.continuation.resume(throwing: CancellationError())
-    }
-
-    private func drainBidiStreamWaiters() {
-        while !bidiStreamWaiters.isEmpty, let streamID = openBidiStream() {
-            let waiter = bidiStreamWaiters.removeFirst()
-            waiter.continuation.resume(returning: streamID)
-        }
-    }
-
-    fileprivate func handleBidiCredit(_ maxStreams: UInt64) {
-        drainBidiStreamWaiters()
-        handlers.withLock { $0.bidiCredit }?(maxStreams)
     }
 
     /// Number of additional bidirectional streams the local endpoint may open.
@@ -799,8 +740,6 @@ actor QUICConnection {
             self.state = .closed
             let writes = self.pendingWrites
             self.pendingWrites.removeAll()
-            let streamWaiters = self.bidiStreamWaiters
-            self.bidiStreamWaiters.removeAll()
             let datagrams = self.pendingDatagrams
             self.pendingDatagrams.removeAll()
             self.inflightStreamBuffers.removeAll()
@@ -813,7 +752,6 @@ actor QUICConnection {
                 callback(closeError)
             }
             for pendingWrite in writes { pendingWrite.completion(closeError) }
-            for waiter in streamWaiters { waiter.continuation.resume(throwing: closeError) }
             for d in datagrams { d.completion?(closeError) }
             // Detach every handler before announcing the close, so nothing fires after it.
             let closedHandler = self.handlers.withLock { current in
@@ -1908,7 +1846,7 @@ nonisolated private let quicBidiCreditCB: @convention(c) (
 ) -> Int32 = { _, maxStreams, userData in
     guard let connection = qcFromUserData(userData) else { return 0 }
     connection.enqueue { [weak connection] in
-        connection?.assumeIsolated { $0.handleBidiCredit(maxStreams) }
+        connection?.handlers.withLock { $0.bidiCredit }?(maxStreams)
     }
     return 0
 }
