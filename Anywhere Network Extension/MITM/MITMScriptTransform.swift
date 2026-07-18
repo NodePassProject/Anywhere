@@ -48,56 +48,49 @@ nonisolated enum MITMScriptTransform {
         case synthesizedResponse(MITMScriptEngine.SynthesizedResponse)
     }
 
-    /// True when a `.script` rule would fire for the URL; check hasStreamScriptRule first — streaming takes priority.
-    static func hasScriptRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
-        rules.contains { rule in
-            switch rule.operation {
-            case .script:
-                return rule.matchesURL(requestURL)
-            case .streamScript, .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
-                return false
-            }
+    /// True when a `.script` rule would fire per the head-time verdicts; check
+    /// hasStreamScriptRule first — streaming takes priority.
+    static func hasScriptRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
+        for (index, rule) in rules.enumerated() {
+            if case .script = rule.operation, verdicts.matches(at: index) { return true }
         }
+        return false
     }
 
-    static func hasStreamScriptRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
-        rules.contains { rule in
-            switch rule.operation {
-            case .streamScript:
-                return rule.matchesURL(requestURL)
-            case .script, .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
-                return false
-            }
+    static func hasStreamScriptRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
+        for (index, rule) in rules.enumerated() {
+            if case .streamScript = rule.operation, verdicts.matches(at: index) { return true }
         }
+        return false
     }
 
-    static func hasBodyJSONRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
-        rules.contains { rule in
-            if case .bodyJSON = rule.operation { return rule.matchesURL(requestURL) }
-            return false
+    static func hasBodyJSONRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
+        for (index, rule) in rules.enumerated() {
+            if case .bodyJSON = rule.operation, verdicts.matches(at: index) { return true }
         }
+        return false
     }
 
-    static func hasBodyReplaceRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
-        rules.contains { rule in
-            if case .bodyReplace = rule.operation { return rule.matchesURL(requestURL) }
-            return false
+    static func hasBodyReplaceRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
+        for (index, rule) in rules.enumerated() {
+            if case .bodyReplace = rule.operation, verdicts.matches(at: index) { return true }
         }
+        return false
     }
 
     /// True when any buffered body transform (needing the full decompressed body) would fire;
     /// `.streamScript` is deliberately excluded.
-    static func hasBufferedBodyRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
-        hasScriptRule(in: rules, requestURL: requestURL)
-            || hasBodyReplaceRule(in: rules, requestURL: requestURL)
-            || hasBodyJSONRule(in: rules, requestURL: requestURL)
+    static func hasBufferedBodyRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
+        hasScriptRule(in: rules, verdicts: verdicts)
+            || hasBodyReplaceRule(in: rules, verdicts: verdicts)
+            || hasBodyJSONRule(in: rules, verdicts: verdicts)
     }
 
     /// True when any rule would read or rewrite the body — buffered (`hasBufferedBodyRule`) or
     /// per-frame (`.streamScript`).
-    static func hasBodyAccessingRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
-        hasBufferedBodyRule(in: rules, requestURL: requestURL)
-            || hasStreamScriptRule(in: rules, requestURL: requestURL)
+    static func hasBodyAccessingRule(in rules: [CompiledMITMRule], verdicts: MITMGateVerdictTable) -> Bool {
+        hasBufferedBodyRule(in: rules, verdicts: verdicts)
+            || hasStreamScriptRule(in: rules, verdicts: verdicts)
     }
 
     /// True for media types meant for incremental delivery (SSE, NDJSON, etc.), where buffered
@@ -132,11 +125,11 @@ nonisolated enum MITMScriptTransform {
     ) async -> HTTPMessage {
         let requestURL = message.url
         var message = message
-        let jsonOperations = matchingBodyJSONOperations(in: rules, requestURL: requestURL)
+        let jsonOperations = await matchingBodyJSONOperations(in: rules, requestURL: requestURL)
         if !jsonOperations.isEmpty {
             message.body = MITMJSONPatch.applyAll(jsonOperations, to: message.body)
         }
-        let replaceOperations = matchingBodyReplaceOperations(in: rules, requestURL: requestURL)
+        let replaceOperations = await matchingBodyReplaceOperations(in: rules, requestURL: requestURL)
         if !replaceOperations.isEmpty {
             message.body = await MITMBodyReplace.applyAll(replaceOperations, to: message.body)
         }
@@ -147,10 +140,10 @@ nonisolated enum MITMScriptTransform {
     private static func matchingBodyJSONOperations(
         in rules: [CompiledMITMRule],
         requestURL: String?
-    ) -> [MITMJSONPatch.CompiledOperation] {
+    ) async -> [MITMJSONPatch.CompiledOperation] {
         var operations: [MITMJSONPatch.CompiledOperation] = []
         for rule in rules {
-            if case .bodyJSON(let operation) = rule.operation, rule.matchesURL(requestURL) {
+            if case .bodyJSON(let operation) = rule.operation, await rule.matchesURL(requestURL) {
                 operations.append(operation)
             }
         }
@@ -161,10 +154,10 @@ nonisolated enum MITMScriptTransform {
     private static func matchingBodyReplaceOperations(
         in rules: [CompiledMITMRule],
         requestURL: String?
-    ) -> [MITMBodyReplace.CompiledOperation] {
+    ) async -> [MITMBodyReplace.CompiledOperation] {
         var operations: [MITMBodyReplace.CompiledOperation] = []
         for rule in rules {
-            if case .bodyReplace(let operation) = rule.operation, rule.matchesURL(requestURL) {
+            if case .bodyReplace(let operation) = rule.operation, await rule.matchesURL(requestURL) {
                 operations.append(operation)
             }
         }
@@ -182,7 +175,7 @@ nonisolated enum MITMScriptTransform {
     ) async -> Outcome {
         let requestURL = message.url
         let edited = await applyNativeBodyEdits(message, rules: rules)
-        guard let match = lastMatchingScriptSource(in: rules, requestURL: requestURL),
+        guard let match = await lastMatchingScriptSource(in: rules, requestURL: requestURL),
               let engineProvider
         else {
             return .message(edited)
@@ -200,15 +193,20 @@ nonisolated enum MITMScriptTransform {
         }
     }
 
-    /// Per-stream cursor threaded through each applyFrame call.
+    /// Per-stream cursor threaded through each applyFrame call. Created via
+    /// ``makeFrameCursor(rules:verdicts:)`` at head time, when the gate verdicts are in scope —
+    /// the per-frame path never consults a gate.
     final class FrameCursor {
         /// Script's persistent per-stream state; only ever touched on scriptQueue (deinit hops its release there).
         var state: JSValue?
         /// Set by a done/exit directive; subsequent frames bypass the script.
         var bypass: Bool = false
-        /// Outer nil = unresolved, `.some(nil)` = no rule matches.
-        fileprivate var resolvedMatch: ScriptMatch??
-        init() {}
+        /// The last matching `.streamScript` rule, resolved at creation; nil = no rule matches.
+        fileprivate let resolvedMatch: ScriptMatch?
+
+        fileprivate init(resolvedMatch: ScriptMatch?) {
+            self.resolvedMatch = resolvedMatch
+        }
 
         deinit {
             // state's final release runs JSValueUnprotect, which mutates VM bookkeeping; off
@@ -216,6 +214,21 @@ nonisolated enum MITMScriptTransform {
             guard let state else { return }
             JSCConcurrencyBridge.shared.enqueue { withExtendedLifetime(state) {} }
         }
+    }
+
+    /// Creates the per-stream cursor, resolving the last matching `.streamScript` rule
+    /// (last-wins semantics) from the head-time verdicts.
+    static func makeFrameCursor(
+        rules: [CompiledMITMRule],
+        verdicts: MITMGateVerdictTable
+    ) -> FrameCursor {
+        for (index, rule) in zip(rules.indices, rules).reversed() {
+            if case .streamScript(let source, let sourceKey) = rule.operation,
+               verdicts.matches(at: index) {
+                return FrameCursor(resolvedMatch: ScriptMatch(source: source, sourceKey: sourceKey))
+            }
+        }
+        return FrameCursor(resolvedMatch: nil)
     }
 
     struct StreamFrameResult {
@@ -227,19 +240,11 @@ nonisolated enum MITMScriptTransform {
     /// both set `cursor.bypass`; exit additionally reverts to the original frame data.
     static func applyFrame(
         _ frame: Data,
-        rules: [CompiledMITMRule],
         frameContext: MITMScriptEngine.FrameContext,
         cursor: FrameCursor,
         engineProvider: MITMScriptEngine.Provider?
     ) -> StreamFrameResult {
-        let resolved: ScriptMatch?
-        if let cached = cursor.resolvedMatch {
-            resolved = cached
-        } else {
-            resolved = lastMatchingStreamScriptSource(in: rules, requestURL: frameContext.url)
-            cursor.resolvedMatch = resolved
-        }
-        guard let match = resolved, let engineProvider
+        guard let match = cursor.resolvedMatch, let engineProvider
         else { return StreamFrameResult(body: frame, bypass: false) }
         // Runs inside `JSCConcurrencyBridge.shared.run` (the async counterpart below) — on the
         // engine's JSC executor — so enter its isolation synchronously.
@@ -265,7 +270,6 @@ nonisolated enum MITMScriptTransform {
     /// frame in flight at a time.
     static func applyFrame(
         _ frame: Data,
-        rules: [CompiledMITMRule],
         frameContext: MITMScriptEngine.FrameContext,
         cursor: FrameCursor,
         engineProvider: MITMScriptEngine.Provider?
@@ -273,7 +277,6 @@ nonisolated enum MITMScriptTransform {
         await JSCConcurrencyBridge.shared.run {
             applyFrame(
                 frame,
-                rules: rules,
                 frameContext: frameContext,
                 cursor: cursor,
                 engineProvider: engineProvider
@@ -292,24 +295,10 @@ nonisolated enum MITMScriptTransform {
     private static func lastMatchingScriptSource(
         in rules: [CompiledMITMRule],
         requestURL: String?
-    ) -> ScriptMatch? {
+    ) async -> ScriptMatch? {
         for rule in rules.reversed() {
             if case .script(let source, let sourceKey) = rule.operation,
-               rule.matchesURL(requestURL) {
-                return ScriptMatch(source: source, sourceKey: sourceKey)
-            }
-        }
-        return nil
-    }
-
-    /// Returns the last matching ``.streamScript`` rule (last-wins semantics), or nil.
-    private static func lastMatchingStreamScriptSource(
-        in rules: [CompiledMITMRule],
-        requestURL: String?
-    ) -> ScriptMatch? {
-        for rule in rules.reversed() {
-            if case .streamScript(let source, let sourceKey) = rule.operation,
-               rule.matchesURL(requestURL) {
+               await rule.matchesURL(requestURL) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }

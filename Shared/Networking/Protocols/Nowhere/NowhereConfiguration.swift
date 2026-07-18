@@ -77,7 +77,7 @@ nonisolated struct NowhereConfiguration: Hashable {
     }
 }
 
-nonisolated final class NowhereFlowIDLease: @unchecked Sendable {
+nonisolated final class NowhereFlowIDLease: Sendable {
     let flowID: UInt32
     private let releaseImpl: @Sendable (UInt32) -> Void
     private let released = Mutex(false)

@@ -92,29 +92,41 @@ nonisolated final class MITMGateRegex: Sendable {
         }
     }
 
-    /// Whether the gate matches the URL (caller already lowercased the host and
-    /// capped length). Fail-closed on timeout or quarantine.
-    func matches(_ normalizedURL: String) -> Bool {
+    /// Synchronous fast path: literal gates match inline (no backtracking possible), and
+    /// regex gates answer from the quarantine flag or the memo cache. nil means the verdict
+    /// isn't known synchronously — resolve it with ``matches(_:)``.
+    func peekMatches(_ normalizedURL: String) -> Bool? {
         // Literal gates can't backtrack — match inline; `.literal` is code-unit-exact and
         // unanchored like `firstMatch`.
         if isLiteral {
             return normalizedURL.range(of: literalPattern, options: .literal) != nil
         }
-        enum CachePeek { case quarantined, cached(Bool), miss }
-        let peek: CachePeek = state.withLock { state in
-            if state.quarantined { return .quarantined }
-            if let cached = state.cache[normalizedURL] { return .cached(cached) }
-            return .miss
+        return state.withLock { state in
+            if state.quarantined { return false }
+            return state.cache[normalizedURL]
         }
-        switch peek {
-        case .quarantined: return false
-        case .cached(let cached): return cached
-        case .miss: break
-        }
+    }
 
-        switch boundedMatch(normalizedURL) {
-        case .matched(let matched):
-            store(normalizedURL, matched)
+    /// Whether the gate matches the URL (caller already lowercased the host and capped
+    /// length). A cache miss evaluates on the regex bridge's worker pool — the caller
+    /// suspends, never blocks. Fail-closed on timeout or quarantine.
+    func matches(_ normalizedURL: String) async -> Bool {
+        if let verdict = peekMatches(normalizedURL) { return verdict }
+
+        // Strong regex + weak self: a runaway can outlive a reload without pinning the cache.
+        // `onResolved` caches the verdict on the bridge's worker (best-effort, also reached by an
+        // abandoned worker that finishes late; no-op once quarantined).
+        let regex = self.regex
+        let pattern = self.pattern
+        let outcome = await MITMRegexConcurrencyBridge.shared.firstMatch(
+            regex, in: normalizedURL,
+            deadlineMillis: Self.matchDeadlineMillis,
+            hardCapSeconds: Self.hardCapSeconds,
+            hardCapMessage: { Self.hardCapMessage(pattern: pattern) },
+            onResolved: { [weak self] matched in self?.store(normalizedURL, matched) }
+        )
+        switch outcome {
+        case .completed(let matched):
             return matched
         case .timedOut:
             recordStrike()
@@ -122,84 +134,43 @@ nonisolated final class MITMGateRegex: Sendable {
         }
     }
 
+    /// Synchronous counterpart of ``firstMatchCaptures(_:)`` for gates whose captures are
+    /// knowable without the regex engine: literal gates (group 0 only) and quarantined gates
+    /// (no match). nil means the captures need async resolution.
+    func peekFirstMatchCaptures(_ normalizedURL: String) -> [String?]?? {
+        // A literal pattern has no capturing groups; group 0 is the matched span.
+        if isLiteral {
+            guard let r = normalizedURL.range(of: literalPattern, options: .literal) else {
+                return .some(nil)
+            }
+            return [String(normalizedURL[r])]
+        }
+        if state.withLock({ $0.quarantined }) { return .some(nil) }
+        return nil
+    }
+
     /// Capture groups of the first match (index 0 = whole match), or nil on no match,
     /// timeout, or quarantine. Not memoized (unbounded URL-specific working set), but shares
     /// the deadline, hard-cap crash, and strike/quarantine machinery of ``matches(_:)``.
-    func firstMatchCaptures(_ normalizedURL: String) -> [String?]? {
-        // A literal pattern has no capturing groups; group 0 is the matched span.
-        if isLiteral {
-            guard let r = normalizedURL.range(of: literalPattern, options: .literal) else { return nil }
-            return [String(normalizedURL[r])]
-        }
-        if state.withLock({ $0.quarantined }) { return nil }
+    func firstMatchCaptures(_ normalizedURL: String) async -> [String?]? {
+        if let captures = peekFirstMatchCaptures(normalizedURL) { return captures }
 
         // Strong regex, no self: a runaway can outlive a reload without pinning the cache.
-        // Not memoized. `.completed(nil)` is a real no-match; `.timedOut` is an abandoned worker.
+        // `.completed(nil)` is a real no-match; `.timedOut` is an abandoned worker.
         let regex = self.regex
         let pattern = self.pattern
-        let outcome = MITMGateRegexMatchConcurrencyBridge.shared.runBounded(
+        let outcome = await MITMRegexConcurrencyBridge.shared.firstMatchCaptureGroups(
+            regex, in: normalizedURL,
             deadlineMillis: Self.matchDeadlineMillis,
             hardCapSeconds: Self.hardCapSeconds,
             hardCapMessage: { Self.hardCapMessage(pattern: pattern) }
-        ) {
-            Self.captureGroups(regex, in: normalizedURL)
-        }
+        )
         switch outcome {
         case .completed(let captures):
             return captures
         case .timedOut:
             recordStrike()
             return nil
-        }
-    }
-
-    /// Extracts the first match's groups (index 0 = whole match); a non-participating
-    /// group is `nil`. nil overall means the pattern did not match.
-    private static func captureGroups(_ regex: NSRegularExpression, in url: String) -> [String?]? {
-        let range = NSRange(url.startIndex..., in: url)
-        guard let match = regex.firstMatch(in: url, options: [], range: range) else { return nil }
-        var groups: [String?] = []
-        groups.reserveCapacity(match.numberOfRanges)
-        for i in 0..<match.numberOfRanges {
-            let nsRange = match.range(at: i)
-            if nsRange.location == NSNotFound {
-                groups.append(nil)
-            } else if let r = Range(nsRange, in: url) {
-                groups.append(String(url[r]))
-            } else {
-                groups.append(nil)
-            }
-        }
-        return groups
-    }
-
-    private enum MatchOutcome {
-        case matched(Bool)
-        case timedOut
-    }
-
-    /// Runs the match on a bounded worker via the gate-match bridge; an abandoned worker that
-    /// finishes late still caches its verdict (the `store` in `body`).
-    private func boundedMatch(_ url: String) -> MatchOutcome {
-        // Strong regex + weak self: a runaway can outlive a reload without pinning the cache.
-        let regex = self.regex
-        let pattern = self.pattern
-        let outcome = MITMGateRegexMatchConcurrencyBridge.shared.runBounded(
-            deadlineMillis: Self.matchDeadlineMillis,
-            hardCapSeconds: Self.hardCapSeconds,
-            hardCapMessage: { Self.hardCapMessage(pattern: pattern) }
-        ) { [weak self] () -> Bool in
-            let range = NSRange(url.startIndex..., in: url)
-            let matched = regex.firstMatch(in: url, options: [], range: range) != nil
-            // Best-effort late cache: no-op once quarantined.
-            self?.store(url, matched)
-            return matched
-        }
-        switch outcome {
-        case .completed(let matched):
-            return .matched(matched)
-        case .timedOut:
-            return .timedOut
         }
     }
 

@@ -414,23 +414,26 @@ nonisolated private enum SudokuTableCache {
 }
 
 nonisolated final class SudokuTables: Sendable {
-    private let pair: Mutex<SudokuTablePair>
+    /// The table pair is immutable after construction (`SudokuTable`/`SudokuTablePair` are
+    /// `Sendable`), so it's shared read-only — no lock. Multiple `SudokuTables` may share the
+    /// same cached pair; that's safe precisely because nothing mutates it.
+    private let pair: SudokuTablePair
     let sendsTableHint: Bool
 
     init(config: SudokuNativeConfig) throws {
         sendsTableHint = config.sendsTableHint
-        pair = Mutex(try SudokuTableCache.pair(for: config))
+        pair = try SudokuTableCache.pair(for: config)
     }
 
     func withUplink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
-        try pair.withLock { try body($0.uplink) }
+        try body(pair.uplink)
     }
 
     func withDownlink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
-        try pair.withLock { try body($0.downlink) }
+        try body(pair.downlink)
     }
 
-    var hint: UInt32 { pair.withLock { $0.uplink.hint } }
+    var hint: UInt32 { pair.uplink.hint }
 }
 
 /// An async byte stream over a ``ProxyConnection``, with a leftover-read buffer.

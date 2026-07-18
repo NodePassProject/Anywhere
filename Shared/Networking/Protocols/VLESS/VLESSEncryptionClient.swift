@@ -888,24 +888,25 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     private func drainServerPadding() async throws {
         enum PaddingStep {
             case done
-            case drain(Data, VLESSEncryptionAEAD?)
             case needMore
         }
         while true {
-            let paddingStep: PaddingStep = recvState.withLock { state in
+            // The AEAD `open` (which advances the read nonce) runs inside the lock that guards
+            // `readAEAD`/`inboundBuffer`, mirroring the send path — receive is single-consumer,
+            // so there's no contention to hold the crypto across.
+            let paddingStep: PaddingStep = try recvState.withLock { state in
                 guard state.pendingServerPaddingLength > 0 else { return .done }
                 let needed = state.pendingServerPaddingLength
                 guard state.inboundBuffer.count >= needed else { return .needMore }
                 let sealedPadding = Data(state.inboundBuffer.prefix(needed))
                 state.inboundBuffer.removeFirst(needed)
-                return .drain(sealedPadding, state.readAEAD)
+                _ = try state.readAEAD!.open(sealedPadding, additionalData: nil)
+                state.pendingServerPaddingLength = 0
+                return .done
             }
             switch paddingStep {
             case .done:
                 return
-            case .drain(let sealedPadding, let aead):
-                _ = try aead!.open(sealedPadding, additionalData: nil)
-                recvState.withLock { $0.pendingServerPaddingLength = 0 }
             case .needMore:
                 guard let data = try await inner.receiveRaw(), !data.isEmpty else {
                     return   // EOF mid-padding surfaces as a clean close on the next read
@@ -920,10 +921,13 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         enum RecordStep {
             case needMore
             case decodeFailed(Error, firstRecordSeen: Bool)
-            case record(Data, Int, VLESSEncryptionAEAD?)
+            case record(Data)
         }
         while true {
-            let recordStep: RecordStep = recvState.withLock { state in
+            // Header decode, AEAD `open` (nonce advance), and any rekey all run under the one
+            // lock that guards `readAEAD`/`inboundBuffer`/`firstRecordSeen` — the whole record is
+            // consumed atomically, mirroring the send path. `receiveRaw` stays outside the lock.
+            let recordStep: RecordStep = try recvState.withLock { state -> RecordStep in
                 guard state.inboundBuffer.count >= VLESSWire.headerLength else { return .needMore }
                 let headerBytes = Array(state.inboundBuffer.prefix(VLESSWire.headerLength))
                 let payloadLength: Int
@@ -936,7 +940,18 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                 guard state.inboundBuffer.count >= recordTotal else { return .needMore }
                 let recordBytes = Data(state.inboundBuffer.prefix(recordTotal))
                 state.inboundBuffer.removeFirst(recordTotal)
-                return .record(recordBytes, payloadLength, state.readAEAD)
+                let header = Data(recordBytes.prefix(VLESSWire.headerLength))
+                let sealedPayload = recordBytes.suffix(payloadLength)
+                let willRekey = state.readAEAD!.nonceIsAtMax
+                // Header bytes are the AAD for this record.
+                let plaintext = try state.readAEAD!.open(Data(sealedPayload), additionalData: header)
+                state.firstRecordSeen = true
+                if willRekey {
+                    var context = Data(header)
+                    context.append(Data(sealedPayload))
+                    state.readAEAD = VLESSEncryptionAEAD(context: context, key: unitedKey, useAES: useAES)
+                }
+                return .record(plaintext)
             }
 
             switch recordStep {
@@ -953,19 +968,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                     throw VLESSEncryptionError.handshakeFailed("new handshake needed")
                 }
                 throw error
-            case .record(let recordBytes, let payloadLength, let aead):
-                let header = Data(recordBytes.prefix(VLESSWire.headerLength))
-                let sealedPayload = recordBytes.suffix(payloadLength)
-                let willRekey = aead!.nonceIsAtMax
-                // Header bytes are the AAD for this record.
-                let plaintext = try aead!.open(Data(sealedPayload), additionalData: header)
-                recvState.withLock { $0.firstRecordSeen = true }
-                if willRekey {
-                    var context = Data(header)
-                    context.append(Data(sealedPayload))
-                    let newAEAD = VLESSEncryptionAEAD(context: context, key: unitedKey, useAES: useAES)
-                    recvState.withLock { $0.readAEAD = newAEAD }
-                }
+            case .record(let plaintext):
                 return plaintext
             }
         }

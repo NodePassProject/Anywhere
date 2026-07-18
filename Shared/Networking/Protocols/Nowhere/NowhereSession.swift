@@ -35,7 +35,7 @@ nonisolated enum NowhereError: Error, LocalizedError {
     }
 }
 
-nonisolated final class NowhereQueuedDatagram: @unchecked Sendable {
+nonisolated final class NowhereQueuedDatagram: Sendable {
     let payload: Data
     private let reservation: NowhereUDPBudgetReservation
 
@@ -45,7 +45,7 @@ nonisolated final class NowhereQueuedDatagram: @unchecked Sendable {
     }
 }
 
-nonisolated final class NowhereUDPBudgetReservation: @unchecked Sendable {
+nonisolated final class NowhereUDPBudgetReservation: Sendable {
     let units: Int
     private let release: @Sendable (Int) -> Void
 

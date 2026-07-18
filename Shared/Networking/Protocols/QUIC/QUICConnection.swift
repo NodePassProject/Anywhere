@@ -1845,8 +1845,8 @@ nonisolated private let quicBidiCreditCB: @convention(c) (
     OpaquePointer?, UInt64, UnsafeMutableRawPointer?
 ) -> Int32 = { _, maxStreams, userData in
     guard let connection = qcFromUserData(userData) else { return 0 }
-    connection.enqueue { [weak connection] in
-        connection?.handlers.withLock { $0.bidiCredit }?(maxStreams)
+    connection.enqueue {
+        connection.handlers.withLock { $0.bidiCredit }?(maxStreams)
     }
     return 0
 }

@@ -205,9 +205,51 @@ nonisolated final class MITMHTTP1Stream {
         /// Script hop outstanding; drive loop halted until the engine result
         /// resumes on the lwIP queue.
         case awaitingScript
+
+        /// Gate-verdict resolution outstanding (regex bridge hop); drive loop halted with the
+        /// head bytes still buffered — the resumed pass re-parses and resolves synchronously
+        /// from ``pendingGateTables``.
+        case awaitingGates
     }
 
     private var mode: Mode = .awaitingHead
+
+    /// Rewrite-rule selection for one request head, derived from the pre-rewrite verdicts.
+    /// Pure selection — committing its state effects happens in `consumeHead`.
+    private enum RewriteSelection {
+        /// No rewrite rule fires; the start line is unchanged.
+        case none
+        /// First matching transparent rewrite: the rewritten start line + replacement upstream.
+        case transparent(line: String, replacement: ReplacementURL)
+        /// First matching 302 / reject sub-mode: answer locally.
+        case synthesize(MITMScriptEngine.SynthesizedResponse)
+    }
+
+    /// Gate verdicts (and the rewrite selection derived from them) for the head currently at
+    /// the front of `rxBuffer`, carried across `.awaitingGates` parks so the retried drive
+    /// pass resolves synchronously. Every entry is keyed by the URL it was resolved against,
+    /// so a stale entry can never leak onto the next head. Cleared when the head commits.
+    private struct PendingGateTables {
+        /// This stream's rules @ the pre-rewrite gating URL (rewrite-rule selection).
+        var rewriteTable: MITMGateVerdictTable?
+        var rewriteSelection: (url: String?, selection: RewriteSelection)?
+        /// This stream's rules @ the post-rewrite gating URL (header rules, body-mode
+        /// selection, script preflight).
+        var ruleTable: MITMGateVerdictTable?
+        /// Response-phase rules @ the post-rewrite gating URL (request phase only: gates the
+        /// Accept-Encoding clamp).
+        var responseGateTable: MITMGateVerdictTable?
+    }
+
+    private var pendingGateTables = PendingGateTables()
+
+    /// Everything head processing needs past the async gate seam, resolved before any state
+    /// mutation so a park can retry the pass cleanly.
+    private struct HeadGates {
+        let rewriteSelection: RewriteSelection
+        let ruleTable: MITMGateVerdictTable
+        let responseGateTable: MITMGateVerdictTable
+    }
 
     /// When set (the h2→h1 bridge's per-stream response stream), the response path delivers IR to
     /// this sink instead of producing HTTP/1.1 bytes. nil ⇒ byte output (the main h1↔h1 path).
@@ -287,11 +329,15 @@ nonisolated final class MITMHTTP1Stream {
         finishDrivePass(output)
     }
 
-    /// Resumes the stashed continuation, or holds `output` while a script hop is outstanding.
+    /// Resumes the stashed continuation, or holds `output` while a script hop or gate
+    /// resolution is outstanding.
     private func finishDrivePass(_ output: Data) {
-        if case .awaitingScript = mode {
+        switch mode {
+        case .awaitingScript, .awaitingGates:
             pendingPreParkOutput = output
             return
+        default:
+            break
         }
         let continuation = parkedContinuation
         parkedContinuation = nil
@@ -308,6 +354,7 @@ nonisolated final class MITMHTTP1Stream {
         // Release buffers eagerly rather than pinning them until the session lets go.
         mode = .passthrough
         rxBuffer = MITMByteBuffer()
+        pendingGateTables = PendingGateTables()
         continuation?.resume(returning: Data())
     }
 
@@ -435,7 +482,7 @@ nonisolated final class MITMHTTP1Stream {
             rxBuffer.removeAll(keepingCapacity: false)
             return false
 
-        case .awaitingScript:
+        case .awaitingScript, .awaitingGates:
             return false
 
         case .awaitingHead:
@@ -513,7 +560,6 @@ nonisolated final class MITMHTTP1Stream {
         headScanned = 0
         let headEnd = terminator.upperBound
         let headData = rxBuffer.subdata(in: 0..<headEnd)
-        rxBuffer.removeFirst(headEnd)
 
         let parsed: ParsedHead
         switch parseHead(headData) {
@@ -521,6 +567,7 @@ nonisolated final class MITMHTTP1Stream {
             parsed = parsedHead
         case .forward:
             // Not HTTP/1.x, or a tolerable deviation: stop rewriting, forward verbatim.
+            rxBuffer.removeFirst(headEnd)
             mode = .passthrough
             output.append(headData)
             return true
@@ -528,15 +575,37 @@ nonisolated final class MITMHTTP1Stream {
             // A request-smuggling / header-injection framing violation (RFC 9112 §6). Fail closed:
             // do not relay the offending bytes. The session closes the connection; `.draining`
             // drops anything already buffered behind this head.
+            rxBuffer.removeFirst(headEnd)
             logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
             mode = .draining
             onFatalClose?()
             return false
         }
 
+        // Gate verdicts must be in hand before any state mutation (FIFO pop, rewrite
+        // commitment, buffer consumption): a cache-miss verdict parks the drive
+        // (`.awaitingGates`) with the head bytes still buffered, and the resumed pass
+        // retries from this same clean boundary, resolving synchronously.
+        guard let gates = ensureGateTables(parsed: parsed) else { return false }
+        rxBuffer.removeFirst(headEnd)
+        pendingGateTables = PendingGateTables()
+
         let rewrittenStartLine: String
-        switch applyRewrite(parsed.startLine) {
-        case .rewritten(let line):
+        if phase == .httpRequest,
+           rules.contains(where: { if case .rewrite = $0.operation { return true }; return false }) {
+            // Each request re-resolves its own upstream. Clear any target a *previous* request on
+            // this keep-alive leg set, so a later request matching no transparent rewrite resolves
+            // to the original origin (and the session tears the leg down if it differs from the
+            // dialed host) rather than inheriting the prior request's target and `Host`.
+            effectiveAuthority = nil
+            resolvedUpstream = nil
+        }
+        switch gates.rewriteSelection {
+        case .none:
+            rewrittenStartLine = parsed.startLine
+        case .transparent(let line, let replacement):
+            effectiveAuthority = replacement.authority
+            resolvedUpstream = (host: replacement.host, port: replacement.port)
             rewrittenStartLine = line
         case .synthesize(let response):
             return synthesizeRequestResponse(
@@ -570,18 +639,13 @@ nonisolated final class MITMHTTP1Stream {
             originatingRequest = nil
         }
 
-        let gateURL = requestURLForGating(
-            startLine: rewrittenStartLine,
-            originatingRequest: originatingRequest
-        )
-
         // Authority rewrite first so a headerReplace on Host can still override it.
         let withAuthority = applyAuthorityRewrite(parsed.headers)
-        var rewrittenHeaders = applyHeaderRules(withAuthority, requestURL: gateURL)
+        var rewrittenHeaders = applyHeaderRules(withAuthority, verdicts: gates.ruleTable)
         // Clamp only when a response body rule will read the reply; a passthrough request keeps
         // the client's `Accept-Encoding` so its negotiation matches a non-intercepted connection.
         if phase == .httpRequest,
-           MITMScriptTransform.hasBodyAccessingRule(in: responseBodyGateRules, requestURL: gateURL) {
+           MITMScriptTransform.hasBodyAccessingRule(in: responseBodyGateRules, verdicts: gates.responseGateTable) {
             rewrittenHeaders = rewrittenHeaders.map { entry in
                 ASCII.equalsIgnoringCase(entry.name, "accept-encoding")
                     ? (name: entry.name, value: MITMBodyCodec.constrainedAcceptEncoding(entry.value))
@@ -595,18 +659,18 @@ nonisolated final class MITMHTTP1Stream {
             originatingMethod: originatingRequest?.method
         )
 
-        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, requestURL: gateURL)
+        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, verdicts: gates.ruleTable)
         // Any rule needing the full decompressed body drives buffered mode.
         let buffersBody = scriptsApply
-            || MITMScriptTransform.hasBodyReplaceRule(in: rules, requestURL: gateURL)
-            || MITMScriptTransform.hasBodyJSONRule(in: rules, requestURL: gateURL)
+            || MITMScriptTransform.hasBodyReplaceRule(in: rules, verdicts: gates.ruleTable)
+            || MITMScriptTransform.hasBodyJSONRule(in: rules, verdicts: gates.ruleTable)
 
         switch framing {
         case .switchingProtocols, .readUntilClose:
             // Buffer a read-until-close body to EOF and re-emit with Content-Length
             // when a buffered script applies and the body is identity-coded; else passthrough.
             if case .readUntilClose = framing, buffersBody,
-               !MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: gateURL) {
+               !MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: gates.ruleTable) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
                 let teContentCoded = Self.transferEncodingHasContentCoding(combinedHeaderValue(rewrittenHeaders, name: "transfer-encoding"))
                 if codec.supported, !codec.requiresDecompression, !teContentCoded {
@@ -728,8 +792,7 @@ nonisolated final class MITMHTTP1Stream {
                 rewrittenHeaders: rewrittenHeaders,
                 length: length,
                 buffersBody: buffersBody,
-                rules: rules,
-                requestURL: gateURL,
+                verdicts: gates.ruleTable,
                 originatingRequest: originatingRequest,
                 into: &output
             )
@@ -738,8 +801,7 @@ nonisolated final class MITMHTTP1Stream {
                 rewrittenStartLine: rewrittenStartLine,
                 rewrittenHeaders: rewrittenHeaders,
                 buffersBody: buffersBody,
-                rules: rules,
-                requestURL: gateURL,
+                verdicts: gates.ruleTable,
                 originatingRequest: originatingRequest,
                 into: &output
             )
@@ -748,13 +810,106 @@ nonisolated final class MITMHTTP1Stream {
         }
     }
 
+    /// Resolves everything head processing needs from the gate regexes — synchronously when
+    /// every verdict answers from a literal gate or the memo cache, otherwise parking the
+    /// drive (`.awaitingGates`) while the regex bridge resolves the misses. nil = parked; the
+    /// head bytes stay in `rxBuffer` and the resumed pass retries from the same clean boundary.
+    private func ensureGateTables(parsed: ParsedHead) -> HeadGates? {
+        if rules.isEmpty && responseBodyGateRules.isEmpty {
+            return HeadGates(rewriteSelection: .none, ruleTable: .empty, responseGateTable: .empty)
+        }
+        // Pre-rewrite gating URL. Requests gate rewrite rules on the original target; responses
+        // never rewrite and gate everything on the originating request's URL — *peeked*, the
+        // commit pop happens after this resolution point.
+        let rewriteURL = requestURLForGating(
+            startLine: parsed.startLine,
+            originatingRequest: phase == .httpResponse ? requestLog.peekHTTP1() : nil
+        )
+        guard let rewriteTable = obtainTable(\.rewriteTable, rules: rules, url: rewriteURL) else { return nil }
+
+        // Cache the selection alongside its URL so a second park doesn't re-log its diagnostics.
+        let selection: RewriteSelection
+        if let cached = pendingGateTables.rewriteSelection, cached.url == rewriteURL {
+            selection = cached.selection
+        } else {
+            selection = selectRewrite(parsed.startLine, verdicts: rewriteTable)
+            pendingGateTables.rewriteSelection = (url: rewriteURL, selection: selection)
+        }
+
+        let postURL: String?
+        switch selection {
+        case .none:
+            postURL = rewriteURL
+        case .transparent(let line, _):
+            postURL = requestURLForGating(startLine: line, originatingRequest: nil)
+        case .synthesize:
+            // The synth path answers locally; nothing downstream consults a gate.
+            return HeadGates(rewriteSelection: selection, ruleTable: .empty, responseGateTable: .empty)
+        }
+        let ruleTable: MITMGateVerdictTable
+        if postURL == rewriteURL {
+            ruleTable = rewriteTable
+        } else {
+            guard let resolved = obtainTable(\.ruleTable, rules: rules, url: postURL) else { return nil }
+            ruleTable = resolved
+        }
+        guard phase == .httpRequest, !responseBodyGateRules.isEmpty else {
+            return HeadGates(rewriteSelection: selection, ruleTable: ruleTable, responseGateTable: .empty)
+        }
+        guard let responseGateTable = obtainTable(\.responseGateTable, rules: responseBodyGateRules, url: postURL)
+        else { return nil }
+        return HeadGates(rewriteSelection: selection, ruleTable: ruleTable, responseGateTable: responseGateTable)
+    }
+
+    /// Slot-cached or synchronously peeked verdicts, or nil after parking the drive and
+    /// spawning the async resolution (whose resume re-runs the pass).
+    private func obtainTable(
+        _ slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?>,
+        rules: [CompiledMITMRule],
+        url: String?
+    ) -> MITMGateVerdictTable? {
+        if let cached = pendingGateTables[keyPath: slot], cached.url == url {
+            return cached
+        }
+        if let peeked = MITMGateVerdictTable.peek(rules: rules, url: url) {
+            pendingGateTables[keyPath: slot] = peeked
+            return peeked
+        }
+        mode = .awaitingGates
+        // Resolve off-queue on the regex bridge; hop back to the lwIP queue to resume the pass.
+        Task { [weak self] in
+            let table = await MITMGateVerdictTable.resolve(rules: rules, url: url)
+            guard let self else { return }
+            self.lwipBridge.enqueue {
+                self.resumeGateResolution(slot: slot, table: table)
+            }
+        }
+        return nil
+    }
+
+    /// Resume for a parked gate resolution: stores the table and re-runs the drive pass — the
+    /// retried `consumeHead` now resolves this table synchronously from the slot.
+    private func resumeGateResolution(
+        slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?>,
+        table: MITMGateVerdictTable
+    ) {
+        guard !torn else { return }
+        pendingGateTables[keyPath: slot] = table
+        guard case .awaitingGates = mode else { return }
+        if resumeIntoForcedPassthroughIfNeeded() { return }
+        mode = .awaitingHead
+        var resumed = pendingPreParkOutput
+        pendingPreParkOutput = Data()
+        while drive(into: &resumed) { }
+        finishDrivePass(resumed)
+    }
+
     private func enterContentLength(
         rewrittenStartLine: String,
         rewrittenHeaders: [Header],
         length: Int,
         buffersBody: Bool,
-        rules: [CompiledMITMRule],
-        requestURL: String?,
+        verdicts: MITMGateVerdictTable,
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
@@ -762,7 +917,7 @@ nonisolated final class MITMHTTP1Stream {
         // so the emitted head can't carry the TE+CL smuggling pair (RFC 9112 §6.3.3).
         let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "transfer-encoding") }
         // Stream scripts can't modify a length-prefixed body; warn and fall through.
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: verdicts) {
             logger.warning("HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
         }
 
@@ -800,8 +955,7 @@ nonisolated final class MITMHTTP1Stream {
         rewrittenStartLine: String,
         rewrittenHeaders: [Header],
         buffersBody: Bool,
-        rules: [CompiledMITMRule],
-        requestURL: String?,
+        verdicts: MITMGateVerdictTable,
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
@@ -811,7 +965,7 @@ nonisolated final class MITMHTTP1Stream {
         let rewrittenHeaders = rewrittenHeaders.filter { !ASCII.equalsIgnoringCase($0.name, "content-length") }
         // Streaming script wins over buffered script; emit head immediately
         // (stream scripts can't mutate head fields).
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, verdicts: verdicts) {
             if responseIRSink != nil {
                 // The bridge can't run a streaming response script across the h2→h1 boundary;
                 // forward the body unscripted as IR rather than stall.
@@ -831,7 +985,7 @@ nonisolated final class MITMHTTP1Stream {
                 headers: rewrittenHeaders,
                 originatingRequest: originatingRequest,
                 startLine: rewrittenStartLine,
-                cursor: MITMScriptTransform.FrameCursor()
+                cursor: MITMScriptTransform.makeFrameCursor(rules: rules, verdicts: verdicts)
             )
             mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
             return true
@@ -1224,13 +1378,11 @@ nonisolated final class MITMHTTP1Stream {
         // cursor is shared by reference so engine mutations are visible on resume.
         let captured = streaming
         mode = .awaitingScript
-        let rules = self.rules
         let engineProvider = self.scriptEngineProvider
         let cursor = streaming.cursor
         Task { [weak self] in
             let result = await MITMScriptTransform.applyFrame(
                 chunk,
-                rules: rules,
                 frameContext: frameContext,
                 cursor: cursor,
                 engineProvider: engineProvider
@@ -2068,39 +2220,27 @@ nonisolated final class MITMHTTP1Stream {
         return result
     }
 
-    private enum RewriteOutcome {
-        case rewritten(String)
-        case synthesize(MITMScriptEngine.SynthesizedResponse)
-    }
-
-    /// Applies the first matching `rewrite` rule: `transparent` rewrites the
-    /// request-target and sets the upstream; synthesize sub-modes return a canned response.
-    private func applyRewrite(_ startLine: String) -> RewriteOutcome {
-        guard phase == .httpRequest else { return .rewritten(startLine) }
+    /// Selects the first matching `rewrite` rule from the pre-resolved gate verdicts, expanding
+    /// any capture template. Pure: the caller commits `effectiveAuthority`/`resolvedUpstream`.
+    private func selectRewrite(_ startLine: String, verdicts: MITMGateVerdictTable) -> RewriteSelection {
+        guard phase == .httpRequest else { return .none }
         guard rules.contains(where: {
             if case .rewrite = $0.operation { return true }
             return false
-        }) else { return .rewritten(startLine) }
-
-        // Each request re-resolves its own upstream. Clear any target a *previous* request on this
-        // keep-alive leg set, so a later request matching no transparent rewrite resolves to the
-        // original origin (and the session tears the leg down if it differs from the dialed host)
-        // rather than inheriting the prior request's target and `Host`.
-        effectiveAuthority = nil
-        resolvedUpstream = nil
+        }) else { return .none }
 
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3 else { return .rewritten(startLine) }
+        guard parts.count == 3 else { return .none }
         let method = String(parts[0])
         let target = String(parts[1])
         let version = String(parts[2])
 
-        if target == "*" { return .rewritten(startLine) } // RFC 9112 §3.2.4 asterisk-form
+        if target == "*" { return .none } // RFC 9112 §3.2.4 asterisk-form
 
-        for rule in rules {
+        for (index, rule) in rules.enumerated() {
             guard case .rewrite = rule.operation else { continue }
-            // Resolves the gate match and expands any `$1`-style target template in one step.
-            guard let resolved = rule.resolvedRewriteAction(for: "\(scheme)://\(host)\(target)") else { continue }
+            // Resolves the gate verdict and expands any `$1`-style target template in one step.
+            guard let resolved = rule.resolvedRewriteAction(verdicts: verdicts, at: index) else { continue }
             switch resolved {
             case .transparent(let replacement):
                 // Re-validate at use time as a backstop (validated at load/resolve time too).
@@ -2108,15 +2248,14 @@ nonisolated final class MITMHTTP1Stream {
                     logger.warning("HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
                     continue
                 }
-                effectiveAuthority = replacement.authority
-                resolvedUpstream = (host: replacement.host, port: replacement.port)
-                return .rewritten("\(method) \(replacement.requestTarget) \(version)")
+                return .transparent(line: "\(method) \(replacement.requestTarget) \(version)",
+                                    replacement: replacement)
             case .redirect302, .reject200Text, .reject200Gif, .reject200Data:
                 guard let response = MITMRespondBuilder.response(for: resolved) else { continue }
                 return .synthesize(response)
             }
         }
-        return .rewritten(startLine)
+        return .none
     }
 
     /// Short-circuits a 302 / reject request: queues the synth response and
@@ -2139,11 +2278,11 @@ nonisolated final class MITMHTTP1Stream {
         return true
     }
 
-    private func applyHeaderRules(_ headers: [Header], requestURL: String?) -> [Header] {
+    private func applyHeaderRules(_ headers: [Header], verdicts: MITMGateVerdictTable) -> [Header] {
         guard !rules.isEmpty else { return headers }
         var current = headers
-        for rule in rules {
-            guard rule.matchesURL(requestURL) else { continue }
+        for (index, rule) in rules.enumerated() {
+            guard verdicts.matches(at: index) else { continue }
             switch rule.operation {
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))

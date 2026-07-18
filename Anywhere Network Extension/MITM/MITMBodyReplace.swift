@@ -54,63 +54,38 @@ nonisolated enum MITMBodyReplace {
     private static let substitutionInFlight = Atomic<Bool>(false)
     
     private static func boundedReplace(_ text: String, operation: CompiledOperation) async -> String? {
+        // Single-flight admission: one substitution at a time process-wide, so a slow pattern
+        // can't fan out pinned workers. Released by the worker itself (even an abandoned one).
         guard substitutionInFlight.compareExchange(
             expected: false, desired: true, ordering: .sequentiallyConsistent
         ).exchanged else { return nil }
 
-        // The regex substitution is uninterruptible; run it on its own detached worker and signal the
-        // result through a one-shot `AsyncStream`. Racing that stream (its iterator is cancellation-
-        // aware) against the soft deadline means losing the race unblocks here without waiting on the
-        // worker, which keeps spinning until the regex returns (or the hard cap crashes a stuck one).
-        let (doneStream, doneSignal) = AsyncStream.makeStream(of: String.self)
-        Task.detached(priority: .userInitiated) {
-            let out: String
-            if let literal = operation.staticReplacement {
-                out = text.replacing(operation.search, with: literal)
-            } else {
-                out = text.replacing(operation.search) { match in
-                    operation.template.expand(output: match.output)
-                }
-            }
-            substitutionInFlight.store(false, ordering: .sequentiallyConsistent)
-            doneSignal.yield(out)
-            doneSignal.finish()
-        }
+        // The substitution is uninterruptible — the regex bridge owns the traversal on its worker
+        // pool with a soft deadline, and crashes a worker still pinned at the hard cap. `expand`
+        // only builds a replacement from an already-matched span; `onResolved` releases the
+        // single-flight admission on the worker (even if it's abandoned).
+        let byteCount = text.utf8.count
+        let search = operation.search
+        let staticReplacement = operation.staticReplacement
+        let template = operation.template
+        let outcome = await MITMRegexConcurrencyBridge.shared.applyingSubstitution(
+            search, to: text,
+            staticReplacement: staticReplacement,
+            expand: { output in template.expand(output: output) },
+            deadlineMillis: substitutionTimeLimitSeconds * 1000,
+            hardCapSeconds: hardCapSeconds,
+            hardCapMessage: {
+                "bodyReplace regex substitution did not return \(hardCapSeconds)s after blowing its soft budget over a \(byteCount) B body — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed, leaving bodyReplace disabled process-wide. Crashing the Network Extension so the system relaunches it clean."
+            },
+            onResolved: { substitutionInFlight.store(false, ordering: .sequentiallyConsistent) }
+        )
 
-        enum RaceResult { case done(String); case timedOut }
-        let result: RaceResult = await withTaskGroup(of: RaceResult.self) { group in
-            group.addTask {
-                var iterator = doneStream.makeAsyncIterator()
-                if let out = await iterator.next() { return .done(out) }
-                return .timedOut
-            }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(substitutionTimeLimitSeconds))
-                return .timedOut
-            }
-            let first = await group.next() ?? .timedOut
-            group.cancelAll()
-            return first
-        }
-
-        switch result {
-        case .done(let out):
+        switch outcome {
+        case .completed(let out):
             return out
         case .timedOut:
             logger.warning("bodyReplace: regex substitution exceeded its time budget over a \(text.utf8.count) B body; leaving the body unchanged (possible catastrophic backtracking in the pattern)")
-            // The worker is still spinning with the in-flight flag stuck; arm the hard-cap crash.
-            Self.scheduleHardCapCheck(byteCount: text.utf8.count)
             return nil
-        }
-    }
-
-    /// One-shot crash check after the hard cap: a substitution that finished cleared the in-flight
-    /// flag and makes this a no-op; one still running (flag stuck `true`) is crashed to recover.
-    private static func scheduleHardCapCheck(byteCount: Int) {
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(for: .seconds(hardCapSeconds))
-            guard substitutionInFlight.load(ordering: .sequentiallyConsistent) else { return }
-            fatalError("bodyReplace regex substitution did not return \(hardCapSeconds)s after blowing its soft budget over a \(byteCount) B body — a worker thread is permanently pinned by catastrophic backtracking and can't be reclaimed, leaving bodyReplace disabled process-wide. Crashing the Network Extension so the system relaunches it clean.")
         }
     }
 }

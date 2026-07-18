@@ -79,7 +79,7 @@ extension RealityConfiguration: Codable {
     }
 }
 
-extension RealityConfiguration: Equatable, Hashable {
+nonisolated extension RealityConfiguration: Equatable, Hashable {
     static func == (lhs: RealityConfiguration, rhs: RealityConfiguration) -> Bool {
         lhs.serverName == rhs.serverName &&
         lhs.publicKey == rhs.publicKey &&

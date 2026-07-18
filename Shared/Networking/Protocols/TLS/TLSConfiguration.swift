@@ -144,7 +144,7 @@ extension TLSConfiguration: Codable {
     }
 }
 
-extension TLSConfiguration: Equatable, Hashable {
+nonisolated extension TLSConfiguration: Equatable, Hashable {
     static func == (lhs: TLSConfiguration, rhs: TLSConfiguration) -> Bool {
         lhs.serverName == rhs.serverName &&
         lhs.alpn == rhs.alpn &&

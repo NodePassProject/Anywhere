@@ -47,22 +47,83 @@ nonisolated final class MITMHTTP2Rewriter {
 
     // MARK: - Headers
 
+    /// Everything the request head path needs from the gate regexes, resolved once at the
+    /// async seam (the regex bridge) so the leg's synchronous pump never touches the engine.
+    /// The request header rules re-gate on the `:path` as a transparent rewrite evolves it, so
+    /// two verdict tables are carried: `pre` (original `:path`) and `post` (rewritten `:path`),
+    /// with `rewriteIndex` marking the rule after which `post` applies.
+    nonisolated struct RequestHeadGates: Sendable {
+        let pre: MITMGateVerdictTable
+        let post: MITMGateVerdictTable
+        /// Index of the transparent-rewrite rule that fired; rules past it gate on `post`.
+        /// nil when no transparent rewrite fires (every rule gates on `pre`).
+        let rewriteIndex: Int?
+        /// Response-phase rules @ the post-rewrite gating URL — the Accept-Encoding clamp gate.
+        let responseGates: MITMGateVerdictTable
+
+        func requestVerdicts(at index: Int) -> MITMGateVerdictTable {
+            if let rewriteIndex, index > rewriteIndex { return post }
+            return pre
+        }
+    }
+
+    /// Derives the post-rewrite `:path` and the firing transparent-rewrite index from the
+    /// pre-rewrite verdicts (first-match-wins).
+    private func postRewrite(originalPath: String?, pre: MITMGateVerdictTable) -> (path: String?, index: Int?) {
+        for (index, rule) in requestRules.enumerated() {
+            guard case .rewrite(.transparent) = rule.operation else { continue }
+            if case .transparent(let replacement)? = rule.resolvedRewriteAction(verdicts: pre, at: index) {
+                return (replacement.requestTarget, index)
+            }
+        }
+        return (originalPath, nil)
+    }
+
+    /// Resolves the request-head gates for a decoded head. Runs in async context (the caller's
+    /// planner) so gate-cache misses suspend on the regex bridge instead of blocking the pump.
+    func resolveRequestHeadGates(originalPath: String?) async -> RequestHeadGates {
+        let preURL = originalPath.map { "https://\(host)\($0)" }
+        let pre = await MITMGateVerdictTable.resolve(rules: requestRules, url: preURL)
+        let (postPath, rewriteIndex) = postRewrite(originalPath: originalPath, pre: pre)
+        let postURL = postPath.map { "https://\(host)\($0)" }
+        let post = postURL == preURL ? pre : await MITMGateVerdictTable.resolve(rules: requestRules, url: postURL)
+        let responseGates = await MITMGateVerdictTable.resolve(rules: responseRules, url: postURL)
+        return RequestHeadGates(pre: pre, post: post, rewriteIndex: rewriteIndex, responseGates: responseGates)
+    }
+
+    /// Synchronous fast path of ``resolveRequestHeadGates(originalPath:)``: returns the gates
+    /// when every needed verdict answers from a literal gate or the memo cache, else nil.
+    func peekRequestHeadGates(originalPath: String?) -> RequestHeadGates? {
+        let preURL = originalPath.map { "https://\(host)\($0)" }
+        guard let pre = MITMGateVerdictTable.peek(rules: requestRules, url: preURL) else { return nil }
+        let (postPath, rewriteIndex) = postRewrite(originalPath: originalPath, pre: pre)
+        let postURL = postPath.map { "https://\(host)\($0)" }
+        let post: MITMGateVerdictTable
+        if postURL == preURL {
+            post = pre
+        } else {
+            guard let resolved = MITMGateVerdictTable.peek(rules: requestRules, url: postURL) else { return nil }
+            post = resolved
+        }
+        guard let responseGates = MITMGateVerdictTable.peek(rules: responseRules, url: postURL) else { return nil }
+        return RequestHeadGates(pre: pre, post: post, rewriteIndex: rewriteIndex, responseGates: responseGates)
+    }
+
     func transformRequestHeaders(
         _ headers: [(name: String, value: String)],
-        streamID: UInt32
+        gates: RequestHeadGates
     ) -> [(name: String, value: String)] {
         // :authority rewrite runs first so header rules see the post-rewrite value.
         let withAuthority = applyAuthorityRewrite(headers)
-        return applyHeaderRules(withAuthority, phase: .httpRequest, requestURL: nil)
+        return applyRequestHeaderRules(withAuthority, gates: gates)
     }
 
-    /// ``requestURL`` gates response-phase rules; response headers carry no ``:path``.
+    /// ``verdicts`` gates response-phase rules at the request URL; response headers carry no ``:path``.
     func transformResponseHeaders(
         _ headers: [(name: String, value: String)],
-        streamID: UInt32,
-        requestURL: String?
+        verdicts: MITMGateVerdictTable
     ) -> [(name: String, value: String)] {
-        applyHeaderRules(headers, phase: .httpResponse, requestURL: requestURL)
+        applyResponseHeaderRules(headers, verdicts: verdicts)
     }
 
     static func requestPath(in headers: [(name: String, value: String)]) -> String? {
@@ -73,17 +134,17 @@ nonisolated final class MITMHTTP2Rewriter {
 
     /// Synthesized response when the first matching request-phase rewrite rule is a
     /// 302 / reject sub-mode; nil for transparent or no match.
-    func requestSynthResponse(requestURL: String?) -> MITMScriptEngine.SynthesizedResponse? {
-        for rule in requestRules {
+    func requestSynthResponse(gates: RequestHeadGates) -> MITMScriptEngine.SynthesizedResponse? {
+        for (index, rule) in requestRules.enumerated() {
             guard case .rewrite(let action) = rule.operation else { continue }
             // A transparent rewrite never synthesizes; it's handled in the header path.
             // Defer to it only when it actually resolves — an unresolvable template is
             // skipped so a later matching rule can still synthesize.
             if case .transparent = action {
-                if rule.resolvedRewriteAction(for: requestURL) != nil { return nil }
+                if rule.resolvedRewriteAction(verdicts: gates.pre, at: index) != nil { return nil }
                 continue
             }
-            guard let resolved = rule.resolvedRewriteAction(for: requestURL) else { continue }
+            guard let resolved = rule.resolvedRewriteAction(verdicts: gates.pre, at: index) else { continue }
             return MITMRespondBuilder.response(for: resolved)
         }
         return nil
@@ -92,28 +153,19 @@ nonisolated final class MITMHTTP2Rewriter {
     // MARK: - Script preflight + application
 
     /// HEADERS emitted immediately, scripts run per-frame.
-    func hasStreamScriptRule(phase: MITMPhase, requestURL: String?) -> Bool {
-        MITMScriptTransform.hasStreamScriptRule(
-            in: rules(phase: phase),
-            requestURL: requestURL
-        )
+    func hasStreamScriptRule(phase: MITMPhase, verdicts: MITMGateVerdictTable) -> Bool {
+        MITMScriptTransform.hasStreamScriptRule(in: rules(phase: phase), verdicts: verdicts)
     }
 
     /// Check ``hasStreamScriptRule`` first — streaming takes precedence and never
     /// coexists with buffered mode.
-    func hasBufferedBodyRule(phase: MITMPhase, requestURL: String?) -> Bool {
-        MITMScriptTransform.hasBufferedBodyRule(
-            in: rules(phase: phase),
-            requestURL: requestURL
-        )
+    func hasBufferedBodyRule(phase: MITMPhase, verdicts: MITMGateVerdictTable) -> Bool {
+        MITMScriptTransform.hasBufferedBodyRule(in: rules(phase: phase), verdicts: verdicts)
     }
 
     /// True when a rule of `phase` would read or rewrite the body (buffered or per-frame).
-    func hasBodyAccessingRule(phase: MITMPhase, requestURL: String?) -> Bool {
-        MITMScriptTransform.hasBodyAccessingRule(
-            in: rules(phase: phase),
-            requestURL: requestURL
-        )
+    func hasBodyAccessingRule(phase: MITMPhase, verdicts: MITMGateVerdictTable) -> Bool {
+        MITMScriptTransform.hasBodyAccessingRule(in: rules(phase: phase), verdicts: verdicts)
     }
 
     func rules(phase: MITMPhase) -> [CompiledMITMRule] {
@@ -135,6 +187,11 @@ nonisolated final class MITMHTTP2Rewriter {
             rules: rules(phase: phase),
             engineProvider: scriptEngineProvider
         )
+    }
+
+    /// Per-stream streaming-script cursor, resolved from the response-phase head gates.
+    func makeResponseFrameCursor(verdicts: MITMGateVerdictTable) -> MITMScriptTransform.FrameCursor {
+        MITMScriptTransform.makeFrameCursor(rules: responseRules, verdicts: verdicts)
     }
 
     // MARK: - Authority rewrite
@@ -167,30 +224,26 @@ nonisolated final class MITMHTTP2Rewriter {
 
     // MARK: - Header rule application
 
-    private func applyHeaderRules(
+    private func applyRequestHeaderRules(
         _ headers: [(name: String, value: String)],
-        phase: MITMPhase,
-        requestURL: String?
+        gates: RequestHeadGates
     ) -> [(name: String, value: String)] {
-        let rulesForPhase = rules(phase: phase)
-        guard !rulesForPhase.isEmpty else { return headers }
+        guard !requestRules.isEmpty else { return headers }
 
         var current = headers
         // First matching transparent rewrite wins; later rewrite rules are skipped.
         var rewroteRequest = false
-        for rule in rulesForPhase {
-            // Request rules gate on the live `:path` (an earlier rule may have
-            // rewritten it); response rules on the originating request URL.
-            let gateURL = (phase == .httpRequest)
-                ? Self.requestPath(in: current).map { "https://\(host)\($0)" }
-                : requestURL
-            guard rule.matchesURL(gateURL) else { continue }
+        for (index, rule) in requestRules.enumerated() {
+            // Request rules gate on the live `:path` (an earlier transparent rewrite may have
+            // changed it) — `gates` carries the pre/post verdicts split at the rewrite index.
+            let verdicts = gates.requestVerdicts(at: index)
+            guard verdicts.matches(at: index) else { continue }
             switch rule.operation {
             case .rewrite:
-                // Request-phase only; 302/reject sub-modes were handled by the pre-check.
+                // 302/reject sub-modes were handled by the pre-check.
                 // resolvedRewriteAction expands any `$1`-style target template against the match.
-                guard phase == .httpRequest, !rewroteRequest,
-                      let resolved = rule.resolvedRewriteAction(for: gateURL),
+                guard !rewroteRequest,
+                      let resolved = rule.resolvedRewriteAction(verdicts: verdicts, at: index),
                       case .transparent(let replacement) = resolved else { continue }
                 rewroteRequest = true
                 effectiveAuthority = replacement.authority
@@ -227,6 +280,35 @@ nonisolated final class MITMHTTP2Rewriter {
                     ASCII.equalsIgnoringCase(entry.name, name) ? (name: name, value: value) : entry
                 }
             case .script, .streamScript, .bodyReplace, .bodyJSON:
+                continue
+            }
+        }
+        return current
+    }
+
+    private func applyResponseHeaderRules(
+        _ headers: [(name: String, value: String)],
+        verdicts: MITMGateVerdictTable
+    ) -> [(name: String, value: String)] {
+        guard !responseRules.isEmpty else { return headers }
+
+        var current = headers
+        for (index, rule) in responseRules.enumerated() {
+            guard verdicts.matches(at: index) else { continue }
+            switch rule.operation {
+            case .headerAdd(let name, let value):
+                guard !name.hasPrefix(":") else { continue }
+                current.append((name: name, value: value))
+            case .headerDelete(let nameLower):
+                guard !nameLower.hasPrefix(":") else { continue }
+                current.removeAll { ASCII.equalsIgnoringCase($0.name, nameLower) }
+            case .headerReplace(let name, let value):
+                guard !name.hasPrefix(":") else { continue }
+                current = current.map { entry in
+                    ASCII.equalsIgnoringCase(entry.name, name) ? (name: name, value: value) : entry
+                }
+            // No rewrite in response phase (RFC: rewrite is request-only); scripts/body run elsewhere.
+            case .rewrite, .script, .streamScript, .bodyReplace, .bodyJSON:
                 continue
             }
         }

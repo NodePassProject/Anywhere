@@ -554,12 +554,43 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
 
-        if let synth = rewriter.requestSynthResponse(requestURL: requestURL) {
+        let head = PendingRequestHead(
+            streamID: streamID, decoded: decoded, neverIndexed: neverIndexed,
+            endStream: endStream, method: method.uppercased(), requestURL: requestURL, originalPath: path
+        )
+        // Resolve the request-head gates before any rewrite/mode decision. Literal/cached gates
+        // resolve inline; a regex cache miss parks the pump on the regex bridge and resumes.
+        if let gates = rewriter.peekRequestHeadGates(originalPath: path) {
+            return applyRequestHead(head, gates: gates)
+        }
+        return parkForRequestGates(head)
+    }
+
+    /// Everything the request-head rewrite + body-mode decision needs past the gate seam.
+    private struct PendingRequestHead: Sendable {
+        let streamID: UInt32
+        let decoded: [(name: String, value: String)]
+        let neverIndexed: Set<String>
+        let endStream: Bool
+        let method: String
+        let requestURL: String?
+        let originalPath: String?
+    }
+
+    /// Applies the request head once its gate verdicts are in hand: synth short-circuit, header
+    /// rewrite, body-mode selection. Never parks (returns false).
+    private func applyRequestHead(_ head: PendingRequestHead, gates: MITMHTTP2Rewriter.RequestHeadGates) -> Bool {
+        let streamID = head.streamID
+        let endStream = head.endStream
+        let requestURL = head.requestURL
+        let neverIndexed = head.neverIndexed
+
+        if let synth = rewriter.requestSynthResponse(gates: gates) {
             answerSynth(streamID: streamID, response: synth)
             return false
         }
 
-        var rewritten = rewriter.transformRequestHeaders(decoded, streamID: streamID)
+        var rewritten = rewriter.transformRequestHeaders(head.decoded, gates: gates)
         // Capture synchronously, while it still reflects this request's rewrite, before a
         // body-buffering hop lets a concurrent stream overwrite the rewriter's shared field.
         let resolvedUpstream = rewriter.resolvedUpstream
@@ -567,15 +598,16 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
 
         // Clamp only when a response body rule will read the reply; a passthrough request keeps
         // the client's `Accept-Encoding` so its negotiation matches a non-intercepted connection.
-        if rewriter.hasBodyAccessingRule(phase: .httpResponse, requestURL: gateURL) {
+        if rewriter.hasBodyAccessingRule(phase: .httpResponse, verdicts: gates.responseGates) {
             rewritten = MITMBridgeHeaders.clampingAcceptEncoding(rewritten)
         }
 
-        if rewriter.hasStreamScriptRule(phase: .httpRequest, requestURL: gateURL) {
+        if rewriter.hasStreamScriptRule(phase: .httpRequest, verdicts: gates.post) {
             logger.warning("bridge \(host) stream \(streamID): request stream-script not supported on the bridge; forwarding body unscripted")
         }
 
-        let hasBufferedRule = rewriter.hasBufferedBodyRule(phase: .httpRequest, requestURL: gateURL)
+        let hasBufferedRule = rewriter.hasBufferedBodyRule(phase: .httpRequest, verdicts: gates.post)
+        let method = head.method
         let willBufferBody = hasBufferedRule && (endStream || shouldBuffer(headers: rewritten))
 
         // Expect: 100-continue — only intercept it when a rule buffers the whole body locally before
@@ -632,6 +664,28 @@ nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
         delegate?.clientLegSendRequestHead(head, url: gateURL, endStream: endStream)
         if endStream { requestStreams.removeValue(forKey: streamID) }
         return false
+    }
+
+    /// Parks the pump while the regex bridge resolves the request-head gates, then resumes on
+    /// the lwIP queue: applies the head and continues pumping. Returns true (parked).
+    private func parkForRequestGates(_ head: PendingRequestHead) -> Bool {
+        let rewriter = self.rewriter
+        Task { [weak self] in
+            let gates = await rewriter.resolveRequestHeadGates(originalPath: head.originalPath)
+            guard let self else { return }
+            self.lwipBridge.enqueue {
+                // The enqueue body runs on the lwIP queue — this leg's isolation domain.
+                guard !self.torn, !self.parseError else {
+                    let continuation = self.parkedContinuation; self.parkedContinuation = nil
+                    continuation?.resume()
+                    return
+                }
+                _ = self.applyRequestHead(head, gates: gates)
+                let parked = self.pump()
+                self.finishPass(parked: parked)
+            }
+        }
+        return true
     }
 
     private func makeRequestHead(

@@ -22,9 +22,17 @@ extension CompiledMITMRule {
 
     /// Whether the gate matches the URL. The gate is unanchored; the host is lowercased
     /// before matching (RFC 3986), path/query keep case; nil/over-long URLs fail closed.
-    func matchesURL(_ url: String?) -> Bool {
+    /// A gate-cache miss evaluates on the regex bridge — the caller suspends, never blocks.
+    func matchesURL(_ url: String?) async -> Bool {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return false }
-        return gate.matches(Self.lowercasingHost(url))
+        return await gate.matches(Self.lowercasingHost(url))
+    }
+
+    /// Synchronous fast path of ``matchesURL(_:)``: literal gates, memoized verdicts, and
+    /// quarantine answer inline; nil means the verdict needs async resolution.
+    func peekMatchesURL(_ url: String?) -> Bool? {
+        guard let url, url.utf16.count <= Self.maxGateURLLength else { return false }
+        return gate.peekMatches(Self.lowercasingHost(url))
     }
 
     /// Lowercases only the authority, leaving path/query untouched.
@@ -44,39 +52,112 @@ extension CompiledMITMRule {
     /// Capture groups from the gate match (index 0 = whole match), or nil on no match /
     /// over-long. Mirrors ``matchesURL(_:)``'s host normalization so a templated rewrite
     /// captures from the same string the gate matched.
-    func capturesForURL(_ url: String?) -> [String?]? {
+    func capturesForURL(_ url: String?) async -> [String?]? {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return nil }
-        return gate.firstMatchCaptures(Self.lowercasingHost(url))
+        return await gate.firstMatchCaptures(Self.lowercasingHost(url))
     }
 
-    /// Resolves this rule's rewrite action for `url`, expanding any capture template.
-    /// nil when the operation isn't a rewrite, the gate doesn't match, or a templated
-    /// target expands to an invalid URL (rule then no-ops). Static targets reuse their
-    /// compile-time parse.
-    func resolvedRewriteAction(for url: String?) -> ResolvedRewriteAction? {
+    /// Synchronous fast path of ``capturesForURL(_:)`` (literal/quarantined gates); outer nil
+    /// means the captures need async resolution, inner nil is a real no-match.
+    func peekCapturesForURL(_ url: String?) -> [String?]?? {
+        guard let url, url.utf16.count <= Self.maxGateURLLength else { return .some(nil) }
+        return gate.peekFirstMatchCaptures(Self.lowercasingHost(url))
+    }
+
+    /// Resolves this rule's rewrite action from a pre-resolved verdict table (`index` is this
+    /// rule's position in the array the table was resolved for), expanding any capture
+    /// template. nil when the operation isn't a rewrite, the gate doesn't match, or a
+    /// templated target expands to an invalid URL (rule then no-ops). Static targets reuse
+    /// their compile-time parse.
+    func resolvedRewriteAction(verdicts: MITMGateVerdictTable, at index: Int) -> ResolvedRewriteAction? {
         guard case .rewrite(let action) = operation else { return nil }
         switch action {
         case .transparent(.resolved(let replacement)):
-            return matchesURL(url) ? .transparent(replacement) : nil
+            return verdicts.matches(at: index) ? .transparent(replacement) : nil
         case .transparent(.templated(let template)):
-            guard let captures = capturesForURL(url),
+            guard let captures = verdicts.captures(at: index),
                   let replacement = MITMRewritePolicy.resolveTransparentTemplate(template, captures: captures)
             else { return nil }
             return .transparent(replacement)
         case .redirect302(.location(let location)):
-            return matchesURL(url) ? .redirect302(location: location) : nil
+            return verdicts.matches(at: index) ? .redirect302(location: location) : nil
         case .redirect302(.templated(let template)):
-            guard let captures = capturesForURL(url),
+            guard let captures = verdicts.captures(at: index),
                   let location = MITMRewritePolicy.resolveRedirectTemplate(template, captures: captures)
             else { return nil }
             return .redirect302(location: location)
         case .reject200Text(let content):
-            return matchesURL(url) ? .reject200Text(content: content) : nil
+            return verdicts.matches(at: index) ? .reject200Text(content: content) : nil
         case .reject200Gif:
-            return matchesURL(url) ? .reject200Gif : nil
+            return verdicts.matches(at: index) ? .reject200Gif : nil
         case .reject200Data(let base64):
-            return matchesURL(url) ? .reject200Data(base64: base64) : nil
+            return verdicts.matches(at: index) ? .reject200Data(base64: base64) : nil
         }
+    }
+}
+
+nonisolated struct MITMGateVerdictTable: Sendable {
+    /// The gate URL the verdicts were resolved against (pre-normalization form).
+    let url: String?
+    private let matched: [Bool]
+    /// Aligned with `matched`; populated only for rules whose rewrite target expands capture
+    /// templates. nil elsewhere, and on no-match / timeout / quarantine.
+    private let captureGroups: [[String?]?]
+
+    func matches(at index: Int) -> Bool { matched[index] }
+    func captures(at index: Int) -> [String?]? { captureGroups[index] }
+
+    /// Verdicts for an empty rule array — the no-rules fast path.
+    static let empty = MITMGateVerdictTable(url: nil, matched: [], captureGroups: [])
+
+    /// True when `rule`'s resolution needs capture groups, not just a boolean verdict.
+    private static func needsCaptures(_ rule: CompiledMITMRule) -> Bool {
+        guard case .rewrite(let action) = rule.operation else { return false }
+        switch action {
+        case .transparent(.templated), .redirect302(.templated):
+            return true
+        case .transparent(.resolved), .redirect302(.location),
+             .reject200Text, .reject200Gif, .reject200Data:
+            return false
+        }
+    }
+
+    /// Synchronous resolution attempt: literal gates, memoized verdicts, and quarantine
+    /// resolve inline. nil when any rule's verdict (or needed captures) requires the regex
+    /// engine — resolve with ``resolve(rules:url:)`` instead.
+    static func peek(rules: [CompiledMITMRule], url: String?) -> MITMGateVerdictTable? {
+        var matched = [Bool]()
+        matched.reserveCapacity(rules.count)
+        var captureGroups = [[String?]?](repeating: nil, count: rules.count)
+        for (index, rule) in rules.enumerated() {
+            if needsCaptures(rule) {
+                guard let groups = rule.peekCapturesForURL(url) else { return nil }
+                captureGroups[index] = groups
+                matched.append(groups != nil)
+            } else {
+                guard let verdict = rule.peekMatchesURL(url) else { return nil }
+                matched.append(verdict)
+            }
+        }
+        return MITMGateVerdictTable(url: url, matched: matched, captureGroups: captureGroups)
+    }
+
+    /// Full resolution: gate-cache misses evaluate on the regex bridge (the caller suspends,
+    /// never blocks); verdicts land in the gates' memo caches for later synchronous peeks.
+    static func resolve(rules: [CompiledMITMRule], url: String?) async -> MITMGateVerdictTable {
+        var matched = [Bool]()
+        matched.reserveCapacity(rules.count)
+        var captureGroups = [[String?]?](repeating: nil, count: rules.count)
+        for (index, rule) in rules.enumerated() {
+            if needsCaptures(rule) {
+                let groups = await rule.capturesForURL(url)
+                captureGroups[index] = groups
+                matched.append(groups != nil)
+            } else {
+                matched.append(await rule.matchesURL(url))
+            }
+        }
+        return MITMGateVerdictTable(url: url, matched: matched, captureGroups: captureGroups)
     }
 }
 

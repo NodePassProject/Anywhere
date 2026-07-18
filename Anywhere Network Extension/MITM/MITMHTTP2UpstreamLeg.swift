@@ -866,44 +866,97 @@ actor MITMHTTP2UpstreamLeg {
         }
 
         let responseURL = originatingRequest?.url
-        let rewritten = rewriter.transformResponseHeaders(decoded, streamID: clientID, requestURL: responseURL)
+        let head = PendingResponseHead(
+            clientID: clientID, status: status, decoded: decoded,
+            neverIndexed: neverIndexed, endStream: endStream,
+            originatingRequest: originatingRequest, responseURL: responseURL
+        )
+        // Resolve the response-phase gates before deciding the body mode. Literal/cached gates
+        // resolve inline; a regex cache miss parks the pump on the regex bridge and resumes.
+        if let verdicts = MITMGateVerdictTable.peek(rules: rewriter.rules(phase: .httpResponse), url: responseURL) {
+            return applyResponseHead(head, verdicts: verdicts)
+        }
+        return parkForResponseGates(head)
+    }
+
+    /// Everything the response-head body-mode decision needs past the gate seam.
+    private struct PendingResponseHead: Sendable {
+        let clientID: UInt32
+        let status: Int
+        let decoded: [(name: String, value: String)]
+        let neverIndexed: Set<String>
+        let endStream: Bool
+        let originatingRequest: MITMRequestLog.Record?
+        let responseURL: String?
+    }
+
+    /// Applies the response head once its gate verdicts are in hand: rewrites headers and
+    /// selects streaming / buffering / passthrough. Never parks (returns false).
+    private func applyResponseHead(_ head: PendingResponseHead, verdicts: MITMGateVerdictTable) -> Bool {
+        let clientID = head.clientID
+        let status = head.status
+        let rewritten = rewriter.transformResponseHeaders(head.decoded, verdicts: verdicts)
         let regular = rewritten.filter { !$0.name.hasPrefix(":") }
 
         // HEAD responses and 204/304 carry no body.
-        let isHead = originatingRequest?.method?.uppercased() == "HEAD"
-        if endStream || isHead || status == 204 || status == 304 {
-            sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: true, neverIndexed: neverIndexed)
+        let isHead = head.originatingRequest?.method?.uppercased() == "HEAD"
+        if head.endStream || isHead || status == 204 || status == 304 {
+            sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: true, neverIndexed: head.neverIndexed)
             // We tell the client the response is over, but the origin only really ended it if it set
             // END_STREAM. `finalizeResponseHalf` keeps the origin half-open if the upload is in flight,
             // else RSTs a synthesized end (e.g. HEAD/204/304 without END_STREAM) so it isn't leaked.
-            finalizeResponseHalf(clientID: clientID, originEnded: endStream)
+            finalizeResponseHalf(clientID: clientID, originEnded: head.endStream)
             return false
         }
 
-        if rewriter.hasStreamScriptRule(phase: .httpResponse, requestURL: responseURL) {
-            sink?.deliverResponseHead(streamID: clientID, status: status, headers: MITMBridgeHeaders.droppingContentLength(regular), endStream: false, neverIndexed: neverIndexed)
+        if rewriter.hasStreamScriptRule(phase: .httpResponse, verdicts: verdicts) {
+            sink?.deliverResponseHead(streamID: clientID, status: status, headers: MITMBridgeHeaders.droppingContentLength(regular), endStream: false, neverIndexed: head.neverIndexed)
             responseStreams[clientID] = .streaming(StreamingResponse(
-                status: status, headers: rewritten, originatingRequest: originatingRequest,
-                cursor: MITMScriptTransform.FrameCursor()
+                status: status, headers: rewritten, originatingRequest: head.originatingRequest,
+                cursor: rewriter.makeResponseFrameCursor(verdicts: verdicts)
             ))
             return false
         }
 
-        if rewriter.hasBufferedBodyRule(phase: .httpResponse, requestURL: responseURL) {
+        if rewriter.hasBufferedBodyRule(phase: .httpResponse, verdicts: verdicts) {
             let codec = MITMBodyCodec.plan(for: HTTPHeader.firstValue(in: rewritten, named: "content-encoding"))
             responseStreams[clientID] = .buffering(BufferedResponse(
                 data: Data(), codec: codec, status: status,
-                headers: rewritten, originatingRequest: originatingRequest, neverIndexed: neverIndexed
+                headers: rewritten, originatingRequest: head.originatingRequest, neverIndexed: head.neverIndexed
             ))
             return false
         }
 
         // Passthrough: stream the body as it arrives. Drain-coupled so a slow client backpressures
         // the origin instead of overflowing the client-bound buffer.
-        sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: false, neverIndexed: neverIndexed)
+        sink?.deliverResponseHead(streamID: clientID, status: status, headers: regular, endStream: false, neverIndexed: head.neverIndexed)
         responseStreams[clientID] = .passthrough
         drainCoupledStreams.insert(clientID)
         return false
+    }
+
+    /// Parks the pump while the regex bridge resolves the response-head gates, then resumes on
+    /// the lwIP queue: applies the head and continues pumping. Returns true (parked).
+    private func parkForResponseGates(_ head: PendingResponseHead) -> Bool {
+        let rules = rewriter.rules(phase: .httpResponse)
+        let url = head.responseURL
+        Task { [weak self] in
+            let verdicts = await MITMGateVerdictTable.resolve(rules: rules, url: url)
+            guard let self else { return }
+            self.lwipBridge.enqueue {
+                self.assumeIsolated { leg in
+                    guard !leg.torn, !leg.parseError else {
+                        let continuation = leg.parkedContinuation; leg.parkedContinuation = nil
+                        continuation?.resume()
+                        return
+                    }
+                    _ = leg.applyResponseHead(head, verdicts: verdicts)
+                    let parked = leg.pump()
+                    leg.finishPass(parked: parked)
+                }
+            }
+        }
+        return true
     }
 
     // MARK: Response DATA
@@ -1169,7 +1222,6 @@ actor MITMHTTP2UpstreamLeg {
         Task { [weak self] in
             let result = await MITMScriptTransform.applyFrame(
                 body,
-                rules: rewriter.rules(phase: .httpResponse),
                 frameContext: context,
                 cursor: cursor,
                 engineProvider: rewriter.scriptEngineProvider
