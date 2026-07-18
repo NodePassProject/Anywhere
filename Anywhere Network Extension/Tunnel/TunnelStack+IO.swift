@@ -14,12 +14,8 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
 extension TunnelStack {
 
     // MARK: - Output Batching
-
-    /// Drains the output buffer to utun. `nonisolated` and driven by ``outputDrainTask`` (a detached
-    /// task), so `writePackets` runs off the lwIP queue and producers never block on it. `packetFlow`
-    /// is captured at task spawn; the buffer/releases stay behind the ``outputBuffer`` Mutex, so this
-    /// touches no actor-isolated state.
-    nonisolated func drainOutputLoop(packetFlow: NEPacketTunnelFlow) {
+    
+    nonisolated func drainOutputLoop(packetFlow: NEPacketTunnelFlow) async {
         let cap = TunnelConstants.tunnelMaxPacketsPerWrite
         while true {
             var packets: [Data] = []
@@ -54,9 +50,7 @@ extension TunnelStack {
 
             if packets.isEmpty { return }
             packetFlow.writePackets(packets, withProtocols: protocols)
-
-            // writePackets copies into the kernel synchronously, so the buffers
-            // are already unreferenced.
+            
             if !releases.isEmpty {
                 let toRelease = releases
                 lwipBridge.enqueue {
@@ -65,11 +59,11 @@ extension TunnelStack {
                     }
                 }
             }
+
+            await Task.yield()
         }
     }
-
-    /// Appends an outbound packet and kicks the drain if idle. `nonisolated`: called from the lwIP
-    /// output callback, the off-actor read loop's reflection path, and the UDP plane.
+    
     nonisolated func enqueueOutbound(_ packet: Data, isIPv6: Bool) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
         let needsKick: Bool = outputBuffer.withLock { buffer in
@@ -91,17 +85,11 @@ extension TunnelStack {
         guard let packetFlow else { return }
         let plane = udpPlane!
         let bridge = lwipBridge
-        // Detached so the read/partition CPU runs off the lwIP queue (like the drain). Strong self:
-        // the bridge's `read` resumes `nil` on cancellation, so `stop()`'s cancel ends the loop and
-        // ARC releases everything the task captured — an idle read pins nothing beyond the flow.
-        // `packetFlow`/`plane`/`bridge` are captured so the loop names no isolated state directly.
         readTask = Task.detached { [self, packetFlow, plane, bridge] in
             while !Task.isCancelled {
                 guard let (packets, _) = await PacketFlowConcurrencyBridge.read(from: packetFlow),
                       running, !Task.isCancelled else { return }
-
-                // Partition — a cheap header peek per packet. Reflected packets bounce straight
-                // back into the TUN here, never reaching lwIP, UDP, routing, or the proxy.
+                
                 let reflector = self.reflector()
                 var udpBatch: [Data] = []
                 var lwipBatch: [Data] = []
@@ -116,10 +104,7 @@ extension TunnelStack {
                         lwipBatch.append(packet)
                     }
                 }
-
-                // Feed both sub-batches concurrently; the loop re-reads only once both finish. The
-                // lwIP feed hops onto the lwIP queue via the bridge and enters the stack's isolation
-                // there through `assumeIsolated`; the UDP plane is its own actor.
+                
                 await withTaskGroup(of: Void.self) { group in
                     if !lwipBatch.isEmpty {
                         group.addTask { [lwipBatch] in
@@ -133,13 +118,9 @@ extension TunnelStack {
             }
         }
     }
-
-    /// Feeds a TCP/ICMP batch into lwIP and re-arms the timeout tick. Isolated (touches
-    /// ``lwipTick``); entered via `assumeIsolated` from the read loop's `lwipBridge.run` hop, so it
-    /// runs on the lwIP queue.
+    
     func feedLwipBatch(_ packets: [Data]) {
         lwipBridge.input(packets)
-        // A fresh segment may have queued a timeout while the tick was suspended — re-arm.
         lwipTick?.resume()
     }
 
@@ -151,16 +132,12 @@ extension TunnelStack {
             leewayMs: TunnelConstants.lwipTimeoutLeewayMs
         ) { [weak self] in
             guard let self, self.running else { return }
-            // Fires on the lwIP queue; the tick suspend is isolated state, entered via
-            // `assumeIsolated` (validated against the queue, no hop).
             if self.lwipBridge.serviceTimeouts() {
                 self.assumeIsolated { $0.lwipTick?.suspend() }
             }
         }
     }
-
-    /// Re-arms the timeout tick after fresh input while stopped/suspended. Isolated; called on the
-    /// lwIP queue from restart/resume paths.
+    
     func resumeLwipTickIfNeeded() {
         lwipTick?.resume()
     }
@@ -173,8 +150,7 @@ extension TunnelStack {
             await self?.runScheduledUDPCleanup()
         }
     }
-
-    /// The periodic UDP-cleanup body, hopped onto the stack actor by the scheduler handler.
+    
     private func runScheduledUDPCleanup() async {
         guard running else { return }
         await udpPlane.cleanup()

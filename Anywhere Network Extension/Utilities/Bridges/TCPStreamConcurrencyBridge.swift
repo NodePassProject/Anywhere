@@ -29,8 +29,8 @@ actor TCPStreamConcurrencyBridge {
     // MARK: Upload (app → upstream)
     //
     // Coalesces a synchronous burst of lwIP recv callbacks so the relay ships one large send;
-    // `tcp_recved` is deferred to ``ackUpload(_:)`` (fired after the upstream accepts a chunk),
-    // so TCP_WND caps how far ahead the buffer runs.
+    // `tcp_recved` is deferred until the upstream accepts a chunk (the ack rides the next
+    // ``receiveUpload(acking:)``), so TCP_WND caps how far ahead the buffer runs.
 
     private var uploadBuffer = Data()
     private var uploadBufferOffset = 0
@@ -116,9 +116,13 @@ actor TCPStreamConcurrencyBridge {
     // MARK: - Upload async surface (single upload relay)
 
     /// The next coalesced upload chunk (≤ `uploadChunkSize`), or `nil` once the app's FIN is
-    /// reached and the buffer is drained. Termination wins over buffered data — a torn-down
-    /// connection's residue must not reach the upstream, and the relay must exit promptly.
-    func receiveUpload() async -> Data? {
+    /// reached and the buffer is drained. Acks `acking` bytes — the previously delivered chunk,
+    /// now accepted by the upstream — in the same hop (ack-on-take), so each relay cycle crosses
+    /// the lwIP queue once; the final chunk's ack rides the call that returns `nil`. Termination
+    /// wins over buffered data — a torn-down connection's residue must not reach the upstream,
+    /// the relay must exit promptly, and the ack is skipped so it never touches the freed pcb.
+    func receiveUpload(acking ackedByteCount: Int) async -> Data? {
+        ackUpload(ackedByteCount)
         while true {
             if terminated { return nil }
             if uploadCount > 0 {
@@ -133,7 +137,8 @@ actor TCPStreamConcurrencyBridge {
 
     /// Acks `byteCount` upload bytes back to lwIP once the upstream accepted them, reopening the
     /// receive window. Deferred until acceptance so the app is throttled to the upstream's rate.
-    func ackUpload(_ byteCount: Int) {
+    /// Rides ``receiveUpload(acking:)``'s hop rather than a hop of its own.
+    private func ackUpload(_ byteCount: Int) {
         guard !terminated, byteCount > 0 else { return }
         var remaining = byteCount
         while remaining > 0 {

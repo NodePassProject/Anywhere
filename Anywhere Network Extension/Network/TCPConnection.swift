@@ -21,42 +21,26 @@ actor TCPConnection {
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
     }
-
-    /// The owning stack, for traffic accounting, MITM state, and teardown
-    /// coordination. Weak: the stack can stop while late completions on this
-    /// connection are still in flight.
+    
     private weak var stack: TunnelStack?
 
     let pcb: UnsafeMutableRawPointer
     let dstPort: UInt16
-
-    /// The lwIP concurrency boundary: the connection's serial executor, every `tcp_*`
-    /// call, and this connection's PCB-token lifetime all go through it.
+    
     let bridge: LWIPConcurrencyBridge
-
-    /// Dial destination, fixed at accept time; an SNI re-route deliberately
-    /// keeps the caller's own DNS choice.
+    
     private(set) var dstHost: String
-
-    /// Routing configuration; an SNI re-match may swap it to a different proxy.
+    
     private(set) var configuration: ProxyConfiguration
 
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
-    /// The in-flight proxy dial. Teardown cancels it so a still-connecting handshake unwinds
-    /// (its `CancellationError` runs the connect path's cleanup) instead of lingering until the
-    /// handshake timeout — `client.cancel()` alone only tears down an already-delivered connection.
     private var proxyDialTask: Task<Void, Never>?
-
-    /// Committed routing identity for traffic accounting and the dial path; an SNI re-match can change it.
-    private var routeTarget: RouteTarget
-
-    /// Whether the accept-time route is the default outbound.
+    
     private let acceptedViaDefault: Bool
-
-    /// Rule set behind the committed route, mirroring `routeTarget`'s mutations;
-    /// nil while the route is the default outbound.
+    
+    private var routeTarget: RouteTarget
     private var ruleSetName: String?
 
     private var bypass: Bool {
@@ -320,7 +304,8 @@ actor TCPConnection {
     
     @concurrent
     private nonisolated func runUploadRelay(_ connection: ProxyConnection, _ stream: TCPStreamConcurrencyBridge, context: RelayContext) async {
-        while let chunk = await stream.receiveUpload() {
+        var unacked = 0
+        while let chunk = await stream.receiveUpload(acking: unacked) {
             do {
                 try await connection.send(chunk)
             } catch {
@@ -329,8 +314,7 @@ actor TCPConnection {
             }
             markActivity()
             context.stack?.addBytesOut(Int64(chunk.count), target: context.routeTarget)
-            // No-op once teardown has terminated the stream, so a late ack never touches the pcb.
-            await stream.ackUpload(chunk.count)
+            unacked = chunk.count
         }
     }
     

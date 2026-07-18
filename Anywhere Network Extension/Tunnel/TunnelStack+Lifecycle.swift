@@ -40,7 +40,7 @@ extension TunnelStack {
         let outputKick = self.outputKick
         outputDrainTask = Task.detached { [self, outputKick, packetFlow] in
             for await _ in outputKick {
-                self.drainOutputLoop(packetFlow: packetFlow)
+                await self.drainOutputLoop(packetFlow: packetFlow)
             }
         }
 

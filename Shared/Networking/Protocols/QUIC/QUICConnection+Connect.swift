@@ -15,6 +15,7 @@ extension QUICConnection {
     // MARK: Connect
     
     nonisolated func connect() async throws {
+        let resolvedIPs: [String] = transport == nil ? await DNSResolver.shared.resolveAll(host) : []
         try await bridge.runParkedThrowing(host: self) { me, continuation in
             guard me.state == .idle else {
                 continuation.resume(throwing: QUICError.connectionFailed("Invalid state"))
@@ -23,7 +24,7 @@ extension QUICConnection {
             QUICCrypto.registerCallbacks()
             me.state = .connecting
             me.connectContinuation = continuation
-            me.setupUDP()
+            me.setupUDP(resolvedIPs: resolvedIPs)
         }
     }
     
@@ -49,17 +50,17 @@ extension QUICConnection {
 
     // MARK: UDP
 
-    func setupUDP() {
+    func setupUDP(resolvedIPs: [String]) {
         if let transport {
             setupTunnelTransport(transport: transport)
         } else {
-            setupDirectCarrier()
+            setupDirectCarrier(resolvedIPs: resolvedIPs)
         }
     }
 
-    func setupDirectCarrier() {
+    func setupDirectCarrier(resolvedIPs: [String]) {
         do {
-            populateRemoteAddr()
+            populateRemoteAddr(resolvedIPs: resolvedIPs)
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
@@ -177,7 +178,10 @@ extension QUICConnection {
         clearMigrationState()
     }
 
-    func populateRemoteAddr() {
+    /// Fills `remoteAddr` from an IP-literal `host` or `resolvedIPs` (resolved off-queue by
+    /// ``connect()`` — never resolve here: this runs on the serial bridge queue, where a
+    /// blocking lookup would stall every connection sharing it).
+    func populateRemoteAddr(resolvedIPs: [String]) {
         var addr4 = in_addr()
         if inet_pton(AF_INET, host, &addr4) == 1 {
             configureIPv4(addr4)
@@ -189,10 +193,10 @@ extension QUICConnection {
             configureIPv6(addr6)
             return
         }
-        
+
         var found4: in_addr?
         var found6: in6_addr?
-        for ip in DNSResolver.shared.resolveAll(host) {
+        for ip in resolvedIPs {
             if found4 == nil {
                 var a4 = in_addr()
                 if inet_pton(AF_INET, ip, &a4) == 1 {
