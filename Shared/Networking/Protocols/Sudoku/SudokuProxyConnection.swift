@@ -5,6 +5,8 @@
 //  Created by saba-futai on 4/23/26.
 //
 
+// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
+
 import Foundation
 import Darwin
 import CryptoKit
@@ -2855,7 +2857,7 @@ nonisolated final class SudokuMuxTCPProxyConnection:
     Sendable
 {
     private struct State {
-        var onClose: (() -> Void)?
+        var onClose: (@Sendable () -> Void)?
         var closed = false
         var readEOF = false
     }
@@ -2868,7 +2870,7 @@ nonisolated final class SudokuMuxTCPProxyConnection:
         client: SudokuMuxClient,
         stream: SudokuMuxStream,
         closesClientOnClose: Bool = true,
-        onClose: (() -> Void)? = nil
+        onClose: (@Sendable () -> Void)? = nil
     ) {
         self.client = client
         self.stream = stream

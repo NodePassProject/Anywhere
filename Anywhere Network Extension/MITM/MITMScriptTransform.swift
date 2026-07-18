@@ -193,10 +193,8 @@ nonisolated enum MITMScriptTransform {
         }
     }
 
-    /// Per-stream cursor threaded through each applyFrame call. Created via
-    /// ``makeFrameCursor(rules:verdicts:)`` at head time, when the gate verdicts are in scope —
-    /// the per-frame path never consults a gate.
-    final class FrameCursor {
+    // MARK: Code quality violation
+    final class FrameCursor: @unchecked Sendable {
         /// Script's persistent per-stream state; only ever touched on scriptQueue (deinit hops its release there).
         var state: JSValue?
         /// Set by a done/exit directive; subsequent frames bypass the script.

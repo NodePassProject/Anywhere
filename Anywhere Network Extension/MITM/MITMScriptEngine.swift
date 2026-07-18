@@ -11,6 +11,10 @@ import CryptoKit
 import Security
 import Synchronization
 
+extension JSVirtualMachine: @unchecked @retroactive Sendable { }
+extension JSContext: @unchecked @retroactive Sendable { }
+extension JSValue: @unchecked @retroactive Sendable { }
+
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptEngine")
 
 /// Input-body bytes pinned by suspended async invocations, summed across all engines.
@@ -73,9 +77,8 @@ actor MITMScriptEngine {
         case respond(SynthesizedResponse)
     }
 
-    /// State for one `process(ctx)` run; `currentInvocation` names the executing
-    /// span so store/control/http blocks act on the right one.
-    fileprivate final class Invocation {
+    // MARK: Code quality violation
+    fileprivate final class Invocation: @unchecked Sendable {
         let scope: UUID?
         /// False on ``applyFrame`` (head is already on the wire).
         let allowsHTTP: Bool
@@ -115,31 +118,23 @@ actor MITMScriptEngine {
     }
 
     private var context: JSContext
-
-    /// Compiled `process(ctx)` functions keyed by source hash; `byteCount` is a hash-collision guard.
+    
     private struct CompiledEntry {
         let byteCount: Int
         let function: JSValue
     }
-
-    /// State guarded by ``stateLock``: the executing span and the compile cache. Held only for short
-    /// critical sections — never across a JSC call (`function.call`/`evaluateScript`/settle) or an
-    /// `await`, since JSC re-enters to read `currentInvocation` and `Mutex` is non-reentrant.
+    
     private struct EngineState {
-        /// Invocation whose synchronous JS span is running right now; nil between spans.
         var currentInvocation: Invocation?
-        /// Compiled `process(ctx)` functions keyed by source hash.
         var compiled: [Int: CompiledEntry] = [:]
     }
     private let stateLock = Mutex(EngineState())
-
+    
+    private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
+    
     /// Suspended async invocations, retained until delivery so weak captures in fetch/settle closures
     /// stay valid. Script-queue-confined (all engine methods run on `MITMScriptTransform.scriptQueue`).
     private var liveInvocations: [ObjectIdentifier: Invocation] = [:]
-
-    /// Shared across all engines: per-rule-set VMs would multiply JSC's multi-MiB per-VM
-    /// overhead beyond the NE's ~50 MiB budget. JSC serializes heap access internally.
-    private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
     /// The span whose JS is executing right now, read (re-entrantly) by the Anywhere.* blocks.
     /// `nonisolated`: backed by `stateLock`, not actor state, so JSC's synchronous native callbacks
@@ -370,13 +365,17 @@ actor MITMScriptEngine {
     private func armWatchdog(for inv: Invocation) {
         inv.watchdog?.cancel()
         let timeout = Self.invocationIdleTimeout
-        inv.watchdog = Task { [weak self, weak inv] in
+        // The task captures only the Sendable identifier; the invocation itself is resolved
+        // back on the JSC queue via `liveInvocations`, which retains it until delivery.
+        let id = ObjectIdentifier(inv)
+        inv.watchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(timeout))
-            guard !Task.isCancelled, let self, let inv else { return }
+            guard !Task.isCancelled, let self else { return }
             JSCConcurrencyBridge.shared.enqueue {
                 // The enqueue body runs on the JSC queue = this actor's executor.
                 self.assumeIsolated { engine in
-                    guard !inv.delivered, let original = inv.original else { return }
+                    guard let inv = engine.liveInvocations[id],
+                          !inv.delivered, let original = inv.original else { return }
                     logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
                     engine.deliver(.modified(original), for: inv)
                 }
@@ -1615,7 +1614,7 @@ actor MITMScriptEngine {
                 // so the async Task carries only that id across its await — never a JSValue/Invocation
                 // through a `@Sendable` boundary — then settles back on the queue via `completeFetch`.
                 let fetchID = engine.registerPendingFetch(inv: liveInv, resolve: resolve, reject: reject)
-                Task {
+                Task { [request] in
                     let result: Result<MITMScriptHTTPClient.Response, Error>
                     do {
                         let response = try await MITMScriptHTTPClient.shared.send(

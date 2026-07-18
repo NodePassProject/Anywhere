@@ -47,7 +47,7 @@ actor NaiveHTTP3Stream {
     /// credits the payload octets only once the app takes them — total credit stays exact,
     /// backpressure preserved.
     private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
 
     /// Partial HTTP/3 frame buffer; frames may span QUIC deliveries.
     private var frameBuffer = Data()
@@ -174,15 +174,9 @@ actor NaiveHTTP3Stream {
     nonisolated func close() {
         Task { await self.performClose() }
     }
-
-    /// Single-consumer pull over `inbox`. Takes a local copy of the iterator for the mutating
-    /// async `next()` (both share the stream's backing storage) and stores it back. Serial by
-    /// ``receiveData()``'s single-consumer contract.
+    
     private func nextInboxChunk() async throws -> Data? {
-        var iterator = inboxIterator
-        let next = try await iterator.next()
-        inboxIterator = iterator
-        return next
+        try await inboxIterator.next(isolation: #isolation)
     }
 
     private func performClose() {

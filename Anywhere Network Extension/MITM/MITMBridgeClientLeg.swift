@@ -28,8 +28,8 @@ nonisolated protocol MITMBridgeClientLegDelegate: AnyObject {
     func clientLegFatalError(_ message: String)
 }
 
-/// lwIP-queue-confined.
-nonisolated final class MITMBridgeClientLeg: MITMResponseSink {
+// MARK: Code quality violation
+nonisolated final class MITMBridgeClientLeg: MITMResponseSink, @unchecked Sendable {
 
     weak var delegate: MITMBridgeClientLegDelegate?
 

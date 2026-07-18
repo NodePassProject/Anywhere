@@ -24,7 +24,7 @@ actor HysteriaConnection {
     /// the ngtcp2 queue via `feedStreamData`; the single consumer pulls `rawIterator` from `open()`
     /// (header) then `receiveRaw()` (data), so the iterator is plain actor-isolated state.
     private nonisolated let rawInbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
     /// Post-header bytes left over from `open()`'s parse, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
 
@@ -127,10 +127,7 @@ actor HysteriaConnection {
     /// Single-consumer pull over `rawInbox`. Takes a local copy of the iterator for the mutating
     /// async `next()` (both share the stream's backing storage) and stores it back.
     private func nextChunk() async throws -> Data? {
-        var iterator = rawIterator
-        let next = try await iterator.next()
-        rawIterator = iterator
-        return next
+        try await rawIterator.next(isolation: #isolation)
     }
 
     nonisolated func cancel() {

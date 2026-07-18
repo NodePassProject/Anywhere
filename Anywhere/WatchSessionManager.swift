@@ -11,9 +11,11 @@ import WatchConnectivity
 
 nonisolated private let logger = AnywhereLogger(category: "WatchSessionManager")
 
-/// iPhone side of the watch bridge: answers watch requests (state, toggle,
-/// select) and mirrors VPN status and the proxy list to the watch through
-/// the application context whenever they change.
+// MARK: Code quality violation - tolerate here temporarily
+nonisolated private struct SendableReplyHandler: @unchecked Sendable {
+    let handler: ([String: Any]) -> Void
+}
+
 @MainActor
 final class WatchSessionManager: NSObject {
     static let shared = WatchSessionManager()
@@ -182,8 +184,9 @@ extension WatchSessionManager: WCSessionDelegate {
             replyHandler([:])
             return
         }
+        let reply = SendableReplyHandler(handler: replyHandler)
         Task { @MainActor in
-            replyHandler(await self.handle(request))
+            reply.handler(await self.handle(request))
         }
     }
 

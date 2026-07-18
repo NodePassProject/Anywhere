@@ -132,12 +132,12 @@ final class PhoneSession: NSObject {
     /// Decodes and applies a snapshot payload, recording when the iPhone took it.
     private func apply(payload: [String: Any]) {
         guard let snapshot = WatchBridge.Snapshot(payload: payload) else { return }
-        cancelUnreachableGrace()
-        snapshotDate = payload[WatchBridge.snapshotDateKey] as? Date ?? .now
-        apply(snapshot)
+        apply(snapshot, taken: payload[WatchBridge.snapshotDateKey] as? Date ?? .now)
     }
 
-    private func apply(_ snapshot: WatchBridge.Snapshot) {
+    private func apply(_ snapshot: WatchBridge.Snapshot, taken date: Date) {
+        cancelUnreachableGrace()
+        snapshotDate = date
         self.snapshot = snapshot
 
         // Drop the optimistic status once the iPhone reports the transition
@@ -196,22 +196,30 @@ extension PhoneSession: WCSessionDelegate {
         if let error {
             logger.warning("Session activation failed: \(error.localizedDescription)")
         }
+        // Decode here so only Sendable values hop to the main actor; the
+        // context dictionary itself stays in the delegate's region.
         let cachedContext = session.receivedApplicationContext
+        let cached = WatchBridge.Snapshot(payload: cachedContext)
+        let cachedDate = cachedContext[WatchBridge.snapshotDateKey] as? Date ?? .now
         Task { @MainActor in
             self.isActivated = activationState == .activated
             // Seed from the last pushed context so the UI has data instantly
             // on cold start, then ask for fresh state.
-            if self.snapshot == nil {
-                self.apply(payload: cachedContext)
+            if self.snapshot == nil, let cached {
+                self.apply(cached, taken: cachedDate)
             }
             self.refresh()
         }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        let snapshot = WatchBridge.Snapshot(payload: applicationContext)
+        let date = applicationContext[WatchBridge.snapshotDateKey] as? Date ?? .now
         Task { @MainActor in
             self.lastError = nil
-            self.apply(payload: applicationContext)
+            if let snapshot {
+                self.apply(snapshot, taken: date)
+            }
         }
     }
 

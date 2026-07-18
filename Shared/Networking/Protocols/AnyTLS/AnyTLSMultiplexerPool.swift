@@ -101,7 +101,7 @@ nonisolated final class AnyTLSMultiplexerPool: MultiplexerPool<AnyTLSMultiplexer
         // Release the reservation and restart the idle clock at stream end, so a freed mux is
         // kept warm for the full idle timeout (not evicted right after a long transfer).
         // Installed at stream creation, so the stream carries no mutable hook.
-        let onEnd: () -> Void = { [weak self, weak multiplexer] in
+        let onEnd: @Sendable () -> Void = { [weak self, weak multiplexer] in
             guard let multiplexer else { return }
             multiplexer.releaseReservation()
             guard let self else { return }

@@ -43,7 +43,7 @@ actor XHTTPH3RequestStream {
     /// them — total credit stays exact, backpressure preserved. The single consumer pulls
     /// `inboxIterator` from ``receive()`` as plain isolated state.
     private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
 
     // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
     // keeps cost amortized O(1).
@@ -152,15 +152,9 @@ actor XHTTPH3RequestStream {
     nonisolated func close() {
         Task { await self.performClose() }
     }
-
-    /// Single-consumer pull over `inbox`. Takes a local copy of the iterator for the mutating
-    /// async `next()` (both share the stream's backing storage) and stores it back. Serial by
-    /// ``receive()``'s single-consumer contract.
+    
     private func nextInboxChunk() async throws -> Data? {
-        var iterator = inboxIterator
-        let next = try await iterator.next()
-        inboxIterator = iterator
-        return next
+        try await inboxIterator.next(isolation: #isolation)
     }
 
     private func performClose() {

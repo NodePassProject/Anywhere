@@ -61,8 +61,9 @@ nonisolated private enum VLESSWire {
 
 /// 12-byte big-endian-incrementing nonce; each seal/open without an explicit nonce
 /// advances the counter by one.
+// MARK: Code quality violation
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
-nonisolated private final class VLESSEncryptionAEAD {
+nonisolated private final class VLESSEncryptionAEAD: @unchecked Sendable {
     let key: SymmetricKey
     let useAES: Bool
     private var nonce: [UInt8] = Array(repeating: 0, count: 12)

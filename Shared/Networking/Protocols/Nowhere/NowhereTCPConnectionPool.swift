@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class NowhereTCPConnectionPoolRegistry {
+nonisolated final class NowhereTCPConnectionPoolRegistry: Sendable {
 
     static let shared = NowhereTCPConnectionPoolRegistry()
 
@@ -101,7 +101,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
     }
 }
 
-nonisolated private final class NowhereTCPConnectionPool {
+nonisolated private final class NowhereTCPConnectionPool: Sendable {
 
     private static let warmConnectionTTL: Duration = .seconds(30)
 

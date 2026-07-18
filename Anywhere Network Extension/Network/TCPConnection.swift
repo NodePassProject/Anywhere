@@ -136,7 +136,7 @@ actor TCPConnection {
     // MARK: Lifecycle
 
     init(stack: TunnelStack,
-         pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
+         pcb: LWIPPCBHandle, dstHost: String, dstPort: UInt16,
          configuration: ProxyConfiguration, routeTarget: RouteTarget,
          viaDefault: Bool,
          ruleSetName: String? = nil,
@@ -145,7 +145,7 @@ actor TCPConnection {
          bridge: LWIPConcurrencyBridge) {
         FlowGauge.incrementPendingTCP()
         self.stack = stack
-        self.pcb = pcb
+        self.pcb = pcb.raw
         self.dstHost = dstHost
         self.dstPort = dstPort
         self.configuration = configuration
@@ -327,7 +327,10 @@ actor TCPConnection {
             return
         }
 
-        stream.assumeIsolated { $0.deliverUpload(bytes: ptr, count: count) }
+        // Copy on this (shared lwIP) executor before the hop; `ptr` is valid only for this call and
+        // the copy is the same one `deliverUpload` did — it just moves ahead of the actor boundary.
+        let uploadChunk = Data(bytes: ptr, count: count)
+        stream.assumeIsolated { $0.deliverUpload(uploadChunk) }
     }
 
     // MARK: - Relay
@@ -653,7 +656,7 @@ actor TCPConnection {
         handshakeTimeoutTask = nil
         startIdleTimer()
 
-        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
+        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
         self.stream = stream
         var seed = Data()
         if let initialData { seed.append(initialData) }
@@ -722,7 +725,7 @@ actor TCPConnection {
             handshakeTimeoutTask = nil
             startIdleTimer()
 
-            let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
+            let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
             self.stream = stream
             if let initialData {
                 // Connect success implies handshake-carried initialData was accepted.
@@ -845,7 +848,7 @@ actor TCPConnection {
         )
         // Downlink bridge: inner-leg output (TLS records or cleartext) rides the per-connection
         // relay bridge — the backlog, backpressure, and `tcp_*` writes are confined there.
-        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: pcb)
+        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
         self.stream = stream
         // The session is an actor on this same lwIP executor; wire its callbacks and kick it off via
         // `assumeIsolated` (we are already on the queue), the same seam its own legs use.

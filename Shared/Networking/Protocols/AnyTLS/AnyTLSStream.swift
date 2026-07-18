@@ -20,7 +20,7 @@ actor AnyTLSStream {
 
     /// Inbound cmdPSH payloads / EOF / error from the multiplexer's demux loop.
     private nonisolated let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
 
     /// Set once `deliverClose` fires; the nonisolated `isConnected` reads it.
     private nonisolated let _ended = Atomic<Bool>(false)
@@ -31,12 +31,12 @@ actor AnyTLSStream {
         var endFired = false
         /// Fires exactly once when the stream ends; used to return the multiplexer to the idle
         /// pool. Installed at creation; nilled after firing so the hook's captures release.
-        var onEnd: (() -> Void)?
+        var onEnd: (@Sendable () -> Void)?
     }
     private let endState: Mutex<EndState>
 
     init(sid: UInt32, multiplexer: AnyTLSMultiplexer, outerTLSVersion: TLSVersion?,
-         onEnd: (() -> Void)? = nil) {
+         onEnd: (@Sendable () -> Void)? = nil) {
         self.sid = sid
         self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
@@ -64,10 +64,7 @@ actor AnyTLSStream {
     // MARK: - Receive
 
     func receiveRaw() async throws -> Data? {
-        var iterator = inboxIterator
-        let next = try await iterator.next()
-        inboxIterator = iterator
-        return next
+        try await inboxIterator.next(isolation: #isolation)
     }
 
     // MARK: - Cancel

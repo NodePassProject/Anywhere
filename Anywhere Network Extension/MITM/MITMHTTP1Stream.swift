@@ -9,9 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
-/// h2→h1 bridge response delivery: the rewritten response is delivered as IR (head / body / reset)
-/// rather than HTTP/1.1 bytes the bridge would only re-parse. Chunked response trailers are dropped.
-/// lwIP-queue-confined.
 nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject {
     /// `endStream` true ⇒ no body follows (the IR consumer ends the stream on the head).
     func http1ResponseHead(status: Int, headers: [(name: String, value: String)], endStream: Bool)
@@ -23,9 +20,8 @@ nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject {
     func http1ResponseReset()
 }
 
-/// One direction of an HTTP/1.x byte stream through the MITM, emitting rewritten plaintext for the
-/// opposite TLS leg. Unparseable input permanently downgrades to passthrough.
-nonisolated final class MITMHTTP1Stream {
+// MARK: Code quality violation
+nonisolated final class MITMHTTP1Stream: @unchecked Sendable {
 
     /// Cap on bytes buffered awaiting the CRLF CRLF head terminator (Apache's
     /// 64 KiB default); on exceed the stream downgrades to passthrough.
@@ -132,9 +128,8 @@ nonisolated final class MITMHTTP1Stream {
         let originatingRequest: MITMRequestLog.Record?
     }
 
-    /// Per-body streaming-script state; one-chunk lookahead so the final chunk
-    /// can be marked `frame.end = true`.
-    private struct StreamingState {
+    // MARK: Code quality violation
+    private struct StreamingState: @unchecked Sendable {
         let headers: [Header]
         let originatingRequest: MITMRequestLog.Record?
         let startLine: String
@@ -165,7 +160,8 @@ nonisolated final class MITMHTTP1Stream {
         case trailerOrEnd
     }
 
-    private enum Mode {
+    // MARK: Code quality violation
+    private enum Mode: @unchecked Sendable {
         /// Accumulating the next head in `rxBuffer` until CRLF CRLF.
         case awaitingHead
 
@@ -864,7 +860,7 @@ nonisolated final class MITMHTTP1Stream {
     /// Slot-cached or synchronously peeked verdicts, or nil after parking the drive and
     /// spawning the async resolution (whose resume re-runs the pass).
     private func obtainTable(
-        _ slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?>,
+        _ slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?> & Sendable,
         rules: [CompiledMITMRule],
         url: String?
     ) -> MITMGateVerdictTable? {
@@ -890,7 +886,7 @@ nonisolated final class MITMHTTP1Stream {
     /// Resume for a parked gate resolution: stores the table and re-runs the drive pass — the
     /// retried `consumeHead` now resolves this table synchronously from the slot.
     private func resumeGateResolution(
-        slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?>,
+        slot: WritableKeyPath<PendingGateTables, MITMGateVerdictTable?> & Sendable,
         table: MITMGateVerdictTable
     ) {
         guard !torn else { return }
@@ -2458,9 +2454,6 @@ nonisolated final class MITMHTTP1Stream {
 
 // MARK: - ChunkedReader
 
-/// Streaming chunked-transfer decoder: `consumeForward` re-emits framing verbatim,
-/// `consumeForwardIR` hands decoded payloads to a closure, and `consumeBuffered`
-/// emits decoded data and returns the original chunk sizes.
 nonisolated private final class ChunkedReader {
     private enum State {
         case sizeLine

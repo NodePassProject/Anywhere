@@ -559,16 +559,15 @@ nonisolated final class XHTTPConnection: Sendable {
 
 /// A poolable underlying XHTTP transport that multiple XHTTP sessions can share
 /// (a multiplexing H2 connection or an H3/QUIC session).
-nonisolated protocol XHTTPXMUXMultiplexerPoolable: AnyObject {
+nonisolated protocol XHTTPXMUXMultiplexerPoolable: AnyObject, Sendable {
     /// True once the connection can no longer carry new sessions.
     var isPoolClosed: Bool { get }
     /// Tears down the underlying connection once the pool retires it with no active leases.
     func poolClose()
 }
 
-/// A reserved slot on a pooled connection. The holder drives one XHTTP session over
-/// `connection`, calls `noteRequest()` per HTTP request, and `release()` once when done.
-nonisolated final class XHTTPXMUXMultiplexerLease {
+// MARK: Code quality violation
+nonisolated final class XHTTPXMUXMultiplexerLease: @unchecked Sendable {
     let connection: XHTTPXMUXMultiplexerPoolable
     private weak var manager: XHTTPXMUXMultiplexerManager?
     /// Strong so the connection outlives all its sessions, even after the pool retires it.
@@ -596,7 +595,8 @@ nonisolated final class XHTTPXMUXMultiplexerLease {
     }
 }
 
-nonisolated final class XHTTPXMUXMultiplexerClient {
+// MARK: Code quality violation
+nonisolated final class XHTTPXMUXMultiplexerClient: @unchecked Sendable {
     enum State { case dialing, ready, failed }
     var state: State = .dialing
     var connection: XHTTPXMUXMultiplexerPoolable?
@@ -636,7 +636,7 @@ nonisolated final class XHTTPXMUXMultiplexerClient {
 /// retirement policy (`cMaxReuseTimes` / `hMaxRequestTimes` / `hMaxReusableSecs`, see
 /// ``XHTTPXMUXMultiplexerClient/isRetired(now:)``) rather than the base's idle-age sweep.
 /// All state is guarded by the `clients` mutex.
-nonisolated final class XHTTPXMUXMultiplexerManager {
+nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     private let config: XHTTPXMUXMultiplexerConfiguration
     /// `maxConcurrency` range rolled once at creation, fixed for the manager's lifetime.
     private let concurrency: Int
@@ -646,14 +646,22 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     private let newConnection: @Sendable () async -> XHTTPXMUXMultiplexerPoolable?
     private let clients = Mutex<[XHTTPXMUXMultiplexerClient]>([])
 
-    fileprivate weak var registry: XHTTPXMUXMultiplexerRegistry?
-    fileprivate var registryKey: String?
+    /// Strong back-reference is safe: the registry is a process-lifetime singleton.
+    private let registry: XHTTPXMUXMultiplexerRegistry?
+    fileprivate let registryKey: String?
 
-    init(config: XHTTPXMUXMultiplexerConfiguration, newConnection: @escaping @Sendable () async -> XHTTPXMUXMultiplexerPoolable?) {
+    fileprivate init(
+        config: XHTTPXMUXMultiplexerConfiguration,
+        newConnection: @escaping @Sendable () async -> XHTTPXMUXMultiplexerPoolable?,
+        registry: XHTTPXMUXMultiplexerRegistry? = nil,
+        registryKey: String? = nil
+    ) {
         self.config = config
         self.concurrency = config.maxConcurrency.random()
         self.connections = config.maxConnections.random()
         self.newConnection = newConnection
+        self.registry = registry
+        self.registryKey = registryKey
     }
 
     /// Acquires a slot, reusing a pooled connection or dialing a new one per policy.
@@ -809,9 +817,9 @@ nonisolated final class XHTTPXMUXMultiplexerRegistry: Sendable {
         let factory = makeFactory()
         return managers.withLock { managers in
             if let existing = managers[key] { return existing }
-            let manager = XHTTPXMUXMultiplexerManager(config: config, newConnection: factory)
-            manager.registry = self
-            manager.registryKey = key
+            let manager = XHTTPXMUXMultiplexerManager(
+                config: config, newConnection: factory, registry: self, registryKey: key
+            )
             managers[key] = manager
             return manager
         }
@@ -919,7 +927,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         var nextStreamId: UInt32 = 1
         var closedFlag = false
         /// Holds dial objects (TLS/Reality client) alive for the connection's lifetime.
-        var retained: [AnyObject] = []
+        var retained: [any Sendable] = []
 
         // Peer flow-control windows (for our sends).
         var peerConnWindow = 65535
@@ -948,7 +956,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     }
 
     /// Keeps a dial-time object (TLS/Reality client) alive for the connection's lifetime.
-    func retain(_ object: AnyObject) {
+    func retain(_ object: any Sendable) {
         state.withLock { $0.retained.append(object) }
     }
 
@@ -1437,7 +1445,7 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         var outstanding = 0       // POSTs written minus responses fully parsed
         var dirty = false         // unparseable/unexpected response → never reuse
         var closed = false
-        var retained: [AnyObject] = []
+        var retained: [any Sendable] = []
         var parseState: ParseState = .headers
         var parseBuffer = Data()
         /// Lease for the current session; refreshed on each pool acquire.
@@ -1459,7 +1467,7 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     }
 
     /// Keeps a dial-time object (TLS/Reality client) alive for the connection's lifetime.
-    func retain(_ object: AnyObject) { state.withLock { $0.retained.append(object) } }
+    func retain(_ object: any Sendable) { state.withLock { $0.retained.append(object) } }
 
     var isPoolClosed: Bool { state.withLock { $0.closed || $0.dirty } }
 

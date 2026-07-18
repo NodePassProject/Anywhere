@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexer")
 
-nonisolated final class AnyTLSMultiplexer: Multiplexer {
+nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
     // MARK: - Properties
 
@@ -166,7 +166,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer {
     /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
     /// `onEnd` fires exactly once when the stream ends (used by the pool to reclaim idle muxes);
     /// installed at creation so the stream carries no mutable hook.
-    func openStream(onEnd: (() -> Void)? = nil) async -> AnyTLSStream? {
+    func openStream(onEnd: (@Sendable () -> Void)? = nil) async -> AnyTLSStream? {
         typealias Opened = (stream: AnyTLSStream, sid: UInt32, armWatchdog: Bool,
                             bufferedBytes: Int, peerVersion: UInt8)
         let opened: Opened? = lock.withLock { (state: inout State) -> Opened? in

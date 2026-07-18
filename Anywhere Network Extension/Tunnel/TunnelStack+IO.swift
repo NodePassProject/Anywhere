@@ -123,12 +123,12 @@ extension TunnelStack {
                 // there through `assumeIsolated`; the UDP plane is its own actor.
                 await withTaskGroup(of: Void.self) { group in
                     if !lwipBatch.isEmpty {
-                        group.addTask {
+                        group.addTask { [lwipBatch] in
                             await bridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
                         }
                     }
                     if !udpBatch.isEmpty {
-                        group.addTask { await plane.feed(udpBatch) }
+                        group.addTask { [udpBatch] in await plane.feed(udpBatch) }
                     }
                 }
             }

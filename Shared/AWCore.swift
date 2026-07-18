@@ -7,6 +7,8 @@
 
 import Foundation
 
+extension UserDefaults: @unchecked @retroactive Sendable { }
+
 nonisolated private let logger = AnywhereLogger(category: "AWCore")
 
 nonisolated final class AWCore {
@@ -26,20 +28,18 @@ nonisolated final class AWCore {
     
     private static let userDefaults: UserDefaults = {
         let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
-        defaults.register(defaults: registeredDefaults)
+        defaults.register(defaults: [
+            UserDefaultsKey.blockWebRTC: true,
+            UserDefaultsKey.bypassCountryCode: "",
+            UserDefaultsKey.identifier: UUID().uuidString,
+            UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
+            UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
+            UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
+            UserDefaultsKey.trustedCertificateSHA256s: [],
+            UserDefaultsKey.trustedSSIDs: [],
+        ])
         return defaults
     }()
-    
-    private static let registeredDefaults: [String: Any] = [
-        UserDefaultsKey.blockWebRTC: true,
-        UserDefaultsKey.bypassCountryCode: "",
-        UserDefaultsKey.identifier: UUID().uuidString,
-        UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
-        UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
-        UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
-        UserDefaultsKey.trustedCertificateSHA256s: [],
-        UserDefaultsKey.trustedSSIDs: [],
-    ]
 
     // MARK: - UserDefaults Keys
 

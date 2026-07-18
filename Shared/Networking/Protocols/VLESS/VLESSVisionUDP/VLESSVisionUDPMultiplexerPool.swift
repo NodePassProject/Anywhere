@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class VLESSVisionUDPMultiplexerPool {
+nonisolated final class VLESSVisionUDPMultiplexerPool: Sendable {
     let configuration: ProxyConfiguration
     private let multiplexers = Mutex<[VLESSVisionUDPMultiplexer]>([])
 

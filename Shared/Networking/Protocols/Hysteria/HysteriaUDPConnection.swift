@@ -24,7 +24,7 @@ actor HysteriaUDPConnection {
     /// the ngtcp2 queue; `receiveRaw()` pulls `rawIterator` and reassembles, so both the iterator and
     /// the defrag slots are plain actor-isolated state.
     private nonisolated let rawInbox: AsyncThrowingStream<HysteriaProtocol.UDPMessage, Error>.Continuation
-    private var rawIterator: AsyncThrowingStream<HysteriaProtocol.UDPMessage, Error>.AsyncIterator
+    nonisolated(unsafe) private var rawIterator: AsyncThrowingStream<HysteriaProtocol.UDPMessage, Error>.AsyncIterator
 
     /// Per-PacketID reassembly slot; fragments arrive interleaved, so each PacketID owns one.
     /// Evicted on completion, TTL expiry, or cap overflow.
@@ -99,13 +99,9 @@ actor HysteriaUDPConnection {
             return payload
         }
     }
-
-    /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`).
+    
     private func nextMessage() async throws -> HysteriaProtocol.UDPMessage? {
-        var iterator = rawIterator
-        let next = try await iterator.next()
-        rawIterator = iterator
-        return next
+        try await rawIterator.next(isolation: #isolation)
     }
 
     private func assembleFragment(_ message: HysteriaProtocol.UDPMessage) -> Data? {

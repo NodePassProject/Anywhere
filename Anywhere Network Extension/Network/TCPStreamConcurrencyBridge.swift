@@ -7,6 +7,9 @@
 
 import Foundation
 
+// MARK: Code quality violation: unchecked Sendable is leaking outside of bridge
+struct LWIPPCBHandle: @unchecked Sendable { let raw: UnsafeMutableRawPointer }
+
 actor TCPStreamConcurrencyBridge {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -55,18 +58,18 @@ actor TCPStreamConcurrencyBridge {
 
     private var pendingWriteCount: Int { pendingWrite.count - pendingWriteOffset }
 
-    init(bridge: LWIPConcurrencyBridge, pcb: UnsafeMutableRawPointer) {
+    init(bridge: LWIPConcurrencyBridge, pcb: LWIPPCBHandle) {
         self.bridge = bridge
-        self.pcb = pcb
+        self.pcb = pcb.raw
     }
 
     // MARK: - Intake (lwIP queue; entered via the owner's `assumeIsolated`)
 
     /// New upload bytes from the local app (lwIP `tcp_recv`). Copies eagerly — `ptr` is valid
     /// only for this call.
-    func deliverUpload(bytes ptr: UnsafeRawPointer, count: Int) {
-        guard !terminated, count > 0 else { return }
-        uploadBuffer.append(ptr.assumingMemoryBound(to: UInt8.self), count: count)
+    func deliverUpload(_ bytes: Data) {
+        guard !terminated, !bytes.isEmpty else { return }
+        uploadBuffer.append(bytes)
         resumeUploadWaiter()
     }
 

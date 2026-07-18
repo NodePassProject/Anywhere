@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "VLESSVisionUDPMultiplexer")
 
-nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer {
+nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
 
     // MARK: - Properties
 

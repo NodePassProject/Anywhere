@@ -10,13 +10,16 @@ import CryptoKit
 import Security
 import Synchronization
 
+extension SecCertificate: @unchecked @retroactive Sendable { }
+extension SecKey: @unchecked @retroactive Sendable { }
+
 nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
 
-nonisolated final class MITMLeafCertCache {
+nonisolated final class MITMLeafCertCache: Sendable {
 
     // MARK: - Public Types
-
-    struct Leaf {
+    
+    struct Leaf: Sendable {
         let certificate: SecCertificate
         let certificateDER: Data
         let privateKeySecKey: SecKey

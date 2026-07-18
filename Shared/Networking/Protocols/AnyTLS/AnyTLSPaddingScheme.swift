@@ -11,7 +11,7 @@ import Security
 
 /// Parsed AnyTLS padding scheme: `key=value` lines where numeric keys map to
 /// comma-separated `min-max` ranges or the literal `c` (checkpoint).
-nonisolated final class AnyTLSPaddingScheme {
+nonisolated final class AnyTLSPaddingScheme: Sendable {
 
     /// Sentinel for the `c` (checkpoint) marker: break if no payload remains, else continue.
     static let checkMark: Int = -1

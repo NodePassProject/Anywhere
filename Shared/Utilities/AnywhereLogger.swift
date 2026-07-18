@@ -17,11 +17,11 @@ nonisolated struct AnywhereLogger {
     /// The user-facing viewer sink, guarded because it is installed on one thread and read from
     /// every logging thread. Not exposed as a synchronous `var`: writers call ``installLogSink``
     /// and ``emit`` snapshots it under the lock, then invokes the closure off-lock.
-    private static let _logSink = Mutex<((String, Level) -> Void)?>(nil)
+    private static let _logSink = Mutex<(@Sendable (String, Level) -> Void)?>(nil)
 
     /// Installs (or, with `nil`, removes) the log sink. Set by the Network Extension at
     /// startup; the main app never installs one.
-    static func installLogSink(_ sink: ((String, Level) -> Void)?) {
+    static func installLogSink(_ sink: (@Sendable (String, Level) -> Void)?) {
         _logSink.withLock { $0 = sink }
     }
 

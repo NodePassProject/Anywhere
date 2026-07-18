@@ -104,14 +104,13 @@ actor TunnelStack {
         var drainInFlight = false
     }
     let outputBuffer = Mutex(OutputBufferState())
-
-    /// ``fn(ctx)`` must run on ``lwipQueue``: `pbuf_free` and `mem_free`
-    /// mutate per-pool freelists with no locking under NO_SYS=1.
-    struct PendingRelease {
+    
+    // MARK: Code quality violation
+    struct PendingRelease: @unchecked Sendable {
         let ctx: UnsafeMutableRawPointer?
         let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
     }
-
+    
     /// Release placeholder for Swift-owned output packets; required so
     /// ``OutputBufferState/releases`` stays index-aligned with ``OutputBufferState/packets``.
     static let noopRelease = PendingRelease(ctx: nil, fn: { _ in })

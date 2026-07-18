@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class NowhereFlowOpenAttempt {
+nonisolated final class NowhereFlowOpenAttempt: Sendable {
     private struct State {
         var connections: [ObjectIdentifier: ProxyConnection] = [:]
         var cancelled = false
@@ -86,7 +86,7 @@ nonisolated final class NowhereFlowOpenAttempt {
     }
 }
 
-nonisolated final class NowhereClient {
+nonisolated final class NowhereClient: Sendable {
 
     private struct Key: Hashable {
         let host: String

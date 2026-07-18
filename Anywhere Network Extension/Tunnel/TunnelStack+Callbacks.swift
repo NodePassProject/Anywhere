@@ -97,7 +97,7 @@ extension TunnelStack: LWIPBridgeHost {
 
     /// Builds the ``TCPConnection`` for a just-accepted pcb, or `nil` to abort it (RST).
     /// `.reject` was already handled by the SYN filter.
-    func lwipAccept(pcb: UnsafeMutableRawPointer, dstIP: UnsafeRawPointer,
+    func lwipAccept(pcb: LWIPPCBHandle, dstIP: UnsafeRawPointer,
                     dstPort: UInt16, isIPv6: Bool) -> TCPConnection? {
         guard let defaultConfiguration = configuration else {
             logger.debug("[TunnelStack] tcp_accept: guard failed")

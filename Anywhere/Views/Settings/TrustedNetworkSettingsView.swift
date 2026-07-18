@@ -134,8 +134,9 @@ struct TrustedNetworkSettingsView: View {
     
     private func refreshCurrentSSID() {
         NEHotspotNetwork.fetchCurrent { network in
+            let ssid = network?.ssid
             Task { @MainActor in
-                currentSSID = network?.ssid
+                currentSSID = ssid
             }
         }
     }

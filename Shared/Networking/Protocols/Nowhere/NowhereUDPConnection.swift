@@ -5,6 +5,8 @@
 //  Created by NodePassProject on 5/30/26.
 //
 
+// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
+
 import Foundation
 import Synchronization
 
@@ -21,21 +23,21 @@ actor NowhereUDPConnection {
     // MARK: Control stream (handshake)
 
     private nonisolated let controlInbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var controlIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var controlIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
     private var controlStreamID: Int64 = -1
 
     // MARK: Inbound datagrams
 
     /// Bounded so a burst that outruns the reader drops oldest rather than growing without limit.
     private nonisolated let datagramInbox: AsyncThrowingStream<NowhereQueuedDatagram, Error>.Continuation
-    private var datagramIterator: AsyncThrowingStream<NowhereQueuedDatagram, Error>.AsyncIterator
+    nonisolated(unsafe) private var datagramIterator: AsyncThrowingStream<NowhereQueuedDatagram, Error>.AsyncIterator
     private static let maxBufferedDatagrams = 64
     private var nextPacketID: UInt32 = 1
 
     // MARK: Termination
 
     private struct TerminationState {
-        var handler: ((Error?) -> Void)?
+        var handler: (@Sendable (Error?) -> Void)?
         var terminated = false
         var error: Error?
     }
@@ -68,8 +70,8 @@ actor NowhereUDPConnection {
     nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
     nonisolated var deliversDatagrams: Bool { true }
 
-    nonisolated func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
-        let immediate: (((Error?) -> Void), Error?)? = termination.withLock { state in
+    nonisolated func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?) {
+        let immediate: ((@Sendable (Error?) -> Void), Error?)? = termination.withLock { state in
             if state.terminated {
                 guard let handler else { return nil }
                 return (handler, state.error)
@@ -286,7 +288,7 @@ actor NowhereUDPConnection {
     }
 
     private nonisolated func notifyTermination(error: Error?) {
-        let handler: ((Error?) -> Void)? = termination.withLock { state in
+        let handler: (@Sendable (Error?) -> Void)? = termination.withLock { state in
             guard !state.terminated else { return nil }
             state.terminated = true
             state.error = error
@@ -300,17 +302,11 @@ actor NowhereUDPConnection {
     // MARK: - Pull helpers
 
     private func nextControlChunk() async throws -> Data? {
-        var iterator = controlIterator
-        let next = try await iterator.next()
-        controlIterator = iterator
-        return next
+        try await controlIterator.next(isolation: #isolation)
     }
 
     private func nextDatagram() async throws -> NowhereQueuedDatagram? {
-        var iterator = datagramIterator
-        let next = try await iterator.next()
-        datagramIterator = iterator
-        return next
+        try await datagramIterator.next(isolation: #isolation)
     }
 
     // MARK: - Helpers

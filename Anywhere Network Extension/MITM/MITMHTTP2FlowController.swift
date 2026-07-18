@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// No internal sync — confined to the serial lwIP queue. Windows are signed (RFC 9113
-/// §6.9.2 allows negative); negative gates synth emission until credited positive.
-nonisolated final class MITMHTTP2FlowController {
+// MARK: Code quality violation
+nonisolated final class MITMHTTP2FlowController: @unchecked Sendable {
 
     /// Largest legal flow-control window (RFC 9113 §6.9.1, 2^31 - 1); credits clamp here.
     static let maxWindow = 0x7FFF_FFFF

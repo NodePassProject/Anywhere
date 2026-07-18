@@ -17,7 +17,7 @@ nonisolated final class StatsRecorder: Sendable {
     }
     
     private struct State {
-        var source: (() -> RawValues)?
+        var source: (@Sendable () -> RawValues)?
         var startedAt: TimeInterval?
         var sleepSecondsAccumulated: TimeInterval = 0
         var sleepBeganAt: TimeInterval?
@@ -25,7 +25,7 @@ nonisolated final class StatsRecorder: Sendable {
 
     private let state = Mutex(State())
     
-    func start(source: @escaping () -> RawValues) {
+    func start(source: @escaping @Sendable () -> RawValues) {
         state.withLock { state in
             state.source = source
             state.startedAt = MonotonicClock.now

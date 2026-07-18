@@ -8,7 +8,8 @@
 import Foundation
 import Synchronization
 
-nonisolated final class MITMScriptHTTP2Stream {
+// MARK: Code quality violation
+nonisolated final class MITMScriptHTTP2Stream: @unchecked Sendable {
 
     /// Advertised per-stream receive window; must match the connection's SETTINGS_INITIAL_WINDOW_SIZE.
     private static let recvWindow = 4 * 1024 * 1024

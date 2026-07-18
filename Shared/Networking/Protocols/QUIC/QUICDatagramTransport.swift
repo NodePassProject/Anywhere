@@ -5,18 +5,17 @@
 //  Created by NodePassProject on 5/19/26.
 //
 
+// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
+
 import Foundation
 import Synchronization
 
-/// Terminal failures MUST surface through `errorHandler` so QUIC fails fast rather than idling on
-/// keep-alive PINGs; `startReceiving` delivers exactly one whole, non-empty datagram per call (use
-/// `errorHandler` for EOF). Callbacks may fire on any queue.
-nonisolated protocol QUICDatagramTransport: AnyObject {
+nonisolated protocol QUICDatagramTransport: AnyObject, Sendable {
     func sendDatagram(_ data: Data)
 
     /// `errorHandler` fires on terminal failure; do not `sendDatagram` after.
-    func startReceiving(handler: @escaping (Data) -> Void,
-                        errorHandler: @escaping (Error?) -> Void)
+    func startReceiving(handler: @escaping @Sendable (Data) -> Void,
+                        errorHandler: @escaping @Sendable (Error?) -> Void)
 
     /// Tears down the transport. Idempotent.
     func cancel()
@@ -27,7 +26,7 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
 
     /// Guards `errorHandler` so it fires at most once across send- and receive-side failures.
     private struct FailureState {
-        var handler: ((Error?) -> Void)?
+        var handler: (@Sendable (Error?) -> Void)?
         var failed = false
     }
 
@@ -40,7 +39,7 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
 
     /// Push handler stored here so the receive loop's `Task` captures only `self`
     /// (the raw closure isn't `Sendable`).
-    private let receiveHandler = Mutex<((Data) -> Void)?>(nil)
+    private let receiveHandler = Mutex<(@Sendable (Data) -> Void)?>(nil)
 
     /// The receive loop. Strong self: the loop owns the transport while receiving; `cancel()`
     /// cancels it and the connection, ending the parked receive so ARC reclaims the transport.
@@ -106,8 +105,8 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
         return false
     }
 
-    func startReceiving(handler: @escaping (Data) -> Void,
-                        errorHandler: @escaping (Error?) -> Void) {
+    func startReceiving(handler: @escaping @Sendable (Data) -> Void,
+                        errorHandler: @escaping @Sendable (Error?) -> Void) {
         failureState.withLock { $0.handler = errorHandler }
         receiveHandler.withLock { $0 = handler }
         // Strong self: the loop owns the transport while receiving; `cancel()` cancels this

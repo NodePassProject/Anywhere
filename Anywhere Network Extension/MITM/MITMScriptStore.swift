@@ -9,7 +9,7 @@ import Foundation
 import Synchronization
 
 /// Backs `Anywhere.store`; namespaced per rule set, stale scopes reclaimed by purgeExcept on reload.
-nonisolated final class MITMScriptStore {
+nonisolated final class MITMScriptStore: Sendable {
 
     static let shared = MITMScriptStore()
 

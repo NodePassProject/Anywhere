@@ -11,8 +11,8 @@ import AnywhereRules
 
 nonisolated private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
-/// Read-only SQLite over `rules(source, type, value)` and `metadata(key, value)` bundled by AnywhereRules; metadata values are JSON.
-nonisolated final class RoutingRulesDatabase {
+// MARK: Code quality violation - tolerate here temporarily
+nonisolated final class RoutingRulesDatabase: @unchecked Sendable {
     static let shared = RoutingRulesDatabase()
 
     private var databaseHandle: OpaquePointer?

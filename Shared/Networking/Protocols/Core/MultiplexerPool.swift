@@ -35,7 +35,8 @@ nonisolated struct MultiplexerPolicy {
 
 // MARK: - MultiplexerPool
 
-nonisolated class MultiplexerPool<S: Multiplexer, Extra> {
+// MARK: Code quality violation
+nonisolated class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendable>: @unchecked Sendable {
     
     struct PoolState {
         var multiplexers: [String: [S]] = [:]

@@ -18,7 +18,7 @@ nonisolated enum MITMCertificateStoreError: Error {
     case missingCAComponents
 }
 
-nonisolated final class MITMCertificateStore {
+nonisolated final class MITMCertificateStore: Sendable {
 
     // MARK: - Configuration
     

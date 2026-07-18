@@ -5,6 +5,8 @@
 //  Created by NodePassProject on 5/3/26.
 //
 
+// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
+
 import Foundation
 import Synchronization
 
@@ -37,7 +39,7 @@ actor MITMSession {
         /// the single consumer pulls `inboxIterator` from ``receive()``. The `Mutex` guards the
         /// iterator *value* so this transport is honestly `Sendable`.
         private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-        private let inboxIterator: Mutex<AsyncThrowingStream<Data, Error>.AsyncIterator>
+        nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
         private struct State {
             var closed = false
             /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
@@ -46,14 +48,14 @@ actor MITMSession {
             var receiveClosed = false
             /// Downlink sink to the lwIP client leg; set once before the pumps start and invoked on
             /// the lwIP queue. Held in `State` (not a bare `var`) so the transport stays `Sendable`.
-            var onSendToClient: ((Data) -> Void)?
+            var onSendToClient: (@Sendable (Data) -> Void)?
         }
         private let state = Mutex(State())
 
         var isReady: Bool { state.withLock { !$0.closed } }
 
         /// Installs the downlink sink; called once before the session's pumps begin.
-        func setOnSendToClient(_ handler: ((Data) -> Void)?) {
+        func setOnSendToClient(_ handler: (@Sendable (Data) -> Void)?) {
             state.withLock { $0.onSendToClient = handler }
         }
 
@@ -61,7 +63,7 @@ actor MITMSession {
             self.lwipBridge = lwipBridge
             let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
             self.inbox = inbox
-            self.inboxIterator = Mutex(inboxStream.makeAsyncIterator())
+            self.inboxIterator = inboxStream.makeAsyncIterator()
         }
 
         // MARK: ByteTransport
@@ -83,9 +85,7 @@ actor MITMSession {
 
         func receive() async throws -> TransportChunk {
             // Single-consumer pull: take the iterator, await one element, store it back.
-            var iterator = inboxIterator.withLock { $0 }
-            let next = try await iterator.next()
-            inboxIterator.withLock { $0 = iterator }
+            let next = try await inboxIterator.next(isolation: #isolation)
             if let next { return .bytes(next) }
             return .end
         }
@@ -287,7 +287,7 @@ actor MITMSession {
     private var torn = false
 
     /// Set by the lwIP-side caller to write inner-leg bytes back to the client (fire-and-forget).
-    var onSendToClient: ((Data) -> Void)? {
+    var onSendToClient: (@Sendable (Data) -> Void)? {
         didSet { innerTransport.setOnSendToClient(onSendToClient) }
     }
 
@@ -914,9 +914,7 @@ actor MITMSession {
     }
 
     /// One-shot winner gate for the deferred-handshake race, shared by the deadline hop and the
-    /// disarm closure. A plain `Sendable` class (its `Atomic` flag makes it concurrency-safe) — the
-    /// replacement for the former `@unchecked Sendable` box whose `settled` was an unsynchronized
-    /// `var` trusted to queue confinement. `claim` wins exactly once.
+    /// disarm closure.
     private final class HandshakeRaceGate: Sendable {
         private let settled = Atomic(false)
         func claim() -> Bool {

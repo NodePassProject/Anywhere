@@ -23,7 +23,8 @@ nonisolated private enum ServerHelloResult {
 
 // MARK: - TLSClient
 
-nonisolated class TLSClient {
+// MARK: Code quality violation
+nonisolated class TLSClient: @unchecked Sendable {
     let configuration: TLSConfiguration
     var connection: (any ByteTransport)?
 

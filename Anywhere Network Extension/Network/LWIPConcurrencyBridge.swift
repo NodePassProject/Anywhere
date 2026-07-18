@@ -25,8 +25,22 @@ protocol LWIPBridgeHost: Actor {
     /// The connection to adopt for a just-accepted pcb, or `nil` to abort it (RST).
     /// `dstIP` is raw address bytes valid for this call only; the returned connection is
     /// handed a retained reference lwIP stores as the pcb's `tcp_arg`.
-    func lwipAccept(pcb: UnsafeMutableRawPointer, dstIP: UnsafeRawPointer,
+    func lwipAccept(pcb: LWIPPCBHandle, dstIP: UnsafeRawPointer,
                     dstPort: UInt16, isIPv6: Bool) -> TCPConnection?
+}
+
+/// Carries a raw lwIP address / packet pointer from a `@convention(c)` callback across the
+/// `assumeIsolated` boundary into ``TunnelStack``. The callback runs on the lwIP queue — the same
+/// executor the stack is pinned to — so the pointer never leaves it; the box only quiets region
+/// isolation for the non-`Sendable` raw pointer. Each pointer is valid only for its callback's span.
+struct LWIPRawPointer: @unchecked Sendable { let raw: UnsafeRawPointer }
+struct LWIPOptRawPointer: @unchecked Sendable { let raw: UnsafeMutableRawPointer? }
+
+/// The lwIP output-buffer release: a raw context plus its `@convention(c)` free function, bundled so
+/// the isolated hop into ``TunnelStack`` captures a single `Sendable` value. Runs on the lwIP queue.
+struct LWIPReleaseAction: @unchecked Sendable {
+    let ctx: UnsafeMutableRawPointer?
+    let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
 }
 
 nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
@@ -121,8 +135,12 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
             guard let host = LWIPConcurrencyBridge.host(), let data, let release else { return }
             let packet = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
                               count: Int(len), deallocator: .none)
+            // Bundle the raw ctx + C release fn into one Sendable value so the isolated hop captures
+            // only Sendable state (dodges a region-isolation checker limitation on a bare `@convention(c)`
+            // capture). The release still runs on the lwIP queue via `assumeIsolated`.
+            let releaseAction = LWIPReleaseAction(ctx: releaseCtx, fn: release)
             host.assumeIsolated {
-                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, releaseCtx: releaseCtx, release: release)
+                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, releaseCtx: releaseAction.ctx, release: releaseAction.fn)
             }
         }
 
@@ -131,7 +149,8 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
             guard let host = LWIPConcurrencyBridge.host(), let dstIP else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
             }
-            return host.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6 != 0) }
+            let dstIPBox = LWIPRawPointer(raw: dstIP)
+            return host.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0) }
         }
 
         // TCP accept: build a connection per incoming pcb (or abort). A non-nil result is
@@ -139,8 +158,10 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         // balances it (see ``TCPConnection`` / ``discard(_:)``).
         lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb in
             guard let host = LWIPConcurrencyBridge.host(), let pcb, let dstIP else { return nil }
+            let pcbHandle = LWIPPCBHandle(raw: pcb)
+            let dstIPBox = LWIPRawPointer(raw: dstIP)
             guard let connection = host.assumeIsolated({
-                $0.lwipAccept(pcb: pcb, dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6 != 0)
+                $0.lwipAccept(pcb: pcbHandle, dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0)
             }) else {
                 return nil
             }
@@ -154,9 +175,10 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
                 logger.debug("[LWIPBridge] tcp_recv: connection is nil")
                 return
             }
+            let dataBox = data.map { LWIPRawPointer(raw: $0) }
             BridgeContext.unretained(connection, as: TCPConnection.self).assumeIsolated { conn in
-                if let data, len > 0 {
-                    conn.handleReceivedData(bytes: data, count: Int(len))
+                if let dataBox, len > 0 {
+                    conn.handleReceivedData(bytes: dataBox.raw, count: Int(len))
                 } else {
                     conn.handleRemoteClose()
                 }

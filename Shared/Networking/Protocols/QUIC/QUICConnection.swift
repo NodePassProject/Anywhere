@@ -5,6 +5,8 @@
 //  Created by NodePassProject on 4/11/26.
 //
 
+// MARK: Various code quality violation issues in this file, consider split this file and refactor, also consider moving ngtcp2 related C bridge code to NGTCP2ConcurrencyBridge so QUICConnection keeps clean
+
 import Foundation
 import Network
 import CryptoKit
@@ -159,7 +161,7 @@ actor QUICConnection {
     private var dcid = ngtcp2_cid()
     private var scid = ngtcp2_cid()
 
-    fileprivate var connectCompletion: ((Error?) -> Void)?
+    fileprivate var connectCompletion: (@Sendable (Error?) -> Void)?
 
     /// Output-event handlers, set by the owning session (HTTP3/Hysteria/Nowhere) and invoked
     /// synchronously from the ngtcp2 callbacks on the bridge queue. The `Mutex` protects the
@@ -266,7 +268,7 @@ actor QUICConnection {
 
     // MARK: Connect
     
-    private nonisolated func connect(completion: @escaping (Error?) -> Void) {
+    private nonisolated func connect(completion: @escaping @Sendable (Error?) -> Void) {
         bridge.enqueue { [weak self] in
             guard let self else { completion(QUICError.connectionFailed("Invalid state")); return }
             self.assumeIsolated { me in
@@ -373,7 +375,7 @@ actor QUICConnection {
     }
 
     private nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
-                                         completion: @escaping (Error?) -> Void) {
+                                         completion: @escaping @Sendable (Error?) -> Void) {
         bridge.enqueue { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
@@ -415,7 +417,7 @@ actor QUICConnection {
 
     /// Queues multiple DATAGRAM frames; `completion` fires once all reach a terminal
     /// state, with the first error or `nil`.
-    private nonisolated func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
+    private nonisolated func writeDatagrams(_ datagrams: [Data], completion: @escaping @Sendable (Error?) -> Void) {
         bridge.enqueue { [weak self] in
             // Split guards so the completion fires even when `self` is gone.
             guard let self else { completion(QUICError.closed); return }
@@ -455,7 +457,7 @@ actor QUICConnection {
     /// Capacity pressure rejects the new batch and never evicts existing frames.
     private nonisolated func writeDatagramsAtomically(
         _ datagrams: [Data],
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @Sendable (Error?) -> Void
     ) {
         bridge.enqueue { [weak self] in
             guard let self else { completion(QUICError.closed); return }
@@ -537,7 +539,7 @@ actor QUICConnection {
     /// Sends as much stream data as flow control allows, queuing the remainder.
     private func writeStreamImpl(conn: OpaquePointer, streamId: Int64,
                                   data: Data, fin: Bool,
-                                  completion: @escaping (Error?) -> Void) {
+                                  completion: @escaping @Sendable (Error?) -> Void) {
         let sent = writeStreamSync(conn: conn, streamId: streamId,
                                     data: data, fin: fin)
 
@@ -582,15 +584,15 @@ actor QUICConnection {
                 return f
             }()
 
-            var vec = ngtcp2_vec(base: stableBase.advanced(by: offset),
-                                 len: remaining)
+            var vecHolder = SendableVecHolder(vec: ngtcp2_vec(base: stableBase.advanced(by: offset),
+                                                              len: remaining))
             let (nwrite, outCarrier) = writeReportingCarrier { pathPtr in
                 txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                     bridge.writeStream(
                         conn, path: pathPtr, pktInfo: &pi,
                         dest: destination.baseAddress, destCapacity: destination.count,
                         dataLength: &pdatalen, flags: flags,
-                        stream: streamId, vec: &vec, vecCount: 1, ts: ts
+                        stream: streamId, vec: &vecHolder.vec, vecCount: 1, ts: ts
                     )
                 }
             }
@@ -764,7 +766,7 @@ actor QUICConnection {
 
     // MARK: UDP
 
-    private func setupUDP(completion: @escaping (Error?) -> Void) {
+    private func setupUDP(completion: @escaping @Sendable (Error?) -> Void) {
         if let transport {
             setupTunnelTransport(transport: transport, completion: completion)
         } else {
@@ -772,7 +774,7 @@ actor QUICConnection {
         }
     }
 
-    private func setupDirectCarrier(completion: @escaping (Error?) -> Void) {
+    private func setupDirectCarrier(completion: @escaping @Sendable (Error?) -> Void) {
         do {
             populateRemoteAddr()
             guard remoteAddr.ss_family != 0 else {
@@ -805,7 +807,7 @@ actor QUICConnection {
     /// chained QUIC rides a fixed relay path and never migrates; the transport routes.
     private func setupTunnelTransport(
         transport: QUICDatagramTransport,
-        completion: @escaping (Error?) -> Void
+        completion: @escaping @Sendable (Error?) -> Void
     ) {
         do {
             configurePlaceholderAddrs()
@@ -1001,7 +1003,7 @@ actor QUICConnection {
     /// Arms a carrier's receive loop, tagging inbound packets with `localAddr` so
     /// ngtcp2 attributes them to the right path. Migration triggers are set elsewhere.
     private func armReceive(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage,
-                            onError: @escaping (Int32) -> Void) {
+                            onError: @escaping @Sendable (Int32) -> Void) {
         carrier.assumeIsolated {
             $0.startReceiving(
                 onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
@@ -1305,7 +1307,8 @@ actor QUICConnection {
         guard let carrier else { return }
         txBuffer.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
-            carrier.assumeIsolated { $0.send(base, length: length) }
+            let baseBox = SendableConstBytePtr(p: base)
+            carrier.assumeIsolated { $0.send(baseBox.p, length: length) }
         }
     }
 
@@ -1318,7 +1321,8 @@ actor QUICConnection {
         guard let carrier else { return }
         datagram.withUnsafeBytes { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            carrier.assumeIsolated { $0.send(base, length: datagram.count) }
+            let baseBox = SendableConstBytePtr(p: base)
+            carrier.assumeIsolated { $0.send(baseBox.p, length: datagram.count) }
         }
     }
 
@@ -1381,13 +1385,13 @@ actor QUICConnection {
             parameters.max_datagram_frame_size = Self.maxDatagramFrameSize
         }
 
-        var path = ngtcp2_path()
+        var pathHolder = SendablePathHolder(path: ngtcp2_path())
         withUnsafeMutablePointer(to: &localAddr) { local in
             withUnsafeMutablePointer(to: &remoteAddr) { remote in
-                path.local = ngtcp2_addr(
+                pathHolder.path.local = ngtcp2_addr(
                     addr: UnsafeMutableRawPointer(local).assumingMemoryBound(to: sockaddr.self),
                     addrlen: ngtcp2_socklen(addrLen))
-                path.remote = ngtcp2_addr(
+                pathHolder.path.remote = ngtcp2_addr(
                     addr: UnsafeMutableRawPointer(remote).assumingMemoryBound(to: sockaddr.self),
                     addrlen: ngtcp2_socklen(addrLen))
             }
@@ -1407,18 +1411,18 @@ actor QUICConnection {
         // PMTUD only over the direct carrier: chained probes don't reflect the
         // wire MTU, and a probe failure trips blackhole detection on a routine inner drop.
         let usePMTUD = (transport == nil)
-        var connectionOpaquePointer: OpaquePointer?
+        var connHolder = SendableOpaquePtrHolder(ptr: nil)
         let rv = Self.pmtudProbes.withUnsafeBufferPointer { probes -> Int32 in
             if usePMTUD {
                 settings.pmtud_probes = probes.baseAddress
                 settings.pmtud_probeslen = probes.count
             }
             return ngtcp2_swift_conn_client_new(
-                &connectionOpaquePointer, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
+                &connHolder.ptr, &dcid, &scid, &pathHolder.path, NGTCP2_PROTO_VER_V1,
                 &callbacks, &settings, &parameters, nil, &connRefStorage
             )
         }
-        guard rv == 0, let connectionOpaquePointer else {
+        guard rv == 0, let connectionOpaquePointer = connHolder.ptr else {
             throw QUICError.connectionFailed("ngtcp2_conn_client_new: \(rv)")
         }
         self.connectionOpaquePointer = connectionOpaquePointer
@@ -1711,6 +1715,21 @@ nonisolated private func qcFromUserData(_ userData: UnsafeMutableRawPointer?) ->
     return NGTCP2ConcurrencyBridge.connection(from: p)
 }
 
+/// Carries a raw ngtcp2 `conn` handle across an `assumeIsolated` boundary inside a `@convention(c)`
+/// callback. The callback already runs on the connection's own (ngtcp2-queue) executor, so the
+/// handle never leaves it — the box only satisfies region isolation for the non-`Sendable`
+/// `OpaquePointer` in the early-handshake callbacks that must use the callback's own `conn`.
+nonisolated private struct NGTCP2ConnHandle: @unchecked Sendable { let raw: OpaquePointer }
+
+// These holders carry ngtcp2 C values that embed raw (non-`Sendable`) pointers — `ngtcp2_vec.base`,
+// `ngtcp2_path`'s address pointers, the freshly minted `OpaquePointer`, and a `txBuffer` base — past
+// a closure/`assumeIsolated` region boundary. Everything stays on the connection's single ngtcp2
+// executor; the boxes only quiet region isolation for values it can't prove don't escape.
+nonisolated private struct SendableVecHolder: @unchecked Sendable { var vec: ngtcp2_vec }
+nonisolated private struct SendablePathHolder: @unchecked Sendable { var path: ngtcp2_path }
+nonisolated private struct SendableOpaquePtrHolder: @unchecked Sendable { var ptr: OpaquePointer? }
+nonisolated private struct SendableConstBytePtr: @unchecked Sendable { let p: UnsafePointer<UInt8> }
+
 nonisolated private let quicClientInitialCB: @convention(c) (
     OpaquePointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { conn, userData in
@@ -1724,10 +1743,11 @@ nonisolated private let quicClientInitialCB: @convention(c) (
         return NGTCP2_ERR_CALLBACK_FAILURE
     }
     guard let connection = qcFromUserData(userData) else { return NGTCP2_ERR_CALLBACK_FAILURE }
+    let connBox = NGTCP2ConnHandle(raw: conn)
     return connection.assumeIsolated { me -> Int32 in
         guard let tls = me.tlsHandler else { return NGTCP2_ERR_CALLBACK_FAILURE }
         var paramsBuffer = [UInt8](repeating: 0, count: 256)
-        let paramsLength = ngtcp2_conn_encode_local_transport_params(conn, &paramsBuffer, paramsBuffer.count)
+        let paramsLength = ngtcp2_conn_encode_local_transport_params(connBox.raw, &paramsBuffer, paramsBuffer.count)
         guard paramsLength >= 0 else { return NGTCP2_ERR_CALLBACK_FAILURE }
         guard let clientHello = tls.buildClientHello(transportParams: Data(paramsBuffer.prefix(Int(paramsLength)))) else {
             return NGTCP2_ERR_CALLBACK_FAILURE
@@ -1736,7 +1756,7 @@ nonisolated private let quicClientInitialCB: @convention(c) (
             guard let p = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return NGTCP2_ERR_CALLBACK_FAILURE
             }
-            return ngtcp2_conn_submit_crypto_data(conn, NGTCP2_ENCRYPTION_LEVEL_INITIAL, p, clientHello.count)
+            return ngtcp2_conn_submit_crypto_data(connBox.raw, NGTCP2_ENCRYPTION_LEVEL_INITIAL, p, clientHello.count)
         }
     }
 }
@@ -1748,9 +1768,10 @@ nonisolated private let quicRecvCryptoDataCB: @convention(c) (
     guard let conn, let data, datalen > 0 else { return 0 }
     guard let connection = qcFromUserData(userData) else { return NGTCP2_ERR_CALLBACK_FAILURE }
     let d = Data(bytes: data, count: datalen)
+    let connBox = NGTCP2ConnHandle(raw: conn)
     return connection.assumeIsolated { me -> Int32 in
         guard let tls = me.tlsHandler else { return NGTCP2_ERR_CALLBACK_FAILURE }
-        switch tls.processCryptoData(d, level: level, conn: conn) {
+        switch tls.processCryptoData(d, level: level, conn: connBox.raw) {
         case .success, .needMoreData: return 0
         case .error(let c): return c
         }
@@ -1765,12 +1786,13 @@ nonisolated private let quicRecvStreamDataCB: @convention(c) (
     guard let conn, let connection = qcFromUserData(userData) else { return 0 }
     _ = conn
     let fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0
+    let dataBox = data.map { SendableConstBytePtr(p: $0) }
     connection.assumeIsolated { me in
         let handler = me.handlers.withLock { $0.streamData }
-        if let data, datalen > 0 {
+        if let dataBox, datalen > 0 {
             // Zero-copy view into ngtcp2's buffer; the handler must copy before returning.
             let view = Data(
-                bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
+                bytesNoCopy: UnsafeMutableRawPointer(mutating: dataBox.p),
                 count: datalen,
                 deallocator: .none
             )

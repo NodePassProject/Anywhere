@@ -10,7 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "RuleResolver")
 
-nonisolated final class RuleResolver {
+nonisolated final class RuleResolver: Sendable {
     static let shared = RuleResolver()
 
     static let maxEntries = 1024

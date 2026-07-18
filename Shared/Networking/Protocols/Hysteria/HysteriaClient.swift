@@ -11,7 +11,7 @@ import Synchronization
 /// Reconnectable wrapper around `HysteriaSession`; dead sessions clear via
 /// `onClose` and callers reconnect on the next acquire. Chained entries are
 /// removed on close because their transport is one-shot.
-nonisolated final class HysteriaClient {
+nonisolated final class HysteriaClient: Sendable {
 
     private struct Key: Hashable {
         let host: String

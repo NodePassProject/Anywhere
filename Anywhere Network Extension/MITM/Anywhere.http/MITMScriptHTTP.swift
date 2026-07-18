@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class MITMScriptHTTPClient {
+nonisolated final class MITMScriptHTTPClient: Sendable {
     static let shared = MITMScriptHTTPClient()
     private init() {}
 

@@ -37,7 +37,8 @@ nonisolated enum MITMScriptHTTP2Error: Error, LocalizedError {
 
 // MARK: - MITMScriptHTTP2Connection
 
-nonisolated final class MITMScriptHTTP2Connection: Multiplexer {
+// MARK: Code quality violation
+nonisolated final class MITMScriptHTTP2Connection: Multiplexer, @unchecked Sendable {
 
     // MARK: Phase
 

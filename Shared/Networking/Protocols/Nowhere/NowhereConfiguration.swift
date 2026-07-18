@@ -99,7 +99,7 @@ nonisolated final class NowhereFlowIDLease: Sendable {
     deinit { release() }
 }
 
-nonisolated final class NowhereTransportIdentityRegistry {
+nonisolated final class NowhereTransportIdentityRegistry: Sendable {
     static let shared = NowhereTransportIdentityRegistry()
 
     private struct State {

@@ -8,6 +8,11 @@
 import SwiftUI
 import AVFoundation
 
+// MARK: Code quality violation - tolerate here temporarily
+nonisolated fileprivate struct SendableCaptureSession: @unchecked Sendable {
+    let session: AVCaptureSession
+}
+
 fileprivate struct CameraProperties {
     var session: AVCaptureSession = .init()
     var output: AVCaptureMetadataOutput = .init()
@@ -224,9 +229,11 @@ fileprivate struct DIQRScannerView: View {
         }
         
         if !status {
-            let session = camera.session
+            // `startRunning`/`stopRunning` are AVFoundation's designated off-main calls; the box
+            // hands the (non-`Sendable`) session to the background task for exactly that call.
+            let box = SendableCaptureSession(session: camera.session)
             Task.detached(priority: .background) {
-                session.stopRunning()
+                box.session.stopRunning()
             }
         }
     }
@@ -330,8 +337,9 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                 }
                 device.unlockForConfiguration()
                 /// Session must be started on a background thread.
+                let box = SendableCaptureSession(session: session)
                 Task.detached(priority: .background) {
-                    session.startRunning()
+                    box.session.startRunning()
                 }
             } catch {
                 print(error.localizedDescription)

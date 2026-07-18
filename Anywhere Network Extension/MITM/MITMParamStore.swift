@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class MITMParamStore {
+nonisolated final class MITMParamStore: Sendable {
     static let shared = MITMParamStore()
 
     /// scope (rule-set id) → (parameter name → resolved value).

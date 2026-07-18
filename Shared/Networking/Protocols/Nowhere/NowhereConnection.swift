@@ -5,6 +5,8 @@
 //  Created by NodePassProject on 5/30/26.
 //
 
+// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
+
 import Foundation
 import Synchronization
 
@@ -14,7 +16,7 @@ nonisolated enum NowhereTCPRelayMode {
 }
 
 protocol NowhereTerminationObservable: AnyObject {
-    nonisolated func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?)
+    nonisolated func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?)
 }
 
 actor NowhereConnection {
@@ -34,7 +36,7 @@ actor NowhereConnection {
     /// ngtcp2 queue via `feedStreamData`; the single consumer pulls `rawIterator` from `open()`
     /// (flow result) then `receiveRaw()` (data), so the iterator is plain actor-isolated state.
     private nonisolated let rawInbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
     /// Post-result bytes left over from `open()`'s handshake, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
 
@@ -171,10 +173,7 @@ actor NowhereConnection {
 
     /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`).
     private func nextChunk() async throws -> Data? {
-        var iterator = rawIterator
-        let next = try await iterator.next()
-        rawIterator = iterator
-        return next
+        try await rawIterator.next(isolation: #isolation)
     }
 
     nonisolated func cancel() {
@@ -199,7 +198,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     private let inner: NowhereTCPConnection
     private let udpState = Mutex(UDPFramingState())
     private struct TerminationState {
-        var handler: ((Error?) -> Void)?
+        var handler: (@Sendable (Error?) -> Void)?
         var terminated = false
         var error: Error?
     }
@@ -213,7 +212,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
     var deliversDatagrams: Bool { true }
 
-    func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
+    func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?) {
         let immediate: (((Error?) -> Void), Error?)? = termination.withLock { state in
             if state.terminated {
                 guard let handler else { return nil }
@@ -236,7 +235,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     }
 
     private func notifyTermination(error: Error?) {
-        let handler: ((Error?) -> Void)? = termination.withLock { state in
+        let handler: (@Sendable (Error?) -> Void)? = termination.withLock { state in
             guard !state.terminated else { return nil }
             state.terminated = true
             state.error = error
@@ -348,7 +347,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         /// Residual receive park (single continuation); see MIGRATION.md's residual-continuations note.
         var pendingReceive: AsyncThrowingStream<Data, Error>.Continuation?
         var terminalError: Error?
-        var preparedCloseHandler: (() -> Void)?
+        var preparedCloseHandler: (@Sendable () -> Void)?
         var transportReadInFlight = false
         var transportReadClosed = false
         var transportWriteClosed = false
@@ -359,7 +358,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     private let state = Mutex(State())
 
     private struct TerminationState {
-        var handler: ((Error?) -> Void)?
+        var handler: (@Sendable (Error?) -> Void)?
         var terminated = false
         var error: Error?
     }
@@ -387,7 +386,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         state.withLock { $0.phase == .prepared && $0.inner?.isConnected == true }
     }
 
-    func setNowhereTerminationHandler(_ handler: ((Error?) -> Void)?) {
+    func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?) {
         let immediate: (((Error?) -> Void), Error?)? = termination.withLock { state in
             if state.terminated {
                 guard let handler else { return nil }
@@ -417,7 +416,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     private func notifyTermination(error: Error?) {
-        let handler: ((Error?) -> Void)? = termination.withLock { state in
+        let handler: (@Sendable (Error?) -> Void)? = termination.withLock { state in
             guard !state.terminated else { return nil }
             state.terminated = true
             state.error = error
@@ -428,7 +427,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         handler?(error)
     }
 
-    func setPreparedCloseHandler(_ handler: (() -> Void)?) {
+    func setPreparedCloseHandler(_ handler: (@Sendable () -> Void)?) {
         state.withLock { $0.preparedCloseHandler = handler }
     }
 
@@ -697,7 +696,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     ) {
         var delivery: AsyncThrowingStream<Data, Error>.Continuation?
         var deliveredData: Data?
-        var closeHandler: (() -> Void)?
+        var closeHandler: (@Sendable () -> Void)?
         var continueReading = false
         var openSignal: AsyncThrowingStream<Never, Error>.Continuation?
         var flowError: Error?

@@ -1139,7 +1139,7 @@ nonisolated final class ProxyClient: Sendable {
         port: UInt16,
         security: XraySecurityLayer
     ) async throws -> XHTTPH2Multiplexer {
-        func bringUp(_ transport: any ByteTransport, retaining object: AnyObject?) async throws -> XHTTPH2Multiplexer {
+        func bringUp(_ transport: any ByteTransport, retaining object: (any Sendable)?) async throws -> XHTTPH2Multiplexer {
             let shared = XHTTPH2Multiplexer(transport: transport)
             if let object { shared.retain(object) }
             try await shared.connect()
@@ -1313,7 +1313,7 @@ nonisolated final class ProxyClient: Sendable {
         port: UInt16,
         security: XraySecurityLayer
     ) async -> XHTTPH1Multiplexer? {
-        func wrap(_ transport: any ByteTransport, retaining object: AnyObject?) -> XHTTPH1Multiplexer {
+        func wrap(_ transport: any ByteTransport, retaining object: (any Sendable)?) -> XHTTPH1Multiplexer {
             let connection = XHTTPH1Multiplexer(transport: transport)
             if let object { connection.retain(object) }
             return connection

@@ -5,6 +5,8 @@
 //  Created by NodePassProject on 5/21/26.
 //
 
+// MARK: Various code quality violation issues in this file, consider refactor
+
 import Foundation
 import Network
 import Darwin
@@ -12,15 +14,6 @@ import Dispatch
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
-/// Carries QUIC's UDP datagrams for ngtcp2, backed by iOS 26's `NetworkConnection`.
-///
-/// An `actor` on the ngtcp2 bridge's serial executor — the same isolation domain as the owning
-/// ``QUICConnection``, so the owner reaches its synchronous surface (`send`/`connect`/`close`/…)
-/// via `assumeIsolated` (both are already on the bridge queue), exactly as `QUICConnection` enters
-/// its own ngtcp2 C callbacks. A driver `Task` owns the `NetworkConnection` off the executor and
-/// hops every state mutation back on via `bridge.enqueue` + `assumeIsolated`. The path callbacks
-/// (`onPathDown`/`onBetterPath`/`onReady`) map to `onViabilityUpdate`/`onBetterPathUpdate`/
-/// `onStateUpdate`; `currentInterfaceType` is cached so it stays synchronously readable.
 actor QUICDatagramCarrier {
 
     /// Adopts the ngtcp2 bridge's serial executor, so this actor's isolation domain *is* the bridge
@@ -41,9 +34,9 @@ actor QUICDatagramCarrier {
     /// Datagrams are sent in order by the driver's send loop. `queue`-confined.
     private var sendContinuation: AsyncStream<Data>.Continuation?
 
-    private var packetHandler: ((Data) -> Void)?
+    private var packetHandler: (@Sendable (Data) -> Void)?
     /// Fires once with the `errno` on terminal failure.
-    private var recvErrorHandler: ((Int32) -> Void)?
+    private var recvErrorHandler: (@Sendable (Int32) -> Void)?
     /// A failure seen before `startReceiving` armed the handler.
     private var pendingError: Int32?
     /// Datagrams received before `startReceiving` armed the handler.
@@ -52,10 +45,10 @@ actor QUICDatagramCarrier {
 
     /// When set, a viability drop calls this instead of surfacing a terminal error,
     /// letting the owner attempt QUIC migration first. Fires on `queue`.
-    var onPathDown: (() -> Void)?
+    var onPathDown: (@Sendable () -> Void)?
     /// Fires (on `queue`) when a better path is reported — the cue for a
     /// proactive migration while still healthy.
-    var onBetterPath: (() -> Void)?
+    var onBetterPath: (@Sendable () -> Void)?
     /// Fires once (on `queue`) when the connection first reaches `.ready`; lets a
     /// proactive migration wait for the target path before switching.
     var onReady: (() -> Void)?
@@ -120,8 +113,8 @@ actor QUICDatagramCarrier {
 
     /// Arms the per-datagram handler. `onPacket` fires with a fresh `Data`;
     /// `onError` fires once on terminal failure. Must run on `queue`.
-    func startReceiving(onPacket: @escaping (Data) -> Void,
-                        onError: @escaping (Int32) -> Void) {
+    func startReceiving(onPacket: @escaping @Sendable (Data) -> Void,
+                        onError: @escaping @Sendable (Int32) -> Void) {
         packetHandler = onPacket
         recvErrorHandler = onError
         if let pendingError {

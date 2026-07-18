@@ -31,7 +31,7 @@ actor VLESSVisionUDPStream {
 
     /// Inbound datagrams; EOF signals a clean End/close, a thrown error a transport failure.
     private nonisolated let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
 
     init(
         sessionID: UInt16,
@@ -106,10 +106,7 @@ actor VLESSVisionUDPStream {
     // MARK: - Receive (driven by the owning flow)
 
     func receive() async throws -> Data? {
-        var iterator = inboxIterator
-        let next = try await iterator.next()
-        inboxIterator = iterator
-        return next
+        try await inboxIterator.next(isolation: #isolation)
     }
 
     // MARK: - Close
