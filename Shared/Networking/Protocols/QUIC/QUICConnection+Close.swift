@@ -53,6 +53,10 @@ extension QUICConnection {
             }
             self.transportReceiveTask?.cancel()
             self.transportReceiveTask = nil
+            self.transportSealContinuation?.finish()
+            self.transportSealContinuation = nil
+            self.transportSealTask?.cancel()
+            self.transportSealTask = nil
             self.transport?.cancel()
             self.closeCarrier()
             self.state = .closed
@@ -79,5 +83,4 @@ extension QUICConnection {
             }
             closedHandler?(closeError)
     }
-
 }

@@ -29,14 +29,11 @@ extension QUICConnection {
             }
         }
     }
-
-    /// Async connect — the single-shot ngtcp2 connect completion is bridged in
-    /// ``NGTCP2ConcurrencyBridge``.
+    
     nonisolated func connect() async throws {
         try await bridge.awaitingCompletion { connect(completion: $0) }
     }
-
-    /// RFC 8446 exporter for the completed QUIC TLS 1.3 connection.
+    
     nonisolated func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
         let result: Result<Data, Error> = await bridge.run { [weak self] in
             guard let self else { return .failure(QUICError.closed) }
@@ -67,10 +64,7 @@ extension QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
-            let carrier = QUICDatagramCarrier(bridge: bridge)
-            // The carrier shares this connection's executor (both on `bridge`), so its synchronous
-            // surface is entered via `assumeIsolated` — we're already on the bridge queue. Our own
-            // isolated addrs are copied through locals (the closure is the *carrier's* isolation).
+            let carrier = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
             let remote = remoteAddr
             var local = localAddr
             try carrier.assumeIsolated { try $0.connect(remoteAddr: remote, localAddr: &local) }
@@ -82,16 +76,13 @@ extension QUICConnection {
             writeToUDP()
             rescheduleTimer()
         } catch {
-            // Nil connectCompletion before firing to prevent double-fire from stray callbacks.
             state = .closed
             closeCarrier()
             connectCompletion = nil
             completion(error)
         }
     }
-
-    /// Wires ngtcp2 to a datagram transport (chained QUIC). Placeholder addrs are safe:
-    /// chained QUIC rides a fixed relay path and never migrates; the transport routes.
+    
     func setupTunnelTransport(
         transport: QUICDatagramTransport,
         completion: @escaping @Sendable (Error?) -> Void
@@ -100,6 +91,9 @@ extension QUICConnection {
             configurePlaceholderAddrs()
             try initializeNgtcp2()
             state = .handshaking
+            if let obfuscator {
+                startTransportSealPump(transport: transport, obfuscator: obfuscator)
+            }
             startTransportReceiveLoop(transport: transport, localAddr: localAddr)
             writeToUDP()
             rescheduleTimer()
@@ -110,31 +104,51 @@ extension QUICConnection {
             completion(error)
         }
     }
-
-    /// Owns the pull loop feeding inbound datagrams from a chained `QUICDatagramTransport` into
-    /// ngtcp2. The task is actor-isolated (strong self), so each `receiveDatagram()` resumes back on
-    /// the bridge queue and the packet is fed synchronously here. It captures `transport` strongly —
-    /// the resource it drives — so the strong-self loop owns the connection while receiving.
-    /// `performTeardown` cancels the task and `transport.cancel()` unblocks the parked pull, ending
-    /// the loop so ARC reclaims both (breaking the connection → task → self cycle).
+    
     func startTransportReceiveLoop(transport: QUICDatagramTransport, localAddr: sockaddr_storage) {
-        transportReceiveTask = Task { [transport] in
+        let mailbox = QUICInboundMailbox()
+        let obfuscator = self.obfuscator
+        let bridge = self.bridge
+        transportReceiveTask = Task.detached { [transport] in
             do {
                 while true {
                     guard let data = try await transport.receiveDatagram() else {
-                        self.handleTransportClosed(nil)   // clean EOF: the relay closed
+                        bridge.enqueue { self.assumeIsolated { $0.handleTransportClosed(nil) } }
                         return
                     }
-                    self.handleReceivedPacket(data, localAddr: localAddr)
+                    guard !data.isEmpty else { continue }
+                    var packet = data
+                    if let obfuscator {
+                        guard let opened = obfuscator.open(data) else { continue }
+                        packet = opened
+                    }
+                    if mailbox.push(packet) {
+                        bridge.enqueue { self.assumeIsolated { $0.drainTransportInbound(mailbox, localAddr: localAddr) } }
+                    }
                 }
             } catch {
-                self.handleTransportClosed(error)
+                bridge.enqueue { self.assumeIsolated { $0.handleTransportClosed(error) } }
             }
         }
     }
-
-    /// Terminal outcome of the chained-transport receive loop: fires any pending connect completion,
-    /// then closes. Isolated (the loop resumes on the bridge queue).
+    
+    func drainTransportInbound(_ mailbox: QUICInboundMailbox, localAddr: sockaddr_storage) {
+        for packet in mailbox.take() {
+            handleReceivedPacket(packet, localAddr: localAddr)
+        }
+    }
+    
+    func startTransportSealPump(transport: QUICDatagramTransport, obfuscator: QUICPacketObfuscator) {
+        let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
+        transportSealContinuation = continuation
+        transportSealTask = Task.detached { [transport] in
+            for await raw in stream {
+                let wireDatagrams = raw.withUnsafeBytes { obfuscator.seal($0) }
+                for wire in wireDatagrams { transport.sendDatagram(wire) }
+            }
+        }
+    }
+    
     func handleTransportClosed(_ error: Error?) {
         let err = error ?? QUICError.closed
         if let callback = connectCompletion {
@@ -143,8 +157,7 @@ extension QUICConnection {
         }
         close(error: err)
     }
-
-    /// Stable placeholder addrs for ngtcp2's path identity check; never used for routing.
+    
     func configurePlaceholderAddrs() {
         addrLen = MemoryLayout<sockaddr_in>.size
         withUnsafeMutablePointer(to: &remoteAddr) { storage in
@@ -169,8 +182,6 @@ extension QUICConnection {
     func closeCarrier() {
         carrier?.assumeIsolated { $0.close() }
         carrier = nil
-        // Also retire any in-flight migration target, so closing mid-migration doesn't
-        // leak its NWConnection or leave a deferred path_validation/deadline on stale state.
         migratingCarrier?.assumeIsolated { $0.close() }
         clearMigrationState()
     }
@@ -187,8 +198,7 @@ extension QUICConnection {
             configureIPv6(addr6)
             return
         }
-
-        // Cache-backed resolver — a direct getaddrinfo() would block the queue.
+        
         var found4: in_addr?
         var found6: in6_addr?
         for ip in DNSResolver.shared.resolveAll(host) {
@@ -283,18 +293,13 @@ extension QUICConnection {
         parameters.initial_max_stream_data_bidi_remote = tuning.initialMaxStreamDataBidiRemote
         parameters.initial_max_stream_data_uni = tuning.initialMaxStreamDataUni
         parameters.max_idle_timeout = tuning.maxIdleTimeout
-        // Advertise migration support only when we can migrate (direct carrier); chained
-        // QUIC honestly declares it won't. ngtcp2 gates *our* migration on the server's
-        // flag, not this one — this is just the correct outbound declaration.
         parameters.disable_active_migration = migrationEnabled ? 0 : 1
         if datagramsEnabled {
             parameters.max_datagram_frame_size = Self.maxDatagramFrameSize
         }
 
         bridge.configureConnRef(&connRefStorage, host: self)
-
-        // PMTUD only over the direct carrier: chained probes don't reflect the
-        // wire MTU, and a probe failure trips blackhole detection on a routine inner drop.
+        
         let usePMTUD = (transport == nil)
         let (conn, rv) = bridge.createClientConn(
             dcid: &dcid, scid: &scid,
@@ -308,15 +313,14 @@ extension QUICConnection {
             throw QUICError.connectionFailed("ngtcp2_conn_client_new: \(rv)")
         }
         self.connectionOpaquePointer = connectionOpaquePointer
-
-        // Keep-alive PINGs detect silently-broken UDP paths (NAT rebind, idle sweep).
+        
         bridge.setKeepAliveTimeout(connectionOpaquePointer, tuning.keepAliveTimeout)
 
-        bridge.setTLSNativeHandle(connectionOpaquePointer,
-            UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256)))
-
-        // Install Brutal after conn_client_new and before any packets, so no
-        // stale CUBIC decisions leak through.
+        bridge.setTLSNativeHandle(
+            connectionOpaquePointer,
+            UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256))
+        )
+        
         if case .brutal(let initialBps) = tuning.cc {
             let brutal = BrutalCongestionControl(initialBps: initialBps)
             if let ccKey = bridge.installBrutal(connectionOpaquePointer) {
@@ -326,16 +330,13 @@ extension QUICConnection {
             }
         }
     }
-
-    /// Updates the Brutal target send rate (bytes/sec); no-op if Brutal isn't installed. Safe off-queue.
+    
     nonisolated func setBrutalBandwidth(_ bps: UInt64) {
         bridge.enqueue { [weak self] in
             self?.assumeIsolated { $0.brutalCC?.setTargetBandwidth(bps) }
         }
     }
-
-    /// Reverts to CUBIC (`Hysteria-CC-RX: auto`); safe off-queue. Unregisters BEFORE rewiring
-    /// the CC table so a racing trampoline no-ops rather than touching a half-initialized CUBIC struct.
+    
     nonisolated func uninstallBrutalCC() {
         bridge.enqueue { [weak self] in
             self?.assumeIsolated { me in

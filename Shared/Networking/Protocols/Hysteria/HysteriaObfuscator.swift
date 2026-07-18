@@ -7,6 +7,7 @@
 
 import Foundation
 import Security
+import Synchronization
 
 // MARK: - Salamander
 
@@ -62,8 +63,6 @@ nonisolated final class SalamanderObfuscator: QUICPacketObfuscator {
 /// Wraps Salamander, additionally fragmenting long-header (handshake) packets into 2–8 randomly
 /// padded chunks reassembled by `msgID`. 1-RTT (short-header) packets pass through with Salamander
 /// only.
-///
-/// All methods run on `QUICConnection.queue`, so reassembly state needs no locking.
 nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     private static let fragmentFlag: UInt8 = 0x80
     private static let headerLength = 5
@@ -76,7 +75,7 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
     private let inner: SalamanderObfuscator
     private let minPacketSize: Int
     private let maxPacketSize: Int
-    private var msgIDCounter: UInt8 = 0
+    private let msgIDCounter = Atomic<UInt8>(0)
 
     private final class Reassembly {
         var chunks: [[UInt8]?]
@@ -90,16 +89,20 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
         }
     }
 
-    /// Keyed by `msgID`.
-    private var reassembly: [UInt8: Reassembly] = [:]
-    private var lastSweep: UInt64 = DispatchTime.now().uptimeNanoseconds
+    private struct ReassemblyTable {
+        /// Keyed by `msgID`.
+        var entries: [UInt8: Reassembly] = [:]
+        var lastSweep: UInt64
+    }
+    /// All reassembly state; `Reassembly` instances are only ever touched under this lock.
+    private let table: Mutex<ReassemblyTable>
 
     init(password: String, minPacketSize: Int, maxPacketSize: Int) {
         self.inner = SalamanderObfuscator(password: password)
-        // Parsers normalize already; clamp defensively in case an obfuscator is built directly.
         let sizes = HysteriaObfuscation.normalizedGeckoSizes(min: minPacketSize, max: maxPacketSize)
         self.minPacketSize = sizes.min
         self.maxPacketSize = sizes.max
+        self.table = Mutex(ReassemblyTable(lastSweep: DispatchTime.now().uptimeNanoseconds))
     }
 
     // MARK: Seal
@@ -111,8 +114,7 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
 
         let chunks = Int.random(in: Self.minChunks...Self.maxChunks)
         let chunkSize = packet.count / chunks
-        msgIDCounter &+= 1
-        let msgID = msgIDCounter
+        let msgID = msgIDCounter.wrappingAdd(1, ordering: .relaxed).newValue
 
         var result: [Data] = []
         result.reserveCapacity(chunks)
@@ -140,9 +142,7 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
         }
         return result
     }
-
-    /// Pads a chunk so the on-wire datagram (salt + header + padding + chunk) lands within the
-    /// configured size window; returns 0 when even the unpadded packet already exceeds the max.
+    
     private func randomPadLength(chunkLength: Int) -> UInt16 {
         let base = SalamanderObfuscator.saltLength + Self.headerLength + chunkLength
         let lo = Swift.max(minPacketSize, base)
@@ -171,50 +171,42 @@ nonisolated final class GeckoObfuscator: QUICPacketObfuscator {
         let payload = Array(bytes[payloadStart...])
         return acceptChunk(msgID: msgID, chunkIdx: chunkIdx, totalChunks: totalChunks, payload: payload)
     }
-
-    /// Stores a fragment and, once every chunk of a message has arrived, returns the reassembled
-    /// QUIC packet. Returns `nil` while the message is incomplete or on a duplicate/invalid chunk.
+    
     private func acceptChunk(msgID: UInt8, chunkIdx: Int, totalChunks: Int, payload: [UInt8]) -> Data? {
-        let now = DispatchTime.now().uptimeNanoseconds
-        if now &- lastSweep >= Self.sweepIntervalNanos {
-            sweepExpired(now: now)
-        }
+        table.withLock { table in
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now &- table.lastSweep >= Self.sweepIntervalNanos {
+                table.entries = table.entries.filter { $0.value.deadline >= now }
+                table.lastSweep = now
+            }
 
-        var entry = reassembly[msgID]
-        // A reused (wrapped) msgID with a different chunk count restarts the slot.
-        if let existing = entry, existing.total != totalChunks {
-            reassembly[msgID] = nil
-            entry = nil
-        }
+            var entry = table.entries[msgID]
+            if let existing = entry, existing.total != totalChunks {
+                table.entries[msgID] = nil
+                entry = nil
+            }
 
-        let active: Reassembly
-        if let entry {
-            active = entry
-        } else {
-            if reassembly.count >= Self.maxReassembly { evictOldest() }
-            active = Reassembly(total: totalChunks, deadline: now &+ Self.reassemblyTTLNanos)
-            reassembly[msgID] = active
-        }
+            let active: Reassembly
+            if let entry {
+                active = entry
+            } else {
+                if table.entries.count >= Self.maxReassembly,
+                   let oldest = table.entries.min(by: { $0.value.deadline < $1.value.deadline })?.key {
+                    table.entries[oldest] = nil
+                }
+                active = Reassembly(total: totalChunks, deadline: now &+ Self.reassemblyTTLNanos)
+                table.entries[msgID] = active
+            }
 
-        guard chunkIdx < active.chunks.count, active.chunks[chunkIdx] == nil else { return nil }
-        active.chunks[chunkIdx] = payload
-        active.received += 1
-        guard active.received >= active.total else { return nil }
+            guard chunkIdx < active.chunks.count, active.chunks[chunkIdx] == nil else { return nil }
+            active.chunks[chunkIdx] = payload
+            active.received += 1
+            guard active.received >= active.total else { return nil }
 
-        reassembly[msgID] = nil
-        var out = [UInt8]()
-        for chunk in active.chunks where chunk != nil { out.append(contentsOf: chunk!) }
-        return Data(out)
-    }
-
-    private func sweepExpired(now: UInt64) {
-        reassembly = reassembly.filter { $0.value.deadline >= now }
-        lastSweep = now
-    }
-
-    private func evictOldest() {
-        if let oldest = reassembly.min(by: { $0.value.deadline < $1.value.deadline })?.key {
-            reassembly[oldest] = nil
+            table.entries[msgID] = nil
+            var out = [UInt8]()
+            for chunk in active.chunks where chunk != nil { out.append(contentsOf: chunk!) }
+            return Data(out)
         }
     }
 }

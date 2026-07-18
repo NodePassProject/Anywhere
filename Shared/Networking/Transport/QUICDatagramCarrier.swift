@@ -8,56 +8,80 @@
 import Foundation
 import Network
 import Darwin
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
-actor QUICDatagramCarrier {
+nonisolated final class QUICInboundMailbox: Sendable {
+    private static let capacity = 256
 
-    /// Adopts the ngtcp2 bridge's serial executor, so this actor's isolation domain *is* the bridge
-    /// queue — shared with ``QUICConnection`` and the C callbacks that drive both.
+    private struct State {
+        var packets: [Data] = []
+        var drainScheduled = false
+        var didWarnOverflow = false
+    }
+    private let state = Mutex(State())
+    
+    func push(_ packet: Data) -> Bool {
+        state.withLock { state in
+            guard state.packets.count < Self.capacity else {
+                // A full backlog implies a drain is already scheduled, so dropping never
+                // strands the queue.
+                if !state.didWarnOverflow {
+                    state.didWarnOverflow = true
+                    logger.warning("[QUIC] Inbound backlog full; dropping datagrams until the bridge queue drains")
+                }
+                return false
+            }
+            state.packets.append(packet)
+            if state.drainScheduled { return false }
+            state.drainScheduled = true
+            return true
+        }
+    }
+    
+    func take() -> [Data] {
+        state.withLock { state in
+            state.drainScheduled = false
+            let batch = state.packets
+            state.packets.removeAll(keepingCapacity: true)
+            return batch
+        }
+    }
+}
+
+actor QUICDatagramCarrier {
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
     }
 
     private typealias QUICError = QUICConnection.QUICError
-
-    /// The ngtcp2 concurrency boundary; vends this actor's executor and the queue the driver hops
-    /// back onto.
+    
     private let bridge: NGTCP2ConcurrencyBridge
-
-    /// Owns the `NetworkConnection` for its whole lifetime; cancelling it tears
-    /// the connection down. `queue`-confined.
+    
+    private let obfuscator: QUICPacketObfuscator?
+    
+    private let inbound = QUICInboundMailbox()
+    
     private var driverTask: Task<Void, Never>?
-    /// Datagrams are sent in order by the driver's send loop. `queue`-confined.
     private var sendContinuation: AsyncStream<Data>.Continuation?
 
     private var packetHandler: (@Sendable (Data) -> Void)?
-    /// Fires once with the `errno` on terminal failure.
     private var recvErrorHandler: (@Sendable (Int32) -> Void)?
-
-    /// When set, a viability drop calls this instead of surfacing a terminal error,
-    /// letting the owner attempt QUIC migration first. Fires on `queue`.
+    
     var onPathDown: (@Sendable () -> Void)?
-    /// Fires (on `queue`) when a better path is reported — the cue for a
-    /// proactive migration while still healthy.
     var onBetterPath: (@Sendable () -> Void)?
-    /// Fires once (on `queue`) when the connection first reaches `.ready`; lets a
-    /// proactive migration wait for the target path before switching.
     var onReady: (() -> Void)?
 
     private var ready = false
-    /// Set once `close()` has run; guards the async callbacks against acting
-    /// after teardown.
     private var closed = false
-    /// One kernel socket per carrier; balanced exactly once by `releaseFlowCount`.
     private var flowCounted = false
-
-    /// Cached egress interface type, refreshed from the connection's path so it
-    /// stays synchronously readable. `queue`-confined.
+    
     private var cachedInterfaceType: NWInterface.InterfaceType?
 
-    init(bridge: NGTCP2ConcurrencyBridge) {
+    init(bridge: NGTCP2ConcurrencyBridge, obfuscator: QUICPacketObfuscator?) {
         self.bridge = bridge
+        self.obfuscator = obfuscator
     }
 
     deinit {
@@ -67,19 +91,13 @@ actor QUICDatagramCarrier {
         FlowGauge.decrementUDP()
         logger.error("[QUIC] Datagram carrier deallocated without close() — recovered the FlowGauge count in deinit; a close() path has regressed.")
     }
-
-    /// The egress interface type in use, or nil before `.ready`. Lets the owner
-    /// confirm a migration target is a *different* interface. Read on `queue`.
+    
     var currentInterfaceType: NWInterface.InterfaceType? {
         cachedInterfaceType
     }
 
     // MARK: - Connect
-
-    /// Creates a connected UDP `NetworkConnection` to `remoteAddr` and fills `localAddr`
-    /// with a family-matched placeholder. The connection becomes ready
-    /// asynchronously; sends issued before then are buffered by the framework.
-    /// Must run on `queue`.
+    
     func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
         guard let endpoint = Self.nwEndpoint(from: remoteAddr) else {
             throw QUICError.connectionFailed("invalid remote address")
@@ -93,17 +111,14 @@ actor QUICDatagramCarrier {
         sendContinuation = sendCont
         
         let carrier = WeakCarrier(value: self)
-        driverTask = Task { [bridge] in
-            await Self.runDriver(endpoint: endpoint, sendStream: sendStream, bridge: bridge, carrier: carrier)
+        driverTask = Task { [bridge, obfuscator, inbound] in
+            await Self.runDriver(endpoint: endpoint, sendStream: sendStream, bridge: bridge,
+                                 carrier: carrier, obfuscator: obfuscator, mailbox: inbound)
         }
     }
 
     // MARK: - Receive
-
-    /// Arms the per-datagram handler. `onPacket` fires with a fresh `Data`; `onError` fires once on
-    /// terminal failure. Called synchronously at setup — in the same `queue` turn as `connect()`,
-    /// before the driver task can enqueue any packet — so there is never a pre-handler gap to buffer.
-    /// Must run on `queue`.
+    
     func startReceiving(onPacket: @escaping @Sendable (Data) -> Void,
                         onError: @escaping @Sendable (Int32) -> Void) {
         packetHandler = onPacket
@@ -111,17 +126,14 @@ actor QUICDatagramCarrier {
     }
 
     // MARK: - Send
-
-    /// Sends one already-copied datagram; errors drop the packet (ngtcp2's loss recovery
-    /// retransmits). The caller copies out of ngtcp2's reused buffer before calling. Must run on `queue`.
+    
     func send(_ datagram: Data) {
         guard !datagram.isEmpty, let sendContinuation else { return }
         sendContinuation.yield(datagram)
     }
 
     // MARK: - Close
-
-    /// Cancels the connection. Idempotent; must run on `queue`.
+    
     func close() {
         guard !closed else { return }
         closed = true
@@ -139,31 +151,24 @@ actor QUICDatagramCarrier {
     }
 
     // MARK: - Driver
-
-    /// Weak handle the driver task and its loops hold instead of the carrier itself, so the driver
-    /// never keeps the actor alive.
+    
     private struct WeakCarrier: Sendable {
         weak var value: QUICDatagramCarrier?
     }
-
-    /// Owns the `NetworkConnection` for the whole session. `withNetworkConnection`
-    /// tears the connection down deterministically when this task is cancelled or
-    /// returns. Runs off `queue`; all state mutation hops back onto `queue`.
+    
     private static func runDriver(
         endpoint: NWEndpoint,
         sendStream: AsyncStream<Data>,
         bridge: NGTCP2ConcurrencyBridge,
-        carrier: WeakCarrier
+        carrier: WeakCarrier,
+        obfuscator: QUICPacketObfuscator?,
+        mailbox: QUICInboundMailbox
     ) async {
         do {
             try await withNetworkConnection(to: endpoint, using: { UDP() }) { connection in
-                // Each hop lands on the bridge queue (`bridge.enqueue`), where `assumeIsolated`
-                // enters the actor synchronously — the queue is its executor.
                 connection.onStateUpdate { connection, state in
                     switch state {
                     case .ready:
-                        // Capture the interface here so it's cached before `onReady`
-                        // fires (proactive migration reads it immediately).
                         let interfaceType = connection.currentPath?.availableInterfaces.first?.type
                         bridge.enqueue { carrier.value?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
                     case .failed(let error):
@@ -176,15 +181,10 @@ actor QUICDatagramCarrier {
                         break  // .setup, .preparing, .cancelled
                     }
                 }
-                // Egress under a ready connection went away: hand off to `onPathDown`
-                // if set (the owner migrates), else deliver a network error so ngtcp2
-                // tears down instead of waiting on its PTO/idle timers.
                 connection.onViabilityUpdate { _, viable in
                     guard !viable else { return }
                     bridge.enqueue { carrier.value?.assumeIsolated { $0.handleViabilityLost() } }
                 }
-                // A better path exists (e.g. Wi-Fi returns while on cellular) — cue a
-                // proactive migration before the current path degrades.
                 connection.onBetterPathUpdate { _, better in
                     guard better else { return }
                     bridge.enqueue { carrier.value?.assumeIsolated { $0.handleBetterPath() } }
@@ -195,8 +195,9 @@ actor QUICDatagramCarrier {
                 }
 
                 try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await Self.runSendLoop(connection, stream: sendStream) }
-                    group.addTask { try await Self.runReceiveLoop(connection, bridge: bridge, carrier: carrier) }
+                    group.addTask { try await Self.runSendLoop(connection, stream: sendStream, obfuscator: obfuscator) }
+                    group.addTask { try await Self.runReceiveLoop(connection, bridge: bridge, carrier: carrier,
+                                                                  obfuscator: obfuscator, mailbox: mailbox) }
                     _ = try await group.next()
                     group.cancelAll()
                 }
@@ -206,28 +207,40 @@ actor QUICDatagramCarrier {
         }
         bridge.enqueue { carrier.value?.assumeIsolated { $0.releaseFlowCount() } }
     }
-
-    /// Drains ordered datagram sends; errors drop the packet (ngtcp2 retransmits).
-    /// Runs off `queue`.
-    private static func runSendLoop(_ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>) async throws {
+    
+    private static func runSendLoop(_ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>,
+                                    obfuscator: QUICPacketObfuscator?) async throws {
         for await datagram in stream {
-            try? await connection.send(datagram)
+            guard let obfuscator else {
+                try? await connection.send(datagram)
+                continue
+            }
+            // One QUIC packet may seal into several wire datagrams (Gecko fragmentation).
+            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+            for wire in wireDatagrams {
+                try? await connection.send(wire)
+            }
         }
     }
-
-    /// Continuously receives datagrams, starting the connection on the first read.
-    /// A receive failure is terminal. Runs off `queue`.
+    
     private static func runReceiveLoop(
         _ connection: NetworkConnection<UDP>,
         bridge: NGTCP2ConcurrencyBridge,
-        carrier: WeakCarrier
+        carrier: WeakCarrier,
+        obfuscator: QUICPacketObfuscator?,
+        mailbox: QUICInboundMailbox
     ) async throws {
         do {
             while true {
                 let message = try await connection.receive()
-                let data = message.content
-                if !data.isEmpty {
-                    bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverPacket(data) } }
+                var packet = message.content
+                guard !packet.isEmpty else { continue }
+                if let obfuscator {
+                    guard let opened = obfuscator.open(packet) else { continue }
+                    packet = opened
+                }
+                if mailbox.push(packet) {
+                    bridge.enqueue { carrier.value?.assumeIsolated { $0.drainInbound() } }
                 }
             }
         } catch {
@@ -237,9 +250,8 @@ actor QUICDatagramCarrier {
         }
     }
 
-    // MARK: - State handling (on queue)
-
-    /// First `.ready`: caches the interface, then fires `onReady` once.
+    // MARK: - State handling
+    
     private func handleReady(interfaceType: NWInterface.InterfaceType?) {
         guard !closed, !ready else { return }
         ready = true
@@ -249,8 +261,7 @@ actor QUICDatagramCarrier {
             onReady()
         }
     }
-
-    /// A `.waiting` report: once ready, prefer migration; otherwise it's terminal.
+    
     private func handleWaiting(_ code: Int32) {
         guard !closed else { return }
         if ready, let onPathDown {
@@ -259,8 +270,7 @@ actor QUICDatagramCarrier {
             deliverError(code)
         }
     }
-
-    /// Egress under a ready connection went away. Must run on `queue`.
+    
     private func handleViabilityLost() {
         guard !closed, ready else { return }
         if let onPathDown {
@@ -269,32 +279,26 @@ actor QUICDatagramCarrier {
             deliverError(POSIXErrorCode.ENETDOWN.rawValue)
         }
     }
-
-    /// A better path appeared while the current one still works. Must run on `queue`.
+    
     private func handleBetterPath() {
         guard !closed, ready else { return }
         onBetterPath?()
     }
 
-    // MARK: - Delivery (on queue)
-
-    /// Delivers a datagram to the armed handler. `startReceiving` arms it at setup before the driver
-    /// task can enqueue any packet, so a nil handler here means teardown already cleared it. Must run
-    /// on `queue`.
-    private func deliverPacket(_ data: Data) {
-        guard !closed else { return }
-        packetHandler?(data)
+    // MARK: - Delivery
+    
+    private func drainInbound() {
+        let batch = inbound.take()
+        guard !closed, let packetHandler else { return }
+        for packet in batch { packetHandler(packet) }
     }
-
-    /// Delivers a terminal error code once. The handler is armed at setup before any driver enqueue,
-    /// so a nil handler here means it already fired (or teardown cleared it). Must run on `queue`.
+    
     private func deliverError(_ code: Int32) {
         guard !closed, let handler = recvErrorHandler else { return }
         recvErrorHandler = nil
         handler(code)
     }
-
-    /// Balances `FlowGauge` exactly once per carrier. Must run on `queue`.
+    
     private func releaseFlowCount() {
         guard flowCounted else { return }
         flowCounted = false
@@ -302,8 +306,7 @@ actor QUICDatagramCarrier {
     }
 
     // MARK: - Address conversion
-
-    /// Converts a `sockaddr_storage` (IPv4/IPv6) to an `NWEndpoint` host/port.
+    
     private static func nwEndpoint(from storage: sockaddr_storage) -> NWEndpoint? {
         var storage = storage
         switch Int32(storage.ss_family) {
@@ -333,9 +336,7 @@ actor QUICDatagramCarrier {
             return nil
         }
     }
-
-    /// Fills `localAddr` with a family-matched `ANY` placeholder; the real local
-    /// 4-tuple is unused for routing (path identity lives in `QUICConnection`).
+    
     private static func fillAnyLocalAddr(_ localAddr: inout sockaddr_storage, family: sa_family_t) {
         if Int32(family) == AF_INET {
             withUnsafeMutablePointer(to: &localAddr) { storage in

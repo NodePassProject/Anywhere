@@ -15,15 +15,11 @@ nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 extension QUICConnection {
 
     // MARK: Migration
-
-    /// Migration applies only to the direct carrier, and only if we advertised support.
+    
     var migrationEnabled: Bool {
         transport == nil && !tuning.disableActiveMigration
     }
-
-    /// A distinct cosmetic local addr for the next migration path, matching the remote's
-    /// family. Never hits the wire (ngtcp2 uses it only as path identity), but it must
-    /// differ from the current local or ngtcp2 won't see a path change.
+    
     func makeMigrationLocalAddr() -> sockaddr_storage {
         migrationCounter = migrationCounter &+ 1
         let tag = migrationCounter == 0 ? 1 : migrationCounter
@@ -52,12 +48,8 @@ extension QUICConnection {
         }
         return storage
     }
-
-    /// The active path died. Move the live session onto a fresh carrier (picking the new
-    /// OS-preferred path) via immediate migration, rather than tearing down every stream.
-    /// Any failure falls back to `close()` and the pool reconnects. Runs on `queue`.
+    
     func attemptReactiveMigration() {
-        // A proactive migration is moot now the path is dead; abandon it (not a failure).
         if migrationKind == .proactive {
             migratingCarrier?.assumeIsolated { $0.close() }
             clearMigrationState()
@@ -70,7 +62,7 @@ extension QUICConnection {
             return
         }
 
-        let newCarrier = QUICDatagramCarrier(bridge: bridge)
+        let newCarrier = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
         var placeholder = sockaddr_storage()
         let remote = remoteAddr
         do {
@@ -82,7 +74,6 @@ extension QUICConnection {
 
         let newLocal = makeMigrationLocalAddr()
         let ts = currentTimestamp()
-        // Bracket the ngtcp2 call so a synchronously-closing callback can't free `conn`.
         let prevBusy = bridge.enterConnHeld()
         let rv = bridge.initiateImmediateMigration(conn, localAddr: newLocal, remoteAddr: remoteAddr,
                                                    addrLen: addrLen, ts: ts)
@@ -94,9 +85,7 @@ extension QUICConnection {
             close(error: QUICError.connectionFailed("migration rejected: \(rv)"))
             return
         }
-
-        // Immediate migration switched the active path: one carrier now (no per-path
-        // routing), so route all I/O to it, retire the old one, validate in background.
+        
         migrationKind = .reactive
         let oldCarrier = carrier
         carrier = newCarrier
@@ -107,17 +96,14 @@ extension QUICConnection {
         writeToUDP()
         rescheduleTimer()
     }
-
-    /// A better path appeared while the current one still works. Validate it on a parallel
-    /// carrier and switch only once it passes, keeping the working path until then.
-    /// Best-effort: any hitch leaves the current path untouched. Runs on `queue`.
+    
     func attemptProactiveMigration() {
         guard migrationEnabled, state == .connected, migrationKind == nil,
               migrationFailures < Self.maxMigrationFailures,
               connectionOpaquePointer != nil,
               let oldType = carrier?.assumeIsolated({ $0.currentInterfaceType }) else { return }
 
-        let target = QUICDatagramCarrier(bridge: bridge)
+        let target = QUICDatagramCarrier(bridge: bridge, obfuscator: obfuscator)
         var placeholder = sockaddr_storage()
         let remote = remoteAddr
         do {
@@ -131,16 +117,16 @@ extension QUICConnection {
         migrationKind = .proactive
         migratingCarrier = target
         migratingLocalAddr = newLocal
-
-        // Before validation, a target failure aborts cleanly; once validating, it's left
-        // for path_validation to time out so the in-flight probe isn't misrouted.
+        
         armReceive(target, localAddr: newLocal) { [weak self] _ in
             self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
         }
-        target.assumeIsolated { $0.onPathDown = { [weak self] in self?.assumeIsolated { $0.abortProactiveIfNotValidating() } } }
-
-        // If the target never reaches `.ready`, give up rather than wedge `migrationKind`.
-        // Fires on `queue` (hopped back onto the ngtcp2 home queue) to touch migration state.
+        target.assumeIsolated {
+            $0.onPathDown = { [weak self] in
+                self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
+            }
+        }
+        
         proactiveDeadlineTask?.cancel()
         proactiveDeadlineTask = Task { [weak self, weak target] in
             try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
@@ -153,9 +139,7 @@ extension QUICConnection {
                 }
             }
         }
-
-        // Once the target is up and confirmed a *different* interface, start validation.
-        // NWConnection buffers the probe until ready.
+        
         target.assumeIsolated { $0.onReady = { [weak self, weak target] in
             guard let self else { return }
             self.assumeIsolated { me in
@@ -175,8 +159,6 @@ extension QUICConnection {
                     me.abortProactiveMigration(countAsFailure: true)
                     return
                 }
-                // Committed: ngtcp2 owns the validation now. Cancel the readiness deadline;
-                // path_validation success/failure drives the rest.
                 me.proactiveValidating = true
                 me.proactiveDeadlineTask?.cancel()
                 me.proactiveDeadlineTask = nil
@@ -186,25 +168,19 @@ extension QUICConnection {
             }
         } }
     }
-
-    /// Drops a proactive-migration target and stays on the current path. `countAsFailure`
-    /// is true only when migration genuinely failed (ngtcp2 rejected, or validation
-    /// failed); benign aborts pass false. Runs on `queue`.
+    
     func abortProactiveMigration(countAsFailure: Bool) {
         guard migrationKind == .proactive else { return }
         migratingCarrier?.assumeIsolated { $0.close() }
         clearMigrationState()
         if countAsFailure { migrationFailures += 1 }
     }
-
-    /// Aborts a proactive migration only while still safe — before `initiate_migration`
-    /// hands ngtcp2 an active validation. Used by the target's error hooks.
+    
     func abortProactiveIfNotValidating() {
         guard migrationKind == .proactive, !proactiveValidating else { return }
         abortProactiveMigration(countAsFailure: false)
     }
-
-    /// Clears migration tracking and the readiness deadline; leaves `migrationFailures`. Runs on `queue`.
+    
     func clearMigrationState() {
         proactiveDeadlineTask?.cancel()
         proactiveDeadlineTask = nil
@@ -212,14 +188,8 @@ extension QUICConnection {
         migratingCarrier = nil
         migrationKind = nil
     }
-
-    /// ngtcp2 finished (or abandoned) validating a migration path. The bridge trampoline defers
-    /// it off the ngtcp2 batch, so `close()` and re-entrant ngtcp2 calls are safe here.
+    
     func handlePathValidation(result: NGTCP2PathValidationResult) {
-        // ABORTED ≠ failure: ngtcp2 abandons a validation (superseded by a newer
-        // migration, or its CID retired) — not a dead path. A reactive switch during
-        // proactive validation aborts the proactive pv; that stale ABORTED must not undo
-        // it. Retire the target only if a proactive migration is still live.
         if result == .aborted {
             if migrationKind == .proactive { abortProactiveMigration(countAsFailure: false) }
             return
@@ -230,7 +200,7 @@ extension QUICConnection {
                 let old = carrier
                 carrier = target
                 localAddr = migratingLocalAddr
-                migratingCarrier = nil       // cleared first so routing settles on `carrier`
+                migratingCarrier = nil
                 armActiveCarrier(target, localAddr: localAddr)
                 old?.assumeIsolated { $0.close() }
             }
@@ -247,18 +217,14 @@ extension QUICConnection {
             }
         }
     }
-
-    /// The carrier for a just-written packet, per the local address ngtcp2 reported. Two carriers
-    /// exist only during a proactive migration; otherwise this is always `carrier`.
+    
     func carrierForOutPath(local: sockaddr_storage) -> QUICDatagramCarrier? {
         if migratingCarrier != nil, sockaddrMatches(local, migratingLocalAddr, length: addrLen) {
             return migratingCarrier
         }
         return carrier
     }
-
-    /// Byte-compares the first `length` octets of two `sockaddr_storage` values — enough to tell
-    /// the active local addr from a migration target's distinct cosmetic one.
+    
     func sockaddrMatches(_ lhs: sockaddr_storage, _ rhs: sockaddr_storage, length: Int) -> Bool {
         var lhs = lhs
         var rhs = rhs
@@ -269,30 +235,23 @@ extension QUICConnection {
             }
         }
     }
-
-    /// Sends `length` bytes from `txBuffer` to the given `carrier`. Drop-on-error; ngtcp2 retransmits.
+    
     func sendTxBuf(length: Int, to carrier: QUICDatagramCarrier?) {
         guard length > 0 else { return }
-        if let obfuscator {
-            let datagrams = txBuffer.withUnsafeBytes { raw in
-                obfuscator.seal(UnsafeRawBufferPointer(rebasing: raw[0..<length]))
-            }
-            for datagram in datagrams { sendDatagram(datagram, to: carrier) }
-            return
-        }
-        // Copy out before the next ngtcp2 write reuses txBuffer.
         let datagram = txBuffer.withUnsafeBufferPointer { Data(bytes: $0.baseAddress!, count: length) }
         sendDatagram(datagram, to: carrier)
     }
-
-    /// Routes one wire datagram to the chained transport or the given direct carrier.
+    
     func sendDatagram(_ datagram: Data, to carrier: QUICDatagramCarrier?) {
         if let transport {
-            transport.sendDatagram(datagram)
+            if let transportSealContinuation {
+                transportSealContinuation.yield(datagram)
+            } else {
+                transport.sendDatagram(datagram)
+            }
             return
         }
         guard let carrier else { return }
         carrier.assumeIsolated { $0.send(datagram) }
     }
-
 }

@@ -14,13 +14,11 @@ nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 
 // MARK: - QUICPacketObfuscator
 
-nonisolated protocol QUICPacketObfuscator: AnyObject {
-    /// Transforms one outgoing QUIC datagram into one or more wire datagrams (Gecko may fragment a
-    /// handshake packet into several).
+nonisolated protocol QUICPacketObfuscator: AnyObject, Sendable {
+    /// Transforms one outgoing QUIC datagram into one or more wire datagrams.
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data]
 
-    /// Transforms one received wire datagram into a complete QUIC datagram, or `nil` when it yields
-    /// none (a Gecko fragment awaiting reassembly, or a malformed packet).
+    /// Transforms one received wire datagram into a complete QUIC datagram.
     func open(_ datagram: Data) -> Data?
 }
 
@@ -78,53 +76,40 @@ actor QUICConnection: NGTCP2BridgeHost {
     let serverName: String
     let alpn: [String]
     let tuning: QUICTuning
-
-    /// When set, ngtcp2 rides this instead of the direct UDP carrier (QUIC through a proxy chain's UDP relay).
+    
     let transport: QUICDatagramTransport?
-
-    /// Obfuscates datagrams at the wire boundary (Hysteria Salamander/Gecko); `nil` sends them raw.
+    
     let obfuscator: QUICPacketObfuscator?
 
     var state: State = .idle
-    /// This connection's concurrency boundary: owns the serial executor everything
-    /// ngtcp2-touching runs on, the async hop, and the conn-held reentrancy guard.
+    
     let bridge: NGTCP2ConcurrencyBridge
-
-    /// Fire-and-forget hop onto the ngtcp2 queue with a `Sendable`-checked closure — the sanctioned
-    /// way for this connection's consumers (H3/Hysteria/Nowhere sessions) and its C callbacks to
-    /// enter the isolation domain, instead of reaching for `queue.async` directly.
+    
     nonisolated func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
         bridge.enqueue(work)
     }
-
-    /// Runs `body` on the ngtcp2 serial queue and awaits its result — the sanctioned async hop
-    /// for queue-confined consumers (sessions/multiplexers), so the `bridge.enqueue`+continuation
-    /// stays inside the bridge instead of leaking into their pure-async code.
+    
     nonisolated func run<T>(_ body: @escaping () -> T) async -> T {
         await bridge.run(body)
     }
-
-    /// Throwing variant: `body` returns a `Result` computed on the ngtcp2 queue.
+    
     nonisolated func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T {
         try await bridge.run(body).get()
     }
 
     var connectionOpaquePointer: OpaquePointer?
     var connRefStorage = ngtcp2_crypto_conn_ref()
-
-    /// True while inside `ngtcp2_swift_conn_read_pkt`; callbacks fired during read
-    /// must not trigger a reentrant write — the tail flush in `handleReceivedPacket` covers it.
+    
     var inReadPkt = false
-
-    /// A coalesced flush is queued; drained by one `writeToUDP` at the end of the queue cycle.
+    
     var flushScheduled = false
-
-    /// Direct-dial UDP carrier (the active path). `nil` when QUIC rides a `QUICDatagramTransport`.
+    
     var carrier: QUICDatagramCarrier?
-
-    /// The pull loop feeding inbound datagrams from a chained `QUICDatagramTransport` into ngtcp2.
-    /// `nil` on the direct-carrier path. Owned here (the outer holder); `performTeardown` cancels it.
+    
     var transportReceiveTask: Task<Void, Never>?
+    
+    var transportSealContinuation: AsyncStream<Data>.Continuation?
+    var transportSealTask: Task<Void, Never>?
 
     var localAddr = sockaddr_storage()
     var remoteAddr = sockaddr_storage()
