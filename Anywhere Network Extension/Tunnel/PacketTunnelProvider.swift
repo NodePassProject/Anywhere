@@ -13,9 +13,6 @@ import WidgetKit
 
 nonisolated private let logger = AnywhereLogger(category: "PacketTunnelProvider")
 
-extension NEPacketTunnelProvider: @unchecked @retroactive Sendable { }
-extension NEPacketTunnelFlow: @unchecked @retroactive Sendable { }
-
 nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()

@@ -10,8 +10,6 @@ import NetworkExtension
 import SwiftUI
 import Observation
 
-extension NETunnelProviderSession: @unchecked @retroactive Sendable { }
-
 nonisolated private let logger = AnywhereLogger(category: "VPNViewModel")
 
 @MainActor

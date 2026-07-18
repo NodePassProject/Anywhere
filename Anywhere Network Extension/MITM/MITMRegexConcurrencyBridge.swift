@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-extension Regex: @unchecked @retroactive Sendable { }
-
 nonisolated final class MITMRegexConcurrencyBridge: Sendable {
 
     static let shared = MITMRegexConcurrencyBridge()

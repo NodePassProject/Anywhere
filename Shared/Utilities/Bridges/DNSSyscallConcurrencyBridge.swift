@@ -8,7 +8,6 @@
 import Foundation
 
 nonisolated final class DNSSyscallConcurrencyBridge: Sendable {
-
     private let queue: DispatchQueue = DispatchQueue(
         label: "com.argsment.Anywhere.DNSSyscallConcurrencyBridge",
         qos: .userInitiated,

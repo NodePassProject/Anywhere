@@ -264,8 +264,6 @@
 				Networking/Protocols/QUIC/ngtcp2/ngtcp2_version.c,
 				Networking/Protocols/QUIC/ngtcp2/ngtcp2_window_filter.c,
 				Networking/Protocols/QUIC/ngtcp2/shared.c,
-				Networking/Protocols/QUIC/NGTCP2ConcurrencyBridge.swift,
-				"Networking/Protocols/QUIC/NGTCP2ConcurrencyBridge+Callbacks.swift",
 				Networking/Protocols/QUIC/QUICConnection.swift,
 				"Networking/Protocols/QUIC/QUICConnection+BridgeHost.swift",
 				"Networking/Protocols/QUIC/QUICConnection+Close.swift",
@@ -384,9 +382,13 @@
 				Networking/TunnelLimits.swift,
 				Networking/Utilities/BridgeContext.swift,
 				Networking/Utilities/BridgeExecutor.swift,
-				Networking/Utilities/DNSSyscallConcurrencyBridge.swift,
 				Protocols/SoftDeletable.swift,
 				Utilities/AnywhereLogger.swift,
+				Utilities/Bridges/DNSSyscallConcurrencyBridge.swift,
+				Utilities/Bridges/FoundationConcurrencyBridge.swift,
+				Utilities/Bridges/NetworkExtensionConcurrencyBridge.swift,
+				Utilities/Bridges/NGTCP2ConcurrencyBridge.swift,
+				"Utilities/Bridges/NGTCP2ConcurrencyBridge+Callbacks.swift",
 				"Utilities/Data+appendCompacting.swift",
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
@@ -413,6 +415,7 @@
 				Models/ProxyMode.swift,
 				Models/QUICPolicy.swift,
 				Utilities/AnywhereLogger.swift,
+				Utilities/Bridges/FoundationConcurrencyBridge.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};
@@ -1226,7 +1229,7 @@
 					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1283,7 +1286,7 @@
 					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1442,7 +1445,7 @@
 					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
@@ -1494,7 +1497,7 @@
 					"\"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2\"",
 					"\"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3\"",
-					"\"$(SRCROOT)/Shared/Utilities/libyaml/include\"",
+					"\"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include\"",
 				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;

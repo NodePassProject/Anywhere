@@ -8,8 +8,6 @@
 import Foundation
 
 nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
-
-    /// This connection's serial executor. Everything ngtcp2-touching runs on its queue.
     let executor: BridgeExecutor
 
     init() {

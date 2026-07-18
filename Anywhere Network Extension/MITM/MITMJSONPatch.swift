@@ -22,7 +22,7 @@ nonisolated enum MITMJSONPatch {
 
     // MARK: - Compiled operation
 
-    /// `@unchecked Sendable` allowed here.
+    /// `@unchecked Sendable` for `Any` is unavoidable.
     enum CompiledOperation: @unchecked Sendable {
         case add(path: [PathSegment], value: Any)
         case replace(path: [PathSegment], value: Any)

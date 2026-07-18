@@ -7,8 +7,6 @@
 
 import Foundation
 
-extension CFString: @unchecked @retroactive Sendable { }
-
 actor AWNotificationCenter {
     // MARK: - Darwin Notification Names
 

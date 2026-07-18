@@ -7,8 +7,6 @@
 
 import Foundation
 
-extension UserDefaults: @unchecked @retroactive Sendable { }
-
 nonisolated private let logger = AnywhereLogger(category: "AWCore")
 
 nonisolated final class AWCore {

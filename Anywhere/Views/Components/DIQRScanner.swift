@@ -8,8 +8,6 @@
 import SwiftUI
 import AVFoundation
 
-extension AVCaptureSession: @unchecked @retroactive Sendable { }
-
 fileprivate struct CameraProperties {
     var session: AVCaptureSession = .init()
     var output: AVCaptureMetadataOutput = .init()
