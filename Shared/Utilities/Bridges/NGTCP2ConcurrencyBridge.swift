@@ -51,16 +51,22 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
         }
     }
 
-    /// Bridges a single-shot ngtcp2 completion callback into async. The connection stores the
-    /// completion `body` receives and a C callback resolves it later on ``queue``, so this is the
-    /// irreducible continuation at the ngtcp2 C boundary (connect / stream write / datagram batch);
-    /// the completion fires exactly once, so it can't double-resume. `body` hands the completion to
-    /// the connection's own callback-form driver.
-    func awaitingCompletion(_ body: (@escaping @Sendable (Error?) -> Void) -> Void) async throws {
+    /// Parked throwing hop that also enters the host connection's isolation. On the ngtcp2 queue it
+    /// enters `host`'s isolation — valid because a ``NGTCP2BridgeHost`` adopts this bridge's executor
+    /// — and hands `body` the isolated connection plus the continuation to resolve inline (a
+    /// state-guard failure, a synchronous setup error, or an empty batch) or stash (in a
+    /// `PendingWrite`, a `DatagramBatchLatch`, or `connectContinuation`) for a later ngtcp2 C callback
+    /// to resume. This is the irreducible continuation at the ngtcp2 C boundary (connect / stream
+    /// write / datagram batch), resumed exactly once. Owning the queue hop, the isolation entry, and
+    /// the continuation here keeps the awaiting entry points free of that boilerplate. `host` stays
+    /// alive across the suspension via the awaiting frame, so the hop always observes it.
+    func runParkedThrowing<Host: NGTCP2BridgeHost>(
+        host: Host,
+        _ body: @escaping (isolated Host, CheckedContinuation<Void, Error>) -> Void
+    ) async throws {
+        let hop = QueueHopBody(body: body)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            body { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
+            queue.async { host.assumeIsolated { me in hop.body(me, continuation) } }
         }
     }
 

@@ -358,11 +358,8 @@ actor MITMSession {
         self.isPlaintext = isPlaintext
         self.innerTransport = InnerTransport(lwipBridge: lwipBridge)
         (self.deferredActions, self.deferredActionContinuation) = AsyncStream.makeStream(of: DeferredAction.self)
-        // Cleartext requests carry an http:// URL; rule gates and script `request.url` must reflect it.
         let scheme = isPlaintext ? "http" : "https"
-        // Scope keyed by matched set id to line up with the Anywhere.store scope.
         self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
-        // effectiveAuthority is late-bound by a transparent rewrite on the first request.
         self.requestStream = MITMHTTP1Stream(
             host: dstHost,
             scheme: scheme,
@@ -393,11 +390,8 @@ actor MITMSession {
     }
 
     // MARK: - Lifecycle
-
-    /// Starts the inner leg — a TLS handshake for HTTPS, or a direct cleartext leg for plain HTTP —
-    /// and defers the upstream dial until the first request resolves the destination.
+    
     func start(sni: String) {
-        // Strong self: `cancel()` finishes the channel, ending this loop and releasing the session.
         deferredActionsTask = Task {
             for await action in deferredActions {
                 apply(action)
@@ -410,7 +404,6 @@ actor MITMSession {
         }
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
-        // Unparseable ClientHello fails closed to TLS 1.2; any 1.3-capable client also speaks 1.2.
         clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? false
         startInnerHandshakeFromClientOffer(
             sni: sni,
@@ -420,24 +413,15 @@ actor MITMSession {
     }
 
     private func installStreamHandlers() {
-        // The streams share this actor's lwIP executor, so enter their isolation synchronously to wire
-        // the hooks. Each hook fires later on that same queue and self-hops back via `assumeIsolated`.
-        // The upgrade must land inline within the current parse pass.
         responseStream.assumeIsolated { $0.onProtocolUpgrade = { [weak self] in
             self?.assumeIsolated { $0.handleResponseUpgrade() }
         } }
-        // Fail closed on a smuggling/injection head or over-cap body — deferred off the parse pass
-        // (onto the ordered action channel) to avoid re-entrant teardown. The request direction can't
-        // cleanly answer the client so it just closes; the response direction answers a 502 first.
         requestStream.assumeIsolated { $0.onFatalClose = { [weak self] in
             self?.post(.cancel(reason: nil))
         } }
         responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
             self?.post(.failInnerLegWith502(reason: "rejected a malformed or oversized upstream response"))
         } }
-        // Mid-body chunked framing breakage (head already on the wire): tear down both legs. A 502
-        // can't be written over an in-flight response, and a synthesized terminator would frame a
-        // truncated body as complete and desync the peer.
         let hardClose: @Sendable () -> Void = { [weak self] in
             self?.post(.cancel(reason: nil))
         }
@@ -482,12 +466,8 @@ actor MITMSession {
 
     func cancel(error: Error? = nil) {
         guard !torn else { return }
-        // Best-effort GOAWAY to an h2 client before suppressing writes (`torn`) so it learns the last
-        // processed stream and can retry (RFC 9113 §6.8). Idempotent; nil-safe for an h1 inner leg or
-        // pre-handshake teardown.
         bridgeClient?.assumeIsolated { $0.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.internalError) }
         torn = true
-        // Disarm in-flight script resumes before they can write to torn legs.
         requestStream.assumeIsolated { $0.markTorn() }
         responseStream.assumeIsolated { $0.markTorn() }
         bridgeClient?.assumeIsolated { $0.markTorn() }
@@ -518,17 +498,13 @@ actor MITMSession {
         innerRecord = nil
         outerRecord?.cancel()
         outerRecord = nil
-        // outerConnection covers the pre-handshake race window; cancel() is idempotent.
         outerConnection?.cancel()
         outerConnection = nil
         proxyClient?.cancel()
         proxyClient = nil
         pendingUpstreamBytes = Data()
-        for writer in legWriters.values { writer.finish() }
-        legWriters.removeAll()
+        legSenders.removeAll()
         innerTransport.cancel()
-        // End the deferred-action channel so its consumer loop finishes and releases the session;
-        // any actions already queued are dropped (their targets would no-op on `torn` anyway).
         deferredActionContinuation.finish()
         deferredActionsTask = nil
         onTeardown?(error)
@@ -551,8 +527,7 @@ actor MITMSession {
             }
         }
     }
-
-    /// Builds the inner TLS server from a minted leaf and feeds the buffered ClientHello.
+    
     private func beginInnerHandshake(with leaf: MITMLeafCertCache.Leaf, alpns: [String], tlsVersions: Set<UInt16>) {
         let server = TLSServer(
             leafCert: leaf.certificate,
@@ -568,8 +543,7 @@ actor MITMSession {
         server.feed(pendingClientBytes)
         pendingClientBytes.removeAll(keepingCapacity: false)
     }
-
-    /// Picks ALPN and TLS versions from the client's offer (h2 / http/1.1, intersected).
+    
     private func startInnerHandshakeFromClientOffer(
         sni: String,
         clientALPNs: [String],
@@ -584,28 +558,24 @@ actor MITMSession {
     }
 
     // MARK: - Outer Handshake (deferred)
-
-    /// Cleartext upstream leg: no TLS handshake — wrap the dialed connection in a `PlaintextLeg` and shuttle h1↔h1.
+    
     private func startCleartextUpstream(over connection: ProxyConnection) {
         guard !torn, let inner = innerRecord else { connection.cancel(); return }
         let outer = PlaintextLeg(transport: TunneledTransport(tunnel: connection))
         outerRecord = outer
         finishDialAndShuttle(inner: inner, outer: outer)
     }
-
-    /// Outer handshake for an HTTP/1.1 *inner* leg (h2 inner uses the decoupled bridge dial).
-    /// Offers http/1.1; on success shuttles h1↔h1.
+    
     private func startOuterHandshakeAfterDial(
         over connection: ProxyConnection,
         host: String,
         innerALPN: String
     ) {
-        // .nonBrowser: a browser fingerprint's ALPS trips strict origins (Google GFE) into fatal unexpected_message.
         let configuration = TLSConfiguration(
             serverName: host,
             alpn: [innerALPN],
             minVersion: .tls12,
-            maxVersion: .tls13, // upstream TLS leg is independent of the client leg — don't cap it to the client's version
+            maxVersion: .tls13,
             fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
@@ -663,113 +633,71 @@ actor MITMSession {
     }
 
     // MARK: - Shuttle
-
-    /// Completes the h1↔h1 dial: flushes the buffered first request, starts the outbound pump.
+    
     private func finishDialAndShuttle(inner: any MITMByteLeg, outer: any MITMByteLeg) {
-        // Flush the buffered first request before the inbound pump forwards new ones.
         let buffered = pendingUpstreamBytes
         pendingUpstreamBytes = Data()
         if !buffered.isEmpty {
             sendChunkedCancellingOnError(buffered, via: outer)
         }
         startOutboundPump(inner: inner, outer: outer)
-        // Resume the inbound pump only if backpressure paused it while dialing; if it never paused
-        // it's still running, so don't double-start it.
         if inboundReadPaused {
             inboundReadPaused = false
             startInboundPump(inner: inner)
         }
     }
-
-    /// sendChunked chunk size; 64 KiB = 4× the TLS plaintext record cap, bounding in-flight bytes per leg.
+    
     private static let pumpChunkSize: Int = 64 * 1024
-
-    /// Per-leg async writers, keyed by record identity, created lazily. Touched only on lwipQueue.
-    private var legWriters: [ObjectIdentifier: LegWriter] = [:]
-
-    /// Serialized, chunked send to a leg. Enqueues on the actor (so concurrent callers keep enqueue
-    /// order and can't interleave bytes mid-frame), then suspends until the write drains. The park
-    /// continuation lives in ``LWIPConcurrencyBridge``; the enqueue completion (from the writer's own
-    /// task) resumes it.
+    
+    private var legSenders: [ObjectIdentifier: SerialSender] = [:]
+    
+    private static func drainChunked(_ data: Data, over record: any MITMByteLeg, chunkSize: Int) async throws {
+        var offset = data.startIndex
+        while offset < data.endIndex {
+            let take = min(chunkSize, data.distance(from: offset, to: data.endIndex))
+            let end = data.index(offset, offsetBy: take)
+            try await record.send(Data(data[offset..<end]))
+            offset = end
+        }
+    }
+    
     private func sendChunked(_ data: Data, via record: any MITMByteLeg) async throws {
         guard !torn else { throw TransportError.notConnected }
-        let writer = writer(for: record)
-        try await lwipBridge.parkThrowing { (continuation: CheckedContinuation<Void, Error>) in
-            writer.enqueue(data) { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
+        try await sender(for: record).submit {
+            try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
+        }.value()
     }
-
-    /// Isolated to the actor (lwIP queue).
-    private func writer(for record: any MITMByteLeg) -> LegWriter {
+    
+    private func sender(for record: any MITMByteLeg) -> SerialSender {
         let key = ObjectIdentifier(record)
-        if let existing = legWriters[key] { return existing }
-        let writer = LegWriter(record: record, chunkSize: Self.pumpChunkSize)
-        legWriters[key] = writer
-        return writer
+        if let existing = legSenders[key] { return existing }
+        let sender = SerialSender()
+        legSenders[key] = sender
+        return sender
     }
-
-    /// Fire-and-forget serialized send; tears the session down if the write fails. On the actor so
-    /// the enqueue keeps its order relative to concurrent sends to the same leg; the writer's
-    /// completion (off the actor) hops back to cancel.
+    
     private func sendChunkedCancellingOnError(_ data: Data, via record: any MITMByteLeg) {
         guard !torn else { return }
-        writer(for: record).enqueue(data) { [weak self] error in
-            guard let error else { return }
-            self?.post(.cancel(reason: error))
+        let pending = sender(for: record).submit {
+            try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
+        }
+        Task { [weak self] in
+            do { try await pending.value() }
+            catch { self?.post(.cancel(reason: error)) }
         }
     }
-
-    /// Serialized send, then a graceful teardown once it drains (used for the 502 answer and the
-    /// upstream-EOF flush, which close the session regardless of the write outcome). Actor-isolated.
+    
     private func sendChunkedThenCancel(_ data: Data, via record: any MITMByteLeg) {
         guard !torn else { return }
-        writer(for: record).enqueue(data) { [weak self] _ in
+        let pending = sender(for: record).submit {
+            try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
+        }
+        Task { [weak self] in
+            _ = try? await pending.value()
             self?.post(.cancel(reason: nil))
         }
     }
-
-    /// Serializes per-leg sends (concurrent callers can't interleave bytes mid-frame) and chunks each
-    /// blob so no single `send` exceeds `chunkSize`. A single consumer task drains the job stream FIFO,
-    /// completing one blob fully before the next.
-    private final class LegWriter: Sendable {
-        private struct Job: Sendable { let data: Data; let resume: @Sendable (Error?) -> Void }
-        private let continuation: AsyncStream<Job>.Continuation
-
-        init(record: any MITMByteLeg, chunkSize: Int) {
-            let (stream, continuation) = AsyncStream<Job>.makeStream()
-            self.continuation = continuation
-            Task {
-                for await job in stream {
-                    var offset = job.data.startIndex
-                    var failure: Error?
-                    while offset < job.data.endIndex {
-                        let take = min(chunkSize, job.data.distance(from: offset, to: job.data.endIndex))
-                        let end = job.data.index(offset, offsetBy: take)
-                        // Copy so the encoder sees a contiguous slab.
-                        do { try await record.send(Data(job.data[offset..<end])) }
-                        catch { failure = error; break }
-                        offset = end
-                    }
-                    job.resume(failure)
-                }
-            }
-        }
-
-        /// Enqueues `data` (FIFO; call on lwipQueue to preserve order across concurrent callers).
-        /// `completion` fires once the blob has fully drained, a send failed, or the writer was finished.
-        func enqueue(_ data: Data, completion: @escaping @Sendable (Error?) -> Void) {
-            if case .terminated = continuation.yield(Job(data: data, resume: completion)) {
-                completion(TransportError.notConnected)
-            }
-        }
-
-        func finish() { continuation.finish() }
-    }
-
-    /// Pumps client plaintext upstream, or drains synthesized responses back to the client. The
-    /// task is actor-isolated, so each `await` resumes on the lwIP queue and `torn`/state are direct.
+    
     private func startInboundPump(inner: any MITMByteLeg) {
         Task {
             let data: Data?
@@ -782,20 +710,13 @@ actor MITMSession {
                 return
             }
             guard let data, !data.isEmpty else {
-                // Client half-closed its send side (FIN). Stop reading the client but keep the
-                // outbound (response) leg pumping so an in-flight response still reaches it —
-                // matching the non-MITM `downlinkOnlyTimeout` path. Teardown then follows from the
-                // upstream's own EOF or the downlink-only idle timeout.
                 return
             }
-            // Feed (may park on a script); `inbound.feed` self-hops onto the lwIP queue.
             let transformed = await inbound.feed(data)
             await routeInbound(inner: inner, transformed: transformed)
         }
     }
-
-    /// Continuation of the inbound pump after the rewrite: drains synth bytes, forwards to the outer
-    /// leg (or buffers + dials it), and re-arms the pump. Runs on the actor (lwIP queue).
+    
     private func routeInbound(inner: any MITMByteLeg, transformed: Data) async {
         enum Route { case stop, recurse, sendUpstream(any MITMByteLeg) }
         let route: Route
@@ -807,12 +728,8 @@ actor MITMSession {
                 sendChunkedCancellingOnError(injected, via: inner)
             }
             if transformed.isEmpty {
-                // Buffered fragment or fully-answered synth.
                 route = .recurse
             } else if let outer = outerRecord {
-                // One outer leg carries one authority. When a later request resolves a different
-                // upstream, reconnect the leg if it's fully idle (so the client sees no drop);
-                // otherwise tear down rather than truncate an in-flight response.
                 if resolvedUpstreamMatchesDialed() {
                     route = .sendUpstream(outer)
                 } else {
@@ -825,7 +742,6 @@ actor MITMSession {
                     route = .stop
                 }
             } else {
-                // Sets up the deferred dial and resumes/pauses the inbound pump itself.
                 bufferUpstreamAndDial(transformed, inner: inner)
                 route = .stop
             }
@@ -846,12 +762,9 @@ actor MITMSession {
             startInboundPump(inner: inner)
         }
     }
-
-    /// Buffers upstream-bound bytes and kicks off the deferred dial; mid-dial calls only buffer.
+    
     private func bufferUpstreamAndDial(_ transformed: Data, inner: any MITMByteLeg) {
         pendingUpstreamBytes.append(transformed)
-        // Backstop only — `resumeOrPauseInboundPreDial` backpressures at the high-water mark, so this
-        // trips only on a pathological single oversized rewrite, not a large streamed upload.
         if pendingUpstreamBytes.count > Self.maxPendingUpstreamBytes {
             logger.warning("\(dstHost): pre-dial upstream buffer exceeded \(Self.maxPendingUpstreamBytes) B; tearing down session")
             cancel(error: nil)
@@ -867,7 +780,6 @@ actor MITMSession {
             return
         }
         dialing = true
-        // A transparent rewrite may have replaced the host/port.
         let resolved = inbound.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
@@ -895,10 +807,7 @@ actor MITMSession {
         }
         resumeOrPauseInboundPreDial(inner: inner)
     }
-
-    /// While the dial is in flight, keep reading client bytes until the upstream-bound buffer reaches
-    /// the high-water mark, then pause — filling the client's TCP window so a fast local uploader is
-    /// throttled instead of buffering an unbounded first-request body. lwipQueue only.
+    
     private func resumeOrPauseInboundPreDial(inner: any MITMByteLeg) {
         if pendingUpstreamBytes.count >= Self.maxPendingClientBytes {
             inboundReadPaused = true
@@ -906,44 +815,31 @@ actor MITMSession {
             startInboundPump(inner: inner)
         }
     }
-
-    /// False when the current request resolves a different upstream than dialed; always true pre-dial.
+    
     private func resolvedUpstreamMatchesDialed() -> Bool {
         guard let dialedHost, let dialedPort else { return true }
         let resolved = inbound.resolvedUpstream
         return (resolved?.host ?? dstHost) == dialedHost
             && (resolved?.port ?? dstPort) == dialedPort
     }
-
-    /// Whether the outer (h1 upstream) leg can be safely closed and re-dialed for a request that
-    /// resolved a different upstream host. Safe only when the leg is fully idle: response stream
-    /// between messages and the just-routed request the only one outstanding (`http1InFlightCount == 1`;
-    /// higher means an earlier request is still owed a response). Else the caller tears down rather
-    /// than truncate an in-flight response.
+    
     static func canSwapOuterLeg(responseBetweenMessages: Bool, http1InFlightCount: Int) -> Bool {
         responseBetweenMessages && http1InFlightCount == 1
     }
-
-    /// Live evaluation of ``canSwapOuterLeg`` against this session's response stream and request log.
+    
     private func canReconnectOuterLeg() -> Bool {
         Self.canSwapOuterLeg(
             responseBetweenMessages: responseStream.assumeIsolated { $0.isBetweenMessages },
             http1InFlightCount: requestLog.http1InFlightCount
         )
     }
-
-    /// Closes the confirmed-idle outer h1 leg and dials a fresh one for a request that resolved a
-    /// different upstream host, keeping the inner (client) leg up so the client sees no drop or retry.
-    /// Precondition: ``canReconnectOuterLeg`` returned true. lwipQueue only.
+    
     private func reconnectOuterLeg(with transformed: Data, inner: any MITMByteLeg) {
         logger.info("\(dstHost): later request resolved a new upstream; reconnecting the idle outer leg instead of tearing down")
-        // Detach before cancelling: the old outbound pump's `outerRecord === outer` guard then sees a
-        // non-matching (nil) record and no-ops its EOF, so cancelling here can't recurse into a full
-        // session teardown.
         let oldOuter = outerRecord
         outerRecord = nil
         if let oldOuter {
-            legWriters.removeValue(forKey: ObjectIdentifier(oldOuter))?.finish()
+            legSenders.removeValue(forKey: ObjectIdentifier(oldOuter))
             oldOuter.cancel()
         }
         tlsClient?.cancel()
@@ -952,8 +848,6 @@ actor MITMSession {
         outerConnection = nil
         proxyClient?.cancel()
         proxyClient = nil
-        // Reset dial state so `bufferUpstreamAndDial` dials afresh; the request's own
-        // `resolvedUpstream` picks the new target.
         dialing = false
         dialedHost = nil
         dialedPort = nil
@@ -1548,15 +1442,16 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             bs.pendingToUpstream.append(out)
         }
     }
-
-    /// Writes framed request bytes to a bridge stream's h1 upstream, clearing the stream's unsent tally
-    /// as the write drains so `maxBridgeUpstreamBufferedBytes` measures only bytes still in hand. A send
-    /// failure aborts the response — the upstream is gone.
+    
     private func flushToBridgeUpstream(_ data: Data, streamID: UInt32, record: TLSRecordConnection) {
         guard !data.isEmpty, !torn else { return }
         let count = data.count
-        writer(for: record).enqueue(data) { [weak self] sendError in
-            // Off-actor writer completion; defers back onto the actor to update the stream tally.
+        let pending = sender(for: record).submit {
+            try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
+        }
+        Task { [weak self] in
+            var sendError: Error?
+            do { try await pending.value() } catch { sendError = error }
             self?.post(.bridgeUpstreamDrained(streamID: streamID, count: count, sendError: sendError))
         }
     }
@@ -1573,7 +1468,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         bs.connection?.cancel()
         bs.proxyClient?.cancel()
         if let record = bs.upstreamRecord {
-            legWriters.removeValue(forKey: ObjectIdentifier(record))?.finish()
+            legSenders.removeValue(forKey: ObjectIdentifier(record))
             record.cancel()
         }
         bs.responseStream.assumeIsolated { $0.markTorn() }

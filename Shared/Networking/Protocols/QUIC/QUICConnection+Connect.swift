@@ -14,24 +14,23 @@ extension QUICConnection {
 
     // MARK: Connect
     
-    nonisolated func connect(completion: @escaping @Sendable (Error?) -> Void) {
-        bridge.enqueue { [weak self] in
-            guard let self else { completion(QUICError.connectionFailed("Invalid state")); return }
-            self.assumeIsolated { me in
-                guard me.state == .idle else {
-                    completion(QUICError.connectionFailed("Invalid state"))
-                    return
-                }
-                QUICCrypto.registerCallbacks()
-                me.state = .connecting
-                me.connectCompletion = completion
-                me.setupUDP(completion: completion)
+    nonisolated func connect() async throws {
+        try await bridge.runParkedThrowing(host: self) { me, continuation in
+            guard me.state == .idle else {
+                continuation.resume(throwing: QUICError.connectionFailed("Invalid state"))
+                return
             }
+            QUICCrypto.registerCallbacks()
+            me.state = .connecting
+            me.connectContinuation = continuation
+            me.setupUDP()
         }
     }
     
-    nonisolated func connect() async throws {
-        try await bridge.awaitingCompletion { connect(completion: $0) }
+    func finishConnect(_ error: Error?) {
+        guard let continuation = connectContinuation else { return }
+        connectContinuation = nil
+        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
     
     nonisolated func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
@@ -50,15 +49,15 @@ extension QUICConnection {
 
     // MARK: UDP
 
-    func setupUDP(completion: @escaping @Sendable (Error?) -> Void) {
+    func setupUDP() {
         if let transport {
-            setupTunnelTransport(transport: transport, completion: completion)
+            setupTunnelTransport(transport: transport)
         } else {
-            setupDirectCarrier(completion: completion)
+            setupDirectCarrier()
         }
     }
 
-    func setupDirectCarrier(completion: @escaping @Sendable (Error?) -> Void) {
+    func setupDirectCarrier() {
         do {
             populateRemoteAddr()
             guard remoteAddr.ss_family != 0 else {
@@ -78,15 +77,11 @@ extension QUICConnection {
         } catch {
             state = .closed
             closeCarrier()
-            connectCompletion = nil
-            completion(error)
+            finishConnect(error)
         }
     }
-    
-    func setupTunnelTransport(
-        transport: QUICDatagramTransport,
-        completion: @escaping @Sendable (Error?) -> Void
-    ) {
+
+    func setupTunnelTransport(transport: QUICDatagramTransport) {
         do {
             configurePlaceholderAddrs()
             try initializeNgtcp2()
@@ -100,8 +95,7 @@ extension QUICConnection {
         } catch {
             state = .closed
             transport.cancel()
-            connectCompletion = nil
-            completion(error)
+            finishConnect(error)
         }
     }
     
@@ -151,10 +145,7 @@ extension QUICConnection {
     
     func handleTransportClosed(_ error: Error?) {
         let err = error ?? QUICError.closed
-        if let callback = connectCompletion {
-            connectCompletion = nil
-            callback(err)
-        }
+        finishConnect(err)
         close(error: err)
     }
     
@@ -279,7 +270,6 @@ extension QUICConnection {
 
         var settings = bridge.defaultSettings()
         settings.initial_ts = currentTimestamp()
-        // Chained transports use the RFC 9000 §14 floor; see chainedMaxUDPPayload.
         settings.max_tx_udp_payload_size = (transport != nil) ? Self.chainedMaxUDPPayload : Self.maxUDPPayload
         settings.cc_algo = tuning.ngtcp2CCAlgo
         settings.max_stream_window = tuning.maxStreamWindow
@@ -350,5 +340,4 @@ extension QUICConnection {
             }
         }
     }
-
 }

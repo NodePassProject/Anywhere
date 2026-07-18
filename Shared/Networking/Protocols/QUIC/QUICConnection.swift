@@ -140,65 +140,45 @@ actor QUICConnection: NGTCP2BridgeHost {
     static let proactiveReadyTimeout: TimeInterval = 5
 
     var tlsHandler: QUICTLSHandler?
-
-    /// ngtcp2's loss/PTO retransmit timer, vended by ``bridge`` so the `DispatchSourceTimer`
-    /// stays in the bridge layer. Re-armed from ``rescheduleTimer`` to ngtcp2's next expiry.
+    
     var retransmitTimer: BridgeDeadlineTimer?
 
     var dcid = ngtcp2_cid()
     var scid = ngtcp2_cid()
-
-    var connectCompletion: (@Sendable (Error?) -> Void)?
-
-    /// Output-event handlers, set by the owning session (HTTP3/Hysteria/Nowhere) and invoked
-    /// synchronously from the ngtcp2 callbacks on the bridge queue. The `Mutex` protects the
-    /// closure set as a value: sessions assign via `withLock` from their own isolation, and the
-    /// callbacks snapshot the closure under the lock and invoke it outside it.
+    
+    var connectContinuation: CheckedContinuation<Void, Error>?
+    
     struct Handlers: Sendable {
-        /// Receives a zero-copy view into ngtcp2's buffer, valid only for the synchronous call —
-        /// dispatching without copying is a use-after-free.
         var streamData: (@Sendable (Int64, Data, Bool) -> Void)?
-        /// Fires on stream termination (`error == nil` for a clean close). A stream can
-        /// trigger reset then close, so handling must be idempotent.
         var streamTermination: (@Sendable (Int64, Error?) -> Void)?
         var datagram: (@Sendable (Data) -> Void)?
         var connectionClosed: (@Sendable (Error) -> Void)?
-        /// Fires after the peer increases the cumulative number of locally initiated
-        /// bidirectional streams. Delivery is deferred until ngtcp2 finishes the
-        /// current packet-processing batch, so handlers may safely open streams.
         var bidiCredit: (@Sendable (UInt64) -> Void)?
     }
     let handlers = Mutex(Handlers())
 
     var brutalCC: BrutalCongestionControl?
-    /// Registry key (`ngtcp2_cc *`) for the `@_cdecl` trampolines.
     var brutalCCKey: OpaquePointer?
 
     let datagramsEnabled: Bool
     static let maxDatagramFrameSize: UInt64 = 65535
-
-    /// Writes blocked by stream flow control; flushed on MAX_STREAM_DATA.
+    
     var pendingWrites: [PendingWrite] = []
 
     struct PendingWrite {
         let streamId: Int64
         var data: Data
         let fin: Bool
-        let completion: (Error?) -> Void
+        let continuation: CheckedContinuation<Void, Error>?
     }
-
-    /// Heap copies of stream bytes per stream, ascending end-offset order. ngtcp2's
-    /// `writev_stream` is zero-copy and re-reads the pointer on every retransmission,
-    /// so bytes must stay valid until acked. Touched only on `queue`.
+    
     var inflightStreamBuffers: [Int64: [InflightStreamBuffer]] = [:]
-    /// Absolute tx offset per stream, labeling retained buffers for the ack callback.
-    /// Touched only on `queue`.
+    
     var streamTxOffset: [Int64: UInt64] = [:]
 
     /// Stable heap copy of stream bytes handed to ngtcp2.
     final class InflightStreamBuffer {
         let storage: UnsafeMutableBufferPointer<UInt8>
-        /// Absolute stream offset one past this buffer's last accepted byte.
         var endOffset: UInt64 = 0
 
         init(copying data: Data) {
@@ -208,37 +188,44 @@ actor QUICConnection: NGTCP2BridgeHost {
         }
 
         deinit { storage.deallocate() }
-
-        /// Runs `body` with the buffer's stable base pointer. Taking it as a closure parameter
-        /// keeps it region-local, so it can be handed to the ngtcp2 bridge without a `Sendable`
-        /// box; the address is stable for the buffer's lifetime.
+        
         func withStableBase<R>(_ body: (UnsafeMutablePointer<UInt8>) -> R) -> R {
             body(storage.baseAddress!)
         }
     }
-
-    /// Datagrams awaiting send, drained first in `writeToUDP()`. Bounded at
-    /// `maxPendingDatagrams` with drop-oldest; each completion fires on every terminal outcome.
+    
     struct PendingDatagram {
         let data: Data
-        let completion: ((Error?) -> Void)?
+        let latch: DatagramBatchLatch?
     }
     var pendingDatagrams: [PendingDatagram] = []
     static let maxPendingDatagrams = 1024
+    
+    final class DatagramBatchLatch {
+        private var remaining: Int
+        private var firstError: Error?
+        private var continuation: CheckedContinuation<Void, Error>?
+
+        init(count: Int, continuation: CheckedContinuation<Void, Error>) {
+            self.remaining = count
+            self.continuation = continuation
+        }
+
+        func settle(_ error: Error?) {
+            if let error, firstError == nil { firstError = error }
+            remaining -= 1
+            guard remaining <= 0, let continuation else { return }
+            self.continuation = nil
+            if let firstError { continuation.resume(throwing: firstError) } else { continuation.resume() }
+        }
+    }
     var didWarnDatagramOverflow = false
 
     static let maxUDPPayload = 1452
-
-    /// UDP payload ceiling when riding a `QUICDatagramTransport`: the RFC 9000 §14 floor (1200 B)
-    /// always fits the inner transport — larger sizes force inner fragmentation and, with PMTUD
-    /// disabled for chained transports, wedge loss recovery at a too-large size forever.
     static let chainedMaxUDPPayload = 1200
-
-    /// Reusable tx buffer; one slot suffices because ngtcp2 is single-threaded on `queue`.
+    
     var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
-
-    /// PMTUD probe sizes, ascending. Must be in (1200, max_tx_udp_payload_size] —
-    /// ngtcp2 silently skips larger probes. Copied by ngtcp2 at conn-new time.
+    
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
     // MARK: Init
@@ -261,8 +248,7 @@ actor QUICConnection: NGTCP2BridgeHost {
     }
 
     // MARK: Timer state
-
-    /// Last deadline armed, to avoid recreating a DispatchSourceTimer on every ACK.
+    
     var lastScheduledExpiry: UInt64 = 0
 
     // MARK: Utilities

@@ -88,10 +88,7 @@ extension QUICConnection {
             default:
                 error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv) (\(bridge.errorString(rv)))")
             }
-            if let callback = connectCompletion {
-                connectCompletion = nil
-                callback(error)
-            }
+            finishConnect(error)
             close(error: error)
             return
         }
@@ -106,8 +103,8 @@ extension QUICConnection {
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
         
-        var pendingCompletions: [(((Error?) -> Void)?, Error?)] = []
-        
+        var settlements: [(DatagramBatchLatch?, Error?)] = []
+
         while !pendingDatagrams.isEmpty {
             var accepted: Int32 = 0
             let head = pendingDatagrams[0]
@@ -134,13 +131,13 @@ extension QUICConnection {
             
             if nwrite == ngtcp2_ssize(NGTCP2_ERR_WRITE_MORE) {
                 let popped = pendingDatagrams.removeFirst()
-                pendingCompletions.append((popped.completion, nil))
+                settlements.append((popped.latch, nil))
                 continue
             }
             if nwrite < 0 {
                 logger.warning("[QUIC] Dropping \(datagram.count)-byte datagram: ngtcp2 err \(nwrite)")
                 let popped = pendingDatagrams.removeFirst()
-                pendingCompletions.append((popped.completion, QUICError.connectionFailed("ngtcp2 write_datagram err \(nwrite)")))
+                settlements.append((popped.latch, QUICError.connectionFailed("ngtcp2 write_datagram err \(nwrite)")))
                 continue
             }
             if nwrite > 0 {
@@ -148,7 +145,7 @@ extension QUICConnection {
             }
             if accepted != 0 {
                 let popped = pendingDatagrams.removeFirst()
-                pendingCompletions.append((popped.completion, nil))
+                settlements.append((popped.latch, nil))
                 continue
             }
             if nwrite > 0 {
@@ -159,7 +156,7 @@ extension QUICConnection {
             if datagram.count > bound {
                 logger.warning("[QUIC] Dropping \(datagram.count)-byte datagram: exceeds path-MTU bound (\(bound) B)")
                 let popped = pendingDatagrams.removeFirst()
-                pendingCompletions.append((popped.completion, QUICError.datagramTooLarge(maxBound: bound)))
+                settlements.append((popped.latch, QUICError.datagramTooLarge(maxBound: bound)))
                 continue
             }
             
@@ -180,7 +177,7 @@ extension QUICConnection {
 
         rescheduleTimer()
         
-        for (callback, error) in pendingCompletions { callback?(error) }
+        for (latch, error) in settlements { latch?.settle(error) }
     }
 
 
@@ -208,10 +205,7 @@ extension QUICConnection {
                     me.bridge.exitConnHeld(prevBusy)
                     if rv != 0 {
                         let error = QUICError.connectionFailed("expiry error: \(rv) (\(me.bridge.errorString(rv)))")
-                        if let callback = me.connectCompletion {
-                            me.connectCompletion = nil
-                            callback(error)
-                        }
+                        me.finishConnect(error)
                         me.close(error: error)
                         return
                     }
