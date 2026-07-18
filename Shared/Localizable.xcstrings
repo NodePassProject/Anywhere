@@ -15257,9 +15257,6 @@
     "SOCKS5" : {
       "shouldTranslate" : false
     },
-    "Spec" : {
-      "shouldTranslate" : false
-    },
     "SSID" : {
       "shouldTranslate" : false
     },

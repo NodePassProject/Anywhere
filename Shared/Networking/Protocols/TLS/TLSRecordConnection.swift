@@ -64,6 +64,9 @@ nonisolated final class TLSRecordConnection: Sendable {
 
     let cipherSuite: UInt16
 
+    /// TLS 1.3 exporter master secret. It is immutable across KeyUpdate and never exposed.
+    private let exporterMasterSecret: Data?
+
     // MARK: - Per-direction Record State
 
     /// One direction's record-protection state: the AEAD key material plus that direction's
@@ -161,10 +164,12 @@ nonisolated final class TLSRecordConnection: Sendable {
     init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data,
          cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256,
          clientAppSecret: Data? = nil, serverAppSecret: Data? = nil,
+         exporterMasterSecret: Data? = nil,
          direction: Direction = .client) {
         self.tlsVersion = 0x0304
         self.cipherSuite = cipherSuite
         self.direction = direction
+        self.exporterMasterSecret = exporterMasterSecret
         // Map the wire roles (client/server) onto this endpoint's directions once, here; the
         // record paths deal only in egress/ingress.
         let client = DirectionState(key: clientKey, iv: clientIV,
@@ -195,6 +200,7 @@ nonisolated final class TLSRecordConnection: Sendable {
         self.tlsVersion = protocolVersion
         self.cipherSuite = cipherSuite
         self.direction = direction
+        self.exporterMasterSecret = nil
         let client = DirectionState(key: clientKey, iv: clientIV,
                                     symmetricKey: SymmetricKey(data: clientKey),
                                     seqNum: initialClientSeqNum)
@@ -205,6 +211,19 @@ nonisolated final class TLSRecordConnection: Sendable {
         self.ingressState = Mutex(direction == .server ? client : server)
         self.egressMACKey = direction == .server ? serverMACKey : clientMACKey
         self.ingressMACKey = direction == .server ? clientMACKey : serverMACKey
+    }
+
+    /// Derives connection-bound keying material without exposing the exporter master secret.
+    func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
+        guard tlsVersion == 0x0304, let exporterMasterSecret, length > 0 else {
+            throw TLSError.handshakeFailed("TLS exporter unavailable")
+        }
+        return TLS13KeyDerivation(cipherSuite: cipherSuite).exportKeyingMaterial(
+            exporterMasterSecret: exporterMasterSecret,
+            label: label,
+            context: context,
+            length: length
+        )
     }
 
     /// Buffers application bytes read during the handshake; call before any `receive()`.

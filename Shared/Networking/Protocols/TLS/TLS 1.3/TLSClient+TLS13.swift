@@ -362,7 +362,11 @@ extension TLSClient {
             throw TLSError.handshakeFailed("Missing handshake state")
         }
 
-        tls13.applicationKeys = kd.deriveApplicationKeys(handshakeSecret: hs, fullTranscript: fullTranscript)
+        let application = kd.deriveApplicationMaterial(
+            handshakeSecret: hs,
+            fullTranscript: fullTranscript
+        )
+        tls13.applicationKeys = application.keys
 
         try await sendTLS13ClientFinished()
 
@@ -377,7 +381,8 @@ extension TLSClient {
             serverIV: appKeys.serverIV,
             cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
             clientAppSecret: appKeys.clientTrafficSecret,
-            serverAppSecret: appKeys.serverTrafficSecret
+            serverAppSecret: appKeys.serverTrafficSecret,
+            exporterMasterSecret: application.exporterMasterSecret
         )
         tlsConnection.adoptTransport(self.connection)
         tlsConnection.publishNegotiatedALPN(self.negotiatedALPN)

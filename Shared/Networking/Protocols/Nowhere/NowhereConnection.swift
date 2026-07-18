@@ -20,8 +20,10 @@ protocol NowhereTerminationObservable: AnyObject {
 actor NowhereConnection {
 
     private let session: NowhereSession
-    private let destination: String
+    private let destination: NowhereProtocol.Target
     private let flowHeader: NowhereProtocol.FlowHeader
+    private let initialData: Data?
+    private weak var attempt: NowhereFlowOpenAttempt?
 
     /// Readiness mirror, so the nonisolated `isConnected`/send-guard read it without hopping.
     private nonisolated let _isReady = Atomic<Bool>(false)
@@ -41,12 +43,16 @@ actor NowhereConnection {
 
     init(
         session: NowhereSession,
-        destination: String,
-        flowHeader: NowhereProtocol.FlowHeader
+        destination: NowhereProtocol.Target,
+        flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data?,
+        attempt: NowhereFlowOpenAttempt?
     ) {
         self.session = session
         self.destination = destination
         self.flowHeader = flowHeader
+        self.initialData = initialData
+        self.attempt = attempt
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         self.rawInbox = continuation
         self.rawIterator = stream.makeAsyncIterator()
@@ -64,24 +70,27 @@ actor NowhereConnection {
 
     func open() async throws {
         do {
-            let sid = try await session.openTCPStream(for: self)
-            streamID = sid
             let frame = try NowhereProtocol.encodeFlowRequest(
                 header: flowHeader,
-                target: destination,
-                protocolSpec: session.protocolSpec
+                target: flowHeader.carriesTarget ? destination : nil,
+                initialData: flowHeader.role == .attach ? nil : initialData
             )
-            try await session.writeStream(sid, data: frame)
+            let sid = try await session.openTCPStream(
+                for: self,
+                request: frame,
+                earlyDataAttempt: initialData?.isEmpty == false ? attempt : nil
+            )
+            streamID = sid
 
             if flowHeader.role == .open {
-                // OPEN has no F2: ready once the request is on the wire (a write failure threw above;
+                // OPEN has no RESULT: ready once the request is on the wire (a write failure threw above;
                 // a later reset surfaces on the first `receiveRaw`).
                 pendingData = Data()
                 _isReady.store(true, ordering: .relaxed)
                 return
             }
 
-            // Non-open: read inbound bytes until the flow-result (F2) frame parses.
+            // Non-open: read inbound bytes until the one-byte setup result parses.
             var buffer = Data()
             while true {
                 guard let chunk = try await nextChunk() else {
@@ -89,16 +98,14 @@ actor NowhereConnection {
                 }
                 buffer.append(chunk)
                 guard buffer.count >= NowhereProtocol.flowResultSize else { continue }
-                let prefix = Data(buffer.prefix(NowhereProtocol.flowResultSize))
-                guard let result = NowhereProtocol.decodeFlowResult(prefix) else {
+                guard let result = NowhereProtocol.decodeFlowResult(buffer) else {
                     throw NowhereError.connectionFailed("Invalid flow result")
                 }
                 // Credit the consumed result frame; post-result data is credited lazily in `receiveRaw`.
                 session.extendStreamOffset(sid, count: NowhereProtocol.flowResultSize)
                 switch result {
                 case .ready:
-                    buffer.removeFirst(NowhereProtocol.flowResultSize)
-                    pendingData = buffer
+                    pendingData = Data(buffer.dropFirst(NowhereProtocol.flowResultSize))
                     _isReady.store(true, ordering: .relaxed)
                     return
                 case .reject(let code):
@@ -197,12 +204,6 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         var error: Error?
     }
     private let termination = Mutex(TerminationState())
-    private struct CancelState {
-        var started = false
-        var finished = false
-    }
-    private let cancelState = Mutex(CancelState())
-    private static let closeFlushBound: Duration = .milliseconds(250)
 
     init(inner: NowhereTCPConnection) {
         self.inner = inner
@@ -249,7 +250,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     func sendRaw(_ data: Data) async throws {
         let frame: Data
         do {
-            frame = try NowhereProtocol.encodeUDPStreamFrame(type: .data, payload: data)
+            frame = try NowhereProtocol.encodeUDPStreamPacket(data)
         } catch NowhereError.udpPacketTooLarge {
             // UDP is lossy by contract. Drop only this packet; keep the flow alive.
             return
@@ -259,40 +260,26 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
 
     private enum PacketStep {
         case deliver(Data)
-        case close
         case fail(Error)
         case needMore
     }
 
-    /// Pops the next typed UoT frame; call inside `udpState.withLock`.
+    /// Pops the next length-only UoT packet; call inside `udpState.withLock`.
     private func nextPacketStep(_ state: inout UDPFramingState) -> PacketStep {
         let available = state.buffer.count - state.bufferOffset
-        guard available >= 3 else { return .needMore }
-        let length = Int(UInt16(state.buffer[state.bufferOffset + 1]) << 8
-            | UInt16(state.buffer[state.bufferOffset + 2]))
-        guard available >= 3 + length else { return .needMore }
-        guard let (message, consumed) = NowhereProtocol.decodeUDPStreamFrame(
+        guard available >= 2 else { return .needMore }
+        guard let (payload, consumed) = NowhereProtocol.decodeUDPStreamPacket(
             state.buffer,
             offset: state.bufferOffset
         ) else {
-            return .fail(NowhereError.connectionFailed("Invalid UoT frame"))
+            return .needMore
         }
         state.bufferOffset += consumed
         if state.bufferOffset > 8192 {
             state.buffer.removeSubrange(0..<state.bufferOffset)
             state.bufferOffset = 0
         }
-        switch message.type {
-        case .data: return .deliver(message.payload)
-        case .ready:
-            return .fail(NowhereError.connectionFailed("Unexpected UoT READY frame"))
-        case .close: return .close
-        case .reject:
-            guard let code = NowhereProtocol.FlowRejectCode(rawValue: message.payload[0]) else {
-                return .fail(NowhereError.connectionFailed("Invalid UoT REJECT frame"))
-            }
-            return .fail(NowhereError.flowRejected(code))
-        }
+        return .deliver(payload)
     }
 
     func receiveRaw() async throws -> Data? {
@@ -302,9 +289,6 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
             switch step {
             case .deliver(let packet):
                 return packet
-            case .close:
-                notifyTermination(error: nil)
-                return nil
             case .fail(let error):
                 notifyTermination(error: error)
                 throw error
@@ -317,6 +301,14 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
                     throw error
                 }
                 guard let data, !data.isEmpty else {
+                    let truncated = udpState.withLock {
+                        $0.buffer.count - $0.bufferOffset != 0
+                    }
+                    if truncated {
+                        let error = NowhereError.connectionFailed("Truncated UoT packet")
+                        notifyTermination(error: error)
+                        throw error
+                    }
                     notifyTermination(error: nil)
                     return nil
                 }
@@ -326,39 +318,12 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     }
 
     func cancel() {
-        let shouldStart = cancelState.withLock { state in
-            guard !state.started else { return false }
-            state.started = true
-            return true
-        }
-        guard shouldStart else { return }
         notifyTermination(error: NowhereError.streamClosed)
         udpState.withLock {
             $0.buffer = Data()
             $0.bufferOffset = 0
         }
-        guard let close = try? NowhereProtocol.encodeUDPStreamFrame(type: .close) else {
-            finishCancel()
-            return
-        }
-        // Best-effort close-frame flush bounded by `closeFlushBound`; whichever of the
-        // send or the deadline finishes first triggers the (idempotent) teardown.
-        Task { [weak self] in
-            guard let self else { return }
-            _ = try? await raceDialDeadline(Self.closeFlushBound) { [weak self] in
-                try await self?.inner.sendRaw(close)
-            }
-            self.finishCancel()
-        }
-    }
-
-    private func finishCancel() {
-        let shouldCancel = cancelState.withLock { state in
-            guard !state.finished else { return false }
-            state.finished = true
-            return true
-        }
-        if shouldCancel { inner.cancel() }
+        inner.cancel()
     }
 }
 
@@ -468,14 +433,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     func prepare() async throws {
-        let auth = try NowhereProtocol.makeAuthFrame(
-            key: configuration.key,
-            protocolSpec: configuration.protocolSpec,
-            sessionID: configuration.sessionID
-        )
-
         try await connectAndSend(
-            payload: auth,
+            payload: Data(),
             successState: .prepared,
             expectsFlowResult: false,
             flowKind: nil,
@@ -484,31 +443,40 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     func openFresh(
-        destination: String,
+        destination: NowhereProtocol.Target,
         mode: NowhereTCPRelayMode = .tcp,
-        flowHeader: NowhereProtocol.FlowHeader
+        flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data? = nil,
+        attempt: NowhereFlowOpenAttempt? = nil
     ) async throws {
-        let bootstrap = try NowhereProtocol.makeAuthFrame(
-            key: configuration.key,
-            protocolSpec: configuration.protocolSpec,
-            sessionID: configuration.sessionID
-        ) + requestPayload(destination: destination, flowHeader: flowHeader)
+        let bootstrap = try requestPayload(
+            destination: destination,
+            flowHeader: flowHeader,
+            initialData: initialData
+        )
 
         try await connectAndSend(
             payload: bootstrap,
             successState: .ready,
             expectsFlowResult: flowHeader.role != .open,
             flowKind: flowHeader.kind,
-            flowRole: flowHeader.role
+            flowRole: flowHeader.role,
+            earlyDataAttempt: initialData?.isEmpty == false ? attempt : nil
         )
     }
 
     func activate(
-        destination: String,
+        destination: NowhereProtocol.Target,
         mode: NowhereTCPRelayMode = .tcp,
-        flowHeader: NowhereProtocol.FlowHeader
+        flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data? = nil,
+        attempt: NowhereFlowOpenAttempt? = nil
     ) async throws {
-        let request = try requestPayload(destination: destination, flowHeader: flowHeader)
+        let request = try requestPayload(
+            destination: destination,
+            flowHeader: flowHeader,
+            initialData: initialData
+        )
 
         let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         let connection: TLSProxyConnection? = state.withLock { state in
@@ -563,6 +531,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             self.deliverPendingReceive()
         }
         Task {
+            attempt?.markEarlyDataWriteStarted()
             do { try await connection.sendRaw(request); onRequestSent(nil) }
             catch { onRequestSent(error) }
         }
@@ -570,13 +539,14 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     private func requestPayload(
-        destination: String,
-        flowHeader: NowhereProtocol.FlowHeader
+        destination: NowhereProtocol.Target,
+        flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data? = nil
     ) throws -> Data {
         return try NowhereProtocol.encodeFlowRequest(
             header: flowHeader,
-            target: destination,
-            protocolSpec: configuration.protocolSpec
+            target: flowHeader.carriesTarget ? destination : nil,
+            initialData: flowHeader.role == .attach ? nil : initialData
         )
     }
 
@@ -585,7 +555,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         successState: Phase,
         expectsFlowResult: Bool,
         flowKind: NowhereProtocol.FlowKind?,
-        flowRole: NowhereProtocol.FlowRole?
+        flowRole: NowhereProtocol.FlowRole?,
+        earlyDataAttempt: NowhereFlowOpenAttempt? = nil
     ) async throws {
         let (openStream, openSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         let canOpen = state.withLock { state -> Bool in
@@ -603,7 +574,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         let baseTLS = configuration.tls
         let tlsConfiguration = TLSConfiguration(
             serverName: baseTLS.serverName,
-            alpn: [configuration.protocolSpec.effectiveALPN],
+            alpn: [configuration.alpn],
             minVersion: .tls13,
             maxVersion: .tls13,
             echEnabled: baseTLS.echEnabled,
@@ -619,6 +590,25 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             case .failure(let error):
                 self.fail(error)
             case .success(let tlsConnection):
+                let bootstrap: Data
+                do {
+                    let exporter = try tlsConnection.exportKeyingMaterial(
+                        label: "EXPORTER-Nowhere-Auth",
+                        context: Data(),
+                        length: 32
+                    )
+                    let auth = try NowhereProtocol.makeAuthFrame(
+                        authKey: self.configuration.authKey,
+                        transport: .tlsTCP,
+                        exporter: exporter,
+                        sessionID: self.configuration.sessionID
+                    )
+                    bootstrap = auth + payload
+                } catch {
+                    tlsConnection.cancel()
+                    self.fail(error)
+                    return
+                }
                 let proxy = TLSProxyConnection(tlsConnection: tlsConnection)
                 let shouldSend = self.state.withLock { state -> Bool in
                     guard state.phase == .connecting else { return false }
@@ -653,7 +643,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
                     self.armTransportRead(on: proxy)
                 }
                 Task {
-                    do { try await proxy.sendRaw(payload); onPayloadSent(nil) }
+                    earlyDataAttempt?.markEarlyDataWriteStarted()
+                    do { try await proxy.sendRaw(bootstrap); onPayloadSent(nil) }
                     catch { onPayloadSent(error) }
                 }
             }
@@ -820,15 +811,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         case invalid
     }
 
-    enum BufferedUOTTerminationStep: Equatable {
-        case none
-        case close
-        case reject(NowhereProtocol.FlowRejectCode)
-        case invalidControl
-    }
-
-    /// Inspects buffered UoT frames without consuming application DATA. This is
-    /// used only by the background termination probe installed for UDP flows.
+    /// The split UoT uplink is write-only after setup. EOF is a clean half-close;
+    /// any reverse application byte is a protocol violation.
     private func bufferedUOTTermination(_ state: State) -> (terminated: Bool, error: Error?) {
         guard state.flowResultKind == .udp, state.flowRole == .open else { return (false, nil) }
         switch Self.bufferedUOTTerminationStep(buffer: state.receiveBuffer) {
@@ -939,15 +923,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         )
         switch step {
         case .ready, .reject:
-            let consumed: Int
-            switch flowResultKind {
-            case .tcp:
-                consumed = NowhereProtocol.flowResultSize
-            case .udp:
-                consumed = 3 + ((Int(state.receiveBuffer[state.receiveBuffer.startIndex + 1]) << 8)
-                    | Int(state.receiveBuffer[state.receiveBuffer.startIndex + 2]))
-            }
-            state.receiveBuffer.removeFirst(consumed)
+            state.receiveBuffer.removeFirst(NowhereProtocol.flowResultSize)
         case .needMore, .invalid:
             break
         }
@@ -958,34 +934,12 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         kind: NowhereProtocol.FlowKind,
         buffer: Data
     ) -> FlowResultStep {
-        switch kind {
-        case .tcp:
-            guard buffer.count >= NowhereProtocol.flowResultSize else { return .needMore }
-            let frame = Data(buffer.prefix(NowhereProtocol.flowResultSize))
-            guard let result = NowhereProtocol.decodeFlowResult(frame) else { return .invalid }
-            switch result {
-            case .ready: return .ready
-            case .reject(let code): return .reject(code)
-            }
-        case .udp:
-            guard buffer.count >= 3 else { return .needMore }
-            let length = (Int(buffer[buffer.startIndex + 1]) << 8)
-                | Int(buffer[buffer.startIndex + 2])
-            guard buffer.count >= 3 + length else { return .needMore }
-            guard let (message, _) = NowhereProtocol.decodeUDPStreamFrame(buffer) else {
-                return .invalid
-            }
-            switch message.type {
-            case .ready:
-                return .ready
-            case .reject:
-                guard let code = NowhereProtocol.FlowRejectCode(rawValue: message.payload[0]) else {
-                    return .invalid
-                }
-                return .reject(code)
-            case .data, .close:
-                return .invalid
-            }
+        _ = kind
+        guard buffer.count >= NowhereProtocol.flowResultSize else { return .needMore }
+        guard let result = NowhereProtocol.decodeFlowResult(buffer) else { return .invalid }
+        switch result {
+        case .ready: return .ready
+        case .reject(let code): return .reject(code)
         }
     }
 

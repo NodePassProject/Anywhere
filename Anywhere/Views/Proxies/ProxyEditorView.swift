@@ -10,14 +10,22 @@ import SwiftUI
 struct ProxyEditorView: View {
     let configuration: ProxyConfiguration?
     let onSave: (ProxyConfiguration) -> Void
-    
+
     @Environment(\.dismiss) private var dismiss
     
-    @State private var selectedProtocol: OutboundProtocol = .vless
+    @State private var selectedProtocol: OutboundProtocol = .nowhere
     @State private var name = ""
     @State private var serverAddress = ""
     @State private var serverPort = ""
     
+    @State private var nowhereKey = ""
+    @State private var nowhereUplink: NowhereNetwork = .udp
+    @State private var nowhereDownlink: NowhereNetwork = .udp
+    @State private var nowherePreconnectEnabled = true
+    @State private var nowherePoolSliderValue = Double(NowherePool.enabledDefault)
+    @State private var nowhereSNI = ""
+    @State private var nowhereALPN = ""
+
     @State private var vlessUUID = ""
     @State private var vlessEncryption = "none"
     @State private var vlessFlow = ""
@@ -73,15 +81,6 @@ struct ProxyEditorView: View {
     @State private var hysteriaObfuscationMaxText = String(HysteriaObfuscation.geckoMaxPacketSizeDefault)
     @State private var hysteriaSNI = ""
     
-    @State private var nowhereKey = ""
-    @State private var nowhereSpec = NowhereProtocol.defaultSpec
-    @State private var nowhereUplink: NowhereNetwork = .udp
-    @State private var nowhereDownlink: NowhereNetwork = .udp
-    @State private var nowherePreconnectEnabled = true
-    @State private var nowherePoolSliderValue = Double(NowherePool.enabledDefault)
-    @State private var nowhereSNI = ""
-    @State private var nowhereALPN = ""
-    
     @State private var trojanPassword = ""
     @State private var trojanSNI = ""
     @State private var trojanALPN = ""
@@ -119,11 +118,11 @@ struct ProxyEditorView: View {
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
     
+    private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isVLESSReality: Bool { vlessSecurity == "reality" }
     private var isVLESSTLS: Bool { vlessSecurity == "tls" }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
-    private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
@@ -141,6 +140,11 @@ struct ProxyEditorView: View {
     
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        if isNowhere {
+            return !nowhereKey.isEmpty
+            && nowhereKey.utf8.count <= 255
+            && nowhereALPN.utf8.count <= 255
+        }
         if isVLESS {
             guard UUID(vlessString: vlessUUID) != nil,
                   !isVLESSReality || (!vlessRealitySNI.isEmpty && !vlessRealityPublicKey.isEmpty) else { return false }
@@ -158,12 +162,6 @@ struct ProxyEditorView: View {
                 else { return false }
             }
             return true
-        }
-        if isNowhere {
-            return !nowhereKey.isEmpty
-            && nowhereKey.utf8.count <= 255
-            && NowhereProtocol.normalizedSpec(nowhereSpec).utf8.count <= 255
-            && nowhereALPN.utf8.count <= 255
         }
         if isTrojan {
             return !trojanPassword.isEmpty
@@ -209,9 +207,9 @@ struct ProxyEditorView: View {
                 
                 Section {
                     Picker(selection: $selectedProtocol) {
+                        Text(String("Nowhere")).tag(OutboundProtocol.nowhere)
                         Text(String("VLESS")).tag(OutboundProtocol.vless)
                         Text(String("Hysteria")).tag(OutboundProtocol.hysteria)
-                        Text(String("Nowhere")).tag(OutboundProtocol.nowhere)
                         Text(String("Trojan")).tag(OutboundProtocol.trojan)
                         Text(String("AnyTLS")).tag(OutboundProtocol.anytls)
                         Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
@@ -271,7 +269,16 @@ struct ProxyEditorView: View {
             } label: {
                 TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundStyle: .white, backgroundStyle: .cyan.gradient)
             }
-            if isVLESS {
+            if isNowhere {
+                LabeledContent {
+                    SecureField("Key", text: $nowhereKey)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                }
+            } else if isVLESS {
                 LabeledContent {
                     TextField(String(localized: "UUID", comment: "UUID for VLESS protocol"), text: $vlessUUID)
                         .autocorrectionDisabled()
@@ -329,23 +336,6 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(title: "Maximum Packet Size", comment: "Maximum Packet Size for Hysteria protocol Gecko obfuscation", systemName: "plus.circle.fill", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
-                }
-            } else if isNowhere {
-                LabeledContent {
-                    SecureField("Key", text: $nowhereKey)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                }
-                LabeledContent {
-                    TextField(String("auto"), text: $nowhereSpec)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .multilineTextAlignment(.trailing)
-                } label: {
-                    TextWithColorfulIcon(title: "Spec", comment: nil, systemName: "slider.horizontal.3", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                 }
             } else if isTrojan {
                 LabeledContent {
@@ -473,7 +463,39 @@ struct ProxyEditorView: View {
     
     @ViewBuilder
     private var networkSettings: some View {
-        if isVLESS {
+        if isNowhere {
+            Section("Network") {
+                Picker(selection: $nowhereUplink) {
+                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
+                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
+                } label: {
+                    TextWithColorfulIcon(title: "Upload", comment: nil, systemName: "arrow.up.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                }
+                Picker(selection: $nowhereDownlink) {
+                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
+                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
+                } label: {
+                    TextWithColorfulIcon(title: "Download", comment: nil, systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                }
+                if nowhereUplink == .tcp && nowhereDownlink == .tcp {
+                    Toggle(isOn: $nowherePreconnectEnabled) {
+                        TextWithColorfulIcon(title: "Preconnect", comment: nil, systemName: "bolt.horizontal.circle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    }
+                    if nowherePreconnectEnabled {
+                        Slider(
+                            value: $nowherePoolSliderValue,
+                            in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
+                        ) {
+                            Text("Connections")
+                        } minimumValueLabel: {
+                            Image(systemName: "dial.low").foregroundStyle(.secondary)
+                        } maximumValueLabel: {
+                            Image(systemName: "dial.high").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        } else if isVLESS {
             Section {
                 Picker(selection: $vlessFlow) {
                     Text("None").tag("")
@@ -615,38 +637,6 @@ struct ProxyEditorView: View {
                             .multilineTextAlignment(.trailing)
                     } label: {
                         TextWithColorfulIcon(title: "Download Speed", comment: "Download Speed for Hysteria protocol", systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                    }
-                }
-            }
-        } else if isNowhere {
-            Section("Network") {
-                Picker(selection: $nowhereUplink) {
-                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
-                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
-                } label: {
-                    TextWithColorfulIcon(title: "Upload", comment: nil, systemName: "arrow.up.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                }
-                Picker(selection: $nowhereDownlink) {
-                    Text(verbatim: "TCP").tag(NowhereNetwork.tcp)
-                    Text(verbatim: "UDP").tag(NowhereNetwork.udp)
-                } label: {
-                    TextWithColorfulIcon(title: "Download", comment: nil, systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                }
-                if nowhereUplink == .tcp && nowhereDownlink == .tcp {
-                    Toggle(isOn: $nowherePreconnectEnabled) {
-                        TextWithColorfulIcon(title: "Preconnect", comment: nil, systemName: "bolt.horizontal.circle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                    }
-                    if nowherePreconnectEnabled {
-                        Slider(
-                            value: $nowherePoolSliderValue,
-                            in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
-                        ) {
-                            Text("Connections")
-                        } minimumValueLabel: {
-                            Image(systemName: "dial.low").foregroundStyle(.secondary)
-                        } maximumValueLabel: {
-                            Image(systemName: "dial.high").foregroundStyle(.secondary)
-                        }
                     }
                 }
             }
@@ -1025,6 +1015,16 @@ struct ProxyEditorView: View {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
+        if case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound {
+            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
+            nowhereKey = key
+            nowhereUplink = uplink
+            nowhereDownlink = downlink
+            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
+            nowherePoolSliderValue = Double(pool > 0 ? pool : NowherePool.enabledDefault)
+            nowhereSNI = tls.serverName
+            nowhereALPN = tls.alpn?.first ?? ""
+        }
         if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _) = configuration.outbound {
             self.vlessUUID = vlessUUID.uuidString
             self.vlessEncryption = vlessEncryption
@@ -1098,6 +1098,8 @@ struct ProxyEditorView: View {
         }
         
         switch configuration.outbound {
+        case .nowhere:
+            break
         case .vless:
             break
         case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni):
@@ -1114,16 +1116,6 @@ struct ProxyEditorView: View {
                 }
             }
             hysteriaSNI = sni
-        case .nowhere(let key, let spec, let uplink, let downlink, let pool, let securityLayer):
-            let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
-            nowhereKey = key
-            nowhereSpec = NowhereProtocol.normalizedSpec(spec)
-            nowhereUplink = uplink
-            nowhereDownlink = downlink
-            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
-            nowherePoolSliderValue = Double(pool > 0 ? pool : NowherePool.enabledDefault)
-            nowhereSNI = tls.serverName
-            nowhereALPN = tls.alpn?.first ?? ""
         case .trojan(let password, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             trojanPassword = password
@@ -1217,7 +1209,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isNowhere || isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = self.configuration?.id ?? UUID()
         } else {
             guard let uuid = UUID(vlessString: vlessUUID) else { return }
@@ -1305,6 +1297,22 @@ struct ProxyEditorView: View {
         
         let outbound: Outbound
         switch selectedProtocol {
+        case .nowhere:
+            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
+                ? min(
+                    NowherePool.sliderRange.upperBound,
+                    max(NowherePool.sliderRange.lowerBound, Int(nowherePoolSliderValue.rounded()))
+                )
+                : 0
+            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
+            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
+            outbound = .nowhere(
+                key: nowhereKey,
+                uplink: nowhereUplink,
+                downlink: nowhereDownlink,
+                pool: pool,
+                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
+            )
         case .vless:
             let vlessXrayTransportLayer: XrayTransportLayer
             if let vlessWebSocketConfiguration { vlessXrayTransportLayer = .ws(vlessWebSocketConfiguration) }
@@ -1336,24 +1344,6 @@ struct ProxyEditorView: View {
                 downloadMbps: down,
                 obfuscation: hysteriaObfuscationValue,
                 sni: sni
-            )
-        case .nowhere:
-            let spec = NowhereProtocol.normalizedSpec(nowhereSpec)
-            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
-                ? min(
-                    NowherePool.sliderRange.upperBound,
-                    max(NowherePool.sliderRange.lowerBound, Int(nowherePoolSliderValue.rounded()))
-                )
-                : 0
-            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
-            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
-            outbound = .nowhere(
-                key: nowhereKey,
-                spec: spec,
-                uplink: nowhereUplink,
-                downlink: nowhereDownlink,
-                pool: pool,
-                securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
             )
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI

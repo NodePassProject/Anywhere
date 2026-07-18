@@ -91,6 +91,7 @@ nonisolated class QUICTLSHandler {
     private var handshakeSecret: Data?
     private var clientHandshakeTrafficSecret: Data?
     private var serverHandshakeTrafficSecret: Data?
+    private var exporterMasterSecret: Data?
 
     private var privateKeyP256: P256.KeyAgreement.PrivateKey?
     private var privateKeyX25519: Curve25519.KeyAgreement.PrivateKey?
@@ -134,6 +135,18 @@ nonisolated class QUICTLSHandler {
         _ = clientRandom.withUnsafeMutableBytes { buffer in
             SecRandomCopyBytes(kSecRandomDefault, 32, buffer.baseAddress!)
         }
+    }
+
+    func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
+        guard state == .completed, let keyDerivation, let exporterMasterSecret, length > 0 else {
+            throw QUICConnection.QUICError.connectionFailed("TLS exporter unavailable")
+        }
+        return keyDerivation.exportKeyingMaterial(
+            exporterMasterSecret: exporterMasterSecret,
+            label: label,
+            context: context,
+            length: length
+        )
     }
 
     // MARK: - Build ClientHello
@@ -527,10 +540,11 @@ nonisolated class QUICTLSHandler {
             return fail("server Finished verification failed (transcript mismatch)")
         }
 
-        let appKeys = keyDerivation.deriveApplicationKeys(
+        let application = keyDerivation.deriveApplicationMaterial(
             handshakeSecret: handshakeSecret, fullTranscript: transcript
         )
-        installApplicationKeys(conn: conn, keys: appKeys)
+        exporterMasterSecret = application.exporterMasterSecret
+        installApplicationKeys(conn: conn, keys: application.keys)
 
         let verifyData = keyDerivation.finishedPayload(
             trafficSecret: clientHTS, transcript: transcript

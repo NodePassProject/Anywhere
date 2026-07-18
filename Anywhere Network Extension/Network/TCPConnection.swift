@@ -671,14 +671,14 @@ actor TCPConnection {
         proxyConnecting = true
         settlePendingAdmission()
 
-        // Protocols whose handshake carries a payload take pendingData as
-        // initialData so the first bytes ride the handshake.
+        // Protocol-specific policy selects the prefix that can ride the opening write.
         let initialData: Data?
-        if configuration.outboundProtocol.handshakeCarriesInitialData {
-            initialData = pendingData.isEmpty ? nil : pendingData
-            if initialData != nil {
-                pendingData.removeAll(keepingCapacity: true)
-            }
+        let prefixLength = configuration.outboundProtocol.initialDataPolicy.prefixLength(
+            for: pendingData.count
+        )
+        if prefixLength > 0 {
+            initialData = Data(pendingData.prefix(prefixLength))
+            pendingData.removeFirst(prefixLength)
         } else {
             initialData = nil
         }

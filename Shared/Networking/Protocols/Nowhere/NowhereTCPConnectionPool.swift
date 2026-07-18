@@ -18,7 +18,6 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
         let proxyHost: String
         let proxyPort: UInt16
         let key: String
-        let spec: String?
         let tlsServerName: String
         let tlsALPN: [String]?
         let tlsMinVersion: UInt16?
@@ -41,9 +40,10 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
         configurationID: UUID,
         configuration: NowhereConfiguration,
         connectHost: String,
-        destination: String,
+        destination: NowhereProtocol.Target,
         mode: NowhereTCPRelayMode = .tcp,
         flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data?,
         attempt: NowhereFlowOpenAttempt
     ) async throws -> ProxyConnection {
         let key = Key(
@@ -52,7 +52,6 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
             proxyHost: configuration.proxyHost,
             proxyPort: configuration.proxyPort,
             key: configuration.key,
-            spec: configuration.spec,
             tlsServerName: configuration.tls.serverName,
             tlsALPN: configuration.tls.alpn,
             tlsMinVersion: configuration.tls.minVersion?.rawValue,
@@ -82,6 +81,7 @@ nonisolated final class NowhereTCPConnectionPoolRegistry {
             destination: destination,
             mode: mode,
             flowHeader: flowHeader,
+            initialData: initialData,
             attempt: attempt
         )
     }
@@ -145,9 +145,10 @@ nonisolated private final class NowhereTCPConnectionPool {
     }
 
     func acquire(
-        destination: String,
+        destination: NowhereProtocol.Target,
         mode: NowhereTCPRelayMode,
         flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data?,
         attempt: NowhereFlowOpenAttempt
     ) async throws -> ProxyConnection {
         var selected: NowhereTCPConnection?
@@ -200,7 +201,13 @@ nonisolated private final class NowhereTCPConnectionPool {
                 throw NowhereError.streamClosed
             }
             do {
-                try await selected.activate(destination: destination, mode: mode, flowHeader: flowHeader)
+                try await selected.activate(
+                    destination: destination,
+                    mode: mode,
+                    flowHeader: flowHeader,
+                    initialData: initialData,
+                    attempt: initialData?.isEmpty == false ? attempt : nil
+                )
                 return Self.proxyConnection(selected, mode: mode)
             } catch {
                 selected.cancel()
@@ -211,6 +218,7 @@ nonisolated private final class NowhereTCPConnectionPool {
                 destination: destination,
                 mode: mode,
                 flowHeader: flowHeader,
+                initialData: initialData,
                 attempt: attempt
             )
         }
@@ -235,9 +243,10 @@ nonisolated private final class NowhereTCPConnectionPool {
     }
 
     private func openFresh(
-        destination: String,
+        destination: NowhereProtocol.Target,
         mode: NowhereTCPRelayMode,
         flowHeader: NowhereProtocol.FlowHeader,
+        initialData: Data?,
         attempt: NowhereFlowOpenAttempt
     ) async throws -> ProxyConnection {
         let connection = NowhereTCPConnection(
@@ -249,7 +258,13 @@ nonisolated private final class NowhereTCPConnectionPool {
             throw NowhereError.streamClosed
         }
         do {
-            try await connection.openFresh(destination: destination, mode: mode, flowHeader: flowHeader)
+            try await connection.openFresh(
+                destination: destination,
+                mode: mode,
+                flowHeader: flowHeader,
+                initialData: initialData,
+                attempt: attempt
+            )
             return Self.proxyConnection(connection, mode: mode)
         } catch {
             connection.cancel()

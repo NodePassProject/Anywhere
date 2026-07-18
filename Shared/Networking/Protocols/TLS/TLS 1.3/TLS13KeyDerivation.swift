@@ -9,6 +9,10 @@ import Foundation
 import CryptoKit
 
 nonisolated struct TLS13KeyDerivation {
+    struct ApplicationMaterial {
+        let keys: TLS13ApplicationKeys
+        let exporterMasterSecret: Data
+    }
     let cipherSuite: UInt16
 
     init(cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) {
@@ -129,7 +133,7 @@ nonisolated struct TLS13KeyDerivation {
     }
 
     /// Derive application keys from the full transcript (including server Finished).
-    func deriveApplicationKeys(handshakeSecret: Data, fullTranscript: Data) -> TLS13ApplicationKeys {
+    func deriveApplicationMaterial(handshakeSecret: Data, fullTranscript: Data) -> ApplicationMaterial {
         let hsKey = SymmetricKey(data: handshakeSecret)
         let derivedHS = deriveSecret(secret: hsKey, label: "derived", messages: Data())
         let (_, masterKey) = extract(inputKeyMaterial: Data(repeating: 0, count: hashLength), salt: derivedHS)
@@ -144,11 +148,42 @@ nonisolated struct TLS13KeyDerivation {
         let serverKey = expandLabel(secret: serverATSKey, label: "key", context: Data(), length: keyLength)
         let serverIV = expandLabel(secret: serverATSKey, label: "iv", context: Data(), length: 12)
 
-        return TLS13ApplicationKeys(
+        let keys = TLS13ApplicationKeys(
             clientKey: clientKey, clientIV: clientIV,
             serverKey: serverKey, serverIV: serverIV,
             clientTrafficSecret: clientATS,
             serverTrafficSecret: serverATS
+        )
+        let exporterMasterSecret = deriveSecret(
+            secret: masterKey,
+            label: "exp master",
+            messages: fullTranscript
+        )
+        return ApplicationMaterial(keys: keys, exporterMasterSecret: exporterMasterSecret)
+    }
+
+    /// Compatibility wrapper for callers that do not need RFC 8446 exporters.
+    func deriveApplicationKeys(handshakeSecret: Data, fullTranscript: Data) -> TLS13ApplicationKeys {
+        deriveApplicationMaterial(handshakeSecret: handshakeSecret, fullTranscript: fullTranscript).keys
+    }
+
+    /// RFC 8446 §7.5 exporter using an explicitly present context (which may be empty).
+    func exportKeyingMaterial(
+        exporterMasterSecret: Data,
+        label: String,
+        context: Data,
+        length: Int
+    ) -> Data {
+        let secret = deriveSecret(
+            secret: SymmetricKey(data: exporterMasterSecret),
+            label: label,
+            messages: Data()
+        )
+        return expandLabel(
+            secret: SymmetricKey(data: secret),
+            label: "exporter",
+            context: transcriptHash(context),
+            length: length
         )
     }
 

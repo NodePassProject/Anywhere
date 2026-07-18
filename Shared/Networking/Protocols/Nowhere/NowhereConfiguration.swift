@@ -25,7 +25,6 @@ nonisolated struct NowhereTransportIdentityKey: Hashable {
     let proxyHost: String
     let proxyPort: UInt16
     let key: String
-    let spec: String?
     let uplink: NowhereNetwork
     let downlink: NowhereNetwork
     let tls: TLSConfiguration
@@ -35,49 +34,69 @@ nonisolated struct NowhereConfiguration: Hashable {
     let proxyHost: String
     let proxyPort: UInt16
     let key: String
-    let spec: String?
     let uplink: NowhereNetwork
     let downlink: NowhereNetwork
     let pool: Int
     let sessionID: Data
     let tls: TLSConfiguration
-    let protocolSpec: NowhereProtocol.EffectiveSpec
+    let alpn: String
+    let authKey: NowhereProtocol.AuthKey
 
     init(
         proxyHost: String,
         proxyPort: UInt16,
         key: String,
-        spec: String?,
         uplink: NowhereNetwork,
         downlink: NowhereNetwork,
         pool: Int,
         sessionID: Data,
         tls: TLSConfiguration
     ) throws {
-        let supportsPreconnect = uplink == .tcp && downlink == .tcp
-        guard (!supportsPreconnect && pool == 0)
-                || (supportsPreconnect && NowherePool.validRange.contains(pool)) else {
+        let supportsPool = uplink == .tcp && downlink == .tcp
+        guard (!supportsPool && pool == 0)
+                || (supportsPool && NowherePool.validRange.contains(pool)) else {
             throw ProxyError.protocolError("Invalid Nowhere pool value")
         }
         guard sessionID.count == 16 else {
             throw ProxyError.protocolError("Invalid Nowhere session ID")
         }
-        let effectiveSpec = NowhereProtocol.normalizedSpec(spec)
+        let alpn = tls.alpn?.first ?? NowhereProtocol.defaultALPN
+        guard !alpn.isEmpty, alpn.utf8.count <= UInt8.max else {
+            throw ProxyError.protocolError("Invalid Nowhere ALPN")
+        }
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
         self.key = key
-        self.spec = effectiveSpec
         self.uplink = uplink
         self.downlink = downlink
         self.pool = pool
         self.sessionID = sessionID
         self.tls = tls
-        self.protocolSpec = try NowhereProtocol.buildEffectiveSpec(
-            key: key,
-            spec: effectiveSpec,
-            alpn: tls.alpn?.first
-        )
+        self.alpn = alpn
+        self.authKey = try NowhereProtocol.deriveAuthKey(sharedKey: key)
     }
+}
+
+nonisolated final class NowhereFlowIDLease: @unchecked Sendable {
+    let flowID: UInt32
+    private let releaseImpl: @Sendable (UInt32) -> Void
+    private let released = Mutex(false)
+
+    init(flowID: UInt32, release: @escaping @Sendable (UInt32) -> Void) {
+        self.flowID = flowID
+        self.releaseImpl = release
+    }
+
+    func release() {
+        let shouldRelease = released.withLock { released in
+            guard !released else { return false }
+            released = true
+            return true
+        }
+        if shouldRelease { releaseImpl(flowID) }
+    }
+
+    deinit { release() }
 }
 
 nonisolated final class NowhereTransportIdentityRegistry {
@@ -85,7 +104,8 @@ nonisolated final class NowhereTransportIdentityRegistry {
 
     private struct State {
         let sessionID: Data
-        var nextFlowID: UInt64
+        var nextFlowID: UInt32
+        var activeFlowIDs: Set<UInt32>
     }
 
     private let states = Mutex<[NowhereTransportIdentityKey: State]>([:])
@@ -103,30 +123,47 @@ nonisolated final class NowhereTransportIdentityRegistry {
             guard status == errSecSuccess else {
                 throw NowhereError.connectionFailed("Failed to generate session ID")
             }
-            states[identityKey] = State(sessionID: bytes, nextFlowID: 1)
+            states[identityKey] = State(sessionID: bytes, nextFlowID: 1, activeFlowIDs: [])
             return bytes
         }
     }
 
-    func nextFlowID(
+    func leaseFlowID(
         for identityKey: NowhereTransportIdentityKey,
         sessionID expectedSessionID: Data
-    ) throws -> UInt64 {
-        return try states.withLock { states in
-            guard var state = states[identityKey],
-                  state.sessionID == expectedSessionID else {
-                // reset()/reclaim invalidated the identity used to construct
-                // this in-flight configuration. Never recreate it here: that
-                // would pair an old session ID with a new flow counter.
+    ) throws -> NowhereFlowIDLease {
+        let flowID = try states.withLock { states -> UInt32 in
+            guard var state = states[identityKey], state.sessionID == expectedSessionID else {
                 throw NowhereError.streamClosed
             }
-            let value = state.nextFlowID
-            guard value != UInt64.max else {
-                throw NowhereError.connectionFailed("Nowhere flow ID space exhausted")
+            var candidate = max(state.nextFlowID, 1)
+            for _ in 0...state.activeFlowIDs.count {
+                if candidate != 0, !state.activeFlowIDs.contains(candidate) {
+                    state.activeFlowIDs.insert(candidate)
+                    state.nextFlowID = candidate &+ 1
+                    if state.nextFlowID == 0 { state.nextFlowID = 1 }
+                    states[identityKey] = state
+                    return candidate
+                }
+                candidate &+= 1
+                if candidate == 0 { candidate = 1 }
             }
-            state.nextFlowID = value + 1
+            throw NowhereError.connectionFailed("Nowhere flow ID space exhausted")
+        }
+        return NowhereFlowIDLease(flowID: flowID) { [weak self] released in
+            self?.releaseFlowID(released, for: identityKey, sessionID: expectedSessionID)
+        }
+    }
+
+    private func releaseFlowID(
+        _ flowID: UInt32,
+        for identityKey: NowhereTransportIdentityKey,
+        sessionID expectedSessionID: Data
+    ) {
+        states.withLock { states in
+            guard var state = states[identityKey], state.sessionID == expectedSessionID else { return }
+            state.activeFlowIDs.remove(flowID)
             states[identityKey] = state
-            return value
         }
     }
 

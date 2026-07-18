@@ -288,6 +288,20 @@ actor QUICConnection {
         try await bridge.awaitingCompletion { connect(completion: $0) }
     }
 
+    /// RFC 8446 exporter for the completed QUIC TLS 1.3 connection.
+    nonisolated func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
+        let result: Result<Data, Error> = await bridge.run { [weak self] in
+            guard let self else { return .failure(QUICError.closed) }
+            return self.assumeIsolated { connection in
+                guard connection.state == .connected, let tls = connection.tlsHandler else {
+                    return .failure(QUICError.closed)
+                }
+                return Result { try tls.exportKeyingMaterial(label: label, context: context, length: length) }
+            }
+        }
+        return try result.get()
+    }
+
     // MARK: Streams
 
     nonisolated func openBidiStream() -> Int64? {
