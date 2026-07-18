@@ -384,9 +384,8 @@ extension TLSClient {
             serverAppSecret: appKeys.serverTrafficSecret,
             exporterMasterSecret: application.exporterMasterSecret
         )
-        tlsConnection.adoptTransport(self.connection)
+        tlsConnection.adoptTransport(self.takeConnection())
         tlsConnection.publishNegotiatedALPN(self.negotiatedALPN)
-        self.connection = nil
 
         if let remaining = self.postHandshakeBuffer, !remaining.isEmpty {
             tlsConnection.prependToReceiveBuffer(remaining)

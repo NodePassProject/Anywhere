@@ -17,25 +17,18 @@ nonisolated struct CompiledMITMRule {
 }
 
 extension CompiledMITMRule {
-    /// Over-long URLs fail closed without running the matcher.
     static let maxGateURLLength = 8 * 1024
-
-    /// Whether the gate matches the URL. The gate is unanchored; the host is lowercased
-    /// before matching (RFC 3986), path/query keep case; nil/over-long URLs fail closed.
-    /// A gate-cache miss evaluates on the regex bridge — the caller suspends, never blocks.
+    
     func matchesURL(_ url: String?) async -> Bool {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return false }
         return await gate.matches(Self.lowercasingHost(url))
     }
-
-    /// Synchronous fast path of ``matchesURL(_:)``: literal gates, memoized verdicts, and
-    /// quarantine answer inline; nil means the verdict needs async resolution.
+    
     func peekMatchesURL(_ url: String?) -> Bool? {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return false }
         return gate.peekMatches(Self.lowercasingHost(url))
     }
-
-    /// Lowercases only the authority, leaving path/query untouched.
+    
     private static func lowercasingHost(_ url: String) -> String {
         guard let sep = url.range(of: "://") else { return url }
         let authStart = sep.upperBound
@@ -49,26 +42,16 @@ extension CompiledMITMRule {
 }
 
 extension CompiledMITMRule {
-    /// Capture groups from the gate match (index 0 = whole match), or nil on no match /
-    /// over-long. Mirrors ``matchesURL(_:)``'s host normalization so a templated rewrite
-    /// captures from the same string the gate matched.
     func capturesForURL(_ url: String?) async -> [String?]? {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return nil }
         return await gate.firstMatchCaptures(Self.lowercasingHost(url))
     }
-
-    /// Synchronous fast path of ``capturesForURL(_:)`` (literal/quarantined gates); outer nil
-    /// means the captures need async resolution, inner nil is a real no-match.
+    
     func peekCapturesForURL(_ url: String?) -> [String?]?? {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return .some(nil) }
         return gate.peekFirstMatchCaptures(Self.lowercasingHost(url))
     }
-
-    /// Resolves this rule's rewrite action from a pre-resolved verdict table (`index` is this
-    /// rule's position in the array the table was resolved for), expanding any capture
-    /// template. nil when the operation isn't a rewrite, the gate doesn't match, or a
-    /// templated target expands to an invalid URL (rule then no-ops). Static targets reuse
-    /// their compile-time parse.
+    
     func resolvedRewriteAction(verdicts: MITMGateVerdictTable, at index: Int) -> ResolvedRewriteAction? {
         guard case .rewrite(let action) = operation else { return nil }
         switch action {
@@ -97,20 +80,15 @@ extension CompiledMITMRule {
 }
 
 nonisolated struct MITMGateVerdictTable: Sendable {
-    /// The gate URL the verdicts were resolved against (pre-normalization form).
     let url: String?
     private let matched: [Bool]
-    /// Aligned with `matched`; populated only for rules whose rewrite target expands capture
-    /// templates. nil elsewhere, and on no-match / timeout / quarantine.
     private let captureGroups: [[String?]?]
 
     func matches(at index: Int) -> Bool { matched[index] }
     func captures(at index: Int) -> [String?]? { captureGroups[index] }
-
-    /// Verdicts for an empty rule array — the no-rules fast path.
+    
     static let empty = MITMGateVerdictTable(url: nil, matched: [], captureGroups: [])
-
-    /// True when `rule`'s resolution needs capture groups, not just a boolean verdict.
+    
     private static func needsCaptures(_ rule: CompiledMITMRule) -> Bool {
         guard case .rewrite(let action) = rule.operation else { return false }
         switch action {
@@ -121,10 +99,7 @@ nonisolated struct MITMGateVerdictTable: Sendable {
             return false
         }
     }
-
-    /// Synchronous resolution attempt: literal gates, memoized verdicts, and quarantine
-    /// resolve inline. nil when any rule's verdict (or needed captures) requires the regex
-    /// engine — resolve with ``resolve(rules:url:)`` instead.
+    
     static func peek(rules: [CompiledMITMRule], url: String?) -> MITMGateVerdictTable? {
         var matched = [Bool]()
         matched.reserveCapacity(rules.count)
@@ -141,9 +116,7 @@ nonisolated struct MITMGateVerdictTable: Sendable {
         }
         return MITMGateVerdictTable(url: url, matched: matched, captureGroups: captureGroups)
     }
-
-    /// Full resolution: gate-cache misses evaluate on the regex bridge (the caller suspends,
-    /// never blocks); verdicts land in the gates' memo caches for later synchronous peeks.
+    
     static func resolve(rules: [CompiledMITMRule], url: String?) async -> MITMGateVerdictTable {
         var matched = [Bool]()
         matched.reserveCapacity(rules.count)
@@ -224,43 +197,33 @@ nonisolated final class MITMRewritePolicy: Sendable {
         var trie = FlatLabelTrie<Int16>()
         var compiledSets: [CompiledMITMRuleSet] = []
         var setCount: Int = 0
-
-        /// Compiled gate regexes keyed by pattern, carried across reloads so an unchanged pattern isn't
-        /// recompiled.
         var gateCache: [String: MITMGateRegex] = [:]
     }
-
-    /// Guards trie + setCount + gateCache; reload holds the lock across the full rebuild so lookups never see a half-built trie.
+    
     private let state = Mutex(PolicyState())
-
-    /// lwIP fast path: keeps the no-rules case at a single bool check.
+    
     var hasRules: Bool { state.withLock { $0.setCount > 0 } }
 
     func reset() {
-        // Drops `gateCache` too; `load` snapshots it first so compiled regexes carry across reloads.
         state.withLock { $0 = PolicyState() }
     }
-
-    /// Replaces the rule set table. Bad rules are dropped (logged) without
-    /// dropping their set; on duplicate suffixes the later set wins.
+    
     func load(ruleSets: [MITMRuleSet]) {
         var scopedRules: [(scope: UUID, rules: [CompiledMITMRule])] = []
-        // The whole rebuild — including gate regex compilation — deliberately runs under the lock.
-        state.withLock { state in
-            let previousGates = state.gateCache
-            state = PolicyState()
-            let trie = FlatLabelTrieBuilder<Int16>()
-            var newGates: [String: MITMGateRegex] = [:]
-            for set in ruleSets {
-                // Disabled sets stay in activeIDs so toggling off preserves the script-store bucket.
-                guard set.enabled else { continue }
-                if let compiled = insert(set, into: &state, trie: trie, previousGates: previousGates, newGates: &newGates) {
-                    scopedRules.append((scope: set.id, rules: compiled))
-                }
+        let previousGates = state.withLock { $0.gateCache }
+        var newState = PolicyState()
+        let trie = FlatLabelTrieBuilder<Int16>()
+        var newGates: [String: MITMGateRegex] = [:]
+        for set in ruleSets {
+            // Disabled sets stay in activeIDs so toggling off preserves the script-store bucket.
+            guard set.enabled else { continue }
+            if let compiled = insert(set, into: &newState, trie: trie, previousGates: previousGates, newGates: &newGates) {
+                scopedRules.append((scope: set.id, rules: compiled))
             }
-            state.gateCache = newGates
-            state.trie = trie.freeze()
         }
+        newState.gateCache = newGates
+        newState.trie = trie.freeze()
+        state.withLock { $0 = newState }
         // Purge JS engine state for deleted sets; edited sets (stable id) keep theirs.
         let activeIDs = Set(ruleSets.map { $0.id })
         MITMScriptEngine.purgeEngines(activeIDs: activeIDs)
@@ -275,11 +238,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             logger.debug("Loaded \(ruleSets.count) rule set(s)")
         }
     }
-
-    /// Inserts one rule set into `state` (its suffixes into `trie`) and returns its compiled rules,
-    /// or nil without a usable suffix. Runs inside `load`'s withLock. Reuses a gate from `newGates`
-    /// (this reload) or `previousGates` (last reload) before compiling, so each distinct pattern is
-    /// compiled at most once.
+    
     private func insert(
         _ set: MITMRuleSet,
         into state: inout PolicyState,
@@ -333,8 +292,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
     func matches(_ host: String) -> Bool {
         set(for: host) != nil
     }
-
-    /// Returns the most-specific rule set covering ``host``, or nil.
+    
     func set(for host: String) -> CompiledMITMRuleSet? {
         guard !host.isEmpty else { return nil }
         var lowered = host.lowercased()
@@ -346,8 +304,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             return state.compiledSets[index]
         }
     }
-
-    /// Rules from the most-specific set matching ``host``, filtered to ``phase``.
+    
     func rules(for host: String, phase: MITMPhase) -> [CompiledMITMRule] {
         guard let set = set(for: host) else { return [] }
         return set.rules.filter { $0.phase == phase }
@@ -418,8 +375,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             return .bodyJSON(compiled)
         }
     }
-
-    /// Compile-cache key; the per-process hasher seed is fine — caches never cross processes.
+    
     private func sourceCacheKey(_ source: String) -> Int {
         var hasher = Hasher()
         hasher.combine(source.utf8.count)
@@ -440,14 +396,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
     }
 
     // MARK: - Static-rule validation
-    //
-    // Rule sets are untrusted; serializers emit header bytes verbatim, so CR/LF in a
-    // value enables response-splitting. Validated once at compile time.
-
-    /// Framing (RFC 9112 §6) and connection-management headers are blocked for add/replace:
-    /// divergent framing is the request-smuggling primitive, and an injected token desyncs
-    /// keep-alive (the h1 leg doesn't strip hop-by-hop, so it reaches upstream). Delete only
-    /// makes framing more conservative, so it stays allowed.
+    
     private static func isFramingHeader(_ name: String) -> Bool {
         switch name.lowercased() {
         case "content-length", "transfer-encoding",
@@ -457,8 +406,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             return false
         }
     }
-
-    /// SP/HTAB/CR/LF/NUL/DEL would break HTTP/1's start line or be rejected by HTTP/2 receivers.
+    
     private static func isValidRequestTargetReplacement(_ replacement: String) -> Bool {
         for byte in replacement.utf8 {
             if byte <= 0x20 || byte == 0x7F {
@@ -469,8 +417,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
     }
 
     // MARK: - Rewrite compilation
-
-    /// Returns nil to drop the rule with a logged diagnostic.
+    
     private static func compileRewrite(_ action: MITMRewriteAction, suffix: String) -> CompiledRewriteAction? {
         switch action {
         case .transparent(let url):
@@ -514,8 +461,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
             return .reject200Data(base64: base64)
         }
     }
-
-    /// Parses a replacement URL into dial + request-target parts; requires an absolute URL with a host.
+    
     static func parseReplacementURL(_ raw: String) -> ReplacementURL? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
@@ -546,19 +492,14 @@ nonisolated final class MITMRewritePolicy: Sendable {
     }
 
     // MARK: - Per-request template resolution
-
-    /// Expands a transparent target template, then parses and wire-safety-checks the result.
-    /// nil (rule no-ops) when the expansion isn't an absolute URL with a host, or the path
-    /// isn't wire-safe.
+    
     static func resolveTransparentTemplate(_ template: MITMCaptureTemplate, captures: [String?]) -> ReplacementURL? {
         let url = template.expand(captures: captures)
         guard let parsed = parseReplacementURL(url),
               isValidRequestTargetReplacement(parsed.requestTarget) else { return nil }
         return parsed
     }
-
-    /// Expands a 302 target template, then trims and validates it as a wire-safe `Location`.
-    /// nil leaves the rule a no-op for this request.
+    
     static func resolveRedirectTemplate(_ template: MITMCaptureTemplate, captures: [String?]) -> String? {
         let location = template.expand(captures: captures).trimmingCharacters(in: .whitespaces)
         guard parseReplacementURL(location) != nil, HTTPHeader.isValidValue(location) else { return nil }
@@ -568,11 +509,9 @@ nonisolated final class MITMRewritePolicy: Sendable {
 
 // MARK: - Binary deserialization
 
-/// Decodes the `AMR1` binary blob into `MITMRuleSet` models.
 nonisolated enum MITMBinaryReader {
     private enum ReadError: Error { case badMagic, badVersion, truncated, malformed }
-
-    /// nil on bad magic/version/truncation.
+    
     static func decode(_ data: Data) -> (enabled: Bool, ruleSets: [MITMRuleSet])? {
         data.withUnsafeBytes { raw -> (enabled: Bool, ruleSets: [MITMRuleSet])? in
             var cursor = Cursor(bytes: raw.bindMemory(to: UInt8.self))
@@ -589,7 +528,6 @@ nonisolated enum MITMBinaryReader {
         let bytes: UnsafeBufferPointer<UInt8>
         private var readOffset = 0
         private var count: Int { bytes.count }
-        /// Payload version; gates the v2 parameter section so a v1 blob still decodes.
         private var version: UInt8 = 0
 
         init(bytes: UnsafeBufferPointer<UInt8>) { self.bytes = bytes }
@@ -739,10 +677,12 @@ nonisolated enum MITMBinaryReader {
 
         private mutating func readUUID() throws -> UUID {
             guard readOffset + 16 <= count else { throw ReadError.truncated }
-            let u = UUID(uuid: (bytes[readOffset], bytes[readOffset + 1], bytes[readOffset + 2], bytes[readOffset + 3],
-                                bytes[readOffset + 4], bytes[readOffset + 5], bytes[readOffset + 6], bytes[readOffset + 7],
-                                bytes[readOffset + 8], bytes[readOffset + 9], bytes[readOffset + 10], bytes[readOffset + 11],
-                                bytes[readOffset + 12], bytes[readOffset + 13], bytes[readOffset + 14], bytes[readOffset + 15]))
+            let u = UUID(uuid: (
+                bytes[readOffset], bytes[readOffset + 1], bytes[readOffset + 2], bytes[readOffset + 3],
+                bytes[readOffset + 4], bytes[readOffset + 5], bytes[readOffset + 6], bytes[readOffset + 7],
+                bytes[readOffset + 8], bytes[readOffset + 9], bytes[readOffset + 10], bytes[readOffset + 11],
+                bytes[readOffset + 12], bytes[readOffset + 13], bytes[readOffset + 14], bytes[readOffset + 15]
+            ))
             readOffset += 16
             return u
         }

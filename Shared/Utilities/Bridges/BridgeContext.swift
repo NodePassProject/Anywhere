@@ -7,7 +7,7 @@
 
 import Foundation
 
-// IMPORTANT: BridgeContext is allowed to use in *ConcurrencyBridge only
+// IMPORTANT: Only allowed to use in *ConcurrencyBridge.
 nonisolated enum BridgeContext {
 
     /// Hands the C side a **retained** pointer to `object` (one owning reference now lives

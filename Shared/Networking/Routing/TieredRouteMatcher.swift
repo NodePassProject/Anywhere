@@ -25,6 +25,15 @@ nonisolated enum MatcherID {
 
 /// Interning payloads (the router's action + rule-set index) down to `Int16`
 /// IDs keeps matcher nodes small.
+// Explicit (not implicit) `Sendable` down the matcher chain: the frozen matchers are shared
+// cross-domain behind router Mutexes, and reloads move freshly built states into them — both
+// require the compiler to see these types as `Sendable`, checked member-by-member here.
+nonisolated extension PayloadTable: Sendable where Payload: Sendable {}
+nonisolated extension TierMatchers: Sendable where Payload: Sendable {}
+nonisolated extension TieredRouteMatcher: Sendable where Payload: Sendable {}
+nonisolated extension CIDRv4Trie: Sendable {}
+nonisolated extension CIDRv6Trie: Sendable {}
+
 nonisolated struct PayloadTable<Payload: Hashable> {
     private var payloads: [Payload] = []
     private var ids: [Payload: Int16] = [:]
@@ -273,8 +282,10 @@ nonisolated struct TierMatchers<Payload: Hashable> {
 
     var suffixTrie = FlatLabelTrie<Int16>()
     var keywordAutomaton = KeywordAutomaton()
-    /// Keyword build state; `finalize` flattens it into `keywordAutomaton`.
-    var keywordBuilder = KeywordAutomatonBuilder()
+    /// Keyword rules buffered as (pattern, interned payload); `finalize` feeds them through a
+    /// ``KeywordAutomatonBuilder`` and drops them, so the non-`Sendable` build tree never lives
+    /// in this (shared, `Sendable`) state — mirroring ``suffixRecords``.
+    var keywordRecords: [(pattern: String, actionID: Int16)] = []
     var ipv4Trie = CIDRv4Trie()
     var ipv6Trie = CIDRv6Trie()
     var domainRuleCount = 0
@@ -296,7 +307,7 @@ nonisolated struct TierMatchers<Payload: Hashable> {
 
     mutating func insertKeyword(_ pattern: String, payload: Payload) {
         guard !pattern.isEmpty else { return }
-        keywordBuilder.insert(pattern, actionID: payloadTable.intern(payload))
+        keywordRecords.append((pattern: pattern, actionID: payloadTable.intern(payload)))
         domainRuleCount += 1
     }
 
@@ -314,7 +325,12 @@ nonisolated struct TierMatchers<Payload: Hashable> {
     }
 
     mutating func finalize(base: UnsafeBufferPointer<UInt8>) {
+        let keywordBuilder = KeywordAutomatonBuilder()
+        for record in keywordRecords {
+            keywordBuilder.insert(record.pattern, actionID: record.actionID)
+        }
         keywordAutomaton = keywordBuilder.finalize()
+        keywordRecords = []
         suffixTrie = FlatLabelTrieBuilder<Int16>.buildBulk(base: base, entries: &suffixRecords)
         suffixRecords = []
     }

@@ -125,6 +125,9 @@ actor TCPConnection {
     private var uplinkDone = false
     private var downlinkDone = false
     private var closePending = false
+    /// Waits out the downlink drain before a deferred close; owned here so ``releaseProxy``
+    /// cancels it symmetrically with the other lifecycle tasks.
+    private var deferredCloseTask: Task<Void, Never>?
 
     /// Logs this connection's terminal failure at most once.
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
@@ -1052,17 +1055,15 @@ actor TCPConnection {
     }
 
     // MARK: - Close / Abort
-
-    /// Graceful MITM teardown: waits for the downlink bridge's backlog to drain (so the response
-    /// tail isn't truncated), then full-closes. The idle timer bounds a stalled peer.
+    
     private func closeWhenDrained() {
         guard !closed else { return }
         guard let stream else { close(); return }
         closePending = true
         setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
-        Task { [weak self] in
+        deferredCloseTask = Task {
             await stream.awaitDownloadDrained()
-            await self?.completeDeferredClose()
+            completeDeferredClose()
         }
     }
 
@@ -1079,9 +1080,7 @@ actor TCPConnection {
         releaseProxy(abortive: false)
         bridge.discard(self)
     }
-
-    /// Tears down with a clean FIN: lwIP's `tcp_close` downgrades to RST while
-    /// un-recved bytes hold the window down, and a mid-handshake RST makes clients retry.
+    
     private func rejectGracefully() {
         guard !closed else { return }
         var remaining = pendingData.count
@@ -1092,9 +1091,7 @@ actor TCPConnection {
         }
         close()
     }
-
-    /// Writes a fatal `access_denied` alert before the FIN — the protocol-level "do not
-    /// retry" signal; it precedes key negotiation, so it goes out as plaintext.
+    
     private func rejectWithTLSAlert() {
         guard !closed else { return }
         // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
@@ -1111,20 +1108,19 @@ actor TCPConnection {
         releaseProxy(abortive: true)
         bridge.discard(self)
     }
-
-    /// `abortive` closes the outbound leg with RST instead of a graceful FIN.
+    
     private func releaseProxy(abortive: Bool = false) {
         settlePendingAdmission()
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
-        // Cancel every in-flight dial's transport so it fails instead of handing back a live socket
-        // after teardown (a success racing teardown is also cancelled by the MITM session consumer).
         for dial in inFlightDials {
             dial.cancel?()
         }
         inFlightDials.removeAll()
         sniffDeadlineTask?.cancel()
         sniffDeadlineTask = nil
+        deferredCloseTask?.cancel()
+        deferredCloseTask = nil
         sniffer = nil
         cancelIdleTimer()
         let connection = proxyConnection
@@ -1142,12 +1138,8 @@ actor TCPConnection {
         pendingData = Data()
         mitmSession = nil
         session?.assumeIsolated { $0.cancel(error: nil) }
-        // Stop the relay loops (their stream awaits return) and cancel the group, then tear the
-        // proxy leg down so any in-flight send/receive unwinds.
         stream?.assumeIsolated { $0.terminate() }
         relay?.cancel()
-        // Cancel a still-connecting dial so its handshake unwinds now; `client.cancel()` then marks
-        // the client so a dial that completes in the race tears its own connection down via deliver().
         dial?.cancel()
         if abortive {
             connection?.abort()

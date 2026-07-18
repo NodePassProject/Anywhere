@@ -380,10 +380,10 @@
 				Networking/Transport/TransportError.swift,
 				Networking/Transport/UDPTransport.swift,
 				Networking/TunnelLimits.swift,
-				Networking/Utilities/BridgeContext.swift,
-				Networking/Utilities/BridgeExecutor.swift,
 				Protocols/SoftDeletable.swift,
 				Utilities/AnywhereLogger.swift,
+				Utilities/Bridges/BridgeContext.swift,
+				Utilities/Bridges/BridgeExecutor.swift,
 				Utilities/Bridges/DNSSyscallConcurrencyBridge.swift,
 				Utilities/Bridges/FoundationConcurrencyBridge.swift,
 				Utilities/Bridges/NetworkExtensionConcurrencyBridge.swift,
@@ -393,6 +393,7 @@
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
 				Utilities/MonotonicClock.swift,
+				"Utilities/String+init.swift",
 				Utilities/SubscriptionDomainHelper.swift,
 				"Utilities/UUID+VLESSString.swift",
 				Utilities/VPNStatus.swift,
@@ -1008,10 +1009,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/ngtcp2",
+					"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-					"$(SRCROOT)/Shared/Utilities/libyaml/include",
+					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -1051,10 +1052,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/Shared/Networking/ngtcp2",
+					"$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE2",
 					"$(SRCROOT)/Shared/Networking/Protocols/Crypto/BLAKE3",
-					"$(SRCROOT)/Shared/Utilities/libyaml/include",
+					"$(SRCROOT)/Shared/Utilities/YAML/libyaml/include",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;

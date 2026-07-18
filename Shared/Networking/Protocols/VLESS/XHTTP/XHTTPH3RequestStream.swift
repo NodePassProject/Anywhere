@@ -6,28 +6,39 @@
 //
 
 import Foundation
+import Synchronization
 
-actor XHTTPH3RequestStream {
+nonisolated final class XHTTPH3RequestStream: Sendable {
 
     // MARK: - State
 
-    enum State { case idle, requestSent, open, closed }
+    enum Phase { case idle, requestSent, open, closed }
 
-    /// The ngtcp2 boundary whose executor this stream adopts; held strongly so the
-    /// executor outlives the stream even after the multiplexer is torn down.
-    private nonisolated let bridge: NGTCP2ConcurrencyBridge
-    nonisolated var unownedExecutor: UnownedSerialExecutor {
-        bridge.executor.asUnownedSerialExecutor()
+    /// Weak back-reference to the owning multiplexer, boxed so the stream stays `Sendable`;
+    /// set once at init.
+    private struct WeakMultiplexer { weak var value: HTTP3Multiplexer? }
+    private let multiplexerBox: Mutex<WeakMultiplexer>
+
+    /// Request/response state, guarded by `lock`. Never held across a call into the
+    /// multiplexer, an inbox yield, or a continuation resume; effects are computed under
+    /// the lock and performed after it is released.
+    private struct State {
+        var phase: Phase = .idle
+        var quicStreamID: Int64?
+        var headersReceived = false
+        var responseStatus: Int?
+
+        // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
+        // keeps cost amortized O(1).
+        var frameBuffer = Data()
+        var frameBufferOffset = 0
     }
+    private let lock = Mutex(State())
 
-    private weak var multiplexer: HTTP3Multiplexer?
-    private(set) var quicStreamID: Int64?
-    private var state: State = .idle
+    var quicStreamID: Int64? { lock.withLock { $0.quicStreamID } }
+    var responseStatus: Int? { lock.withLock { $0.responseStatus } }
 
     // MARK: - Response
-
-    private var headersReceived = false
-    private(set) var responseStatus: Int?
 
     /// One-shot response-status signal; the awaiter is `responseTask.value`. Yields the HTTP
     /// status then finishes on success, or finishes-throwing on failure.
@@ -38,22 +49,16 @@ actor XHTTPH3RequestStream {
 
     /// Inbound DATA payloads / EOF / error from the multiplexer's demux events. QUIC flow
     /// control counts every stream byte (HTTP/3 frame header + payload), so the per-chunk
-    /// `quicBytes` accounting is split: `deliverData` credits the frame-header octets as
+    /// `quicBytes` accounting is split: the demux path credits the frame-header octets as
     /// chunks arrive, and ``receive()`` credits the payload octets only once the app takes
     /// them — total credit stays exact, backpressure preserved. The single consumer pulls via
     /// ``receive()``.
     private let inbox = AsyncInbox<Data>()
 
-    // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
-    // keeps cost amortized O(1).
-    private var frameBuffer = Data()
-    private var frameBufferOffset = 0
-
     // MARK: - Init
 
     init(multiplexer: HTTP3Multiplexer) {
-        self.bridge = multiplexer.sharedBridge
-        self.multiplexer = multiplexer
+        self.multiplexerBox = Mutex(WeakMultiplexer(value: multiplexer))
         let (responseStream, responseSignal) = AsyncThrowingStream.makeStream(of: Int.self)
         self.responseSignal = responseSignal
         self.responseTask = Task {
@@ -68,29 +73,33 @@ actor XHTTPH3RequestStream {
     /// HEADERS are written (or throws if the stream fails). Await ``awaitResponseStatus()`` for
     /// the response `:status`.
     func sendRequest(headerBlock: Data, endStream: Bool) async throws {
-        guard let multiplexer else { throw HTTP3Error.streamClosed }
+        guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
+            throw HTTP3Error.streamClosed
+        }
         try await multiplexer.ensureReady()
 
-        // Demux event sinks; they fire on the shared executor and enter this actor's
-        // isolation synchronously (verified against the executor at runtime).
+        // Demux event sinks; they fire synchronously on the ngtcp2 queue and route into
+        // this stream's Mutex-guarded state machine (compute under the lock, effects after).
         let events = HTTP3Multiplexer.StreamEvents(
             data: { [weak self] data, fin in
-                self?.assumeIsolated { $0.handleStreamData(data, fin: fin) }
+                self?.handleStreamData(data, fin: fin)
             },
             error: { [weak self] error in
-                self?.assumeIsolated { $0.handleSessionError(error) }
+                self?.handleSessionError(error)
             }
         )
 
-        // The open and the sink registration are one isolated step on the multiplexer, so a
+        // The open and the sink registration are one on-queue step on the multiplexer, so a
         // fast response is recorded before we even return here, then surfaced by
         // `awaitResponseStatus()` (via `responseTask`) — never lost.
         guard let sid = await multiplexer.openStream(events: events) else {
-            state = .closed
+            lock.withLock { $0.phase = .closed }
             throw HTTP3Error.streamIdBlocked
         }
-        quicStreamID = sid
-        state = .requestSent
+        lock.withLock { state in
+            state.quicStreamID = sid
+            state.phase = .requestSent
+        }
 
         let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
         do {
@@ -104,15 +113,18 @@ actor XHTTPH3RequestStream {
     /// Suspends until the response `:status` arrives (or the stream fails). If the HEADERS were
     /// already parsed, the promise is resolved and returns immediately.
     func awaitResponseStatus() async throws -> Int {
-        guard multiplexer != nil else { throw HTTP3Error.streamClosed }
+        guard multiplexerBox.withLock({ $0.value }) != nil else { throw HTTP3Error.streamClosed }
         return try await responseTask.value
     }
 
     func sendBody(_ data: Data, fin: Bool) async throws {
-        guard let multiplexer else { throw HTTP3Error.streamClosed }
-        guard state != .closed, let sid = quicStreamID else {
+        guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
             throw HTTP3Error.streamClosed
         }
+        let sid: Int64? = lock.withLock { state in
+            state.phase == .closed ? nil : state.quicStreamID
+        }
+        guard let sid else { throw HTTP3Error.streamClosed }
         if data.isEmpty && !fin { return }
         // An empty payload with fin==true is a bare half-close (FIN, no DATA frame).
         let frame = data.isEmpty ? Data() : HTTP3Framer.dataFrame(payload: data)
@@ -120,7 +132,7 @@ actor XHTTPH3RequestStream {
     }
 
     func receive() async throws -> Data? {
-        guard multiplexer != nil else { throw HTTP3Error.streamClosed }
+        guard multiplexerBox.withLock({ $0.value }) != nil else { throw HTTP3Error.streamClosed }
         let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
@@ -135,7 +147,7 @@ actor XHTTPH3RequestStream {
 
     /// Reads and discards the entire response so the stream closes cleanly on EOF —
     /// avoids RESET_STREAM after FIN, which some servers treat as aborting the POST.
-    nonisolated func drainResponse() {
+    func drainResponse() {
         Task {
             while true {
                 let data: Data?
@@ -145,30 +157,30 @@ actor XHTTPH3RequestStream {
         }
     }
 
-    nonisolated func close() {
-        Task { await self.performClose() }
-    }
-    
-    private func nextInboxChunk() async throws -> Data? {
-        try await inbox.next()
-    }
-
-    private func performClose() {
-        guard state != .closed else { return }
-        state = .closed
-        // A caller-initiated close before completion is H3_REQUEST_CANCELLED;
-        // after a clean response it's H3_NO_ERROR.
-        detachFromMultiplexer(code: headersReceived ? .noError : .requestCancelled)
+    func close() {
+        let detach: (sid: Int64?, code: HTTP3ErrorCode)? = lock.withLock { state in
+            guard state.phase != .closed else { return nil }
+            // A caller-initiated close before completion is H3_REQUEST_CANCELLED;
+            // after a clean response it's H3_NO_ERROR.
+            let code: HTTP3ErrorCode = state.headersReceived ? .noError : .requestCancelled
+            state.phase = .closed
+            return (state.quicStreamID, code)
+        }
+        guard let detach else { return }
+        detachFromMultiplexer(sid: detach.sid, code: detach.code)
         responseSignal.finish(throwing: HTTP3Error.streamClosed)
         inbox.finish()
     }
 
-    // MARK: - Demux events (delivered on the shared executor)
+    private func nextInboxChunk() async throws -> Data? {
+        try await inbox.next()
+    }
+
+    // MARK: - Demux events (delivered synchronously on the ngtcp2 queue)
 
     private func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {
-            frameBuffer.append(data)
-            processFrameBuffer()
+            processInbound(data)
         }
         if fin {
             // EOF ordered after every chunk already yielded to the inbox; the shutdown fires
@@ -190,101 +202,141 @@ actor XHTTPH3RequestStream {
 
     // MARK: - Frame processing
 
-    private func processFrameBuffer() {
+    /// Outcome of the response-HEADERS frame in a parse pass, decided under `lock`.
+    private enum HeadersOutcome {
+        case none
+        case status(Int)
+        case missingStatus
+        case failed(Error)
+    }
+
+    /// Appends `data` (a zero-copy ngtcp2 view — copied here) and drains every complete frame.
+    /// Frame parsing and state transitions run under `lock`; inbox yields, flow-control acks,
+    /// and the response resolution are performed after it is released.
+    private func processInbound(_ data: Data) {
         // Only DATA frames reach the app; control frames are acked in batch.
         var controlBytes = 0
-        while frameBufferOffset < frameBuffer.count {
-            guard let (frame, consumed) = HTTP3Framer.parseFrame(
-                from: frameBuffer, offset: frameBufferOffset
-            ) else {
-                break
-            }
-            frameBufferOffset += consumed
+        var deliveries: [Data] = []
+        var outcome: HeadersOutcome = .none
 
-            if !headersReceived {
-                processResponseHeaders(frame)
-                controlBytes += consumed
-            } else if frame.type == HTTP3FrameType.data.rawValue {
-                deliverData(frame.payload, quicBytes: consumed)
-            } else {
-                // Trailers / unknown frames after the response headers.
-                controlBytes += consumed
+        lock.withLock { state in
+            state.frameBuffer.append(data)
+            while state.frameBufferOffset < state.frameBuffer.count {
+                guard let (frame, consumed) = HTTP3Framer.parseFrame(
+                    from: state.frameBuffer, offset: state.frameBufferOffset
+                ) else {
+                    break
+                }
+                state.frameBufferOffset += consumed
+
+                if !state.headersReceived {
+                    outcome = Self.processResponseHeaders(frame, state: &state)
+                    controlBytes += consumed
+                    // A rejected response closes the stream; nothing after it is deliverable.
+                    if case .failed = outcome { break }
+                    if case .missingStatus = outcome { break }
+                } else if frame.type == HTTP3FrameType.data.rawValue {
+                    if frame.payload.isEmpty {
+                        controlBytes += consumed
+                    } else {
+                        // Credit the frame-header overhead now; the payload octets are credited
+                        // in `receive` once the consumer drains them (backpressure preserved).
+                        controlBytes += consumed - frame.payload.count
+                        deliveries.append(Data(frame.payload))
+                    }
+                } else {
+                    // Trailers / unknown frames after the response headers.
+                    controlBytes += consumed
+                }
             }
+
+            if state.frameBufferOffset >= state.frameBuffer.count {
+                state.frameBuffer = Data()
+                state.frameBufferOffset = 0
+            } else if state.frameBufferOffset > 64 * 1024 {
+                state.frameBuffer = Data(state.frameBuffer[(state.frameBuffer.startIndex + state.frameBufferOffset)...])
+                state.frameBufferOffset = 0
+            }
+        }
+
+        switch outcome {
+        case .none:
+            break
+        case .status(let status):
+            responseSignal.yield(status)
+            responseSignal.finish()
+        case .missingStatus:
+            responseSignal.finish(throwing: HTTP3Error.connectionFailed("Response missing :status"))
+        case .failed(let error):
+            handleStreamError(error)
+        }
+
+        for payload in deliveries {
+            inbox.yield(payload)
         }
         if controlBytes > 0 {
             ackQuicBytes(controlBytes)
         }
-
-        if frameBufferOffset >= frameBuffer.count {
-            frameBuffer = Data()
-            frameBufferOffset = 0
-        } else if frameBufferOffset > 64 * 1024 {
-            frameBuffer = Data(frameBuffer[(frameBuffer.startIndex + frameBufferOffset)...])
-            frameBufferOffset = 0
-        }
     }
 
-    private func processResponseHeaders(_ frame: HTTP3Framer.Frame) {
+    /// Parses the response HEADERS. Must be called with `lock` held; on a decoded status the
+    /// phase flips to `.open` in place, and the off-lock effects (response resolution or
+    /// teardown) are carried in the returned outcome.
+    private static func processResponseHeaders(_ frame: HTTP3Framer.Frame, state: inout State) -> HeadersOutcome {
         guard frame.type == HTTP3FrameType.headers.rawValue else {
-            handleStreamError(HTTP3Error.connectionFailed("Expected HEADERS, got type \(frame.type)"))
-            return
+            return .failed(HTTP3Error.connectionFailed("Expected HEADERS, got type \(frame.type)"))
         }
         guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
-            handleStreamError(HTTP3Error.connectionFailed("Malformed QPACK header block"))
-            return
+            return .failed(HTTP3Error.connectionFailed("Malformed QPACK header block"))
         }
 
         let statusValue = headers.first(where: { $0.name == ":status" })?.value
         let status = statusValue.flatMap { Int($0) }
-        responseStatus = status
-        headersReceived = true
-        state = .open
+        state.responseStatus = status
+        state.headersReceived = true
+        state.phase = .open
 
         if let status {
-            responseSignal.yield(status)
-            responseSignal.finish()
+            return .status(status)
         } else {
-            responseSignal.finish(throwing: HTTP3Error.connectionFailed("Response missing :status"))
+            return .missingStatus
         }
-    }
-
-    private func deliverData(_ data: Data, quicBytes: Int) {
-        guard !data.isEmpty else {
-            if quicBytes > 0 { ackQuicBytes(quicBytes) }
-            return
-        }
-        // Credit the frame-header overhead now; the payload octets are credited in `receive`
-        // once the consumer drains them (backpressure preserved).
-        let headerBytes = quicBytes - data.count
-        if headerBytes > 0 { ackQuicBytes(headerBytes) }
-        inbox.yield(Data(data))
     }
 
     /// Extends the QUIC stream flow-control window once the app has consumed data.
     private func ackQuicBytes(_ count: Int) {
-        guard count > 0, let sid = quicStreamID else { return }
-        multiplexer?.extendStreamOffset(sid, count: count)
+        guard count > 0 else { return }
+        guard let sid = lock.withLock({ $0.quicStreamID }) else { return }
+        multiplexerBox.withLock { $0.value }?.extendStreamOffset(sid, count: count)
     }
 
     private func handleStreamError(_ error: Error) {
-        guard state != .closed else { return }
-        state = .closed
-        detachFromMultiplexer(code: .internalError)
+        let sid: Int64?? = lock.withLock { state in
+            guard state.phase != .closed else { return nil }
+            state.phase = .closed
+            return .some(state.quicStreamID)
+        }
+        guard let sid else { return }
+        detachFromMultiplexer(sid: sid, code: .internalError)
         responseSignal.finish(throwing: error)
         inbox.finish(throwing: error)
     }
 
     private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {
-        guard state != .closed else { return }
-        state = .closed
-        detachFromMultiplexer(code: code)
+        let sid: Int64?? = lock.withLock { state in
+            guard state.phase != .closed else { return nil }
+            state.phase = .closed
+            return .some(state.quicStreamID)
+        }
+        guard let sid else { return }
+        detachFromMultiplexer(sid: sid, code: code)
     }
 
-    /// Releases the mux registration + slot and shuts the QUIC stream down. The multiplexer
-    /// shares this actor's executor, so its isolation is entered synchronously here.
-    private func detachFromMultiplexer(code: HTTP3ErrorCode) {
-        guard let multiplexer, let sid = quicStreamID else { return }
-        multiplexer.assumeIsolated { $0.removeStream(sid) }
+    /// Releases the mux registration + slot and shuts the QUIC stream down. Called with
+    /// `lock` released — both multiplexer calls take the multiplexer's own locks.
+    private func detachFromMultiplexer(sid: Int64?, code: HTTP3ErrorCode) {
+        guard let multiplexer = multiplexerBox.withLock({ $0.value }), let sid else { return }
+        multiplexer.removeStream(sid)
         multiplexer.shutdownStream(sid, code: code)
     }
 }

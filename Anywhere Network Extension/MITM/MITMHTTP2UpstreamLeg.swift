@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
 
@@ -1201,7 +1202,7 @@ actor MITMHTTP2UpstreamLeg {
     /// scripts are synchronous and per small frame (no `await`), so the stall is brief.
     private func handleStreamingData(streamID: UInt32, body: Data, endStream: Bool, trailers: [(name: String, value: String)] = []) -> Bool {
         guard case .streaming(let streamingResponse)? = responseStreams[streamID] else { return false }
-        if streamingResponse.cursor.bypass {
+        if streamingResponse.cursor.mutable.withLock({ $0.bypass }) {
             advanceStreaming(streamID)
             deliverStreamingFrame(streamID: streamID, body: body, endStream: endStream, trailers: trailers)
             return false
@@ -1245,7 +1246,7 @@ actor MITMHTTP2UpstreamLeg {
         guard case .streaming(var streamingResponse)? = responseStreams[streamID] else { return }
         streamingResponse.frameIndex += 1
         // Per-frame growth cap (approximate); a large jump trips bypass for the rest of the stream.
-        if growth > Self.maxStreamingRewriteGrowthBytes { streamingResponse.cursor.bypass = true }
+        if growth > Self.maxStreamingRewriteGrowthBytes { streamingResponse.cursor.mutable.withLock { $0.bypass = true } }
         responseStreams[streamID] = .streaming(streamingResponse)
     }
 }

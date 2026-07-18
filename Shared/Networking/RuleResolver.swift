@@ -26,6 +26,10 @@ nonisolated final class RuleResolver: Sendable {
 
     private let state = Mutex(State())
 
+    /// Blocking `getaddrinfo` runs on the DNS syscall bridge's pool — never on a cooperative
+    /// thread — mirroring `DNSResolver`.
+    private let blockingBridge = DNSSyscallConcurrencyBridge()
+
     private init() {}
 
     // MARK: - Public API
@@ -47,8 +51,8 @@ nonisolated final class RuleResolver: Sendable {
         }
         guard shouldResolve else { return }
 
-        Task.detached(priority: .utility) { [self] in
-            let ip = Self.resolveIPv4(key)
+        Task(priority: .utility) { [self] in
+            let ip = await blockingBridge.run { Self.resolveIPv4(key) }
             state.withLock { state in
                 state.inFlight.remove(key)
                 guard let ip else { return }
@@ -84,7 +88,7 @@ nonisolated final class RuleResolver: Sendable {
     }
 
     /// Blocking A-record resolution on the physical interface, returning the
-    /// first IPv4 only. Runs on a background queue.
+    /// first IPv4 only. Runs on the DNS syscall bridge's pool.
     private static func resolveIPv4(_ host: String) -> String? {
         var hints = addrinfo()
         hints.ai_family = AF_INET          // IPv4 only
@@ -100,7 +104,7 @@ nonisolated final class RuleResolver: Sendable {
                 var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
                 var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 if inet_ntop(AF_INET, &address.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
-                    return String(cString: buffer)   // first IPv4 wins — one IP per domain
+                    return String(nulTerminated: buffer)   // first IPv4 wins — one IP per domain
                 }
             }
             current = info.pointee.ai_next

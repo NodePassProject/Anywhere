@@ -195,22 +195,18 @@ nonisolated enum MITMScriptTransform {
     }
     
     final class FrameCursor: Sendable {
-        private struct Mutable {
+        struct Mutable {
+            /// Script's persistent per-stream state; only ever touched on scriptQueue (deinit hops
+            /// its release there).
             var state: JSValue?
+            /// Set by a done/exit directive; subsequent frames bypass the script.
             var bypass = false
         }
-        private let mutable = Mutex(Mutable())
+        /// Crossed by the lwIP-queue stream drivers (bypass) and the JSC queue (state), so the
+        /// Mutex is genuine cross-domain guarding; callers use `withLock` inline so every access
+        /// names the lock and multi-field transitions stay atomic.
+        let mutable = Mutex(Mutable())
 
-        /// Script's persistent per-stream state; only ever touched on scriptQueue (deinit hops its release there).
-        var state: JSValue? {
-            get { mutable.withLock { $0.state } }
-            set { mutable.withLock { $0.state = newValue } }
-        }
-        /// Set by a done/exit directive; subsequent frames bypass the script.
-        var bypass: Bool {
-            get { mutable.withLock { $0.bypass } }
-            set { mutable.withLock { $0.bypass = newValue } }
-        }
         /// The last matching `.streamScript` rule, resolved at creation; nil = no rule matches.
         fileprivate let resolvedMatch: ScriptMatch?
 
@@ -258,19 +254,20 @@ nonisolated enum MITMScriptTransform {
         else { return StreamFrameResult(body: frame, bypass: false) }
         // Runs inside `JSCConcurrencyBridge.shared.run` (the async counterpart below) — on the
         // engine's JSC executor — so enter its isolation synchronously.
+        let state = cursor.mutable.withLock { $0.state }
         let outcome = engineProvider.get().assumeIsolated {
             $0.applyFrame(frame, source: match.source, sourceKey: match.sourceKey,
-                          frameContext: frameContext, state: cursor.state)
+                          frameContext: frameContext, state: state)
         }
         switch outcome {
         case .modified(let body, let state):
-            cursor.state = state
+            cursor.mutable.withLock { $0.state = state }
             return StreamFrameResult(body: body, bypass: false)
         case .done(let body):
-            cursor.bypass = true
+            cursor.mutable.withLock { $0.bypass = true }
             return StreamFrameResult(body: body, bypass: true)
         case .exit:
-            cursor.bypass = true
+            cursor.mutable.withLock { $0.bypass = true }
             return StreamFrameResult(body: frame, bypass: true)
         }
     }

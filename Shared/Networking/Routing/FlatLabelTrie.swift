@@ -306,12 +306,19 @@ nonisolated extension FlatLabelTrieBuilder {
     /// `offset`/`length` delimit the suffix's lowercased UTF-8 bytes in the
     /// `buildBulk` buffer; `order` (collection index) breaks ties between identical
     /// suffixes so the last-collected one wins, matching `insert`'s overwrite.
+    /// Pure value data, so `Sendable` (unlike the builder itself) — buffered records may sit in
+    /// shared matcher state between collection and `buildBulk`.
     struct BulkEntry {
         var offset: Int32
         var length: Int32
         var payload: Payload
         var order: Int32
     }
+}
+
+nonisolated extension FlatLabelTrieBuilder.BulkEntry: Sendable where Payload: Sendable {}
+
+nonisolated extension FlatLabelTrieBuilder {
 
     /// Builds the frozen trie from `entries` (sorted in place). `base` must remain
     /// valid for the call; matched label bytes are copied into the trie before it

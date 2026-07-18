@@ -5,8 +5,6 @@
 //  Created by NodePassProject on 5/3/26.
 //
 
-// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
-
 import Foundation
 import Synchronization
 
@@ -284,6 +282,52 @@ actor MITMSession {
 
     private var torn = false
 
+    // MARK: - Deferred actions
+    //
+    // Upcalls from queue-confined child callbacks (stream hooks, writer completions, handshake
+    // timeouts) that must run off the caller's stack — a teardown mid-parse would be re-entrant.
+    // A callback yields an action instead of spawning an unowned `Task`; the single session-owned
+    // ``deferredActionsTask`` applies them in FIFO order. Same deferral as the former per-event
+    // task hops, but with ordering, ownership, and deterministic teardown.
+
+    private enum DeferredAction {
+        case cancel(reason: Error?)
+        case failInnerLegWith502(reason: String)
+        case failPendingBridgeRequests(reason: Error)
+        case abortBridgeStream(streamID: UInt32, acceptResponseAborted: Bool)
+        case bridgeUpstreamDrained(streamID: UInt32, count: Int, sendError: Error?)
+        case failBridgeStreamOnTimeout(streamID: UInt32)
+    }
+    private let deferredActions: AsyncStream<DeferredAction>
+    private nonisolated let deferredActionContinuation: AsyncStream<DeferredAction>.Continuation
+    /// The single ordered consumer; spawned by ``start(sni:)``, ended by `cancel()` finishing the
+    /// channel (the loop then falls out on its own, releasing the strongly captured session).
+    private var deferredActionsTask: Task<Void, Never>?
+
+    /// Defers `action` off the current call stack; safe from any domain, ordered per producer.
+    private nonisolated func post(_ action: DeferredAction) {
+        deferredActionContinuation.yield(action)
+    }
+
+    /// Applies one deferred action on the actor; anything arriving after teardown drops at the
+    /// target method's own `torn` guard.
+    private func apply(_ action: DeferredAction) {
+        switch action {
+        case .cancel(let reason):
+            cancel(error: reason)
+        case .failInnerLegWith502(let reason):
+            failInnerLegWith502(reason)
+        case .failPendingBridgeRequests(let reason):
+            failPendingBridgeRequests(error: reason)
+        case .abortBridgeStream(let streamID, let acceptResponseAborted):
+            abortBridgeStream(streamID, acceptResponseAborted: acceptResponseAborted)
+        case .bridgeUpstreamDrained(let streamID, let count, let sendError):
+            noteBridgeUpstreamDrained(streamID: streamID, count: count, sendError: sendError)
+        case .failBridgeStreamOnTimeout(let streamID):
+            failBridgeStreamOnTimeout(streamID)
+        }
+    }
+
     /// Set by the lwIP-side caller to write inner-leg bytes back to the client (fire-and-forget).
     var onSendToClient: (@Sendable (Data) -> Void)? {
         didSet { innerTransport.setOnSendToClient(onSendToClient) }
@@ -313,6 +357,7 @@ actor MITMSession {
         self.lwipBridge = lwipBridge
         self.isPlaintext = isPlaintext
         self.innerTransport = InnerTransport(lwipBridge: lwipBridge)
+        (self.deferredActions, self.deferredActionContinuation) = AsyncStream.makeStream(of: DeferredAction.self)
         // Cleartext requests carry an http:// URL; rule gates and script `request.url` must reflect it.
         let scheme = isPlaintext ? "http" : "https"
         // Scope keyed by matched set id to line up with the Anywhere.store scope.
@@ -352,6 +397,12 @@ actor MITMSession {
     /// Starts the inner leg — a TLS handshake for HTTPS, or a direct cleartext leg for plain HTTP —
     /// and defers the upstream dial until the first request resolves the destination.
     func start(sni: String) {
+        // Strong self: `cancel()` finishes the channel, ending this loop and releasing the session.
+        deferredActionsTask = Task {
+            for await action in deferredActions {
+                apply(action)
+            }
+        }
         installStreamHandlers()
         guard !isPlaintext else {
             startPlaintext()
@@ -376,19 +427,19 @@ actor MITMSession {
             self?.assumeIsolated { $0.handleResponseUpgrade() }
         } }
         // Fail closed on a smuggling/injection head or over-cap body — deferred off the parse pass
-        // (via a `Task` hop onto the actor) to avoid re-entrant teardown. The request direction can't
+        // (onto the ordered action channel) to avoid re-entrant teardown. The request direction can't
         // cleanly answer the client so it just closes; the response direction answers a 502 first.
         requestStream.assumeIsolated { $0.onFatalClose = { [weak self] in
-            Task { await self?.cancel(error: nil) }
+            self?.post(.cancel(reason: nil))
         } }
         responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
-            Task { await self?.failInnerLegWith502("rejected a malformed or oversized upstream response") }
+            self?.post(.failInnerLegWith502(reason: "rejected a malformed or oversized upstream response"))
         } }
         // Mid-body chunked framing breakage (head already on the wire): tear down both legs. A 502
         // can't be written over an in-flight response, and a synthesized terminator would frame a
         // truncated body as complete and desync the peer.
         let hardClose: @Sendable () -> Void = { [weak self] in
-            Task { await self?.cancel(error: nil) }
+            self?.post(.cancel(reason: nil))
         }
         requestStream.assumeIsolated { $0.onHardClose = hardClose }
         responseStream.assumeIsolated { $0.onHardClose = hardClose }
@@ -476,6 +527,10 @@ actor MITMSession {
         for writer in legWriters.values { writer.finish() }
         legWriters.removeAll()
         innerTransport.cancel()
+        // End the deferred-action channel so its consumer loop finishes and releases the session;
+        // any actions already queued are dropped (their targets would no-op on `torn` anyway).
+        deferredActionContinuation.finish()
+        deferredActionsTask = nil
         onTeardown?(error)
     }
 
@@ -556,7 +611,7 @@ actor MITMSession {
         let client = TLSClient(configuration: configuration)
         tlsClient = client
         let disarm = armUpstreamHandshakeTimeout { [weak self] in
-            Task { await self?.failInnerLegWith502("upstream TLS handshake timed out") }
+            self?.post(.failInnerLegWith502(reason: "upstream TLS handshake timed out"))
         }
         Task {
             do {
@@ -661,8 +716,8 @@ actor MITMSession {
     private func sendChunkedCancellingOnError(_ data: Data, via record: any MITMByteLeg) {
         guard !torn else { return }
         writer(for: record).enqueue(data) { [weak self] error in
-            guard error != nil else { return }
-            Task { await self?.cancel(error: error) }
+            guard let error else { return }
+            self?.post(.cancel(reason: error))
         }
     }
 
@@ -671,7 +726,7 @@ actor MITMSession {
     private func sendChunkedThenCancel(_ data: Data, via record: any MITMByteLeg) {
         guard !torn else { return }
         writer(for: record).enqueue(data) { [weak self] _ in
-            Task { await self?.cancel(error: nil) }
+            self?.post(.cancel(reason: nil))
         }
     }
 
@@ -1263,7 +1318,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         let client = TLSClient(configuration: configuration)
         sharedUpstreamTLSClient = client
         let disarm = armUpstreamHandshakeTimeout { [weak self] in
-            Task { await self?.failPendingBridgeRequests(error: UpstreamHandshakeTimeout()) }
+            self?.post(.failPendingBridgeRequests(reason: UpstreamHandshakeTimeout()))
         }
         Task {
             do {
@@ -1332,7 +1387,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 }
             }
             legSelf.onFatalError = { [weak self] _ in
-                Task { await self?.cancel(error: nil) }
+                self?.post(.cancel(reason: nil))
             }
             // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST,
             // not this connection-level frame) so it redials new streams while in-flight ones finish.
@@ -1410,14 +1465,14 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         // A malformed / oversized upstream response fails just this stream (RST), not the whole
         // multiplexed h2 connection. The stream shares this actor's executor; enter its isolation.
         responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
-            Task { await self?.abortBridgeStream(streamID, acceptResponseAborted: true) }
+            self?.post(.abortBridgeStream(streamID: streamID, acceptResponseAborted: true))
         } }
         let bs = BridgeStream(clientStreamID: streamID, responseStream: responseStream, responseLog: responseLog)
         let irSink = BridgeResponseIRSink(streamID: streamID, client: bridgeClient) { [weak self] sid in
             // RST the client stream now (fires on the lwIP queue = the actor's executor); free the
-            // dead h1 upstream after the current `transform` returns via a deferred task.
+            // dead h1 upstream after the current `transform` returns via the deferred-action channel.
             self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: sid) } }
-            Task { await self?.abortBridgeStream(sid, acceptResponseAborted: false) }
+            self?.post(.abortBridgeStream(streamID: sid, acceptResponseAborted: false))
         }
         responseStream.assumeIsolated { $0.responseIRSink = irSink }
         bs.responseIRSink = irSink
@@ -1501,8 +1556,8 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         guard !data.isEmpty, !torn else { return }
         let count = data.count
         writer(for: record).enqueue(data) { [weak self] sendError in
-            // Off-actor writer completion; hops back onto the actor to update the stream tally.
-            Task { await self?.noteBridgeUpstreamDrained(streamID: streamID, count: count, sendError: sendError) }
+            // Off-actor writer completion; defers back onto the actor to update the stream tally.
+            self?.post(.bridgeUpstreamDrained(streamID: streamID, count: count, sendError: sendError))
         }
     }
 
@@ -1544,7 +1599,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         let client = TLSClient(configuration: configuration)
         bs.tlsClient = client
         let disarm = armUpstreamHandshakeTimeout { [weak self] in
-            Task { await self?.failBridgeStreamOnTimeout(streamID) }
+            self?.post(.failBridgeStreamOnTimeout(streamID: streamID))
         }
         Task {
             do {

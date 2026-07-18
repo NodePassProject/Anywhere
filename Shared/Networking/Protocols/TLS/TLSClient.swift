@@ -31,10 +31,27 @@ actor TLSClient {
     /// ``cancel()`` — called from teardown on other tasks — can abort an in-flight handshake without
     /// hopping onto the actor. Cancelling it makes the driver's parked `receive()` throw, which
     /// unwinds the handshake and clears the isolated crypto state via `releaseOnFailure`.
+    /// Read via the ``connection`` snapshot; mutations go through ``adoptTransport(_:)`` and the
+    /// atomic ``takeConnection()`` so no caller treats the lock as a plain variable.
     private let connectionBox = Mutex<(any ByteTransport)?>(nil)
-    nonisolated var connection: (any ByteTransport)? {
-        get { connectionBox.withLock { $0 } }
-        set { connectionBox.withLock { $0 = newValue } }
+
+    /// Read-only snapshot of the live transport; `nil` before adoption and after teardown.
+    nonisolated var connection: (any ByteTransport)? { connectionBox.withLock { $0 } }
+
+    /// Publishes the handshake's transport. Called once per connect attempt before the first send.
+    private func adoptTransport(_ transport: any ByteTransport) {
+        connectionBox.withLock { $0 = transport }
+    }
+
+    /// Atomically detaches and returns the transport, so a racing adopt/cancel can never leave a
+    /// transport both published and cancelled-behind-its-back. Internal: the TLS 1.2/1.3 finish
+    /// paths use it to hand the transport over to the record connection.
+    nonisolated func takeConnection() -> (any ByteTransport)? {
+        connectionBox.withLock { connection in
+            let taken = connection
+            connection = nil
+            return taken
+        }
     }
 
     // Cleared after handshake.
@@ -121,7 +138,7 @@ actor TLSClient {
             storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
             let transport = TCPTransport(host: host, port: port)
-            self.connection = transport
+            adoptTransport(transport)
             do {
                 try await transport.connect(initialData: clientHello)
             } catch {
@@ -144,7 +161,7 @@ actor TLSClient {
             guard let privateKey = ephemeralPrivateKey else {
                 throw TLSError.handshakeFailed("No ephemeral key")
             }
-            self.connection = TunneledTransport(tunnel: tunnel)
+            adoptTransport(TunneledTransport(tunnel: tunnel))
 
             let clientHello = try buildTLSClientHello(privateKey: privateKey)
             storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
@@ -169,13 +186,11 @@ actor TLSClient {
     /// parked `receive()` throw, so `releaseOnFailure` clears the isolated crypto state as it unwinds
     /// — this nonisolated path only needs to drop the transport.
     nonisolated func cancel() {
-        connection?.cancel()
-        connection = nil
+        takeConnection()?.cancel()
     }
 
     private func releaseOnFailure() {
-        connection?.cancel()
-        connection = nil
+        takeConnection()?.cancel()
         clearHandshakeState()
     }
 

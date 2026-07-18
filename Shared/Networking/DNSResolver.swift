@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import dnssd
 import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "DNSResolver")
@@ -256,14 +255,14 @@ nonisolated final class DNSResolver: Sendable {
                 var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
                 var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 if inet_ntop(AF_INET, &address.sin_addr, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil {
-                    let ip = String(cString: buffer)
+                    let ip = String(nulTerminated: buffer)
                     if !ipv4.contains(ip) { ipv4.append(ip) }
                 }
             } else if info.pointee.ai_family == AF_INET6 {
                 var address = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
                 var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
                 if inet_ntop(AF_INET6, &address.sin6_addr, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil {
-                    let ip = String(cString: buffer)
+                    let ip = String(nulTerminated: buffer)
                     if !ipv6.contains(ip) { ipv6.append(ip) }
                 }
             }
@@ -307,9 +306,14 @@ nonisolated final class DNSResolver: Sendable {
     }
     
     private func lookupECH(bare: String, key: String, scheduledGeneration: UInt64) async -> Data? {
-        let result = await Self.blockingBridge.run {
-            Self.queryHTTPSRecordECH(host: bare)
-        }
+        // The DNSService fd/poll machinery lives in the bridge; this side only supplies the
+        // SVCB "ech" SvcParam parser and caches the outcome.
+        let result = await Self.blockingBridge.queryFirstRecord(
+            host: bare,
+            rrtype: kHTTPSRecordType,
+            timeout: Self.echQueryTimeout,
+            accept: { echParseSVCBECH($0) }
+        )
 
         return state.withLock { state in
             state.echInFlight[key] = nil
@@ -321,58 +325,11 @@ nonisolated final class DNSResolver: Sendable {
                 .map { min(max(TimeInterval($0.ttl), Self.echMinTTL), Self.echMaxTTL) }
                 ?? Self.echNegativeTTL
             let insertedAt = CFAbsoluteTimeGetCurrent()
-            state.echCache[key] = ECHCacheEntry(config: result?.config,
+            state.echCache[key] = ECHCacheEntry(config: result?.payload,
                                                 expiry: insertedAt + ttl)
             Self.compactECH(&state, now: insertedAt)
-            return result?.config
+            return result?.payload
         }
-    }
-    
-    private static func queryHTTPSRecordECH(host: String) -> (config: Data, ttl: UInt32)? {
-        final class QueryResult { var config: Data?; var ttl: UInt32 = 0; var answered = false }
-        let result = QueryResult()
-
-        // Non-capturing so it bridges to the C callback; state flows via context.
-        let callback: DNSServiceQueryRecordReply = { _, flags, _, errorCode, _, rrtype, _, rdlen, rdata, ttl, context in
-            guard let context else { return }
-            let result = Unmanaged<QueryResult>.fromOpaque(context).takeUnretainedValue()
-            // MoreComing clear marks the batch complete; note it so the poll loop
-            // stops instead of waiting out the timeout when the host publishes no
-            // usable ECH record (the common negative case resolves promptly).
-            if (flags & kDNSServiceFlagsMoreComing) == 0 { result.answered = true }
-            guard errorCode == kDNSServiceErr_NoError,
-                  rrtype == kHTTPSRecordType, let rdata, rdlen > 0
-            else { return }
-            guard result.config == nil else { return }   // keep the first usable record
-            if let ech = echParseSVCBECH(Data(bytes: rdata, count: Int(rdlen))) {
-                result.config = ech
-                result.ttl = ttl
-            }
-        }
-
-        var serviceRef: DNSServiceRef?
-        let context = Unmanaged.passUnretained(result).toOpaque()
-        let queryError = host.withCString { cHost in
-            DNSServiceQueryRecord(&serviceRef, 0, 0, cHost,
-                                  kHTTPSRecordType, UInt16(kDNSServiceClass_IN), callback, context)
-        }
-        guard queryError == kDNSServiceErr_NoError, let serviceRef else { return nil }
-        defer { DNSServiceRefDeallocate(serviceRef) }
-
-        let fd = DNSServiceRefSockFD(serviceRef)
-        guard fd >= 0 else { return nil }
-
-        let deadline = CFAbsoluteTimeGetCurrent() + echQueryTimeout
-        while result.config == nil, !result.answered {
-            let remaining = deadline - CFAbsoluteTimeGetCurrent()
-            if remaining <= 0 { break }
-            var pollDescriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&pollDescriptor, 1, Int32(remaining * 1000))
-            guard ready > 0, (pollDescriptor.revents & Int16(POLLIN)) != 0 else { break }
-            if DNSServiceProcessResult(serviceRef) != kDNSServiceErr_NoError { break }
-        }
-        guard let config = result.config else { return nil }
-        return (config, result.ttl)
     }
 }
 
@@ -384,7 +341,7 @@ private nonisolated let kHTTPSRecordType: UInt16 = 65
 /// (RFC 9460): `SvcPriority(2) ++ TargetName ++ SvcParams`, where each SvcParam
 /// is `key(2) ++ length(2) ++ value`. Returns the ECHConfigList bytes, or nil
 /// when absent. TargetName is uncompressed per spec; AliasMode (priority 0,
-/// no params) yields nil. A free function so the C callback can reach it.
+/// no params) yields nil. Passed to the DNS bridge as the record-payload parser.
 private nonisolated func echParseSVCBECH(_ rdata: Data) -> Data? {
     return rdata.withUnsafeBytes { raw -> Data? in
         let bytes = raw.bindMemory(to: UInt8.self)

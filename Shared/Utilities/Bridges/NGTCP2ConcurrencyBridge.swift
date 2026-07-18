@@ -36,11 +36,18 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
 
     // MARK: - Async hop
 
+    /// Carries a caller-supplied hop closure into `queue.async`. The closure exists to reach
+    /// ngtcp2's queue-confined state (that is the hop's whole purpose), so it is deliberately not
+    /// `@Sendable`; the wrapper only quiets region isolation for the crossing — the body runs
+    /// solely on the ngtcp2 queue.
+    private struct QueueHopBody<Body>: @unchecked Sendable { let body: Body }
+
     /// Runs `body` on the ngtcp2 queue and resumes the caller with its result — for the
     /// off-queue readers that must observe queue-confined ngtcp2 state.
     func run<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            queue.async { continuation.resume(returning: body()) }
+        let hop = QueueHopBody(body: body)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: hop.body()) }
         }
     }
 

@@ -232,10 +232,12 @@ extension TunnelStack {
             deferredRestartTask?.cancel()
             let delay = TunnelConstants.restartThrottleInterval - elapsed
             // Actor-isolated task: sleeps off the queue, then resumes on it to run the restart.
-            deferredRestartTask = Task { [weak self] in
+            // Strong self: the sleep is cancellation-aware, so `stop()`'s cancel ends the task
+            // promptly and ARC releases the stack with it.
+            deferredRestartTask = Task {
                 try? await Task.sleep(for: .seconds(delay))
-                guard !Task.isCancelled, let self else { return }
-                await self.performDeferredRestart(configuration: configuration, revalidateMode: revalidateMode)
+                guard !Task.isCancelled else { return }
+                performDeferredRestart(configuration: configuration, revalidateMode: revalidateMode)
             }
             logger.debug("[TunnelStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
             return

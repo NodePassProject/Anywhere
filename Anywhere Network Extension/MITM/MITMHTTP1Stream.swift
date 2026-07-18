@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
@@ -1292,7 +1293,7 @@ actor MITMHTTP1Stream {
                             return false // parked
                         }
                     }
-                    streaming.cursor.bypass = true
+                    streaming.cursor.mutable.withLock { $0.bypass = true }
                     appendChunk(accumulator, into: &output)
                     mode = .streamingChunked(
                         streaming: streaming,
@@ -1380,7 +1381,7 @@ actor MITMHTTP1Stream {
         postFrame: StreamingPostFrame,
         into output: inout Data
     ) -> Bool {
-        if streaming.cursor.bypass {
+        if streaming.cursor.mutable.withLock({ $0.bypass }) {
             streaming.frameIndex += 1
             if !chunk.isEmpty {
                 appendChunk(chunk, into: &output)
@@ -1443,7 +1444,7 @@ actor MITMHTTP1Stream {
             resumed.append(contentsOf: "0\r\n".utf8)
             mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
         case .bypassRemainder(let left, let accumulator):
-            streaming.cursor.bypass = true
+            streaming.cursor.mutable.withLock { $0.bypass = true }
             appendChunk(accumulator, into: &resumed)
             mode = .streamingChunked(
                 streaming: streaming,

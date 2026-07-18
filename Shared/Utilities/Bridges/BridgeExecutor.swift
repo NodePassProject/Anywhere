@@ -7,7 +7,7 @@
 
 import Dispatch
 
-// IMPORTANT: BridgeExecutor is allowed to use in *ConcurrencyBridge only
+// IMPORTANT: Only allowed to use in *ConcurrencyBridge.
 nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
 
     /// The one queue this executor serializes onto. Exposed so the bridges' C timers and
@@ -49,14 +49,6 @@ nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
     /// synchronous `assumeIsolated` path from a C callback instead of scheduling a hop.
     var isOnQueue: Bool {
         DispatchQueue.getSpecific(key: onQueueKey) == true
-    }
-
-    /// Runs `body` synchronously on ``queue``, for the rare teardown that must complete
-    /// before returning (e.g. lwIP `stop()` on the provider's thread). Never call from a
-    /// context already on ``queue`` — that would deadlock; use `assumeIsolated` there.
-    func runSyncOffQueue<T>(_ body: () -> T) -> T {
-        precondition(!isOnQueue, "runSyncOffQueue called while already on the bridge queue")
-        return queue.sync(execute: body)
     }
 
     // MARK: - Timers

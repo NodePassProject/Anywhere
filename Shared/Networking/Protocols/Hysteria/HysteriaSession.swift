@@ -40,31 +40,54 @@ nonisolated enum HysteriaError: Error, LocalizedError {
 
 // MARK: - HysteriaSession
 
-/// One authenticated Hysteria (HTTP/3-shaped) session over a `QUICConnection`. An actor on
-/// the QUIC connection's serial executor, so the demux path, the auth state machine, and
-/// ngtcp2 share a single isolation domain with no cross-queue dispatch.
-actor HysteriaSession {
-
-    nonisolated var unownedExecutor: UnownedSerialExecutor { quic.unownedExecutor }
+nonisolated final class HysteriaSession: Sendable {
 
     enum State { case idle, connecting, authenticating, ready, closed }
 
     private let quic: QUICConnection
     private let configuration: HysteriaConfiguration
 
-    private var state: State = .idle
+    /// Session + demux state, guarded by `lock`. Never held across a call into a consumer
+    /// connection, a QUIC write, or a continuation resume; effects are computed under the
+    /// lock and performed after it is released.
+    private struct Session {
+        var state: State = .idle
 
-    /// Once-only gate shared by `close()` and `failSession`; terminal teardown runs exactly once.
-    private var closed = false
+        /// Once-only gate shared by `close()` and `failSession`; terminal teardown runs exactly once.
+        var closed = false
 
-    /// Bidi stream used for the one-shot auth POST.
-    private var authStreamID: Int64 = -1
-    private var authBuffer = Data()
-    private var authHeadersReceived = false
+        /// Bidi stream used for the one-shot auth POST.
+        var authStreamID: Int64 = -1
+        var authBuffer = Data()
+        var authHeadersReceived = false
+
+        var tcpStreams: [Int64: HysteriaConnection] = [:]
+
+        /// Server-initiated streams already rejected via STOP_SENDING/RESET_STREAM,
+        /// so chunks arriving before the peer's reset don't re-trigger `shutdownStream`.
+        var rejectedServerStreams: Set<Int64> = []
+
+        var udpSessions: [UInt32: HysteriaUDPConnection] = [:]
+        var nextUDPSessionID: UInt32 = 1
+
+        /// Pending idle close; without it the QUIC connection (socket, ngtcp2
+        /// state, keep-alive PING) stays resident forever after the last consumer
+        /// goes away.
+        var idleCloseTask: Task<Void, Never>?
+
+        var udpSupported = false
+        var serverRxBytesPerSec: UInt64 = 0
+    }
+    private let lock = Mutex(Session())
+
     /// Ceiling on `authBuffer` growth; ~3× the largest legitimate auth
     /// response (one HEADERS frame plus padding ≤ `maxPaddingLength`), so
     /// anything bigger is a misbehaving server — tear down rather than OOM.
     private static let authBufferMaxBytes = 16 * 1024
+
+    /// Idle window before self-close; 60 s frees resources promptly yet
+    /// survives back-to-back UDP queries.
+    private static let idleCloseDelay: TimeInterval = 60
 
     /// Readiness latch coalescing all `ensureReady()` awaiters behind one connect+auth. The
     /// demux loop finishes `readySignal` at `.ready` (or throwing on teardown); every awaiter
@@ -72,30 +95,11 @@ actor HysteriaSession {
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
 
-    private var tcpStreams: [Int64: HysteriaConnection] = [:]
-
-    /// Server-initiated streams already rejected via STOP_SENDING/RESET_STREAM,
-    /// so chunks arriving before the peer's reset don't re-trigger `shutdownStream`.
-    private var rejectedServerStreams: Set<Int64> = []
-
-    private var udpSessions: [UInt32: HysteriaUDPConnection] = [:]
-    private var nextUDPSessionID: UInt32 = 1
-
-    /// Pending idle close; without it the QUIC connection (socket, ngtcp2
-    /// state, keep-alive PING) stays resident forever after the last consumer
-    /// goes away.
-    private var idleCloseTask: Task<Void, Never>?
-    /// Idle window before self-close; 60 s frees resources promptly yet
-    /// survives back-to-back UDP queries.
-    private static let idleCloseDelay: TimeInterval = 60
-
-    private var udpSupported = false
-    private var serverRxBytesPerSec: UInt64 = 0
-
-    // MARK: Pool-visible state (read without entering the actor)
+    // MARK: Pool-visible state (read without taking `lock`)
 
     /// Read and written only inside `_poolState.withLock`; a lock-free read
-    /// of a locked `Bool` write is a data race under Swift's memory model.
+    /// of a locked `Bool` write is a data race under Swift's memory model. Only ever
+    /// taken sequentially with `lock` (never nested), so the two can't deadlock.
     private struct PoolState {
         var isClosed = false
         var tcpCount = 0
@@ -105,16 +109,16 @@ actor HysteriaSession {
     }
     private let _poolState = Mutex(PoolState())
 
-    nonisolated var isClosed: Bool {
+    var isClosed: Bool {
         _poolState.withLock { $0.isClosed }
     }
 
-    nonisolated var hasActiveConnections: Bool {
+    var hasActiveConnections: Bool {
         _poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
     }
 
     /// Installs the registry's eviction hook; fired exactly once when the session closes.
-    nonisolated func setOnClose(_ hook: @escaping @Sendable () -> Void) {
+    func setOnClose(_ hook: @escaping @Sendable () -> Void) {
         _poolState.withLock { $0.onClose = hook }
     }
 
@@ -151,11 +155,13 @@ actor HysteriaSession {
     // MARK: - Lifecycle
 
     func ensureReady() async throws {
-        // Kick off connect+auth exactly once; the gate resolves it.
-        if state == .idle {
-            state = .connecting
-            startConnection()
+        // Kick off connect+auth exactly once; the latch resolves it.
+        let begin: Bool = lock.withLock { session in
+            guard session.state == .idle else { return false }
+            session.state = .connecting
+            return true
         }
+        if begin { startConnection() }
         // Resolves on `.ready` (success) or teardown (`.streamClosed` retryable / real error).
         try await readyTask.value
     }
@@ -163,15 +169,15 @@ actor HysteriaSession {
     private func startConnection() {
         QUICCrypto.registerCallbacks()
 
+        // Fires on the ngtcp2 queue; routes into the locked teardown path.
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
-                self?.assumeIsolated { $0.failSession(error) }
+                self?.failSession(error)
             }
         }
 
         // Strong `self`: the connect task owns the session until auth kicks off, so it
-        // can't deallocate mid-handshake and leak the ngtcp2 state. Explicit `[self]` so the
-        // deliberately-weak captures in the stored QUIC handlers below read as intentional.
+        // can't deallocate mid-handshake and leak the ngtcp2 state.
         Task { [self] in
             do {
                 try await quic.connect()
@@ -181,23 +187,29 @@ actor HysteriaSession {
             }
             quic.handlers.withLock { handlers in
                 handlers.streamData = { [weak self] sid, data, fin in
-                    self?.assumeIsolated { $0.handleStreamData(sid: sid, data: data, fin: fin) }
+                    self?.handleStreamData(sid: sid, data: data, fin: fin)
                 }
                 handlers.streamTermination = { [weak self] sid, error in
-                    self?.assumeIsolated { $0.handleStreamTermination(sid: sid, error: error) }
+                    self?.handleStreamTermination(sid: sid, error: error)
                 }
                 handlers.datagram = { [weak self] data in
-                    self?.assumeIsolated { $0.handleDatagram(data) }
+                    self?.handleDatagram(data)
                 }
             }
 
-            openHTTP3Control()
-            sendAuthRequest()
-            state = .authenticating
+            // Control-stream setup + auth open/write + authStreamID/state registration all run
+            // in one ngtcp2-queue turn, so the demux can't observe a half-registered auth stream.
+            let opened: Bool = await quic.run { self.openControlAndAuthOnQueue() }
+            if !opened {
+                failSession(HysteriaError.connectionFailed("Failed to open auth stream"))
+            }
         }
     }
 
-    private func openHTTP3Control() {
+    /// Runs on the ngtcp2 queue (opens/writes assert it). Opens the HTTP/3 control streams and the
+    /// auth bidi stream, registers the auth stream under `lock`, and writes the auth request.
+    /// Returns false when ngtcp2 has no stream credit for the auth stream.
+    private func openControlAndAuthOnQueue() -> Bool {
         // RFC 9114 §6.2: a control stream with SETTINGS is mandatory;
         // a strict HTTP/3 server would otherwise close the connection.
         if let sid = quic.openUniStream() {
@@ -214,11 +226,29 @@ actor HysteriaSession {
         if let decoderStreamID = quic.openUniStream() {
             quic.writeStreamOnQueue(decoderStreamID, data: Data([0x03]))
         }
+
+        guard let sid = quic.openBidiStream() else { return false }
+        lock.withLock { session in
+            session.authStreamID = sid
+            if session.state == .connecting { session.state = .authenticating }
+        }
+
+        let extraHeaders: [(name: String, value: String)] = [
+            ("hysteria-auth", configuration.password),
+            ("hysteria-cc-rx", String(configuration.clientRxBytesPerSec)),
+            ("hysteria-padding", HysteriaProtocol.randomPaddingString()),
+            ("content-length", "0"),
+        ]
+        let frame = HysteriaHTTP3Codec.encodeAuthRequestFrame(
+            authority: "hysteria", path: "/auth", extraHeaders: extraHeaders
+        )
+        quic.writeStreamOnQueue(sid, data: frame)
+        return true
     }
 
     /// Parses one HTTP/3 frame off the front of `buffer`, or nil if incomplete.
     /// The payload is a zero-copy slice of `buffer`.
-    private func parseNextHTTP3Frame(_ buffer: Data) -> (type: UInt64, payload: Data, consumed: Int)? {
+    private static func parseNextHTTP3Frame(_ buffer: Data) -> (type: UInt64, payload: Data, consumed: Int)? {
         guard let (frameType, typeLen) = HysteriaProtocol.decodeVarInt(from: buffer, offset: 0) else { return nil }
         guard let (payloadLen, lenBytes) = HysteriaProtocol.decodeVarInt(from: buffer, offset: typeLen) else { return nil }
         let headerLen = typeLen + lenBytes
@@ -241,193 +271,214 @@ actor HysteriaSession {
         return frame
     }
 
-    private func sendAuthRequest() {
-        guard let sid = quic.openBidiStream() else {
-            failSession(HysteriaError.connectionFailed("Failed to open auth stream"))
-            return
-        }
-        authStreamID = sid
-
-        let extraHeaders: [(name: String, value: String)] = [
-            ("hysteria-auth", configuration.password),
-            ("hysteria-cc-rx", String(configuration.clientRxBytesPerSec)),
-            ("hysteria-padding", HysteriaProtocol.randomPaddingString()),
-            ("content-length", "0"),
-        ]
-        let frame = HysteriaHTTP3Codec.encodeAuthRequestFrame(
-            authority: "hysteria", path: "/auth", extraHeaders: extraHeaders
-        )
-
-        quic.writeStreamOnQueue(sid, data: frame)
-    }
-
-    // MARK: - Stream dispatch
+    // MARK: - Stream dispatch (delivered synchronously on the ngtcp2 queue)
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
-        if sid == authStreamID {
-            handleAuthStreamData(data, fin: fin)
-            return
+        enum Route { case auth; case tcp(HysteriaConnection); case serverReject(first: Bool); case ignore }
+        let route: Route = lock.withLock { session in
+            if sid == session.authStreamID { return .auth }
+            if let connection = session.tcpStreams[sid] { return .tcp(connection) }
+            // Server-initiated stream (uni or bidi): reject it once so it stops streaming garbage.
+            if (sid & 0x01) == 0x01, !data.isEmpty {
+                return .serverReject(first: session.rejectedServerStreams.insert(sid).inserted)
+            }
+            return .ignore
         }
 
-        if let connection = tcpStreams[sid] {
+        switch route {
+        case .auth:
+            handleAuthStreamData(data, fin: fin)
+        case .tcp(let connection):
             // Hand the zero-copy bytes to the connection's Sendable inbox; it detaches + buffers them.
             connection.feedStreamData(data, fin: fin)
-            return
-        }
-
-        // Server-initiated stream (uni or bidi). Credit flow control so a
-        // misbehaving peer can't pin the connection window to zero, then
-        // reject the stream once so it stops streaming garbage.
-        if (sid & 0x01) == 0x01, !data.isEmpty {
+        case .serverReject(let first):
+            // Credit flow control so a misbehaving peer can't pin the connection window to zero.
             quic.extendStreamOffset(sid, count: data.count)
-            if rejectedServerStreams.insert(sid).inserted {
+            if first {
                 quic.shutdownStream(sid, appErrorCode: HysteriaProtocol.closeErrCodeProtocolError)
             }
+        case .ignore:
+            break
         }
     }
 
+    /// One outcome of an auth-response parse pass, decided under `lock`.
+    private enum AuthOutcome {
+        case needMore
+        case fail(Error)
+        case ready(brutal: BrutalAction?, authStreamID: Int64)
+    }
+    private enum BrutalAction { case uninstall; case setBandwidth(UInt64) }
+
     private func handleAuthStreamData(_ data: Data, fin: Bool) {
-        // Credit flow control even for post-auth drain bytes.
-        quic.extendStreamOffset(authStreamID, count: data.count)
+        var creditStreamID: Int64 = -1
+        let outcome: AuthOutcome = lock.withLock { session in
+            creditStreamID = session.authStreamID
 
-        // Don't buffer post-auth bytes; they could trip the buffer cap.
-        if authHeadersReceived { return }
+            // Don't buffer post-auth bytes; they could trip the buffer cap.
+            guard !session.authHeadersReceived else { return .needMore }
 
-        authBuffer.append(data)
-
-        if authBuffer.count > Self.authBufferMaxBytes {
-            failSession(HysteriaError.connectionFailed(
-                "Auth response exceeded \(Self.authBufferMaxBytes)-byte buffer cap"
-            ))
-            return
-        }
-
-        guard let (frameType, payload, consumed) = parseNextHTTP3Frame(authBuffer) else {
-            // FIN before a parseable HEADERS frame — fail fast instead of
-            // waiting for the QUIC idle timeout.
-            if fin {
-                failSession(HysteriaError.connectionFailed(
-                    "Auth stream ended before HEADERS frame"
+            session.authBuffer.append(data)
+            if session.authBuffer.count > Self.authBufferMaxBytes {
+                return .fail(HysteriaError.connectionFailed(
+                    "Auth response exceeded \(Self.authBufferMaxBytes)-byte buffer cap"
                 ))
             }
-            return
-        }
-        authBuffer = Data(authBuffer.dropFirst(consumed))
 
-        guard frameType == 0x01 else {
-            failSession(HysteriaError.connectionFailed("Auth response wasn't HEADERS"))
-            return
-        }
-        guard let headers = HysteriaHTTP3Codec.decodeHeaderBlock(payload) else {
-            failSession(HysteriaError.connectionFailed("Malformed auth QPACK block"))
-            return
-        }
-
-        authHeadersReceived = true
-
-        let status = headers.first(where: { $0.name == ":status" })?.value
-        guard let statusStr = status, let code = Int(statusStr) else {
-            failSession(HysteriaError.connectionFailed("Missing :status on auth response"))
-            return
-        }
-        if code != HysteriaProtocol.authSuccessStatus {
-            failSession(HysteriaError.authRejected(statusCode: code))
-            return
-        }
-
-        udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
-            $0.lowercased() == "true"
-        } ?? false
-        // The server's CC-RX only caps our send rate under Brutal; BBR paces itself.
-        if configuration.congestionControl == .brutal {
-            let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
-            // "auto" asks the client to self-pace. ngtcp2 here lacks
-            // BBR-with-pacing, so uninstall Brutal and let native CUBIC drive.
-            // Any other value (including unparseable/missing) means 0 = no cap.
-            let serverRxAuto = ccRxValue.lowercased() == "auto"
-            serverRxBytesPerSec = serverRxAuto ? 0 : (UInt64(ccRxValue) ?? 0)
-
-            if serverRxAuto {
-                quic.uninstallBrutalCC()
-            } else {
-                // Brutal tx = min(server_rx, client_max_tx); 0 means no cap
-                // on either side (client 0 leaves CUBIC driving).
-                let clientTxBps = configuration.uploadBytesPerSec
-                let effectiveTxBps: UInt64 = serverRxBytesPerSec == 0
-                    ? clientTxBps
-                    : min(serverRxBytesPerSec, clientTxBps)
-                quic.setBrutalBandwidth(effectiveTxBps)
+            guard let (frameType, payload, consumed) = Self.parseNextHTTP3Frame(session.authBuffer) else {
+                // FIN before a parseable HEADERS frame — fail fast instead of
+                // waiting for the QUIC idle timeout.
+                if fin {
+                    return .fail(HysteriaError.connectionFailed("Auth stream ended before HEADERS frame"))
+                }
+                return .needMore
             }
+            session.authBuffer = Data(session.authBuffer.dropFirst(consumed))
+
+            guard frameType == 0x01 else {
+                return .fail(HysteriaError.connectionFailed("Auth response wasn't HEADERS"))
+            }
+            guard let headers = HysteriaHTTP3Codec.decodeHeaderBlock(payload) else {
+                return .fail(HysteriaError.connectionFailed("Malformed auth QPACK block"))
+            }
+
+            session.authHeadersReceived = true
+
+            let status = headers.first(where: { $0.name == ":status" })?.value
+            guard let statusStr = status, let code = Int(statusStr) else {
+                return .fail(HysteriaError.connectionFailed("Missing :status on auth response"))
+            }
+            if code != HysteriaProtocol.authSuccessStatus {
+                return .fail(HysteriaError.authRejected(statusCode: code))
+            }
+
+            session.udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
+                $0.lowercased() == "true"
+            } ?? false
+
+            // The server's CC-RX only caps our send rate under Brutal; BBR paces itself.
+            var brutal: BrutalAction? = nil
+            if configuration.congestionControl == .brutal {
+                let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
+                // "auto" asks the client to self-pace. ngtcp2 here lacks
+                // BBR-with-pacing, so uninstall Brutal and let native CUBIC drive.
+                // Any other value (including unparseable/missing) means 0 = no cap.
+                let serverRxAuto = ccRxValue.lowercased() == "auto"
+                session.serverRxBytesPerSec = serverRxAuto ? 0 : (UInt64(ccRxValue) ?? 0)
+
+                if serverRxAuto {
+                    brutal = .uninstall
+                } else {
+                    // Brutal tx = min(server_rx, client_max_tx); 0 means no cap
+                    // on either side (client 0 leaves CUBIC driving).
+                    let clientTxBps = configuration.uploadBytesPerSec
+                    let effectiveTxBps: UInt64 = session.serverRxBytesPerSec == 0
+                        ? clientTxBps
+                        : min(session.serverRxBytesPerSec, clientTxBps)
+                    brutal = .setBandwidth(effectiveTxBps)
+                }
+            }
+
+            session.state = .ready
+            return .ready(brutal: brutal, authStreamID: session.authStreamID)
         }
 
-        quic.shutdownStream(authStreamID, appErrorCode: HysteriaProtocol.closeErrCodeOK)
+        // Credit flow control even for post-auth drain bytes.
+        quic.extendStreamOffset(creditStreamID, count: data.count)
 
-        state = .ready
-        readySignal.finish()
+        switch outcome {
+        case .needMore:
+            break
+        case .fail(let error):
+            failSession(error)
+        case .ready(let brutal, let authStreamID):
+            switch brutal {
+            case .uninstall: quic.uninstallBrutalCC()
+            case .setBandwidth(let bps): quic.setBrutalBandwidth(bps)
+            case nil: break
+            }
+            quic.shutdownStream(authStreamID, appErrorCode: HysteriaProtocol.closeErrCodeOK)
+            readySignal.finish()
+        }
     }
 
     private func handleStreamTermination(sid: Int64, error: Error?) {
-        if sid == authStreamID {
-            // Pre-ready: server aborted auth — fail fast. Post-ready: our
-            // own STOP_SENDING reflecting back — absorb silently.
-            if state != .ready {
-                failSession(error ?? HysteriaError.connectionFailed(
-                    "Auth stream closed before completion"
-                ))
+        enum Effect { case none; case failAuth(Error); case tcp(HysteriaConnection) }
+        let effect: Effect = lock.withLock { session in
+            if sid == session.authStreamID {
+                // Pre-ready: server aborted auth — fail fast. Post-ready: our
+                // own STOP_SENDING reflecting back — absorb silently.
+                if session.state != .ready {
+                    return .failAuth(error ?? HysteriaError.connectionFailed("Auth stream closed before completion"))
+                }
+                return .none
             }
-            return
+            if session.rejectedServerStreams.remove(sid) != nil { return .none }
+            guard let connection = session.tcpStreams.removeValue(forKey: sid) else { return .none }
+            return .tcp(connection)
         }
-        if rejectedServerStreams.remove(sid) != nil { return }
-        guard let connection = tcpStreams.removeValue(forKey: sid) else { return }
-        _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
-        updateIdleCloseTimer()
-        connection.handleStreamTermination(error: error)
+
+        switch effect {
+        case .none:
+            break
+        case .failAuth(let error):
+            failSession(error)
+        case .tcp(let connection):
+            _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
+            updateIdleCloseTimer()
+            connection.handleStreamTermination(error: error)
+        }
     }
 
     // MARK: - Datagram dispatch (UDP)
 
     private func handleDatagram(_ data: Data) {
         guard let message = HysteriaProtocol.decodeUDPMessage(data) else { return }
-        if let connection = udpSessions[message.sessionID] {
-            connection.feedDatagram(message)
-        }
+        let connection = lock.withLock { $0.udpSessions[message.sessionID] }
         // Unknown sessions drop silently; Hysteria has no UDP teardown handshake.
+        connection?.feedDatagram(message)
     }
 
     // MARK: - TCP stream API (called by HysteriaConnection)
 
-    func openTCPStream(for connection: HysteriaConnection) throws -> Int64 {
-        guard state == .ready else { throw HysteriaError.notReady }
-        guard let sid = quic.openBidiStream() else {
-            throw HysteriaError.connectionFailed("Failed to open TCP stream")
+    func openTCPStream(for connection: HysteriaConnection) async throws -> Int64 {
+        enum Result { case notReady; case openFailed; case ok(Int64) }
+        // Open the bidi stream and register it in one ngtcp2-queue turn so no demuxed byte
+        // can arrive for the stream before it's routed.
+        let result: Result = await quic.run {
+            guard self.lock.withLock({ $0.state == .ready }) else { return .notReady }
+            guard let sid = self.quic.openBidiStream() else { return .openFailed }
+            self.lock.withLock { $0.tcpStreams[sid] = connection }
+            return .ok(sid)
         }
-        tcpStreams[sid] = connection
-        _poolState.withLock { $0.tcpCount += 1 }
-        updateIdleCloseTimer()
-        return sid
+        switch result {
+        case .notReady:
+            throw HysteriaError.notReady
+        case .openFailed:
+            throw HysteriaError.connectionFailed("Failed to open TCP stream")
+        case .ok(let sid):
+            _poolState.withLock { $0.tcpCount += 1 }
+            updateIdleCloseTimer()
+            return sid
+        }
     }
 
     /// Async stream write, over the QUIC ngtcp2-boundary continuation.
-    nonisolated func writeStream(_ sid: Int64, data: Data) async throws {
+    func writeStream(_ sid: Int64, data: Data) async throws {
         try await quic.writeStream(sid, data: data)
     }
 
-    nonisolated func extendStreamOffset(_ sid: Int64, count: Int) {
+    func extendStreamOffset(_ sid: Int64, count: Int) {
         quic.extendStreamOffset(sid, count: count)
     }
 
-    nonisolated func shutdownStream(_ sid: Int64, appErrorCode: UInt64 = HysteriaProtocol.closeErrCodeOK) {
+    func shutdownStream(_ sid: Int64, appErrorCode: UInt64 = HysteriaProtocol.closeErrCodeOK) {
         quic.shutdownStream(sid, appErrorCode: appErrorCode)
     }
 
-    nonisolated func releaseTCPStream(_ sid: Int64) {
-        Task {
-            await self.performReleaseTCPStream(sid)
-        }
-    }
-
-    private func performReleaseTCPStream(_ sid: Int64) {
-        if tcpStreams.removeValue(forKey: sid) != nil {
+    func releaseTCPStream(_ sid: Int64) {
+        let removed = lock.withLock { $0.tcpStreams.removeValue(forKey: sid) != nil }
+        if removed {
             _poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
             updateIdleCloseTimer()
         }
@@ -435,83 +486,84 @@ actor HysteriaSession {
 
     // MARK: - UDP session API (called by HysteriaUDPConnection)
 
-    func registerUDPSession(_ conn: HysteriaUDPConnection) throws -> UInt32 {
-        guard state == .ready else { throw HysteriaError.notReady }
-        guard udpSupported else { throw HysteriaError.udpNotSupported }
-        guard udpSessions.count < Int(UInt32.max) else {
-            throw HysteriaError.connectionFailed("UDP session pool exhausted")
+    func registerUDPSession(_ conn: HysteriaUDPConnection) async throws -> UInt32 {
+        let sid: UInt32 = try lock.withLock { session in
+            guard session.state == .ready else { throw HysteriaError.notReady }
+            guard session.udpSupported else { throw HysteriaError.udpNotSupported }
+            guard session.udpSessions.count < Int(UInt32.max) else {
+                throw HysteriaError.connectionFailed("UDP session pool exhausted")
+            }
+            var sid = session.nextUDPSessionID
+            while session.udpSessions[sid] != nil {
+                sid = sid == UInt32.max ? 1 : sid + 1
+            }
+            session.nextUDPSessionID = sid == UInt32.max ? 1 : sid + 1
+            session.udpSessions[sid] = conn
+            return sid
         }
-        var sid = nextUDPSessionID
-        while udpSessions[sid] != nil {
-            sid = sid == UInt32.max ? 1 : sid + 1
-        }
-        nextUDPSessionID = sid == UInt32.max ? 1 : sid + 1
-        udpSessions[sid] = conn
         _poolState.withLock { $0.udpCount += 1 }
         updateIdleCloseTimer()
         return sid
     }
 
-    nonisolated func releaseUDPSession(_ sessionID: UInt32) {
-        Task {
-            await self.performReleaseUDPSession(sessionID)
-        }
-    }
-
-    private func performReleaseUDPSession(_ sessionID: UInt32) {
-        if udpSessions.removeValue(forKey: sessionID) != nil {
+    func releaseUDPSession(_ sessionID: UInt32) {
+        let removed = lock.withLock { $0.udpSessions.removeValue(forKey: sessionID) != nil }
+        if removed {
             _poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
             updateIdleCloseTimer()
         }
     }
 
     /// Re-checks counts at fire time so a rapid release-then-open cycle doesn't
-    /// tear the connection down.
+    /// tear the connection down. `_poolState` is read off `lock` (never nested).
     private func updateIdleCloseTimer() {
-        idleCloseTask?.cancel()
-        idleCloseTask = nil
-
-        guard state == .ready else { return }
+        lock.withLock { session in
+            session.idleCloseTask?.cancel()
+            session.idleCloseTask = nil
+        }
+        guard lock.withLock({ $0.state == .ready }) else { return }
         let total = _poolState.withLock { $0.tcpCount + $0.udpCount }
         guard total == 0 else { return }
 
         // Weak: the idle timer observes its owner; it must not keep an otherwise
         // dropped session alive for the whole idle window.
-        idleCloseTask = Task { [weak self] in
+        let task = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.idleCloseDelay))
             guard !Task.isCancelled, let self else { return }
-            await self.closeIfStillIdle()
+            self.closeIfStillIdle()
         }
+        let armed = lock.withLock { session -> Bool in
+            guard session.state == .ready else { return false }
+            session.idleCloseTask?.cancel()   // cancel any timer raced in between the checks
+            session.idleCloseTask = task
+            return true
+        }
+        if !armed { task.cancel() }
     }
 
     private func closeIfStillIdle() {
+        guard lock.withLock({ $0.state == .ready }) else { return }
         let liveCount = _poolState.withLock { $0.tcpCount + $0.udpCount }
-        guard liveCount == 0, state == .ready else { return }
+        guard liveCount == 0 else { return }
         performTeardown(readyError: HysteriaError.streamClosed,
                         connectionError: HysteriaError.connectionFailed("Session closed"))
     }
 
     /// Async DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
-    nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
+    func writeDatagrams(_ datagrams: [Data]) async throws {
         try await quic.writeDatagrams(datagrams)
     }
 
     /// Async reader for the path-MTU-bounded datagram payload size.
-    nonisolated func currentMaxDatagramPayloadSize() async -> Int {
+    func currentMaxDatagramPayloadSize() async -> Int {
         await quic.currentMaxDatagramPayloadSize()
     }
 
     // MARK: - Close
 
-    nonisolated func close() {
-        // Strong `self`: an off-actor caller may hold the last reference; the enqueued
-        // teardown must still run so the socket and ngtcp2 state are released.
-        quic.enqueue {
-            self.assumeIsolated {
-                $0.performTeardown(readyError: HysteriaError.streamClosed,
-                                   connectionError: HysteriaError.connectionFailed("Session closed"))
-            }
-        }
+    func close() {
+        performTeardown(readyError: HysteriaError.streamClosed,
+                        connectionError: HysteriaError.connectionFailed("Session closed"))
     }
 
     private func failSession(_ error: Error) {
@@ -522,12 +574,29 @@ actor HysteriaSession {
     /// pending `ensureReady()` awaiters (`.streamClosed` marks a retryable eviction);
     /// `connectionError` fans out to live TCP/UDP consumers.
     private func performTeardown(readyError: Error, connectionError: Error) {
-        guard !closed else { return }
-        closed = true
-        state = .closed
+        struct Teardown {
+            var tcp: [HysteriaConnection]
+            var udp: [HysteriaUDPConnection]
+            var idleCloseTask: Task<Void, Never>?
+        }
+        let teardown: Teardown? = lock.withLock { session in
+            guard !session.closed else { return nil }
+            session.closed = true
+            session.state = .closed
+            let snapshot = Teardown(
+                tcp: Array(session.tcpStreams.values),
+                udp: Array(session.udpSessions.values),
+                idleCloseTask: session.idleCloseTask
+            )
+            session.idleCloseTask = nil
+            session.tcpStreams.removeAll()
+            session.udpSessions.removeAll()
+            session.rejectedServerStreams.removeAll()
+            return snapshot
+        }
+        guard let teardown else { return }
 
-        idleCloseTask?.cancel()
-        idleCloseTask = nil
+        teardown.idleCloseTask?.cancel()
 
         // Zero counters atomically with isClosed so hasActiveConnections
         // never reads true on a closed session.
@@ -542,15 +611,8 @@ actor HysteriaSession {
 
         readySignal.finish(throwing: readyError)
 
-        let tcp = Array(tcpStreams.values)
-        tcpStreams.removeAll()
-        for c in tcp { c.handleSessionError(connectionError) }
-
-        let udp = Array(udpSessions.values)
-        udpSessions.removeAll()
-        for c in udp { c.handleSessionError(connectionError) }
-
-        rejectedServerStreams.removeAll()
+        for connection in teardown.tcp { connection.handleSessionError(connectionError) }
+        for connection in teardown.udp { connection.handleSessionError(connectionError) }
 
         quic.close()
         onClose?()

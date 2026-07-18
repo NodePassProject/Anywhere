@@ -91,15 +91,14 @@ extension TunnelStack {
         guard let packetFlow else { return }
         let plane = udpPlane!
         let bridge = lwipBridge
-        // Detached so the read/partition CPU runs off the lwIP queue (like the drain). Weak self:
-        // `readPackets` parks until the next packet with no cancellation seam, so a strong capture
-        // would pin the stack across an idle read after `stop()`; the promoted `self` is dropped
-        // each iteration. `packetFlow`/`plane`/`bridge` are captured so the loop names no isolated
-        // state directly.
-        readTask = Task.detached { [weak self, packetFlow, plane, bridge] in
+        // Detached so the read/partition CPU runs off the lwIP queue (like the drain). Strong self:
+        // the bridge's `read` resumes `nil` on cancellation, so `stop()`'s cancel ends the loop and
+        // ARC releases everything the task captured — an idle read pins nothing beyond the flow.
+        // `packetFlow`/`plane`/`bridge` are captured so the loop names no isolated state directly.
+        readTask = Task.detached { [self, packetFlow, plane, bridge] in
             while !Task.isCancelled {
-                let (packets, _) = await PacketFlowConcurrencyBridge.read(from: packetFlow)
-                guard let self, self.running, !Task.isCancelled else { return }
+                guard let (packets, _) = await PacketFlowConcurrencyBridge.read(from: packetFlow),
+                      running, !Task.isCancelled else { return }
 
                 // Partition — a cheap header peek per packet. Reflected packets bounce straight
                 // back into the TUN here, never reaching lwIP, UDP, routing, or the proxy.

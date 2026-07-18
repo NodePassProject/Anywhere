@@ -40,19 +40,27 @@ nonisolated final class JSCConcurrencyBridge: @unchecked Sendable {
 
     // MARK: - Async hops
 
+    /// Carries a caller-supplied hop closure into `queue.async`. The closure exists to reach
+    /// JSC's queue-confined state (that is the hop's whole purpose), so it is deliberately not
+    /// `@Sendable`; the wrapper only quiets region isolation for the crossing — the body runs
+    /// solely on the JSC queue.
+    private struct QueueHopBody<Body>: @unchecked Sendable { let body: Body }
+
     /// One-shot hop: runs `body` on the JSC queue and resumes the caller with its result — the
     /// async seam between the pure-async pipeline and JSC's thread-affine, queue-confined state.
     func run<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            queue.async { continuation.resume(returning: body()) }
+        let hop = QueueHopBody(body: body)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: hop.body()) }
         }
     }
 
     /// Parked hop: runs `body` on the JSC queue, handing it the `continuation` to resolve later —
     /// e.g. when a JS promise settles or the invocation's watchdog fires. Resumed exactly once.
     func runParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            queue.async { body(continuation) }
+        let hop = QueueHopBody(body: body)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { hop.body(continuation) }
         }
     }
 }

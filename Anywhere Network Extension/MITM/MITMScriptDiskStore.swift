@@ -13,17 +13,13 @@ nonisolated private let logger = AnywhereLogger(category: "MITMScriptDiskStore")
 nonisolated final class MITMScriptDiskStore: Sendable {
 
     static let shared = MITMScriptDiskStore()
-    
+
     static let maxBytesPerScope: Int = 1 * 1024 * 1024
     static let maxTotalBytes: Int = 16 * 1024 * 1024
-    
+
     private struct State {
-        /// An empty dictionary means "loaded, no keys", distinct from a not-yet-loaded scope.
         var cache: [UUID: [String: Data]] = [:]
         var loaded: Set<UUID> = []
-
-        /// Serialized file size per scope, the basis for both caps. Seeded by a one-time directory
-        /// scan so the total cap counts scopes never loaded this session.
         var fileSizes: [UUID: Int] = [:]
         var totalBytes: Int = 0
         var didScan = false
@@ -44,16 +40,13 @@ nonisolated final class MITMScriptDiskStore: Sendable {
     // MARK: - API
 
     func get(scope: UUID, key: String) -> Data? {
-        state.withLock { state in
-            ensureLoadedUnlocked(scope, &state)
-            return state.cache[scope]?[key]
-        }
+        ensureLoaded(scope)
+        return state.withLock { $0.cache[scope]?[key] }
     }
-    
-    func set(scope: UUID, key: String, value: Data) throws {
-        try state.withLock { state in
-            ensureLoadedUnlocked(scope, &state)
 
+    func set(scope: UUID, key: String, value: Data) throws {
+        ensureLoaded(scope)
+        let serialized: Data = try state.withLock { state in
             var bucket = state.cache[scope] ?? [:]
             bucket[key] = value
             guard let serialized = serialize(bucket) else {
@@ -63,35 +56,17 @@ nonisolated final class MITMScriptDiskStore: Sendable {
                 throw MITMScriptStore.StoreError.capacityExceeded
             }
             let oldSize = state.fileSizes[scope] ?? 0
-            let projectedTotal = state.totalBytes - oldSize + serialized.count
-            if projectedTotal > Self.maxTotalBytes {
+            if state.totalBytes - oldSize + serialized.count > Self.maxTotalBytes {
                 throw MITMScriptStore.StoreError.capacityExceeded
             }
-            guard writeUnlocked(scope: scope, data: serialized) else {
-                throw MITMScriptStore.StoreError.writeFailed
-            }
-            state.cache[scope] = bucket
-            state.fileSizes[scope] = serialized.count
-            state.totalBytes = projectedTotal
+            return serialized
         }
-    }
-
-    func delete(scope: UUID, key: String) {
+        guard writeToDisk(scope: scope, data: serialized) else {
+            throw MITMScriptStore.StoreError.writeFailed
+        }
         state.withLock { state in
-            ensureLoadedUnlocked(scope, &state)
-            guard var bucket = state.cache[scope], bucket[key] != nil else { return }
-            bucket.removeValue(forKey: key)
-
-            if bucket.isEmpty {
-                // Last key gone: drop the file rather than persist an empty dictionary.
-                removeFileUnlocked(scope, &state)
-                state.cache[scope] = [:]
-                return
-            }
-            guard let serialized = serialize(bucket), writeUnlocked(scope: scope, data: serialized) else {
-                // Leave disk and cache as they were so the store stays consistent.
-                return
-            }
+            var bucket = state.cache[scope] ?? [:]
+            bucket[key] = value
             state.cache[scope] = bucket
             let oldSize = state.fileSizes[scope] ?? 0
             state.totalBytes = state.totalBytes - oldSize + serialized.count
@@ -99,65 +74,112 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         }
     }
 
-    func keys(scope: UUID) -> [String] {
-        state.withLock { state in
-            ensureLoadedUnlocked(scope, &state)
-            return state.cache[scope].map { Array($0.keys) } ?? []
+    func delete(scope: UUID, key: String) {
+        ensureLoaded(scope)
+        enum Pending {
+            case nothing
+            case removeFile
+            case write(Data, bucket: [String: Data])
         }
+        let pending: Pending = state.withLock { state in
+            guard var bucket = state.cache[scope], bucket[key] != nil else { return .nothing }
+            bucket.removeValue(forKey: key)
+            if bucket.isEmpty { return .removeFile }
+            guard let serialized = serialize(bucket) else { return .nothing }
+            return .write(serialized, bucket: bucket)
+        }
+        switch pending {
+        case .nothing:
+            return
+        case .removeFile:
+            removeFile(scope)
+            state.withLock { state in
+                state.cache[scope] = [:]
+                state.totalBytes -= state.fileSizes[scope] ?? 0
+                state.fileSizes.removeValue(forKey: scope)
+            }
+        case .write(let serialized, let bucket):
+            guard writeToDisk(scope: scope, data: serialized) else { return }
+            state.withLock { state in
+                state.cache[scope] = bucket
+                let oldSize = state.fileSizes[scope] ?? 0
+                state.totalBytes = state.totalBytes - oldSize + serialized.count
+                state.fileSizes[scope] = serialized.count
+            }
+        }
+    }
+
+    func keys(scope: UUID) -> [String] {
+        ensureLoaded(scope)
+        return state.withLock { $0.cache[scope].map { Array($0.keys) } ?? [] }
     }
 
     @discardableResult
     func purgeExcept(activeIDs: Set<UUID>) -> Int {
-        state.withLock { state in
-            ensureScannedUnlocked(&state)
+        ensureScanned()
+        let stale: [UUID] = state.withLock { state in
             let stale = state.fileSizes.keys.filter { !activeIDs.contains($0) }
             for scope in stale {
-                removeFileUnlocked(scope, &state)
+                state.totalBytes -= state.fileSizes[scope] ?? 0
+                state.fileSizes.removeValue(forKey: scope)
                 state.cache.removeValue(forKey: scope)
                 state.loaded.remove(scope)
             }
-            return stale.count
+            return stale
         }
+        for scope in stale {
+            removeFile(scope)
+        }
+        return stale.count
     }
 
     // MARK: - Private
     
-    private func ensureScannedUnlocked(_ state: inout State) {
-        guard !state.didScan else { return }
-        state.didScan = true
-        guard let directory,
-              let entries = try? FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.fileSizeKey],
-                options: [.skipsHiddenFiles]
-              )
-        else { return }
-        for url in entries where url.pathExtension == "plist" {
-            guard let scope = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else { continue }
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            state.fileSizes[scope] = size
-            state.totalBytes += size
+    private func ensureScanned() {
+        let needsScan = state.withLock { !$0.didScan }
+        guard needsScan else { return }
+
+        var sizes: [UUID: Int] = [:]
+        if let directory,
+           let entries = try? FileManager.default.contentsOfDirectory(
+             at: directory,
+             includingPropertiesForKeys: [.fileSizeKey],
+             options: [.skipsHiddenFiles]
+           ) {
+            for url in entries where url.pathExtension == "plist" {
+                guard let scope = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else { continue }
+                sizes[scope] = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            }
+        }
+
+        state.withLock { state in
+            guard !state.didScan else { return }
+            state.didScan = true
+            state.fileSizes.merge(sizes) { current, _ in current }
+            state.totalBytes = state.fileSizes.values.reduce(0, +)
         }
     }
+    
+    private func ensureLoaded(_ scope: UUID) {
+        ensureScanned()
+        let needsLoad = state.withLock { !$0.loaded.contains(scope) }
+        guard needsLoad else { return }
 
-    private func ensureLoadedUnlocked(_ scope: UUID, _ state: inout State) {
-        ensureScannedUnlocked(&state)
-        guard !state.loaded.contains(scope) else { return }
-        state.loaded.insert(scope)
-        guard let url = fileURL(scope),
-              let data = coordinatedRead(url),
-              let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-              let dictionary = object as? [String: Data]
-        else {
-            state.cache[scope] = [:]
-            return
+        var bucket: [String: Data] = [:]
+        if let url = fileURL(scope),
+           let data = coordinatedRead(url),
+           let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+           let dictionary = object as? [String: Data] {
+            bucket = dictionary
         }
-        state.cache[scope] = dictionary
-    }
 
-    /// Coordinated read so a concurrent writer in another App Group process can't be observed
-    /// mid-write. (Cross-process cache coherence would also need an `NSFilePresenter`; only the
-    /// serialized NE writes this store.)
+        state.withLock { state in
+            guard !state.loaded.contains(scope) else { return }
+            state.loaded.insert(scope)
+            state.cache[scope] = bucket
+        }
+    }
+    
     private func coordinatedRead(_ url: URL) -> Data? {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?
@@ -168,7 +190,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         return result
     }
 
-    private func writeUnlocked(scope: UUID, data: Data) -> Bool {
+    private func writeToDisk(scope: UUID, data: Data) -> Bool {
         guard let directory, let url = fileURL(scope) else { return false }
         let fileManager = FileManager.default
         if !fileManager.fileExists(atPath: directory.path) {
@@ -194,16 +216,13 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         return true
     }
 
-    private func removeFileUnlocked(_ scope: UUID, _ state: inout State) {
-        if let url = fileURL(scope) {
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            var coordError: NSError?
-            coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordError) { coordinatedURL in
-                try? FileManager.default.removeItem(at: coordinatedURL)
-            }
+    private func removeFile(_ scope: UUID) {
+        guard let url = fileURL(scope) else { return }
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordError: NSError?
+        coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &coordError) { coordinatedURL in
+            try? FileManager.default.removeItem(at: coordinatedURL)
         }
-        state.totalBytes -= state.fileSizes[scope] ?? 0
-        state.fileSizes.removeValue(forKey: scope)
     }
 
     private func fileURL(_ scope: UUID) -> URL? {

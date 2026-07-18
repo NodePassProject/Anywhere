@@ -41,8 +41,9 @@ nonisolated final class DomainRouter: Sendable {
     }
 
     /// `matcher` + `configurationMap`, guarded as one unit (lookups run on both the lwIP and UDP
-    /// queues); reloads hold the lock across the whole compile so a lookup never sees a half-built tier.
-    private struct RoutingState {
+    /// queues); reloads build a whole new state off-lock and swap it in atomically, so a lookup
+    /// never sees a half-built tier and never stalls behind a compile.
+    private struct RoutingState: Sendable {
         var matcher = TieredRouteMatcher<RulePayload>(tierCount: Tier.allCases.count)
         var configurationMap: [UUID: ProxyConfiguration] = [:]
         /// Rule-set display names by payload entry index; empty for older payloads.
@@ -101,20 +102,20 @@ nonisolated final class DomainRouter: Sendable {
         routingState.withLock { $0 = RoutingState() }
     }
 
-    /// Compiles rules from the App Group routing file into per-tier matchers; the whole
-    /// rebuild deliberately runs inside one critical section.
+    /// Compiles rules from the App Group routing file into per-tier matchers. The compile runs
+    /// off-lock on a fresh `RoutingState` (it never reads the old one), then a single short
+    /// critical section swaps it in — concurrent lookups keep matching against the old tiers
+    /// instead of stalling for the whole parse.
     func loadRoutingConfiguration() {
-        routingState.withLock { state in
-            Self.loadRoutingConfigurationLocked(into: &state)
-        }
+        let newState = Self.makeRoutingState()
+        routingState.withLock { $0 = newState }
     }
 
-    private static func loadRoutingConfigurationLocked(into state: inout RoutingState) {
-        state = RoutingState()
-
+    private static func makeRoutingState() -> RoutingState {
+        var state = RoutingState()
         guard let data = AWCore.getRoutingData() else {
             logger.debug("[DomainRouter] No routing data available")
-            return
+            return state
         }
 
         do {
@@ -125,13 +126,13 @@ nonisolated final class DomainRouter: Sendable {
                 state.matcher.finalize(base: base)
             }
         } catch {
-            state = RoutingState()
             logger.error("[DomainRouter] Routing payload parse failed: \(error)")
-            return
+            return RoutingState()
         }
 
         let tiers = state.matcher.tiers
         logger.debug("[DomainRouter] Loaded tiers — user: \(tiers[Tier.user.rawValue].domainRuleCount)+\(tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(tiers[Tier.adBlock.rawValue].domainRuleCount)+\(tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(tiers[Tier.builtIn.rawValue].domainRuleCount)+\(tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(tiers[Tier.bypass.rawValue].domainRuleCount)+\(tiers[Tier.bypass.rawValue].ipRuleCount); \(state.configurationMap.count) configurations")
+        return state
     }
 
     // MARK: - Payload reader

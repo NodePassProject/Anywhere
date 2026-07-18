@@ -340,7 +340,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         /// `activate`/`connectAndSend` await it, the callback-driven resolution sites finish it.
         var openSignal: AsyncThrowingStream<Never, Error>.Continuation?
         var receiveBuffer = Data()
-        /// Residual receive park (single continuation); see MIGRATION.md's residual-continuations note.
+        /// Residual receive park (single continuation).
         var pendingReceive: AsyncThrowingStream<Data, Error>.Continuation?
         var terminalError: Error?
         var preparedCloseHandler: (@Sendable () -> Void)?

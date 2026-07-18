@@ -77,14 +77,21 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
 
     // MARK: - Async hop
 
+    /// Carries a caller-supplied hop closure into `queue.async`. The closure exists to reach
+    /// lwIP-queue-confined state (that is the hop's whole purpose), so it is deliberately not
+    /// `@Sendable`; like ``LWIPRawPointer``, the wrapper only quiets region isolation for the
+    /// crossing — the body runs solely on the lwIP queue.
+    private struct QueueHopBody<Body>: @unchecked Sendable { let body: Body }
+
     /// Runs `body` on the lwIP queue and resumes the caller with its result — the async
     /// seam between the relay drivers (pure async/await) and lwIP's queue-confined state.
     ///
     /// Not `@Sendable`/`throws`: `body` reaches a connection's lwipQueue-confined state
     /// exactly as the former `TCPConnection.onLwip` did, and lwIP calls don't throw.
     func run<T>(_ body: @escaping () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            queue.async { continuation.resume(returning: body()) }
+        let hop = QueueHopBody(body: body)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { continuation.resume(returning: hop.body()) }
         }
     }
 
@@ -93,15 +100,17 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
     /// when that completes. Resumed exactly once. The continuation scaffolding lives here so the
     /// lwIP-queue-confined callers (MITM legs/streams) never open one themselves.
     func runParked<T>(_ body: @escaping (CheckedContinuation<T, Never>) -> Void) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
-            queue.async { body(continuation) }
+        let hop = QueueHopBody(body: body)
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            queue.async { hop.body(continuation) }
         }
     }
 
     /// Throwing counterpart of ``runParked``: `body` may resume the continuation by throwing.
     func runParkedThrowing<T>(_ body: @escaping (CheckedContinuation<T, Error>) -> Void) async throws -> T {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-            queue.async { body(continuation) }
+        let hop = QueueHopBody(body: body)
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            queue.async { hop.body(continuation) }
         }
     }
 
@@ -111,13 +120,6 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
     /// continuation; the continuation scaffolding still lives here in the bridge. Resumed once.
     func parkThrowing<T>(_ body: (CheckedContinuation<T, Error>) -> Void) async throws -> T {
         try await withCheckedThrowingContinuation(body)
-    }
-
-    /// Runs `body` synchronously on the lwIP queue from an off-queue caller (e.g. the provider's
-    /// `stop()` thread), completing before returning. Delegates to the executor's guarded
-    /// primitive, which precondition-checks it isn't already on the queue (that would deadlock).
-    func runSyncOffQueue<T>(_ body: () -> T) -> T {
-        executor.runSyncOffQueue(body)
     }
 
     /// A repeating tick on the lwIP queue for driving `lwip_bridge_check_timeouts`; the raw

@@ -7,22 +7,28 @@
 
 import NetworkExtension
 import Network
+import Synchronization
 #if os(iOS)
 import WidgetKit
 #endif
 
 nonisolated private let logger = AnywhereLogger(category: "PacketTunnelProvider")
 
+/// `Sendable` comes from ``NetworkExtensionConcurrencyBridge``'s conformance on
+/// `NEPacketTunnelProvider` (the NE library border); the compiler requires the subclass to
+/// restate the inherited `@unchecked` marker, so the restatement below is mandatory syntax, not
+/// a new bypass. Everything stored here is a `let` of a `Sendable` type — the long-lived task
+/// handles sit behind a `Mutex` — so the claim holds by construction.
 nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()
-    
+
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
-    private var pathMonitorTask: Task<Void, Never>?
+    private let pathMonitorTask = Mutex<Task<Void, Never>?>(nil)
 
     /// Consumes the stack's tunnel-settings-reapply signal and drives `setTunnelNetworkSettings`
     /// on the provider (routes/DNS change). Cancelled in `stopTunnel`.
-    private var reapplySettingsTask: Task<Void, Never>?
+    private let reapplySettingsTask = Mutex<Task<Void, Never>?>(nil)
 
     /// Edge-transition tracker for the path loop; single-task-confined, so a plain value type.
     private struct PathTransition {
@@ -78,10 +84,13 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
         
         // Drive `setTunnelNetworkSettings` whenever the stack signals a routes/DNS change.
+        // Strong self: the stream ends on cancellation, `stopTunnel` cancels, ARC cleans up.
         let reapplySignal = tunnelStack.reapplySettingsSignal
-        reapplySettingsTask = Task { [weak self] in
-            for await _ in reapplySignal {
-                self?.reapplyTunnelSettings()
+        reapplySettingsTask.withLock { task in
+            task = Task {
+                for await _ in reapplySignal {
+                    self.reapplyTunnelSettings()
+                }
             }
         }
 
@@ -103,9 +112,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
         startMonitoringPath()
-        statsRecorder.start { [weak self] in
+        // Captures the stack (the resource actually polled), not the provider; `stopTunnel`'s
+        // `statsRecorder.stop()` releases the closure.
+        statsRecorder.start { [tunnelStack] in
             return StatsRecorder.RawValues(
-                byteCounts: self?.tunnelStack.byteCounts ?? TrafficByteCounts(),
+                byteCounts: tunnelStack.byteCounts,
                 tcpConnectionCount: FlowGauge.liveTCP,
                 udpConnectionCount: FlowGauge.liveUDP,
                 memoryBytes: Self.memoryFootprint()
@@ -219,7 +230,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
         guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
-        return NEIPv6Route(destinationAddress: String(cString: buffer), networkPrefixLength: NSNumber(value: prefixLength))
+        return NEIPv6Route(destinationAddress: String(nulTerminated: buffer), networkPrefixLength: NSNumber(value: prefixLength))
     }
 
     private static func dottedQuad(_ value: UInt32) -> String {
@@ -247,8 +258,10 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         
         statsRecorder.stop()
         stopMonitoringPath()
-        reapplySettingsTask?.cancel()
-        reapplySettingsTask = nil
+        reapplySettingsTask.withLock { task in
+            task?.cancel()
+            task = nil
+        }
         logTunnelStop(reason: reason)
         await tunnelStack.stop()
     }
@@ -308,19 +321,24 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     // MARK: - Path Monitoring
 
     private func startMonitoringPath() {
-        guard pathMonitorTask == nil else { return }
-        pathMonitorTask = Task { [weak self] in
-            guard let self else { return }
-            var transition = PathTransition()
-            for await path in self.pathMonitorBridge.paths() {
-                await self.handlePathUpdate(path, transition: &transition)
+        // Strong self: cancelling the task ends the stream (tearing the monitor down) and the
+        // loop, so ARC reclaims everything once `stopMonitoringPath` runs.
+        pathMonitorTask.withLock { task in
+            guard task == nil else { return }
+            task = Task {
+                var transition = PathTransition()
+                for await path in self.pathMonitorBridge.paths() {
+                    await self.handlePathUpdate(path, transition: &transition)
+                }
             }
         }
     }
 
     private func stopMonitoringPath() {
-        pathMonitorTask?.cancel()
-        pathMonitorTask = nil
+        pathMonitorTask.withLock { task in
+            task?.cancel()
+            task = nil
+        }
     }
 
     /// Hands the egress identity (incl. Wi-Fi SSID on iOS) to the stack for the

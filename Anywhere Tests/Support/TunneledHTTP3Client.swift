@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 @testable import Anywhere
 
 enum TunneledHTTP3Client {
@@ -33,34 +34,30 @@ enum TunneledHTTP3Client {
     }
 }
 
-/// One GET exchange over the multiplexer. An actor on the multiplexer's executor, so the
-/// demux events it registers enter its isolated state synchronously — the same shape as
-/// the production `XHTTPH3RequestStream`/`NaiveHTTP3Stream` consumers.
-private actor HTTP3GetRequest {
-    private nonisolated let bridge: NGTCP2ConcurrencyBridge
-    nonisolated var unownedExecutor: UnownedSerialExecutor {
-        bridge.executor.asUnownedSerialExecutor()
-    }
+private nonisolated final class HTTP3GetRequest: Sendable {
 
     private let multiplexer: HTTP3Multiplexer
     private let authority: String
     private let path: String
 
-    private var quicStreamID: Int64?
-    private var headersReceived = false
-    private var status: Int?
-    private var responseHeaders: [(name: String, value: String)] = []
-    private var body = Data()
-    private var frameBuffer = Data()
-    private var frameBufferOffset = 0
-    private var finished = false
+    /// Request/response state, guarded by `lock`.
+    private struct State {
+        var quicStreamID: Int64?
+        var headersReceived = false
+        var status: Int?
+        var responseHeaders: [(name: String, value: String)] = []
+        var body = Data()
+        var frameBuffer = Data()
+        var frameBufferOffset = 0
+        var finished = false
+    }
+    private let lock = Mutex(State())
 
     /// One-shot result latch; `run()` awaits `resultTask.value`.
     private let resultSignal: AsyncThrowingStream<HTTPResponse, Error>.Continuation
     private let resultTask: Task<HTTPResponse, Error>
 
     init(multiplexer: HTTP3Multiplexer, authorityHost: String, port: UInt16, path: String) {
-        self.bridge = multiplexer.sharedBridge
         self.multiplexer = multiplexer
         self.authority = port == 443 ? authorityHost : "\(authorityHost):\(port)"
         self.path = path
@@ -77,16 +74,16 @@ private actor HTTP3GetRequest {
 
         let events = HTTP3Multiplexer.StreamEvents(
             data: { [weak self] data, fin in
-                self?.assumeIsolated { $0.handleStreamData(data, fin: fin) }
+                self?.handleStreamData(data, fin: fin)
             },
             error: { [weak self] error in
-                self?.assumeIsolated { $0.complete(.failure(error)) }
+                self?.complete(.failure(error))
             }
         )
         guard let streamID = await multiplexer.openStream(events: events) else {
             throw HTTP3Error.streamIdBlocked
         }
-        quicStreamID = streamID
+        lock.withLock { $0.quicStreamID = streamID }
 
         let headerBlock = QPACKEncoder.encodeRequestHeaders(
             method: "GET",
@@ -99,78 +96,92 @@ private actor HTTP3GetRequest {
             do {
                 try await multiplexer.writeStream(streamID, data: frame, fin: true)
             } catch {
-                complete(.failure(error))
+                self.complete(.failure(error))
             }
         }
         return try await resultTask.value
     }
 
-    // MARK: - Demux events (delivered on the shared executor)
+    // MARK: - Demux events (delivered synchronously on the ngtcp2 queue)
 
     private func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {
-            frameBuffer.append(data)
-            processFrames()
+            processFrames(appending: data)
         }
         if fin { finishOnEnd() }
     }
 
     // MARK: - Frame processing
 
-    private func processFrames() {
+    private func processFrames(appending data: Data) {
         var consumedBytes = 0
-        while frameBufferOffset < frameBuffer.count {
-            guard let (frame, consumed) = HTTP3Framer.parseFrame(from: frameBuffer, offset: frameBufferOffset) else {
-                break
-            }
-            frameBufferOffset += consumed
-            consumedBytes += consumed
+        var malformed = false
 
-            if frame.type == HTTP3FrameType.headers.rawValue {
-                if !headersReceived {
-                    headersReceived = true
-                    guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
-                        complete(.failure(HTTP3Error.connectionFailed("Malformed QPACK header block")))
-                        return
-                    }
-                    responseHeaders = headers
-                    if let raw = headers.first(where: { $0.name == ":status" })?.value {
-                        status = Int(raw)
-                    }
+        lock.withLock { state in
+            state.frameBuffer.append(data)
+            while state.frameBufferOffset < state.frameBuffer.count {
+                guard let (frame, consumed) = HTTP3Framer.parseFrame(
+                    from: state.frameBuffer, offset: state.frameBufferOffset
+                ) else {
+                    break
                 }
-            } else if frame.type == HTTP3FrameType.data.rawValue {
-                body.append(frame.payload)
+                state.frameBufferOffset += consumed
+                consumedBytes += consumed
+
+                if frame.type == HTTP3FrameType.headers.rawValue {
+                    if !state.headersReceived {
+                        state.headersReceived = true
+                        guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
+                            malformed = true
+                            break
+                        }
+                        state.responseHeaders = headers
+                        if let raw = headers.first(where: { $0.name == ":status" })?.value {
+                            state.status = Int(raw)
+                        }
+                    }
+                } else if frame.type == HTTP3FrameType.data.rawValue {
+                    state.body.append(frame.payload)
+                }
+            }
+
+            if state.frameBufferOffset >= state.frameBuffer.count {
+                state.frameBuffer = Data()
+                state.frameBufferOffset = 0
+            } else if state.frameBufferOffset > 64 * 1024 {
+                state.frameBuffer = Data(state.frameBuffer[(state.frameBuffer.startIndex + state.frameBufferOffset)...])
+                state.frameBufferOffset = 0
             }
         }
-        if consumedBytes > 0, let streamID = quicStreamID {
-            multiplexer.extendStreamOffset(streamID, count: consumedBytes)
-        }
-        compactBuffer()
-    }
 
-    private func compactBuffer() {
-        if frameBufferOffset >= frameBuffer.count {
-            frameBuffer = Data()
-            frameBufferOffset = 0
-        } else if frameBufferOffset > 64 * 1024 {
-            frameBuffer = Data(frameBuffer[(frameBuffer.startIndex + frameBufferOffset)...])
-            frameBufferOffset = 0
+        if malformed {
+            complete(.failure(HTTP3Error.connectionFailed("Malformed QPACK header block")))
+            return
+        }
+        if consumedBytes > 0, let streamID = lock.withLock({ $0.quicStreamID }) {
+            multiplexer.extendStreamOffset(streamID, count: consumedBytes)
         }
     }
 
     private func finishOnEnd() {
-        guard let status else {
+        let snapshot: (status: Int?, headers: [(name: String, value: String)], body: Data) =
+            lock.withLock { (status: $0.status, headers: $0.responseHeaders, body: $0.body) }
+        guard let status = snapshot.status else {
             complete(.failure(HTTP3Error.connectionFailed("stream ended before response headers")))
             return
         }
-        complete(.success(HTTPResponse(statusCode: status, headers: responseHeaders, body: body)))
+        complete(.success(HTTPResponse(statusCode: status, headers: snapshot.headers, body: snapshot.body)))
     }
 
     private func complete(_ result: Result<HTTPResponse, Error>) {
-        guard !finished else { return }
-        finished = true
-        if let streamID = quicStreamID {
-            multiplexer.assumeIsolated { $0.removeStream(streamID) }
+        let sid: Int64?? = lock.withLock { state in
+            guard !state.finished else { return nil }
+            state.finished = true
+            return .some(state.quicStreamID)
+        }
+        guard let sid else { return }
+        if let streamID = sid {
+            multiplexer.removeStream(streamID)
             multiplexer.shutdownStream(streamID, code: .noError)
         }
         switch result {

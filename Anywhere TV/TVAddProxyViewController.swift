@@ -49,7 +49,7 @@ class TVAddProxyViewController: UITableViewController {
             barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped)
         )
         navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: String(localized: "Continue"), style: .done, target: self, action: #selector(continueTapped)
+            title: String(localized: "Continue"), style: .prominent, target: self, action: #selector(continueTapped)
         )
         updateContinueButton()
     }

@@ -165,7 +165,7 @@ nonisolated struct VLESSVisionUDPFrameMetadata {
             }
             var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
             inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count))
-            return (String(cString: buffer), position + 16)
+            return (String(nulTerminated: buffer), position + 16)
         }
     }
 
