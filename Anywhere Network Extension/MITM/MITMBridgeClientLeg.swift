@@ -594,11 +594,10 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             answerSynth(streamID: streamID, response: synth)
             return false
         }
-
-        var rewritten = rewriter.transformRequestHeaders(head.decoded, gates: gates)
-        // Capture synchronously, while it still reflects this request's rewrite, before a
-        // body-buffering hop lets a concurrent stream overwrite the rewriter's shared field.
-        let resolvedUpstream = rewriter.resolvedUpstream
+        
+        var rewritten: [(name: String, value: String)]
+        let resolvedUpstream: (host: String, port: UInt16?)?
+        (rewritten, resolvedUpstream) = rewriter.transformRequestHeaders(head.decoded, gates: gates)
         let gateURL = MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(host)\($0)" } ?? requestURL
 
         // Clamp only when a response body rule will read the reply; a passthrough request keeps
@@ -1107,14 +1106,15 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     private func flushResponse(_ streamID: UInt32, cap: Int = .max) -> Bool {
         guard var paceState = paceStates[streamID] else { return false }
         var progressed = false
-        let available = max(0, min(flowController.connectionWindow, paceState.streamWindow, paceState.pending.count, cap))
+        let available = flowController.takeConnection(
+            upTo: min(paceState.streamWindow, paceState.pending.count, cap)
+        )
         if available > 0 {
             let chunk = paceState.pending.prefix(available)
             // A pending trailer is the terminal frame, so body DATA must not carry END_STREAM.
             let bodyDrained = paceState.sawEnd && available == paceState.pending.count
             let endOnData = bodyDrained && paceState.pendingTrailers == nil
             delegate?.clientLegWriteToClient(Codec.frameData(streamID: streamID, payload: chunk, endStream: endOnData))
-            flowController.debitConnection(available)
             paceState.streamWindow -= available
             paceState.pending.removeFirst(available)
             if endOnData { paceState.finished = true }
@@ -1144,10 +1144,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         }
         return progressed
     }
-
-    /// Distributes the available client connection window across response streams in equal shares, so
-    /// a large download can't drain it all and starve its siblings. One `flushResponse` per stream,
-    /// each capped to its fair slice; window a stream can't use flows to those after it.
+    
     private func distributeClientConnectionWindow() {
         // Only streams with buffered body contend. Counting idle streams would shrink each share and
         // leave window unused until the next WINDOW_UPDATE, so a sole sender sees the full window.
@@ -1183,10 +1180,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         if case .streaming = requestStreams[streamID] { return true }
         return false
     }
-
-    /// Called when the request (upload) half finishes. Cleans up its state and, if the response half
-    /// already completed (the stream was kept open only for this upload), notifies the upstream that
-    /// the stream is fully done.
+    
     private func finishRequestUpload(_ streamID: UInt32) {
         requestStreams.removeValue(forKey: streamID)
         streamDeferredUpload.remove(streamID)

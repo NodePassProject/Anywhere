@@ -166,21 +166,19 @@ actor TCPConnection {
     /// Arms the handshake timer and either begins dialing or waits for the sniff deadline.
     /// The bridge's accept trampoline calls this once, on the lwIP queue, right after `init`.
     func start() {
-        handshakeTimeoutTask = Task { [weak self] in
+        handshakeTimeoutTask = Task {
             try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
             guard !Task.isCancelled else { return }
-            await self?.handshakeTimedOut()
+            handshakeTimedOut()
         }
 
         if sniffer == nil {
             beginConnecting()
         } else {
-            // Server-speaks-first protocols (SSH, SMTP, FTP) never send client
-            // bytes; commit the IP-based route at the deadline.
-            sniffDeadlineTask = Task { [weak self] in
+            sniffDeadlineTask = Task {
                 try? await Task.sleep(for: .seconds(TunnelConstants.sniffDeadline))
                 guard !Task.isCancelled else { return }
-                await self?.sniffDeadlineFired()
+                sniffDeadlineFired()
             }
         }
     }
@@ -785,16 +783,14 @@ actor TCPConnection {
         idleCheckTask?.cancel()
         idleCheckTask = nil
     }
-
-    /// Schedules the next idle re-check `delay` seconds out. Weak self so the sleep can't pin the
-    /// connection; `await` hops back onto the actor (lwIP executor).
+    
     private func scheduleIdleCheck(after delay: TimeInterval) {
         idleCheckTask?.cancel()
         guard idleActive, delay > 0 else { return }
-        idleCheckTask = Task { [weak self] in
+        idleCheckTask = Task {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            await self?.checkIdle()
+            checkIdle()
         }
     }
 

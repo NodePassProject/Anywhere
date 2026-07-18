@@ -489,7 +489,10 @@ actor MITMHTTP2UpstreamLeg {
     @discardableResult
     private func flushRequestBody(_ clientID: UInt32, cap: Int = .max) -> Bool {
         guard var entry = pendingRequestBodies[clientID], let sid = ourStreamID[clientID] else { return false }
-        let available = max(0, min(flowController.serverConnectionWindow, entry.streamWindow, entry.remaining.count, cap))
+        // Grant-and-debit the upstream connection window atomically (read+debit in one critical
+        // section); the stream window and remaining/cap bounds are this leg's own confined state.
+        let available = flowController.takeServerConnection(
+            upTo: min(entry.streamWindow, entry.remaining.count, cap))
         if available > 0 {
             let chunk = entry.remaining.prefix(available)
             entry.remaining.removeFirst(available)
@@ -497,7 +500,6 @@ actor MITMHTTP2UpstreamLeg {
             // With trailers pending, END_STREAM rides the trailing HEADERS, not the final DATA.
             onUpstreamBytes?(Codec.frameData(streamID: sid, payload: chunk,
                                              endStream: bodyDone && entry.pendingTrailers == nil))
-            flowController.debitServerConnection(available)
             entry.streamWindow -= available
             // Bytes reached the origin under its window; let the client send that much more upload
             // (drain-coupled flow control).

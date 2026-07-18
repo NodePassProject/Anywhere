@@ -78,7 +78,6 @@ nonisolated final class VLESSEncryptionCTR: Sendable {
     /// XOR keystream bytes directly into a mutable buffer, avoiding an extra copy.
     func processInPlace(_ buffer: UnsafeMutableRawBufferPointer) {
         if buffer.count == 0 { return }
-        /// `@unchecked Sendable` allowed here.
         struct Region: @unchecked Sendable { let base: UnsafeMutableRawPointer?; let count: Int }
         let region = Region(base: buffer.baseAddress, count: buffer.count)
         cryptor.withLock { cryptor in
