@@ -82,22 +82,70 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
         connHeld = previous
     }
 
-    // MARK: - Conn-ref context
-    //
-    // ngtcp2's `ngtcp2_crypto_conn_ref.user_data` (also handed to the crypto callbacks)
-    // carries an **unretained** back-reference to the owning ``QUICConnection`` — the
-    // connection owns the `ngtcp2_conn` and outlives it, driving `ngtcp2_conn_del` itself.
-    // These wrap the pointer round-trip so the connection layer never touches
-    // ``BridgeContext`` directly.
+    // MARK: - Construction
 
-    /// The `user_data` pointer to store in `ngtcp2_crypto_conn_ref` (unretained).
-    static func connRefContext(_ connection: QUICConnection) -> UnsafeMutableRawPointer {
-        BridgeContext.passUnretained(connection)
+    /// Creates the client `ngtcp2_conn` over an initial path built from `localAddr`/`remoteAddr`,
+    /// wiring the PMTUD probe array's lifetime across the call. Returns the new conn (or `nil`)
+    /// and ngtcp2's `err_t`. The raw path/out-pointer juggling stays here at the C boundary.
+    func createClientConn(dcid: inout ngtcp2_cid, scid: inout ngtcp2_cid,
+                          localAddr: inout sockaddr_storage, remoteAddr: inout sockaddr_storage,
+                          addrLen: Int, version: UInt32,
+                          callbacks: inout ngtcp2_callbacks, settings: inout ngtcp2_settings,
+                          pmtudProbes: [UInt16]?,
+                          params: inout ngtcp2_transport_params,
+                          connRef: inout ngtcp2_crypto_conn_ref) -> (conn: OpaquePointer?, rv: Int32) {
+        withUnsafeMutablePointer(to: &localAddr) { lp in
+            withUnsafeMutablePointer(to: &remoteAddr) { rp in
+                var path = ngtcp2_path(
+                    local: ngtcp2_addr(addr: UnsafeMutableRawPointer(lp).assumingMemoryBound(to: sockaddr.self),
+                                       addrlen: ngtcp2_socklen(addrLen)),
+                    remote: ngtcp2_addr(addr: UnsafeMutableRawPointer(rp).assumingMemoryBound(to: sockaddr.self),
+                                        addrlen: ngtcp2_socklen(addrLen)),
+                    user_data: nil
+                )
+                func build() -> (OpaquePointer?, Int32) {
+                    var out: OpaquePointer?
+                    let rv = ngtcp2_swift_conn_client_new(
+                        &out, &dcid, &scid, &path, version,
+                        &callbacks, &settings, &params, nil, &connRef
+                    )
+                    return (out, rv)
+                }
+                guard let pmtudProbes else { return build() }
+                // ngtcp2 copies the probes at conn-new time; they need only outlive this call.
+                return pmtudProbes.withUnsafeBufferPointer { probes in
+                    settings.pmtud_probes = probes.baseAddress
+                    settings.pmtud_probeslen = probes.count
+                    return build()
+                }
+            }
+        }
     }
 
-    /// Recovers the connection behind a conn-ref / crypto-callback `user_data` pointer.
-    static func connection(from userData: UnsafeMutableRawPointer) -> QUICConnection {
-        BridgeContext.unretained(userData, as: QUICConnection.self)
+    /// ngtcp2's default settings, ready for the connection to tune.
+    func defaultSettings() -> ngtcp2_settings {
+        var settings = ngtcp2_settings()
+        ngtcp2_swift_settings_default(&settings)
+        return settings
+    }
+
+    /// ngtcp2's default transport parameters, ready for the connection to tune.
+    func defaultTransportParams() -> ngtcp2_transport_params {
+        var params = ngtcp2_transport_params()
+        ngtcp2_swift_transport_params_default(&params)
+        return params
+    }
+
+    // MARK: - Brutal congestion control
+
+    /// Installs the Brutal CC algorithm on `conn`; returns its `ngtcp2_cc *` registry key, or `nil`.
+    func installBrutal(_ conn: OpaquePointer) -> OpaquePointer? {
+        ngtcp2_swift_install_brutal(conn)
+    }
+
+    /// Reverts `conn` to the library's default CC (undoes ``installBrutal(_:)``).
+    func uninstallBrutal(_ conn: OpaquePointer) {
+        ngtcp2_swift_uninstall_brutal(conn)
     }
 
     // MARK: - Connection operations
@@ -105,8 +153,8 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
     // Thin wrappers over the `ngtcp2_conn_*` / `ngtcp2_swift_conn_*` entry points the
     // connection core drives, so ``QUICConnection``'s own read/write/timer/stream logic
     // names no ngtcp2 symbol. `conn` is the `ngtcp2_conn *`, owned by the connection and
-    // valid only on ``queue``; all of these run there. (The one-time `conn_client_new`
-    // construction and the TLS/crypto callbacks stay with their layers.)
+    // valid only on ``queue``; all of these run there. (The TLS/crypto callbacks stay with
+    // their layers.)
 
     /// Opens a client-initiated bidirectional stream; returns its id, or `nil` if blocked.
     func openBidiStream(_ conn: OpaquePointer) -> Int64? {
@@ -188,59 +236,122 @@ nonisolated final class NGTCP2ConcurrencyBridge: @unchecked Sendable {
 
     /// Immediately switches the active path (reactive migration); returns ngtcp2's `err_t`.
     func initiateImmediateMigration(_ conn: OpaquePointer,
-                                    path: UnsafeMutablePointer<ngtcp2_path>,
-                                    ts: ngtcp2_tstamp) -> Int32 {
-        ngtcp2_conn_initiate_immediate_migration(conn, path, ts)
+                                    localAddr: sockaddr_storage, remoteAddr: sockaddr_storage,
+                                    addrLen: Int, ts: ngtcp2_tstamp) -> Int32 {
+        withPath(local: localAddr, remote: remoteAddr, addrLen: addrLen) { pathPtr in
+            ngtcp2_conn_initiate_immediate_migration(conn, pathPtr, ts)
+        }
     }
 
     /// Begins validating a new path before switching (proactive migration); returns `err_t`.
     func initiateMigration(_ conn: OpaquePointer,
-                           path: UnsafeMutablePointer<ngtcp2_path>,
-                           ts: ngtcp2_tstamp) -> Int32 {
-        ngtcp2_conn_initiate_migration(conn, path, ts)
+                           localAddr: sockaddr_storage, remoteAddr: sockaddr_storage,
+                           addrLen: Int, ts: ngtcp2_tstamp) -> Int32 {
+        withPath(local: localAddr, remote: remoteAddr, addrLen: addrLen) { pathPtr in
+            ngtcp2_conn_initiate_migration(conn, pathPtr, ts)
+        }
+    }
+
+    // MARK: Path marshaling (library boundary)
+
+    /// Builds an `ngtcp2_path` over pinned copies of `local`/`remote` and runs `body` with it.
+    /// ngtcp2 copies the addrs internally, so the copies need only outlive the call. Kept in the
+    /// bridge so the raw `sockaddr`/`ngtcp2_path` pointer juggling stays at the C boundary.
+    private func withPath<R>(local: sockaddr_storage, remote: sockaddr_storage, addrLen: Int,
+                             _ body: (UnsafeMutablePointer<ngtcp2_path>) -> R) -> R {
+        var local = local
+        var remote = remote
+        return withUnsafeMutablePointer(to: &local) { lp in
+            withUnsafeMutablePointer(to: &remote) { rp in
+                var path = ngtcp2_path(
+                    local: ngtcp2_addr(addr: UnsafeMutableRawPointer(lp).assumingMemoryBound(to: sockaddr.self),
+                                       addrlen: ngtcp2_socklen(addrLen)),
+                    remote: ngtcp2_addr(addr: UnsafeMutableRawPointer(rp).assumingMemoryBound(to: sockaddr.self),
+                                        addrlen: ngtcp2_socklen(addrLen)),
+                    user_data: nil
+                )
+                return withUnsafeMutablePointer(to: &path) { body($0) }
+            }
+        }
+    }
+
+    /// Runs an ngtcp2 *write* (`body`) with an `ngtcp2_path` over owned capacity buffers, copying
+    /// back into `chosenLocal` the local address ngtcp2 reported for the packet — the connection maps
+    /// that to a carrier. The buffers are mandatory: every write copies the chosen 4-tuple into
+    /// `path`, so NULL would crash.
+    private func writeReportingLocal<R>(_ chosenLocal: inout sockaddr_storage,
+                                        _ body: (UnsafeMutablePointer<ngtcp2_path>) -> R) -> R {
+        var local = sockaddr_storage()
+        var remote = sockaddr_storage()
+        let cap = ngtcp2_socklen(MemoryLayout<sockaddr_storage>.size)
+        let result = withUnsafeMutablePointer(to: &local) { lp in
+            withUnsafeMutablePointer(to: &remote) { rp in
+                var path = ngtcp2_path(
+                    local: ngtcp2_addr(addr: UnsafeMutableRawPointer(lp).assumingMemoryBound(to: sockaddr.self),
+                                       addrlen: cap),
+                    remote: ngtcp2_addr(addr: UnsafeMutableRawPointer(rp).assumingMemoryBound(to: sockaddr.self),
+                                        addrlen: cap),
+                    user_data: nil
+                )
+                return withUnsafeMutablePointer(to: &path) { body($0) }
+            }
+        }
+        chosenLocal = local
+        return result
     }
 
     // MARK: Read / write
 
-    /// Feeds one received datagram into the connection; returns ngtcp2's `err_t`.
+    /// Feeds one received datagram into the connection over the given fixed path; returns ngtcp2's `err_t`.
     func readPacket(_ conn: OpaquePointer,
-                    path: UnsafeMutablePointer<ngtcp2_path>,
-                    pktInfo: UnsafeMutablePointer<ngtcp2_pkt_info>,
+                    localAddr: sockaddr_storage, remoteAddr: sockaddr_storage, addrLen: Int,
+                    pktInfo: inout ngtcp2_pkt_info,
                     data: UnsafePointer<UInt8>, count: Int, ts: ngtcp2_tstamp) -> Int32 {
-        ngtcp2_swift_conn_read_pkt(conn, path, pktInfo, data, count, ts)
+        withPath(local: localAddr, remote: remoteAddr, addrLen: addrLen) { pathPtr in
+            ngtcp2_swift_conn_read_pkt(conn, pathPtr, &pktInfo, data, count, ts)
+        }
     }
 
     /// Writes the next outgoing packet into `dest`; returns bytes written or a negative `err_t`.
+    /// `chosenLocalAddr` receives the local address ngtcp2 attributed the packet to.
     func writePacket(_ conn: OpaquePointer,
-                     path: UnsafeMutablePointer<ngtcp2_path>,
-                     pktInfo: UnsafeMutablePointer<ngtcp2_pkt_info>,
+                     chosenLocalAddr: inout sockaddr_storage,
+                     pktInfo: inout ngtcp2_pkt_info,
                      dest: UnsafeMutablePointer<UInt8>?, destCapacity: Int,
                      ts: ngtcp2_tstamp) -> ngtcp2_ssize {
-        ngtcp2_swift_conn_write_pkt(conn, path, pktInfo, dest, destCapacity, ts)
+        writeReportingLocal(&chosenLocalAddr) { pathPtr in
+            ngtcp2_swift_conn_write_pkt(conn, pathPtr, &pktInfo, dest, destCapacity, ts)
+        }
     }
 
-    /// Writes stream data into a packet; `dataLength` receives bytes accepted from `vec`.
+    /// Writes stream data into a packet from `src`; `dataLength` receives bytes accepted.
+    /// `chosenLocalAddr` receives the local address ngtcp2 attributed the packet to.
     func writeStream(_ conn: OpaquePointer,
-                     path: UnsafeMutablePointer<ngtcp2_path>,
-                     pktInfo: UnsafeMutablePointer<ngtcp2_pkt_info>,
+                     chosenLocalAddr: inout sockaddr_storage,
+                     pktInfo: inout ngtcp2_pkt_info,
                      dest: UnsafeMutablePointer<UInt8>?, destCapacity: Int,
-                     dataLength: UnsafeMutablePointer<ngtcp2_ssize>, flags: UInt32,
-                     stream: Int64, vec: UnsafePointer<ngtcp2_vec>, vecCount: Int,
-                     ts: ngtcp2_tstamp) -> ngtcp2_ssize {
-        ngtcp2_swift_conn_writev_stream(conn, path, pktInfo, dest, destCapacity,
-                                        dataLength, flags, stream, vec, vecCount, ts)
+                     dataLength: inout ngtcp2_ssize, flags: UInt32, stream: Int64,
+                     src: UnsafePointer<UInt8>, srcLen: Int, ts: ngtcp2_tstamp) -> ngtcp2_ssize {
+        var vec = ngtcp2_vec(base: UnsafeMutablePointer(mutating: src), len: srcLen)
+        return writeReportingLocal(&chosenLocalAddr) { pathPtr in
+            ngtcp2_swift_conn_writev_stream(conn, pathPtr, &pktInfo, dest, destCapacity,
+                                            &dataLength, flags, stream, &vec, 1, ts)
+        }
     }
 
     /// Writes a DATAGRAM frame into a packet; `accepted` receives whether it was queued.
+    /// `chosenLocalAddr` receives the local address ngtcp2 attributed the packet to.
     func writeDatagram(_ conn: OpaquePointer,
-                       path: UnsafeMutablePointer<ngtcp2_path>,
-                       pktInfo: UnsafeMutablePointer<ngtcp2_pkt_info>,
+                       chosenLocalAddr: inout sockaddr_storage,
+                       pktInfo: inout ngtcp2_pkt_info,
                        dest: UnsafeMutablePointer<UInt8>?, destCapacity: Int,
-                       accepted: UnsafeMutablePointer<Int32>, flags: UInt32,
+                       accepted: inout Int32, flags: UInt32,
                        datagramId: UInt64, data: UnsafePointer<UInt8>, dataLength: Int,
                        ts: ngtcp2_tstamp) -> ngtcp2_ssize {
-        ngtcp2_swift_conn_write_datagram(conn, path, pktInfo, dest, destCapacity,
-                                         accepted, flags, datagramId, data, dataLength, ts)
+        writeReportingLocal(&chosenLocalAddr) { pathPtr in
+            ngtcp2_swift_conn_write_datagram(conn, pathPtr, &pktInfo, dest, destCapacity,
+                                             &accepted, flags, datagramId, data, dataLength, ts)
+        }
     }
 
     // MARK: Diagnostics

@@ -40,10 +40,9 @@ actor XHTTPH3RequestStream {
     /// control counts every stream byte (HTTP/3 frame header + payload), so the per-chunk
     /// `quicBytes` accounting is split: `deliverData` credits the frame-header octets as
     /// chunks arrive, and ``receive()`` credits the payload octets only once the app takes
-    /// them — total credit stays exact, backpressure preserved. The single consumer pulls
-    /// `inboxIterator` from ``receive()`` as plain isolated state.
-    private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// them — total credit stays exact, backpressure preserved. The single consumer pulls via
+    /// ``receive()``.
+    private let inbox = AsyncInbox<Data>()
 
     // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
     // keeps cost amortized O(1).
@@ -61,9 +60,6 @@ actor XHTTPH3RequestStream {
             for try await status in responseStream { return status }
             throw HTTP3Error.streamClosed
         }
-        let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.inbox = inbox
-        self.inboxIterator = inboxStream.makeAsyncIterator()
     }
 
     // MARK: - Request
@@ -154,7 +150,7 @@ actor XHTTPH3RequestStream {
     }
     
     private func nextInboxChunk() async throws -> Data? {
-        try await inboxIterator.next(isolation: #isolation)
+        try await inbox.next()
     }
 
     private func performClose() {

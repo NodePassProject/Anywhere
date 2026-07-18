@@ -5,12 +5,9 @@
 //  Created by NodePassProject on 5/21/26.
 //
 
-// MARK: Various code quality violation issues in this file, consider refactor
-
 import Foundation
 import Network
 import Darwin
-import Dispatch
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
@@ -37,11 +34,6 @@ actor QUICDatagramCarrier {
     private var packetHandler: (@Sendable (Data) -> Void)?
     /// Fires once with the `errno` on terminal failure.
     private var recvErrorHandler: (@Sendable (Int32) -> Void)?
-    /// A failure seen before `startReceiving` armed the handler.
-    private var pendingError: Int32?
-    /// Datagrams received before `startReceiving` armed the handler.
-    private var pendingPackets: [Data] = []
-    private var didWarnPendingOverflow = false
 
     /// When set, a viability drop calls this instead of surfacing a terminal error,
     /// letting the owner attempt QUIC migration first. Fires on `queue`.
@@ -63,9 +55,6 @@ actor QUICDatagramCarrier {
     /// Cached egress interface type, refreshed from the connection's path so it
     /// stays synchronously readable. `queue`-confined.
     private var cachedInterfaceType: NWInterface.InterfaceType?
-
-    /// Bounds the pre-handler datagram buffer.
-    private static let maxPendingPackets = 1024
 
     init(bridge: NGTCP2ConcurrencyBridge) {
         self.bridge = bridge
@@ -111,31 +100,22 @@ actor QUICDatagramCarrier {
 
     // MARK: - Receive
 
-    /// Arms the per-datagram handler. `onPacket` fires with a fresh `Data`;
-    /// `onError` fires once on terminal failure. Must run on `queue`.
+    /// Arms the per-datagram handler. `onPacket` fires with a fresh `Data`; `onError` fires once on
+    /// terminal failure. Called synchronously at setup — in the same `queue` turn as `connect()`,
+    /// before the driver task can enqueue any packet — so there is never a pre-handler gap to buffer.
+    /// Must run on `queue`.
     func startReceiving(onPacket: @escaping @Sendable (Data) -> Void,
                         onError: @escaping @Sendable (Int32) -> Void) {
         packetHandler = onPacket
         recvErrorHandler = onError
-        if let pendingError {
-            self.pendingError = nil
-            onError(pendingError)
-            return
-        }
-        let drained = pendingPackets
-        pendingPackets.removeAll()
-        for data in drained {
-            onPacket(data)
-        }
     }
 
     // MARK: - Send
 
-    /// Sends `length` bytes; errors drop the packet (ngtcp2's loss recovery
-    /// retransmits). Copies out of ngtcp2's reused buffer. Must run on `queue`.
-    func send(_ bytes: UnsafePointer<UInt8>, length: Int) {
-        guard length > 0, let sendContinuation else { return }
-        let datagram = Data(bytes: bytes, count: length)
+    /// Sends one already-copied datagram; errors drop the packet (ngtcp2's loss recovery
+    /// retransmits). The caller copies out of ngtcp2's reused buffer before calling. Must run on `queue`.
+    func send(_ datagram: Data) {
+        guard !datagram.isEmpty, let sendContinuation else { return }
         sendContinuation.yield(datagram)
     }
 
@@ -152,9 +132,6 @@ actor QUICDatagramCarrier {
         driverTask = nil
         packetHandler = nil
         recvErrorHandler = nil
-        pendingError = nil
-        pendingPackets.removeAll()
-        didWarnPendingOverflow = false
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
@@ -301,34 +278,20 @@ actor QUICDatagramCarrier {
 
     // MARK: - Delivery (on queue)
 
-    /// Delivers a datagram, or buffers it if no handler is armed yet. Must run on
-    /// `queue`.
+    /// Delivers a datagram to the armed handler. `startReceiving` arms it at setup before the driver
+    /// task can enqueue any packet, so a nil handler here means teardown already cleared it. Must run
+    /// on `queue`.
     private func deliverPacket(_ data: Data) {
         guard !closed else { return }
-        if let packetHandler {
-            packetHandler(data)
-        } else {
-            if pendingPackets.count >= Self.maxPendingPackets {
-                pendingPackets.removeFirst()
-                if !didWarnPendingOverflow {
-                    didWarnPendingOverflow = true
-                    logger.warning("[QUIC] Pre-handler buffer overflowed (cap \(Self.maxPendingPackets)); dropping oldest until startReceiving arms")
-                }
-            }
-            pendingPackets.append(data)
-        }
+        packetHandler?(data)
     }
 
-    /// Delivers a terminal error code once, or latches it until `startReceiving`
-    /// arms the handler. Must run on `queue`.
+    /// Delivers a terminal error code once. The handler is armed at setup before any driver enqueue,
+    /// so a nil handler here means it already fired (or teardown cleared it). Must run on `queue`.
     private func deliverError(_ code: Int32) {
-        guard !closed else { return }
-        if let handler = recvErrorHandler {
-            recvErrorHandler = nil
-            handler(code)
-        } else {
-            pendingError = code
-        }
+        guard !closed, let handler = recvErrorHandler else { return }
+        recvErrorHandler = nil
+        handler(code)
     }
 
     /// Balances `FlowGauge` exactly once per carrier. Must run on `queue`.

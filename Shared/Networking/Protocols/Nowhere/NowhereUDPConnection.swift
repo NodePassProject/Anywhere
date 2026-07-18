@@ -22,15 +22,16 @@ actor NowhereUDPConnection {
 
     // MARK: Control stream (handshake)
 
-    private nonisolated let controlInbox: AsyncThrowingStream<Data, Error>.Continuation
-    nonisolated(unsafe) private var controlIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Control-stream bytes for the flow-open handshake. Producer is `Sendable` (ngtcp2 queue);
+    /// single consumer via `nextControlChunk()`.
+    private let controlInbox = AsyncInbox<Data>()
     private var controlStreamID: Int64 = -1
 
     // MARK: Inbound datagrams
 
-    /// Bounded so a burst that outruns the reader drops oldest rather than growing without limit.
-    private nonisolated let datagramInbox: AsyncThrowingStream<NowhereQueuedDatagram, Error>.Continuation
-    nonisolated(unsafe) private var datagramIterator: AsyncThrowingStream<NowhereQueuedDatagram, Error>.AsyncIterator
+    /// Bounded so a burst that outruns the reader drops the newest rather than growing without
+    /// limit; single consumer via `nextDatagram()`.
+    private let datagramInbox = AsyncInbox<NowhereQueuedDatagram>(capacity: NowhereUDPConnection.maxBufferedDatagrams)
     private static let maxBufferedDatagrams = 64
     private var nextPacketID: UInt32 = 1
 
@@ -55,15 +56,6 @@ actor NowhereUDPConnection {
         self.destination = destination
         self.flowHeader = flowHeader
         self.expectsResult = flowHeader.role != .open
-        let (controlStream, controlInbox) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.controlInbox = controlInbox
-        self.controlIterator = controlStream.makeAsyncIterator()
-        let (datagramStream, datagramInbox) = AsyncThrowingStream.makeStream(
-            of: NowhereQueuedDatagram.self,
-            bufferingPolicy: .bufferingOldest(Self.maxBufferedDatagrams)
-        )
-        self.datagramInbox = datagramInbox
-        self.datagramIterator = datagramStream.makeAsyncIterator()
     }
 
     nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
@@ -302,11 +294,11 @@ actor NowhereUDPConnection {
     // MARK: - Pull helpers
 
     private func nextControlChunk() async throws -> Data? {
-        try await controlIterator.next(isolation: #isolation)
+        try await controlInbox.next()
     }
 
     private func nextDatagram() async throws -> NowhereQueuedDatagram? {
-        try await datagramIterator.next(isolation: #isolation)
+        try await datagramInbox.next()
     }
 
     // MARK: - Helpers

@@ -35,11 +35,9 @@ actor MITMSession {
     final class InnerTransport: ByteTransport, Sendable {
         let lwipBridge: LWIPConcurrencyBridge
 
-        /// Client→session bytes. Producer side (`inbox`) is `Sendable` (fed from the lwIP queue);
-        /// the single consumer pulls `inboxIterator` from ``receive()``. The `Mutex` guards the
-        /// iterator *value* so this transport is honestly `Sendable`.
-        private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-        nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+        /// Client→session bytes. The producer (`yield`/`finish`) is `Sendable` (fed from the lwIP
+        /// queue); a single consumer pulls via ``receive()``.
+        private let inbox = AsyncInbox<Data>()
         private struct State {
             var closed = false
             /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
@@ -61,9 +59,6 @@ actor MITMSession {
 
         init(lwipBridge: LWIPConcurrencyBridge) {
             self.lwipBridge = lwipBridge
-            let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
-            self.inbox = inbox
-            self.inboxIterator = inboxStream.makeAsyncIterator()
         }
 
         // MARK: ByteTransport
@@ -84,9 +79,8 @@ actor MITMSession {
         }
 
         func receive() async throws -> TransportChunk {
-            // Single-consumer pull: take the iterator, await one element, store it back.
-            let next = try await inboxIterator.next(isolation: #isolation)
-            if let next { return .bytes(next) }
+            // Single-consumer pull.
+            if let next = try await inbox.next() { return .bytes(next) }
             return .end
         }
 

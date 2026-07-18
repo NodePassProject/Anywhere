@@ -18,9 +18,9 @@ actor AnyTLSStream {
     /// Captured at construction so `outerTLSVersion` keeps working after the multiplexer goes away.
     private nonisolated let cachedTLSVersion: TLSVersion?
 
-    /// Inbound cmdPSH payloads / EOF / error from the multiplexer's demux loop.
-    private nonisolated let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Inbound cmdPSH payloads / EOF / error from the multiplexer's demux loop. Single consumer
+    /// (`receiveRaw`); `Sendable` producer via `yield`/`finish`.
+    private let inbox = AsyncInbox<Data>()
 
     /// Set once `deliverClose` fires; the nonisolated `isConnected` reads it.
     private nonisolated let _ended = Atomic<Bool>(false)
@@ -41,9 +41,6 @@ actor AnyTLSStream {
         self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
         self.endState = Mutex(EndState(onEnd: onEnd))
-        let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.inbox = continuation
-        self.inboxIterator = stream.makeAsyncIterator()
     }
 
     nonisolated var isConnected: Bool { !_ended.load(ordering: .relaxed) }
@@ -64,7 +61,7 @@ actor AnyTLSStream {
     // MARK: - Receive
 
     func receiveRaw() async throws -> Data? {
-        try await inboxIterator.next(isolation: #isolation)
+        try await inbox.next()
     }
 
     // MARK: - Cancel

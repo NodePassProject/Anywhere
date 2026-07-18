@@ -57,11 +57,8 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     /// contract an actor would rely on across `next()`'s suspension). Backpressure is preserved:
     /// flow-control credit is returned only once the app takes the bytes. H2 flow control counts DATA
     /// payload octets (RFC 7540 §6.9.1), so `data.count` is the exact amount to credit.
-    private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    /// `nonisolated(unsafe)`: the single-consumer contract (one serial `receiveData` caller) provides
-    /// the serialization; advanced in place via `next(isolation:)` so it never crosses to `next()`'s
-    /// `@concurrent` executor.
-    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Single consumer (one serial `receiveData` caller); `Sendable` producer via `yield`/`finish`.
+    private let inbox = AsyncInbox<Data>()
 
     /// Resolves when the CONNECT response (200) arrives, or the stream fails first. The waiter
     /// continuation lives in the promise (async infra), bridging the multiplexer's read loop.
@@ -83,13 +80,10 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.connectSignal = connectSignal
         self.connectTask = Task { for try await _ in connectStream {} }
-        let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.inbox = inbox
-        self.inboxIterator = inboxStream.makeAsyncIterator()
     }
-    
+
     private func nextInboxChunk() async throws -> Data? {
-        try await inboxIterator.next(isolation: #isolation)
+        try await inbox.next()
     }
 
     // MARK: - HTTPTunnel

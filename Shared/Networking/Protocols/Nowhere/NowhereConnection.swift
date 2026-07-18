@@ -32,11 +32,10 @@ actor NowhereConnection {
     /// Assigned once in `open()`, read from the send/cancel paths.
     private nonisolated let _streamID = Atomic<Int64>(-1)
 
-    /// Inbound stream bytes from the demux. Producer (`rawInbox`) is Sendable and driven on the
-    /// ngtcp2 queue via `feedStreamData`; the single consumer pulls `rawIterator` from `open()`
-    /// (flow result) then `receiveRaw()` (data), so the iterator is plain actor-isolated state.
-    private nonisolated let rawInbox: AsyncThrowingStream<Data, Error>.Continuation
-    nonisolated(unsafe) private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Inbound stream bytes from the demux. The producer (`yield`/`finish`) is `Sendable` and driven
+    /// on the ngtcp2 queue via `feedStreamData`; a single consumer pulls via `open()` (flow result)
+    /// then `receiveRaw()` (data), never concurrently.
+    private let rawInbox = AsyncInbox<Data>()
     /// Post-result bytes left over from `open()`'s handshake, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
 
@@ -55,9 +54,6 @@ actor NowhereConnection {
         self.flowHeader = flowHeader
         self.initialData = initialData
         self.attempt = attempt
-        let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.rawInbox = continuation
-        self.rawIterator = stream.makeAsyncIterator()
     }
 
     nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
@@ -173,7 +169,7 @@ actor NowhereConnection {
 
     /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`).
     private func nextChunk() async throws -> Data? {
-        try await rawIterator.next(isolation: #isolation)
+        try await rawInbox.next()
     }
 
     nonisolated func cancel() {

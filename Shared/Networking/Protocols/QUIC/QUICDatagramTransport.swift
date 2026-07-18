@@ -5,17 +5,15 @@
 //  Created by NodePassProject on 5/19/26.
 //
 
-// MARK: Various code quality violation issues in this file (handler patterns), consider refactor
-
 import Foundation
-import Synchronization
 
 nonisolated protocol QUICDatagramTransport: AnyObject, Sendable {
+    /// Submits one outgoing datagram in order; drops are recovered by ngtcp2, so there is no result.
     func sendDatagram(_ data: Data)
 
-    /// `errorHandler` fires on terminal failure; do not `sendDatagram` after.
-    func startReceiving(handler: @escaping @Sendable (Data) -> Void,
-                        errorHandler: @escaping @Sendable (Error?) -> Void)
+    /// Pulls the next inbound datagram. Returns `nil` on a clean end-of-stream and throws on terminal
+    /// failure — the QUIC connection tears down on either. Single-consumer.
+    func receiveDatagram() async throws -> Data?
 
     /// Tears down the transport. Idempotent.
     func cancel()
@@ -24,45 +22,30 @@ nonisolated protocol QUICDatagramTransport: AnyObject, Sendable {
 nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport, Sendable {
     private let connection: ProxyConnection
 
-    /// Guards `errorHandler` so it fires at most once across send- and receive-side failures.
-    private struct FailureState {
-        var handler: (@Sendable (Error?) -> Void)?
-        var failed = false
-    }
-
-    private let failureState = Mutex(FailureState())
-
     /// Outgoing datagrams reach the wire in submission order via a single owned writer task
     /// draining this stream. The one consumer *is* the ordering — no lock, no queue. The
     /// stream is `.unbounded`; the QUIC layer already bounds its own datagram backlog.
     private let outbound: AsyncStream<Data>.Continuation
 
-    /// Push handler stored here so the receive loop's `Task` captures only `self`
-    /// (the raw closure isn't `Sendable`).
-    private let receiveHandler = Mutex<(@Sendable (Data) -> Void)?>(nil)
-
-    /// The receive loop. Strong self: the loop owns the transport while receiving; `cancel()`
-    /// cancels it and the connection, ending the parked receive so ARC reclaims the transport.
-    private let receiveTask = Mutex<Task<Void, Never>?>(nil)
-
     init(connection: ProxyConnection) {
         self.connection = connection
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
         self.outbound = continuation
-        // The writer task's lifetime is the stream's: `cancel()` finishes `outbound` (owned by
-        // this transport), which ends the loop; a dropped transport finishes it via `outbound`'s
-        // deinit. Weak self so the task never keeps the transport — and through it the
-        // connection — alive.
-        Task { [weak self] in
+        // The writer task owns the connection strongly for its lifetime and drives ordered sends.
+        // `cancel()` finishes `outbound` (ending the drain) and cancels the connection; a dropped
+        // transport finishes `outbound` via its continuation's deinit — either way the loop ends and
+        // ARC reclaims the captured connection.
+        Task { [connection] in
             for await data in stream {
-                guard let self else { break }
                 do {
-                    try await self.connection.send(data)
+                    try await connection.send(data)
                 } catch {
                     // Transient errors (PMTU shrink, fragmentation refusal, queue overflow) are
                     // not terminal — outer QUIC loss recovery treats the drop as ordinary loss.
                     if Self.isTransientDatagramError(error) { continue }
-                    self.surfaceFailure(error)
+                    // A terminal send failure cancels the connection so the paired `receiveDatagram`
+                    // pull unblocks and the QUIC owner tears down.
+                    connection.cancel()
                     break
                 }
             }
@@ -71,6 +54,15 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
 
     func sendDatagram(_ data: Data) {
         outbound.yield(data)
+    }
+
+    func receiveDatagram() async throws -> Data? {
+        try await connection.receive()
+    }
+
+    func cancel() {
+        outbound.finish()   // ends the writer task's drain loop
+        connection.cancel()
     }
 
     /// True for per-datagram errors (packet didn't fit), false for terminal ones; the outer
@@ -103,53 +95,5 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
             return false
         }
         return false
-    }
-
-    func startReceiving(handler: @escaping @Sendable (Data) -> Void,
-                        errorHandler: @escaping @Sendable (Error?) -> Void) {
-        failureState.withLock { $0.handler = errorHandler }
-        receiveHandler.withLock { $0 = handler }
-        // Strong self: the loop owns the transport while receiving; `cancel()` cancels this
-        // task and the connection, which ends the parked receive.
-        let task = Task {
-            do {
-                while true {
-                    guard let data = try await connection.receive() else {
-                        surfaceFailure(nil)   // clean EOF
-                        return
-                    }
-                    receiveHandler.withLock { $0 }?(data)
-                }
-            } catch {
-                surfaceFailure(error)
-            }
-        }
-        receiveTask.withLock { $0 = task }
-    }
-
-    func cancel() {
-        // Swallow the teardown-driven EOF/error the receive loop will observe once the
-        // connection is cancelled, so it isn't surfaced as a spurious transport failure.
-        failureState.withLock { $0.failed = true; $0.handler = nil }
-        outbound.finish()   // ends the writer task's drain loop
-        // Cancel the receive loop, then the connection it is parked on; its strong self dies with it.
-        let receive = receiveTask.withLock { task -> Task<Void, Never>? in
-            defer { task = nil }
-            return task
-        }
-        receive?.cancel()
-        connection.cancel()
-    }
-
-    /// Forwards the latched `errorHandler` exactly once; taken out under the lock, invoked outside.
-    private func surfaceFailure(_ error: Error?) {
-        let handler: ((Error?) -> Void)? = failureState.withLock { state in
-            guard !state.failed else { return nil }
-            state.failed = true
-            let h = state.handler
-            state.handler = nil
-            return h
-        }
-        handler?(error)
     }
 }

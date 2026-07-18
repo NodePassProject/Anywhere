@@ -40,14 +40,12 @@ actor NaiveHTTP3Stream {
     nonisolated var isConnected: Bool { _isConnected.load(ordering: .relaxed) }
 
     /// Inbound DATA payloads / EOF / error from the multiplexer's demux events. The producer
-    /// side (`inbox`) runs on the shared executor; the single consumer pulls `inboxIterator`
-    /// from ``receiveData()`` as plain isolated state. QUIC flow control counts every stream
-    /// byte (HTTP/3 frame header + payload), so the per-chunk `quicBytes` accounting is split:
-    /// the demux path credits the frame-header octets as chunks arrive, and ``receiveData()``
-    /// credits the payload octets only once the app takes them — total credit stays exact,
-    /// backpressure preserved.
-    private let inbox: AsyncThrowingStream<Data, Error>.Continuation
-    nonisolated(unsafe) private var inboxIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// (`yield`/`finish`) runs on the shared executor; the single consumer pulls via
+    /// ``receiveData()``. QUIC flow control counts every stream byte (HTTP/3 frame header +
+    /// payload), so the per-chunk `quicBytes` accounting is split: the demux path credits the
+    /// frame-header octets as chunks arrive, and ``receiveData()`` credits the payload octets only
+    /// once the app takes them — total credit stays exact, backpressure preserved.
+    private let inbox = AsyncInbox<Data>()
 
     /// Partial HTTP/3 frame buffer; frames may span QUIC deliveries.
     private var frameBuffer = Data()
@@ -74,9 +72,6 @@ actor NaiveHTTP3Stream {
         let (connectStream, connectSignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.connectSignal = connectSignal
         self.connectTask = Task { for try await _ in connectStream {} }
-        let (inboxStream, inbox) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.inbox = inbox
-        self.inboxIterator = inboxStream.makeAsyncIterator()
     }
 
     // MARK: - NaiveTunnel
@@ -176,7 +171,7 @@ actor NaiveHTTP3Stream {
     }
     
     private func nextInboxChunk() async throws -> Data? {
-        try await inboxIterator.next(isolation: #isolation)
+        try await inbox.next()
     }
 
     private func performClose() {

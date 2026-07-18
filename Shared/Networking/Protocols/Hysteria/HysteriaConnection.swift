@@ -20,11 +20,10 @@ actor HysteriaConnection {
     /// Assigned once in `open()`, read from the send/receive/cancel paths.
     private nonisolated let _streamID = Atomic<Int64>(-1)
 
-    /// Inbound stream bytes from the demux. The producer (`rawInbox`) is `Sendable` and driven on
-    /// the ngtcp2 queue via `feedStreamData`; the single consumer pulls `rawIterator` from `open()`
-    /// (header) then `receiveRaw()` (data), so the iterator is plain actor-isolated state.
-    private nonisolated let rawInbox: AsyncThrowingStream<Data, Error>.Continuation
-    nonisolated(unsafe) private var rawIterator: AsyncThrowingStream<Data, Error>.AsyncIterator
+    /// Inbound stream bytes from the demux. The producer (`yield`/`finish`) is `Sendable` and driven
+    /// on the ngtcp2 queue via `feedStreamData`; a single consumer pulls via `open()` (header) then
+    /// `receiveRaw()` (data), never concurrently.
+    private let rawInbox = AsyncInbox<Data>()
     /// Post-header bytes left over from `open()`'s parse, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
 
@@ -34,9 +33,6 @@ actor HysteriaConnection {
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
-        let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
-        self.rawInbox = continuation
-        self.rawIterator = stream.makeAsyncIterator()
     }
 
     nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
@@ -124,10 +120,9 @@ actor HysteriaConnection {
         return chunk
     }
 
-    /// Single-consumer pull over `rawInbox`. Takes a local copy of the iterator for the mutating
-    /// async `next()` (both share the stream's backing storage) and stores it back.
+    /// Single-consumer pull over `rawInbox`.
     private func nextChunk() async throws -> Data? {
-        try await rawIterator.next(isolation: #isolation)
+        try await rawInbox.next()
     }
 
     nonisolated func cancel() {

@@ -20,11 +20,10 @@ actor HysteriaUDPConnection {
     /// Assigned once in `open()`, read from the send path.
     private nonisolated let _sessionID = Atomic<UInt32>(0)
 
-    /// Inbound datagram messages from the demux. Producer (`rawInbox`) is `Sendable` and driven on
-    /// the ngtcp2 queue; `receiveRaw()` pulls `rawIterator` and reassembles, so both the iterator and
-    /// the defrag slots are plain actor-isolated state.
-    private nonisolated let rawInbox: AsyncThrowingStream<HysteriaProtocol.UDPMessage, Error>.Continuation
-    nonisolated(unsafe) private var rawIterator: AsyncThrowingStream<HysteriaProtocol.UDPMessage, Error>.AsyncIterator
+    /// Inbound datagram messages from the demux. The producer (`yield`/`finish`) is `Sendable` and
+    /// driven on the ngtcp2 queue; `receiveRaw()` is the single consumer and reassembles, so the
+    /// defrag slots are plain actor-isolated state.
+    private let rawInbox = AsyncInbox<HysteriaProtocol.UDPMessage>()
 
     /// Per-PacketID reassembly slot; fragments arrive interleaved, so each PacketID owns one.
     /// Evicted on completion, TTL expiry, or cap overflow.
@@ -50,9 +49,6 @@ actor HysteriaUDPConnection {
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
-        let (stream, continuation) = AsyncThrowingStream.makeStream(of: HysteriaProtocol.UDPMessage.self)
-        self.rawInbox = continuation
-        self.rawIterator = stream.makeAsyncIterator()
     }
 
     nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
@@ -101,7 +97,7 @@ actor HysteriaUDPConnection {
     }
     
     private func nextMessage() async throws -> HysteriaProtocol.UDPMessage? {
-        try await rawIterator.next(isolation: #isolation)
+        try await rawInbox.next()
     }
 
     private func assembleFragment(_ message: HysteriaProtocol.UDPMessage) -> Data? {
