@@ -8,43 +8,41 @@
 import Foundation
 import Synchronization
 
-protocol DialDeadlineDelegate: AnyObject, Sendable {
-    nonisolated func dialDeadlineDidExpire()
+nonisolated func withDialDeadline<T: Sendable>(
+    _ duration: Duration,
+    onExpiry: @escaping @Sendable () -> Void,
+    error makeError: @escaping @Sendable () -> any Error,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let winner = RaceClaim()
+    return try await withThrowingTaskGroup(of: T?.self) { group in
+        group.addTask {
+            do {
+                let value = try await operation()
+                return winner.claim() ? value : nil
+            } catch {
+                if winner.claim() { throw error }
+                return nil
+            }
+        }
+        group.addTask {
+            do { try await Task.sleep(for: duration) } catch { return nil }
+            guard winner.claim() else { return nil }
+            onExpiry()
+            throw makeError()
+        }
+        defer { group.cancelAll() }
+        while let result = try await group.next() {
+            if let value = result { return value }
+        }
+        throw CancellationError()
+    }
 }
 
-nonisolated final class DialDeadline: Sendable {
-    private struct WeakDelegate: Sendable { weak var value: (any DialDeadlineDelegate)? }
+nonisolated final class RaceClaim: Sendable {
+    private let claimed = Atomic<Bool>(false)
 
-    private let duration: Duration
-    private let delegate: WeakDelegate
-    private let task = Mutex<Task<Void, Never>?>(nil)
-
-    init(_ duration: Duration, delegate: any DialDeadlineDelegate) {
-        self.duration = duration
-        self.delegate = WeakDelegate(value: delegate)
-    }
-    
-    func arm() {
-        let delegate = self.delegate.value
-        let fresh = Task {
-            do { try await Task.sleep(for: duration) } catch { return }
-            guard !Task.isCancelled else { return }
-            delegate?.dialDeadlineDidExpire()
-        }
-        task.withLock { existing in
-            existing?.cancel()
-            existing = fresh
-        }
-    }
-    
-    func disarm() {
-        task.withLock { existing in
-            existing?.cancel()
-            existing = nil
-        }
-    }
-
-    deinit {
-        task.withLock { $0?.cancel() }
+    func claim() -> Bool {
+        !claimed.exchange(true, ordering: .relaxed)
     }
 }

@@ -8,18 +8,11 @@
 import Foundation
 import Synchronization
 
-nonisolated final class WebSocketConnection: DialDeadlineDelegate, Sendable {
-    
+nonisolated final class WebSocketConnection: Sendable {
+
     // MARK: Deadline
-    
+
     private static let upgradeDeadline: Duration = .seconds(30)
-    
-    private let upgradeTimedOut = Atomic<Bool>(false)
-    
-    func dialDeadlineDidExpire() {
-        upgradeTimedOut.store(true, ordering: .relaxed)
-        cancel()
-    }
 
     // MARK: Transport
 
@@ -66,16 +59,12 @@ nonisolated final class WebSocketConnection: DialDeadlineDelegate, Sendable {
     // MARK: - HTTP Upgrade Handshake
     
     func performUpgrade(earlyData: Data? = nil) async throws {
-        let deadline = DialDeadline(Self.upgradeDeadline, delegate: self)
-        deadline.arm()
-        defer { deadline.disarm() }
-        do {
-            try await sendAndAwaitUpgrade(earlyData: earlyData)
-        } catch {
-            if upgradeTimedOut.load(ordering: .relaxed) {
-                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "handshake timed out"))
-            }
-            throw error
+        try await withDialDeadline(Self.upgradeDeadline, onExpiry: {
+            self.cancel()
+        }, error: {
+            AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "handshake timed out"))
+        }) {
+            try await self.sendAndAwaitUpgrade(earlyData: earlyData)
         }
     }
 

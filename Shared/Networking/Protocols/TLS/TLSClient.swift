@@ -22,23 +22,6 @@ nonisolated private enum ServerHelloResult {
     case helloRetryRequest
 }
 
-// MARK: - Handshake Deadline
-
-nonisolated private final class TLSHandshakeGuard: DialDeadlineDelegate {
-    static let deadline: Duration = .seconds(30)
-    
-    private let client: TLSClient
-    
-    let timedOut = Atomic<Bool>(false)
-    
-    init(_ client: TLSClient) { self.client = client }
-    
-    func dialDeadlineDidExpire() {
-        timedOut.store(true, ordering: .relaxed)
-        client.cancel()
-    }
-}
-
 // MARK: - TLSClient
 
 actor TLSClient {
@@ -138,84 +121,82 @@ actor TLSClient {
     }
 
     // MARK: - Public API
-
-    /// Dials a fresh TCP connection and performs the TLS handshake async-natively over the
-    /// transport's async surface. The ClientHello rides the connect as initial data, saving a
-    /// round trip.
+    
+    private static let handshakeDeadline: Duration = .seconds(30)
+    
+    private func withHandshakeDeadline(
+        _ handshake: @escaping @Sendable () async throws -> TLSRecordConnection
+    ) async throws -> TLSRecordConnection {
+        do {
+            return try await withDialDeadline(Self.handshakeDeadline, onExpiry: {
+                self.cancel()
+            }, error: {
+                AnywhereError.tls(.handshakeFailed(detail: "handshake timed out"))
+            }, operation: handshake)
+        } catch {
+            releaseOnFailure()
+            throw error
+        }
+    }
+    
     func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
-        let guardDelegate = TLSHandshakeGuard(self)
-        let deadline = DialDeadline(TLSHandshakeGuard.deadline, delegate: guardDelegate)
-        deadline.arm()
-        defer { deadline.disarm() }
-        do {
-            try await prepareECH()
-
-            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-            guard let privateKey = ephemeralPrivateKey else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
-            }
-
-            let clientHello = try buildTLSClientHello(privateKey: privateKey)
-            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-            let transport = TCPTransport(host: host, port: port)
-            adoptTransport(transport)
-            do {
-                try await transport.connect(initialData: clientHello)
-            } catch {
-                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
-            }
-
-            return try await receiveServerResponse()
-        } catch {
-            releaseOnFailure()
-            if guardDelegate.timedOut.load(ordering: .relaxed) {
-                throw AnywhereError.tls(.handshakeFailed(detail: "handshake timed out"))
-            }
-            throw error
+        try await withHandshakeDeadline {
+            try await self.performConnect(host: host, port: port)
         }
     }
 
-    /// Performs the TLS handshake over an existing proxy tunnel (proxy chaining).
+    private func performConnect(host: String, port: UInt16) async throws -> TLSRecordConnection {
+        try await prepareECH()
+
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        guard let privateKey = ephemeralPrivateKey else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
+        }
+
+        let clientHello = try buildTLSClientHello(privateKey: privateKey)
+        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+        let transport = TCPTransport(host: host, port: port)
+        adoptTransport(transport)
+        do {
+            try await transport.connect(initialData: clientHello)
+        } catch {
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
+        }
+
+        return try await receiveServerResponse()
+    }
+    
     func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
-        let guardDelegate = TLSHandshakeGuard(self)
-        let deadline = DialDeadline(TLSHandshakeGuard.deadline, delegate: guardDelegate)
-        deadline.arm()
-        defer { deadline.disarm() }
-        do {
-            try await prepareECH()
-
-            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-            guard let privateKey = ephemeralPrivateKey else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
-            }
-            adoptTransport(TunneledTransport(tunnel: tunnel))
-
-            let clientHello = try buildTLSClientHello(privateKey: privateKey)
-            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-            guard let connection = self.connection else {
-                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
-            }
-            do {
-                try await connection.send(clientHello)
-            } catch {
-                throw AnywhereError.tls(.handshakeFailed(detail: error.localizedDescription))
-            }
-
-            return try await receiveServerResponse()
-        } catch {
-            releaseOnFailure()
-            if guardDelegate.timedOut.load(ordering: .relaxed) {
-                throw AnywhereError.tls(.handshakeFailed(detail: "handshake timed out"))
-            }
-            throw error
+        try await withHandshakeDeadline {
+            try await self.performConnect(overTunnel: tunnel)
         }
     }
 
-    /// Aborts an in-flight handshake from any task. Cancelling the transport makes the driver's
-    /// parked `receive()` throw, so `releaseOnFailure` clears the isolated crypto state as it unwinds
-    /// — this nonisolated path only needs to drop the transport.
+    private func performConnect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        try await prepareECH()
+
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        guard let privateKey = ephemeralPrivateKey else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
+        }
+        adoptTransport(TunneledTransport(tunnel: tunnel))
+
+        let clientHello = try buildTLSClientHello(privateKey: privateKey)
+        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+        guard let connection = self.connection else {
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
+        }
+        do {
+            try await connection.send(clientHello)
+        } catch {
+            throw AnywhereError.tls(.handshakeFailed(detail: error.localizedDescription))
+        }
+
+        return try await receiveServerResponse()
+    }
+    
     nonisolated func cancel() {
         takeConnection()?.cancel()
     }

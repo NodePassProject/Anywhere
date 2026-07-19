@@ -10,31 +10,34 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
-nonisolated private final class InFlightDial: DialDeadlineDelegate {
+nonisolated private final class InFlightDial: Sendable {
     enum Target {
         case connection(any ProxyConnection)
-        case proxyTask(Task<any ProxyConnection, any Error>, ProxyClient)
+        case client(ProxyClient)
     }
 
     private let target: Target
     
-    let timedOut = Atomic<Bool>(false)
+    let aborted: AsyncStream<Never>
+    private let abortSignal: AsyncStream<Never>.Continuation
 
-    init(_ target: Target) { self.target = target }
+    private let winner = RaceClaim()
+
+    init(_ target: Target) {
+        self.target = target
+        (aborted, abortSignal) = AsyncStream.makeStream(of: Never.self)
+    }
+
+    func claim() -> Bool { winner.claim() }
 
     func cancel() {
+        abortSignal.finish()
         switch target {
         case .connection(let connection):
             connection.cancel()
-        case .proxyTask(let task, let client):
-            task.cancel()
+        case .client(let client):
             client.cancel()
         }
-    }
-
-    func dialDeadlineDidExpire() {
-        timedOut.store(true, ordering: .relaxed)
-        cancel()
     }
 }
 
@@ -58,7 +61,8 @@ actor TCPConnection: MITMSessionHost {
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
-    private var proxyDialTask: Task<Void, Never>?
+    
+    private var sessionTask: Task<Void, Never>?
     
     private let acceptedViaDefault: Bool
     
@@ -93,10 +97,8 @@ actor TCPConnection: MITMSessionHost {
     private var httpSniffer: HTTPRequestSniffer?
 
     // MARK: Relay
-    
+
     private var stream: TCPStreamConcurrencyBridge?
-    
-    private var relayTask: Task<Void, Never>?
 
     // MARK: Actor-isolated idle timer
     
@@ -313,7 +315,7 @@ actor TCPConnection: MITMSessionHost {
         if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
         if uplinkDone { stream.assumeIsolated { $0.deliverUploadEOF() } }
         let context = RelayContext(stack: stack, routeTarget: routeTarget)
-        relayTask = Task {
+        sessionTask = Task {
             await self.runRelay(connection, stream: stream, context: context)
         }
     }
@@ -500,8 +502,6 @@ actor TCPConnection: MITMSessionHost {
     
     private func beginConnecting() {
         guard !closed, !proxyConnecting, proxyConnection == nil, mitmSession == nil else { return }
-        // MITM defers the dial into the session: a rewrite may change the host,
-        // and a 302 / reject answers without dialing at all.
         if mitmEnabled {
             startMITMSession()
             return
@@ -515,18 +515,15 @@ actor TCPConnection: MITMSessionHost {
     
     private func applySNI(_ sni: String) {
         guard let stack else { return }
-
-        // MITM (intercept TLS?) is decided independently of routing (which leg).
+        
         if stack.mitmEnabled, stack.mitmPolicy.matches(sni) {
             mitmEnabled = true
             mitmSNI = sni
-            // Routing is deferred to the dialer.
             return
         }
 
         let router = stack.domainRouter
         guard let match = router.matchDomain(sni) else {
-            // No domain rule — keep the IP-derived route.
             return
         }
 
@@ -542,9 +539,6 @@ actor TCPConnection: MITMSessionHost {
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectWithTLSAlert()
         case .proxy(let id):
-            // The domain rule wins over any IP-CIDR route set at accept time — but only with
-            // its configuration in hand. Committing `.proxy(id)` while keeping the accept-time
-            // configuration would dial a proxy the request log doesn't show.
             guard let resolved = router.resolveConfiguration(action: match.action) else {
                 logger.report("[TCP] SNI route", error: AnywhereError.routing(.configurationMissing(host: sni)))
                 return
@@ -593,15 +587,12 @@ actor TCPConnection: MITMSessionHost {
         if initialData != nil {
             pendingData.removeAll(keepingCapacity: true)
         }
-
-        // Direct/bypass — not a proxied connection. TCPTransport has no dial
-        // timer, so it stays out of the Dial stat automatically.
+        
         let transport = TCPTransport(host: dstHost, port: dstPort)
         let connection = DirectProxyConnection(transport: transport)
         self.proxyConnection = connection
-        // Strong self, stored like the proxy dial: teardown cancels this task so a still-connecting
-        // transport unwinds; the finish handler's `closed` guard releases a late-delivered dial.
-        proxyDialTask = Task {
+        
+        sessionTask = Task {
             let error: Error?
             do {
                 try await transport.connect()
@@ -609,14 +600,13 @@ actor TCPConnection: MITMSessionHost {
             } catch let dialError {
                 error = dialError
             }
-            // Same-actor call (the Task inherits this actor's executor); no hop, no await.
             self.finishDirectConnect(connection: connection, error: error, initialData: initialData)
         }
     }
-    
+
     private func finishDirectConnect(connection: DirectProxyConnection, error: Error?, initialData: Data?) {
         proxyConnecting = false
-        proxyDialTask = nil
+        sessionTask = nil
         guard !closed else { return }
 
         if let error {
@@ -665,25 +655,21 @@ actor TCPConnection: MITMSessionHost {
 
         let host = dstHost
         let port = dstPort
-        // Strong self: teardown cancels this task (unwinding a still-connecting handshake); the
-        // finish handler's `closed` guard cancels a connection delivered after a mid-dial close.
-        proxyDialTask = Task {
+        
+        sessionTask = Task {
             let result: Result<ProxyConnection, Error>
             do {
                 result = .success(try await client.connect(to: host, port: port, initialData: initialData))
             } catch {
                 result = .failure(error)
             }
-            // Same-actor call (the Task inherits this actor's executor); no hop, no await.
             self.finishProxyConnect(result: result, initialData: initialData)
         }
     }
-
-    /// Completes a proxy dial on the actor: wires the activity timer and starts the relay,
-    /// or reports the failure. Cancels a late connection if teardown already closed us.
+    
     private func finishProxyConnect(result: Result<ProxyConnection, Error>, initialData: Data?) {
         proxyConnecting = false
-        proxyDialTask = nil
+        sessionTask = nil
         guard !closed else {
             if case .success(let connection) = result { connection.cancel() }
             return
@@ -714,7 +700,7 @@ actor TCPConnection: MITMSessionHost {
         }
     }
 
-    // MARK: - Idle Timer (actor-isolated)
+    // MARK: - Idle Timer
     
     private func startIdleTimer() {
         idleTimeout = initialIdleTimeout
@@ -759,8 +745,7 @@ actor TCPConnection: MITMSessionHost {
             checkIdle()
         }
     }
-
-    /// Runs on the actor: closes if idle past `idleTimeout`, else re-arms for the remaining window.
+    
     private func checkIdle() {
         guard !closed, idleActive, idleTimeout > 0 else { return }
         let elapsed = MonotonicClock.now - lastActivityTick.load(ordering: .relaxed)
@@ -903,7 +888,6 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func resolveUpstreamRoute(forDialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?) {
-        // A rule matching the real dial host is an explicit route, never the default.
         if let router = stack?.domainRouter, let match = router.matchDomain(host) {
             switch match.action {
             case .direct:
@@ -918,7 +902,6 @@ actor TCPConnection: MITMSessionHost {
             }
         }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
-            // Unchanged host keeps the accept-time route — and carries its default-ness.
             let route: UpstreamRoute = bypass ? .direct : .proxy(routeTarget: routeTarget, configuration: configuration)
             return (route, acceptedViaDefault, ruleSetName)
         }
@@ -926,8 +909,6 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func defaultUpstreamRoute() -> UpstreamRoute {
-        // Read the default route/configuration from the stack's published UDP-config snapshot
-        // (nonisolated), so this stays synchronous without hopping onto the stack actor.
         guard let config = stack?.udpConfig(),
               case .proxy = config.defaultRouteTarget,
               let configuration = config.configuration else {
@@ -939,21 +920,22 @@ actor TCPConnection: MITMSessionHost {
     private func dialDirectUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
         let transport = TCPTransport(host: host, port: port)
         let connection = DirectProxyConnection(transport: transport)
-        
+
         let dial = InFlightDial(.connection(connection))
         inFlightDials.append(dial)
         defer { forgetDial(dial) }
-        
-        let deadline = DialDeadline(.seconds(TunnelConstants.handshakeTimeout), delegate: dial)
-        deadline.arm()
-        defer { deadline.disarm() }
-        
+
         do {
-            try await transport.connect()
+            try await withDialDeadline(.seconds(TunnelConstants.handshakeTimeout), onExpiry: {
+                dial.cancel()
+            }, error: {
+                Self.upstreamDialTimeout
+            }) {
+                try await transport.connect()
+            }
             return MITMDialResult(connection: connection, proxyClient: nil)
         } catch {
             connection.cancel()
-            if dial.timedOut.load(ordering: .relaxed) { throw Self.upstreamDialTimeout }
             throw error
         }
     }
@@ -963,23 +945,43 @@ actor TCPConnection: MITMSessionHost {
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
-        
-        let dialTask = Task { try await client.connect(to: host, port: port, initialData: nil) }
-        let dial = InFlightDial(.proxyTask(dialTask, client))
+        let dial = InFlightDial(.client(client))
         inFlightDials.append(dial)
         defer { forgetDial(dial) }
-        
-        let deadline = DialDeadline(.seconds(TunnelConstants.handshakeTimeout), delegate: dial)
-        deadline.arm()
-        defer { deadline.disarm() }
-        
+
         do {
-            let connection = try await dialTask.value
+            let connection = try await withThrowingTaskGroup(of: (any ProxyConnection)?.self) { group in
+                group.addTask {
+                    do {
+                        let opened = try await client.connect(to: host, port: port, initialData: nil)
+                        if dial.claim() { return opened }
+                        opened.cancel()  // the deadline or teardown already won
+                        return nil
+                    } catch {
+                        if dial.claim() { throw error }
+                        return nil
+                    }
+                }
+                group.addTask {
+                    do { try await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout)) } catch { return nil }
+                    guard dial.claim() else { return nil }
+                    dial.cancel()
+                    throw Self.upstreamDialTimeout
+                }
+                group.addTask {
+                    for await _ in dial.aborted {}
+                    guard dial.claim() else { return nil }
+                    throw AnywhereError.transport(.terminated)
+                }
+                defer { group.cancelAll() }
+                while let result = try await group.next() {
+                    if let opened = result { return opened }
+                }
+                throw AnywhereError.transport(.terminated)
+            }
             return MITMDialResult(connection: connection, proxyClient: client)
         } catch {
-            dialTask.cancel()
             await client.cancel()
-            if dial.timedOut.load(ordering: .relaxed) { throw Self.upstreamDialTimeout }
             throw error
         }
     }
@@ -1055,22 +1057,19 @@ actor TCPConnection: MITMSessionHost {
         cancelIdleTimer()
         let connection = proxyConnection
         let client = proxyClient
-        let dial = proxyDialTask
         let session = mitmSession
         let stream = self.stream
-        let relay = self.relayTask
+        let lifecycle = sessionTask
         proxyConnection = nil
         proxyClient = nil
-        proxyDialTask = nil
+        sessionTask = nil
         proxyConnecting = false
         self.stream = nil
-        self.relayTask = nil
         pendingData = Data()
         mitmSession = nil
         session?.assumeIsolated { $0.cancel(error: nil) }
         stream?.assumeIsolated { $0.terminate() }
-        relay?.cancel()
-        dial?.cancel()
+        lifecycle?.cancel()
         if abortive {
             connection?.abort()
         } else {

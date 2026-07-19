@@ -15,8 +15,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     // MARK: - Properties
 
     let configuration: ProxyConfiguration
-
-    /// Fields guarded by `lock`.
+    
     private struct State {
         var proxyClient: ProxyClient?
         var proxyConnection: ProxyConnection?
@@ -24,32 +23,17 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         var nextSessionID: UInt16 = 1
         var closed = false
         var isXUDP = false
-
-        /// Memoized dial: the first `ensureReady` caller stores its connect task here and every
-        /// other caller awaits it, so a burst of first-use streams coalesces onto one dial.
         var readyTask: Task<Void, Error>?
-
         var frameParser = VLESSVisionUDPFrameParser()
-
-        /// Idle-close timer as a cancellable `Task` (re-armed whenever the stream set empties).
-        var idleTask: Task<Void, Never>?
-
-        /// Tail of the wire-send chain: each frame links after the previous and runs only once it
-        /// finishes, so frames never interleave on the shared connection — no lock held across the write.
+        var idleSince: ContinuousClock.Instant?
         var sendTail: Task<Void, Error>?
-
-        /// The connection read loop. Strong self: the loop owns the mux while receiving;
-        /// `close(error:)` cancels it and the connection, ending the parked receive.
-        var readTask: Task<Void, Never>?
+        var runTask: Task<Void, Never>?
     }
 
     private let lock = Mutex(State())
 
     private static let idleTimeout: TimeInterval = 16
-
-    /// Called once when the mux becomes permanently unusable (idle timeout, transport failure,
-    /// or explicit close) so the pool can evict it. Immutable — installed at creation, before
-    /// the mux is shared; fires off the pool's lock.
+    
     private let onClose: (@Sendable (VLESSVisionUDPMultiplexer) -> Void)?
 
     // MARK: - Init
@@ -106,38 +90,60 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         let published = lock.withLock { state -> Bool in
             guard !state.closed else { return false }
             state.proxyConnection = connection
+            markIdlenessLocked(&state)
             return true
         }
         guard published else {
-            // Closed mid-dial: `close()` already tore down; just drop the connection.
             connection.cancel()
             throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed"))
         }
-        startReadLoop(connection)
-        resetIdleTimer()
+        startSession(connection)
     }
-
-    private func resetIdleTimer() {
+    
+    private func startSession(_ connection: ProxyConnection) {
+        let task = Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self.runReadLoop(connection) }
+                group.addTask { await self.runIdleSweep() }
+            }
+        }
         lock.withLock { state in
-            state.idleTask?.cancel()
-            state.idleTask = nil
-            guard !state.closed, state.streams.isEmpty else { return }
-            state.idleTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(Self.idleTimeout * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                self?.idleTimerFired()
+            if state.closed {
+                task.cancel()
+            } else {
+                state.runTask = task
+            }
+        }
+    }
+    
+    private func markIdlenessLocked(_ state: inout State) {
+        state.idleSince = state.streams.isEmpty ? ContinuousClock.now : nil
+    }
+    
+    private func runIdleSweep() async {
+        while !Task.isCancelled {
+            enum Step { case expired; case sleep(Duration) }
+            let step: Step? = lock.withLock { state in
+                guard !state.closed else { return nil }
+                guard let since = state.idleSince else { return .sleep(.seconds(Self.idleTimeout)) }
+                let elapsed = since.duration(to: ContinuousClock.now)
+                if elapsed >= .seconds(Self.idleTimeout) { return .expired }
+                return .sleep(.seconds(Self.idleTimeout) - elapsed)
+            }
+            switch step {
+            case nil:
+                return
+            case .expired:
+                close(error: nil)
+                return
+            case .sleep(let duration):
+                try? await Task.sleep(for: duration)
             }
         }
     }
 
-    private func idleTimerFired() {
-        let shouldClose = lock.withLock { state in !state.closed && state.streams.isEmpty }
-        if shouldClose { close(error: nil) }
-    }
-
     // MARK: - Streams
-
-    /// Lazily connects the underlying proxy connection on first use, then opens a stream.
+    
     func openStream(
         network: VLESSVisionUDPNetwork,
         host: String,
@@ -154,14 +160,12 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             let sessionID: UInt16
             let xudp: Bool
             if globalID != nil {
-                // VLESSVisionUDPGlobalID: one flow per mux connection, always stream ID 0
                 sessionID = 0
                 state.isXUDP = true
                 xudp = true
             } else {
                 sessionID = state.nextSessionID
                 state.nextSessionID &+= 1
-                // Skip 0 (reserved)
                 if state.nextSessionID == 0 { state.nextSessionID = 1 }
                 xudp = false
             }
@@ -174,10 +178,9 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
                 multiplexer: self
             )
             state.streams[sessionID] = stream
+            markIdlenessLocked(&state)
             return (stream, sessionID, xudp)
         }
-
-        resetIdleTimer()
 
         do {
             try await ensureReady()
@@ -185,9 +188,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             removeStreamEntry(sessionID)
             throw error
         }
-
-        // For VLESSVisionUDPGlobalID, the first UDP payload must be sent on the New frame so the
-        // server parses GlobalID from a data-bearing packet.
+        
         if isXUDP {
             return stream
         }
@@ -210,19 +211,16 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         }
         return stream
     }
-
-    /// Drops a stream after a failed open — cleanup only, no idle re-arm.
+    
     private func removeStreamEntry(_ sessionID: UInt16) {
         lock.withLock { _ = $0.streams.removeValue(forKey: sessionID) }
     }
-
-    /// Removes a stream that closed itself; re-arms the idle timer if the mux went idle.
+    
     func removeStream(_ sessionID: UInt16) {
-        let becameIdle: Bool = lock.withLock { state in
+        lock.withLock { state in
             state.streams.removeValue(forKey: sessionID)
-            return state.streams.isEmpty
+            markIdlenessLocked(&state)
         }
-        if becameIdle { resetIdleTimer() }
     }
 
     // MARK: - Send
@@ -251,23 +249,18 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
 
     // MARK: - Read Loop
 
-    private func startReadLoop(_ connection: ProxyConnection) {
-        // Strong self: the loop owns the mux while receiving; `close(error:)` cancels this
-        // task and the connection, which ends the parked receive so ARC reclaims the mux.
-        let task = Task {
-            do {
-                while true {
-                    guard let data = try await connection.receive(), !data.isEmpty else {
-                        handleReadEnd(error: nil)   // clean EOF
-                        return
-                    }
-                    handleInbound(data)
+    private func runReadLoop(_ connection: ProxyConnection) async {
+        do {
+            while true {
+                guard let data = try await connection.receive(), !data.isEmpty else {
+                    handleReadEnd(error: nil)   // clean EOF
+                    return
                 }
-            } catch {
-                handleReadEnd(error: error)
+                handleInbound(data)
             }
+        } catch {
+            handleReadEnd(error: error)
         }
-        lock.withLock { $0.readTask = task }
     }
 
     private func handleReadEnd(error: Error?) {
@@ -318,17 +311,14 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     }
 
     // MARK: - Close
-
-    /// `error` is non-nil when the mux connection died with a transport failure;
-    /// pass `nil` for normal teardown (idle close, deliberate cancel). Idempotent.
+    
     func close(error: Error? = nil) {
         struct Teardown {
             var streams: [VLESSVisionUDPStream]
             var connection: ProxyConnection?
             var client: ProxyClient?
-            var idleTask: Task<Void, Never>?
             var readyTask: Task<Void, Error>?
-            var readTask: Task<Void, Never>?
+            var runTask: Task<Void, Never>?
         }
 
         let teardown: Teardown? = lock.withLock { state in
@@ -339,25 +329,20 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
                 streams: Array(state.streams.values),
                 connection: state.proxyConnection,
                 client: state.proxyClient,
-                idleTask: state.idleTask,
                 readyTask: state.readyTask,
-                readTask: state.readTask
+                runTask: state.runTask
             )
             state.streams.removeAll()
             state.proxyConnection = nil
             state.proxyClient = nil
-            state.idleTask = nil
             state.readyTask = nil
-            state.readTask = nil
+            state.runTask = nil
             state.frameParser.reset()
             return snapshot
         }
         guard let teardown else { return }
-
-        teardown.idleTask?.cancel()
-        // Cancel the read loop, then (below) the connection it is parked on; its strong self
-        // dies with it.
-        teardown.readTask?.cancel()
+        
+        teardown.runTask?.cancel()
 
         for stream in teardown.streams {
             stream.deliverClose(error: error)
@@ -365,14 +350,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
 
         teardown.connection?.cancel()
         teardown.client?.cancel()
-
-        // Cancel the in-flight dial so a coalesced `ensureReady` caller unblocks: its `connectMultiplexer`
-        // observes cancellation (and the just-cancelled client) and throws, failing every awaiter of the
-        // shared task. In-flight/queued sends fail fast on their own because the connection is cancelled.
         teardown.readyTask?.cancel()
-
-        // Fired last so the pool evicts exactly once (the `closed` guard above makes close()
-        // idempotent).
         onClose?(self)
     }
 }

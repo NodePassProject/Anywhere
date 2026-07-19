@@ -9,7 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated final class TCPTransport: ByteTransport, DialDeadlineDelegate, Sendable {
+nonisolated final class TCPTransport: ByteTransport, Sendable {
 
     // MARK: Constants
 
@@ -102,17 +102,17 @@ nonisolated final class TCPTransport: ByteTransport, DialDeadlineDelegate, Senda
             throw AnywhereError.transport(.terminated)
         }
         
-        let deadline = DialDeadline(Self.dialDeadline, delegate: self)
-        deadline.arm()
-        defer { deadline.disarm() }
-
-        try await withTaskCancellationHandler {
-            for try await _ in guts.dialOutcome {}
-        } onCancel: {
-            cancel()
+        try await withDialDeadline(Self.dialDeadline, onExpiry: {
+            self.cancel()
+        }, error: {
+            AnywhereError.transport(.posix(.connect, errno: ETIMEDOUT))
+        }) {
+            try await withTaskCancellationHandler {
+                for try await _ in guts.dialOutcome {}
+            } onCancel: {
+                self.cancel()
+            }
         }
-        // A cancelled iteration ends without throwing; only a live, ready
-        // transport may report a successful dial.
         guard isReady else { throw AnywhereError.transport(.terminated) }
     }
 
@@ -147,8 +147,6 @@ nonisolated final class TCPTransport: ByteTransport, DialDeadlineDelegate, Senda
 
                 if let initialData, hasInitialData {
                     do {
-                        // Bounded by the connect-level ``DialDeadline``: on expiry the driver task is
-                        // cancelled, unwinding this send.
                         try await connection.send(initialData, endOfStream: false)
                     } catch {
                         guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
@@ -236,10 +234,6 @@ nonisolated final class TCPTransport: ByteTransport, DialDeadlineDelegate, Senda
         guts.dialSignal.finish(throwing: dialError)
         guts.teardownSignal.finish()
         task?.cancel()
-    }
-    
-    func dialDeadlineDidExpire() {
-        tearDown(dialError: AnywhereError.transport(.posix(.connect, errno: ETIMEDOUT)))
     }
 
     // MARK: - Helpers

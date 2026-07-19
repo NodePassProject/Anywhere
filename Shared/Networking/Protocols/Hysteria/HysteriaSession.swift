@@ -18,34 +18,23 @@ nonisolated final class HysteriaSession: Sendable {
 
     private let quic: QUICConnection
     private let configuration: HysteriaConfiguration
-
-    /// Session + demux state, guarded by `lock`. Never held across a call into a consumer
-    /// connection, a QUIC write, or a continuation resume; effects are computed under the
-    /// lock and performed after it is released.
+    
     private struct Session {
         var state: State = .idle
-
-        /// Once-only gate shared by `close()` and `failSession`; terminal teardown runs exactly once.
         var closed = false
-
-        /// Bidi stream used for the one-shot auth POST.
+        
         var authStreamID: Int64 = -1
         var authBuffer = Data()
         var authHeadersReceived = false
 
         var tcpStreams: [Int64: HysteriaConnection] = [:]
-
-        /// Server-initiated streams already rejected via STOP_SENDING/RESET_STREAM,
-        /// so chunks arriving before the peer's reset don't re-trigger `shutdownStream`.
         var rejectedServerStreams: Set<Int64> = []
 
         var udpSessions: [UInt32: HysteriaUDPConnection] = [:]
         var nextUDPSessionID: UInt32 = 1
-
-        /// Pending idle close; without it the QUIC connection (socket, ngtcp2
-        /// state, keep-alive PING) stays resident forever after the last consumer
-        /// goes away.
-        var idleCloseTask: Task<Void, Never>?
+        
+        var idleSince: ContinuousClock.Instant?
+        var idleSweepTask: Task<Void, Never>?
 
         var udpSupported = false
         var serverRxBytesPerSec: UInt64 = 0
@@ -485,32 +474,46 @@ nonisolated final class HysteriaSession: Sendable {
             updateIdleCloseTimer()
         }
     }
-
-    /// Re-checks counts at fire time so a rapid release-then-open cycle doesn't
-    /// tear the connection down. `_poolState` is read off `lock` (never nested).
+    
     private func updateIdleCloseTimer() {
-        lock.withLock { session in
-            session.idleCloseTask?.cancel()
-            session.idleCloseTask = nil
-        }
-        guard lock.withLock({ $0.state == .ready }) else { return }
         let total = _poolState.withLock { $0.tcpCount + $0.udpCount }
-        guard total == 0 else { return }
-
-        // Weak: the idle timer observes its owner; it must not keep an otherwise
-        // dropped session alive for the whole idle window.
-        let task = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.idleCloseDelay))
-            guard !Task.isCancelled, let self else { return }
-            self.closeIfStillIdle()
+        lock.withLock { session in
+            guard session.state == .ready, !session.closed else {
+                session.idleSince = nil
+                return
+            }
+            session.idleSince = total == 0 ? ContinuousClock.now : nil
+            if session.idleSweepTask == nil {
+                session.idleSweepTask = Task { [weak self] in await self?.runIdleSweep() }
+            }
         }
-        let armed = lock.withLock { session -> Bool in
-            guard session.state == .ready else { return false }
-            session.idleCloseTask?.cancel()   // cancel any timer raced in between the checks
-            session.idleCloseTask = task
-            return true
+    }
+    
+    private func runIdleSweep() async {
+        enum Step { case closeNow; case sleep(Duration); case stop }
+        while !Task.isCancelled {
+            let step: Step = lock.withLock { session in
+                guard !session.closed, session.state == .ready else { return .stop }
+                guard let since = session.idleSince else { return .sleep(.seconds(Self.idleCloseDelay)) }
+                let elapsed = since.duration(to: ContinuousClock.now)
+                if elapsed >= .seconds(Self.idleCloseDelay) { return .closeNow }
+                return .sleep(.seconds(Self.idleCloseDelay) - elapsed)
+            }
+            switch step {
+            case .stop:
+                return
+            case .sleep(let duration):
+                try? await Task.sleep(for: duration)
+            case .closeNow:
+                closeIfStillIdle()
+                let done = lock.withLock { session -> Bool in
+                    if session.closed { return true }
+                    session.idleSince = nil
+                    return false
+                }
+                if done { return }
+            }
         }
-        if !armed { task.cancel() }
     }
 
     private func closeIfStillIdle() {
@@ -541,15 +544,12 @@ nonisolated final class HysteriaSession: Sendable {
     private func failSession(_ error: Error) {
         performTeardown(readyError: error, connectionError: error)
     }
-
-    /// Terminal teardown; the `closed` gate makes it run exactly once. `readyError` resolves
-    /// pending `ensureReady()` awaiters (`.streamClosed` marks a retryable eviction);
-    /// `connectionError` fans out to live TCP/UDP consumers.
+    
     private func performTeardown(readyError: Error, connectionError: Error) {
         struct Teardown {
             var tcp: [HysteriaConnection]
             var udp: [HysteriaUDPConnection]
-            var idleCloseTask: Task<Void, Never>?
+            var idleSweepTask: Task<Void, Never>?
         }
         let teardown: Teardown? = lock.withLock { session in
             guard !session.closed else { return nil }
@@ -558,9 +558,10 @@ nonisolated final class HysteriaSession: Sendable {
             let snapshot = Teardown(
                 tcp: Array(session.tcpStreams.values),
                 udp: Array(session.udpSessions.values),
-                idleCloseTask: session.idleCloseTask
+                idleSweepTask: session.idleSweepTask
             )
-            session.idleCloseTask = nil
+            session.idleSweepTask = nil
+            session.idleSince = nil
             session.tcpStreams.removeAll()
             session.udpSessions.removeAll()
             session.rejectedServerStreams.removeAll()
@@ -568,10 +569,8 @@ nonisolated final class HysteriaSession: Sendable {
         }
         guard let teardown else { return }
 
-        teardown.idleCloseTask?.cancel()
-
-        // Zero counters atomically with isClosed so hasActiveConnections
-        // never reads true on a closed session.
+        teardown.idleSweepTask?.cancel()
+        
         let onClose = _poolState.withLock { state in
             state.isClosed = true
             state.tcpCount = 0

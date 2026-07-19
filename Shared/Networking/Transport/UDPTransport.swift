@@ -9,7 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated final class UDPTransport: DatagramTransport, DialDeadlineDelegate, Sendable {
+nonisolated final class UDPTransport: DatagramTransport, Sendable {
 
     // MARK: Constants
 
@@ -94,14 +94,16 @@ nonisolated final class UDPTransport: DatagramTransport, DialDeadlineDelegate, S
             throw AnywhereError.transport(.terminated)
         }
         
-        let deadline = DialDeadline(Self.dialDeadline, delegate: self)
-        deadline.arm()
-        defer { deadline.disarm() }
-
-        try await withTaskCancellationHandler {
-            for try await _ in guts.dialOutcome {}
-        } onCancel: {
-            cancel()
+        try await withDialDeadline(Self.dialDeadline, onExpiry: {
+            self.cancel()
+        }, error: {
+            self.dialTimeoutError()
+        }) {
+            try await withTaskCancellationHandler {
+                for try await _ in guts.dialOutcome {}
+            } onCancel: {
+                self.cancel()
+            }
         }
         guard isReady else { throw AnywhereError.transport(.terminated) }
     }
@@ -192,11 +194,7 @@ nonisolated final class UDPTransport: DatagramTransport, DialDeadlineDelegate, S
     func cancel() {
         tearDown(dialError: AnywhereError.transport(.terminated))
     }
-    
-    func dialDeadlineDidExpire() {
-        tearDown(dialError: dialTimeoutError())
-    }
-    
+
     private func tearDown(dialError: Error) {
         let task: Task<Void, Never>? = guts.state.withLock { state in
             guard !state.cancelled else { return nil }

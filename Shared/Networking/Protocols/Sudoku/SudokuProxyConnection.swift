@@ -2402,11 +2402,8 @@ nonisolated private enum SudokuAddress {
 nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
     private static let keepaliveInterval: TimeInterval = 15
     private let record: SudokuRecordStream
-    /// Non-nil when the session owns its transport (pooled sessions); torn down on close.
     private let factory: SudokuConnectionFactory?
-
-    /// Called once when the session becomes permanently unusable so the pool can evict it.
-    /// Immutable — installed at creation, before the client is shared.
+    
     private let onClose: (@Sendable (SudokuMuxClient) -> Void)?
 
     private struct State {
@@ -2414,19 +2411,14 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
         var nextStreamID: UInt32 = 0
         var lastWrite: ContinuousClock.Instant = ContinuousClock.now
         var closed = false
-        /// The 15s keepalive loop; cancelled on close.
-        var keepaliveTask: Task<Void, Never>?
-        /// The frame reader loop. Strong self: the loop owns the client while reading; `close`
-        /// cancels it and the record it is parked on, ending the loop.
-        var readerTask: Task<Void, Never>?
+        var runTask: Task<Void, Never>?
     }
     private let state = Mutex(State())
 
     var isClosed: Bool {
         state.withLock { $0.closed }
     }
-
-    /// Thread-safe count read off-queue by the pool's idle sweep.
+    
     var activeStreamCount: Int {
         state.withLock { $0.streams.count }
     }
@@ -2436,21 +2428,20 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
         self.record = record
         self.factory = factory
         self.onClose = onClose
-        // Keepalive stays weak-self: it's a periodic timer, so a strong capture would pin the
-        // client across an idle interval after close (which cancels it).
-        let keepaliveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.keepaliveInterval))
-                if Task.isCancelled { return }
-                self?.sendKeepaliveIfIdle()
+        let task = Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self.readerLoop() }
+                group.addTask { await self.keepaliveLoop() }
             }
         }
-        // Strong self: the reader owns the client while reading; `close` cancels this task and
-        // closes the record it is parked on, ending the loop so ARC reclaims the client.
-        let readerTask = Task { await self.readerLoop() }
-        state.withLock {
-            $0.keepaliveTask = keepaliveTask
-            $0.readerTask = readerTask
+        state.withLock { $0.runTask = task }
+    }
+
+    private func keepaliveLoop() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(Self.keepaliveInterval))
+            if Task.isCancelled { return }
+            sendKeepaliveIfIdle()
         }
     }
 
@@ -2494,25 +2485,20 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
     func removeStream(id: UInt32) {
         state.withLock { _ = $0.streams.removeValue(forKey: id) }
     }
-
-    /// `error` non-nil for transport failure, nil for clean close.
+    
     func close(error: Error? = nil) {
-        typealias Drained = (streams: [SudokuMuxStream], keepalive: Task<Void, Never>?, reader: Task<Void, Never>?)
+        typealias Drained = (streams: [SudokuMuxStream], run: Task<Void, Never>?)
         let drained: Drained? = state.withLock { state in
             if state.closed { return nil }
             state.closed = true
             let streamsToClose = Array(state.streams.values)
             state.streams.removeAll()
-            let keepalive = state.keepaliveTask
-            state.keepaliveTask = nil
-            let reader = state.readerTask
-            state.readerTask = nil
-            return (streamsToClose, keepalive, reader)
+            let run = state.runTask
+            state.runTask = nil
+            return (streamsToClose, run)
         }
         guard let drained else { return }
-        drained.keepalive?.cancel()
-        // Cancel the reader, then close the record it is parked on; its strong self dies with it.
-        drained.reader?.cancel()
+        drained.run?.cancel()
         for stream in drained.streams {
             stream.markClosed(discardQueuedData: true, error: error)
         }
