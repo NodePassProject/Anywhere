@@ -21,7 +21,9 @@ extension QUICConnection {
         carrier.assumeIsolated {
             $0.startReceiving(
                 onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
-                onError: onError
+                onError: onError,
+                onBatchBegin: { [weak self] in self?.assumeIsolated { $0.beginStreamDeliveryBatch() } },
+                onBatchEnd: { [weak self] in self?.assumeIsolated { $0.endStreamDeliveryBatch() } }
             )
         }
     }
@@ -97,9 +99,11 @@ extension QUICConnection {
 
     func writeToUDP() {
         guard let connectionOpaquePointer else { return }
-        
+
         let prevBusy = bridge.enterConnHeld()
         defer { bridge.exitConnHeld(prevBusy) }
+        beginTxBatch()
+        defer { endTxBatch() }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
         

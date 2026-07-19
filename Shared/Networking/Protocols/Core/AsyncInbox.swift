@@ -19,6 +19,7 @@ nonisolated final class AsyncInbox<Element: Sendable>: Sendable {
 
     private enum Step {
         case element(Element)
+        case batch([Element])
         case end
         case failure(Error)
         case wait(AsyncStream<Void>)
@@ -99,6 +100,50 @@ nonisolated final class AsyncInbox<Element: Sendable>: Sendable {
             switch step {
             case .element(let element):
                 return element
+            case .batch:
+                fatalError("next() never produces a batch step")
+            case .end:
+                return nil
+            case .failure(let error):
+                throw error
+            case .wait(let gate):
+                for await _ in gate { break }
+                // A finished gate loops to re-check; a cancelled consumer must not spin.
+                try Task.checkCancellation()
+            }
+        }
+    }
+
+    /// Like ``next()``, but drains *everything* buffered in one call — one consumer wake-up per
+    /// producer burst instead of one per element. Never returns an empty array: waits when the
+    /// buffer is empty, `nil` at clean end-of-stream, throws the terminal error once (buffered
+    /// elements are always delivered first). Single-consumer, cancellation-aware.
+    func nextBatch() async throws -> [Element]? {
+        while true {
+            let step: Step = state.withLock { s in
+                if !s.buffer.isEmpty {
+                    let batch = s.buffer
+                    s.buffer.removeAll(keepingCapacity: true)
+                    return .batch(batch)
+                }
+                if let failure = s.failure {
+                    s.failure = nil   // surface once, then behave as a clean end
+                    return .failure(failure)
+                }
+                if s.finished {
+                    return .end
+                }
+                // Enroll a fresh gate under the lock so a `yield`/`finish` racing in can't be lost:
+                // it either lands in the buffer (seen on the next turn) or finishes this gate.
+                let (gate, continuation) = AsyncStream<Void>.makeStream()
+                s.waiter = continuation
+                return .wait(gate)
+            }
+            switch step {
+            case .element:
+                fatalError("nextBatch() never produces an element step")
+            case .batch(let batch):
+                return batch
             case .end:
                 return nil
             case .failure(let error):

@@ -29,6 +29,7 @@ extension QUICConnection {
     
     func performTeardown(error: Error?) {
         guard self.state != .closed else { return }
+            self.flushStreamDeliveries()
             if self.state != .connected {
                 QUICSessionTicketCache.invalidate(serverName: self.serverName, alpn: self.alpn)
             }

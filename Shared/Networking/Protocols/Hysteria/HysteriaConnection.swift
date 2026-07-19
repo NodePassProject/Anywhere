@@ -120,9 +120,16 @@ actor HysteriaConnection {
         return chunk
     }
 
-    /// Single-consumer pull over `rawInbox`.
+    /// Single-consumer pull over `rawInbox`. Drains the whole backlog per call and hands the
+    /// app one merged chunk — one wake-up and one flow-control credit per burst, and bigger
+    /// chunks for the downstream relay, instead of a full cycle per QUIC stream frame.
     private func nextChunk() async throws -> Data? {
-        try await rawInbox.next()
+        guard let batch = try await rawInbox.nextBatch() else { return nil }
+        guard batch.count > 1 else { return batch.first }
+        var merged = batch[0]
+        merged.reserveCapacity(batch.reduce(0) { $0 + $1.count })
+        for chunk in batch.dropFirst() { merged.append(chunk) }
+        return merged
     }
 
     nonisolated func cancel() {

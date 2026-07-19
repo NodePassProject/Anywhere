@@ -198,6 +198,9 @@ extension QUICConnection {
         let baseOffset = streamTxOffset[streamId] ?? 0
         let inflight = InflightStreamBuffer(copying: data)
 
+        beginTxBatch()
+        defer { endTxBatch() }
+
         while offset < data.count {
             var pi = ngtcp2_pkt_info()
             var pdatalen: ngtcp2_ssize = 0

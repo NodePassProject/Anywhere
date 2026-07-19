@@ -25,8 +25,6 @@ nonisolated final class QUICInboundMailbox: Sendable {
     func push(_ packet: Data) -> Bool {
         state.withLock { state in
             guard state.packets.count < Self.capacity else {
-                // A full backlog implies a drain is already scheduled, so dropping never
-                // strands the queue.
                 if !state.didWarnOverflow {
                     state.didWarnOverflow = true
                     logger.warning("[QUIC] Inbound backlog full; dropping datagrams until the bridge queue drains")
@@ -64,10 +62,12 @@ actor QUICDatagramCarrier {
     private let inbound = QUICInboundMailbox()
     
     private var driverTask: Task<Void, Never>?
-    private var sendContinuation: AsyncStream<Data>.Continuation?
+    private var sendContinuation: AsyncStream<[Data]>.Continuation?
 
     private var packetHandler: (@Sendable (Data) -> Void)?
-    private var recvErrorHandler: (@Sendable (Int32) -> Void)?
+    private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
+    private var batchBeginHandler: (@Sendable () -> Void)?
+    private var batchEndHandler: (@Sendable () -> Void)?
     
     var onPathDown: (@Sendable () -> Void)?
     var onBetterPath: (@Sendable () -> Void)?
@@ -107,7 +107,7 @@ actor QUICDatagramCarrier {
         FlowGauge.incrementUDP()
         flowCounted = true
 
-        let (sendStream, sendCont) = AsyncStream.makeStream(of: Data.self)
+        let (sendStream, sendCont) = AsyncStream.makeStream(of: [Data].self)
         sendContinuation = sendCont
         
         let carrier = WeakCarrier(value: self)
@@ -116,20 +116,31 @@ actor QUICDatagramCarrier {
                                  carrier: carrier, obfuscator: obfuscator, mailbox: inbound)
         }
     }
-
+    
     // MARK: - Receive
     
-    func startReceiving(onPacket: @escaping @Sendable (Data) -> Void,
-                        onError: @escaping @Sendable (Int32) -> Void) {
+    func startReceiving(
+        onPacket: @escaping @Sendable (Data) -> Void,
+        onError: @escaping @Sendable (Int32) -> Void,
+        onBatchBegin: (@Sendable () -> Void)? = nil,
+        onBatchEnd: (@Sendable () -> Void)? = nil
+    ) {
         packetHandler = onPacket
-        recvErrorHandler = onError
+        reveiceErrorHandler = onError
+        batchBeginHandler = onBatchBegin
+        batchEndHandler = onBatchEnd
     }
 
     // MARK: - Send
     
     func send(_ datagram: Data) {
         guard !datagram.isEmpty, let sendContinuation else { return }
-        sendContinuation.yield(datagram)
+        sendContinuation.yield([datagram])
+    }
+    
+    func send(batch: [Data]) {
+        guard !batch.isEmpty, let sendContinuation else { return }
+        sendContinuation.yield(batch)
     }
 
     // MARK: - Close
@@ -143,7 +154,9 @@ actor QUICDatagramCarrier {
         driverTask?.cancel()
         driverTask = nil
         packetHandler = nil
-        recvErrorHandler = nil
+        reveiceErrorHandler = nil
+        batchBeginHandler = nil
+        batchEndHandler = nil
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
@@ -159,7 +172,7 @@ actor QUICDatagramCarrier {
     @concurrent
     private static func runDriver(
         endpoint: NWEndpoint,
-        sendStream: AsyncStream<Data>,
+        sendStream: AsyncStream<[Data]>,
         bridge: NGTCP2ConcurrencyBridge,
         carrier: WeakCarrier,
         obfuscator: QUICPacketObfuscator?,
@@ -209,17 +222,20 @@ actor QUICDatagramCarrier {
         bridge.enqueue { carrier.value?.assumeIsolated { $0.releaseFlowCount() } }
     }
     
-    private static func runSendLoop(_ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>,
-                                    obfuscator: QUICPacketObfuscator?) async throws {
-        for await datagram in stream {
-            guard let obfuscator else {
-                try? await connection.send(datagram)
-                continue
-            }
-            // One QUIC packet may seal into several wire datagrams (Gecko fragmentation).
-            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-            for wire in wireDatagrams {
-                try? await connection.send(wire)
+    private static func runSendLoop(
+        _ connection: NetworkConnection<UDP>, stream: AsyncStream<[Data]>,
+        obfuscator: QUICPacketObfuscator?
+    ) async throws {
+        for await batch in stream {
+            for datagram in batch {
+                guard let obfuscator else {
+                    try? await connection.send(datagram)
+                    continue
+                }
+                let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+                for wire in wireDatagrams {
+                    try? await connection.send(wire)
+                }
             }
         }
     }
@@ -291,12 +307,14 @@ actor QUICDatagramCarrier {
     private func drainInbound() {
         let batch = inbound.take()
         guard !closed, let packetHandler else { return }
+        batchBeginHandler?()
         for packet in batch { packetHandler(packet) }
+        batchEndHandler?()
     }
     
     private func deliverError(_ code: Int32) {
-        guard !closed, let handler = recvErrorHandler else { return }
-        recvErrorHandler = nil
+        guard !closed, let handler = reveiceErrorHandler else { return }
+        reveiceErrorHandler = nil
         handler(code)
     }
     

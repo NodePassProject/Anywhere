@@ -101,8 +101,22 @@ actor QUICConnection: NGTCP2BridgeHost {
     var connRefStorage = ngtcp2_crypto_conn_ref()
     
     var inReadPkt = false
-    
+
     var flushScheduled = false
+    
+    struct PendingStreamDelivery {
+        var data = Data()
+        var fin = false
+
+        mutating func append(_ chunk: Data, fin sawFin: Bool) {
+            if !chunk.isEmpty { data.append(chunk) }
+            if sawFin { fin = true }
+        }
+    }
+    var pendingStreamDeliveries: [Int64: PendingStreamDelivery] = [:]
+    var pendingStreamDeliveryOrder: [Int64] = []
+    
+    var receiveBatchDepth = 0
     
     var carrier: QUICDatagramCarrier?
     
@@ -225,6 +239,10 @@ actor QUICConnection: NGTCP2BridgeHost {
     static let chainedMaxUDPPayload = 1200
     
     var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
+    
+    var txBatch: [Data] = []
+    var txBatchCarrier: QUICDatagramCarrier?
+    var txBatchDepth = 0
     
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 

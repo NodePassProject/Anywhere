@@ -33,7 +33,45 @@ extension QUICConnection {
     }
     
     func deliverStreamData(streamId: Int64, data: Data, fin: Bool) {
+        if receiveBatchDepth > 0 {
+            if pendingStreamDeliveries[streamId] == nil {
+                pendingStreamDeliveryOrder.append(streamId)
+            }
+            pendingStreamDeliveries[streamId, default: PendingStreamDelivery()].append(data, fin: fin)
+            return
+        }
         handlers.withLock { $0.streamData }?(streamId, data, fin)
+    }
+    
+    func beginStreamDeliveryBatch() {
+        receiveBatchDepth += 1
+    }
+    
+    func endStreamDeliveryBatch() {
+        receiveBatchDepth -= 1
+        if receiveBatchDepth <= 0 {
+            receiveBatchDepth = 0
+            flushStreamDeliveries()
+        }
+    }
+    
+    func flushStreamDeliveries() {
+        guard !pendingStreamDeliveryOrder.isEmpty else { return }
+        let order = pendingStreamDeliveryOrder
+        pendingStreamDeliveryOrder = []
+        var deliveries = pendingStreamDeliveries
+        pendingStreamDeliveries = [:]
+        guard let handler = handlers.withLock({ $0.streamData }) else { return }
+        for streamId in order {
+            guard let pending = deliveries.removeValue(forKey: streamId) else { continue }
+            handler(streamId, pending.data, pending.fin)
+        }
+    }
+    
+    private func flushStreamDelivery(streamId: Int64) {
+        guard let pending = pendingStreamDeliveries.removeValue(forKey: streamId) else { return }
+        pendingStreamDeliveryOrder.removeAll { $0 == streamId }
+        handlers.withLock { $0.streamData }?(streamId, pending.data, pending.fin)
     }
     
     func deliverDatagram(_ data: Data) {
@@ -45,6 +83,7 @@ extension QUICConnection {
     }
     
     func handleStreamClose(streamId: Int64, appErrorCode: UInt64, hasAppError: Bool) {
+        flushStreamDelivery(streamId: streamId)
         let error: Error? = (hasAppError && !Self.isBenignCloseCode(appErrorCode))
             ? QUICError.streamClosedWithError(appErrorCode: appErrorCode)
             : nil
@@ -52,8 +91,9 @@ extension QUICConnection {
         releaseStreamSendState(streamId: streamId)
         handlers.withLock { $0.streamTermination }?(streamId, error)
     }
-    
+
     func handleStreamReset(streamId: Int64, appErrorCode: UInt64) {
+        flushStreamDelivery(streamId: streamId)
         let error: Error? = Self.isBenignCloseCode(appErrorCode)
             ? nil
             : QUICError.streamReset(appErrorCode: appErrorCode)

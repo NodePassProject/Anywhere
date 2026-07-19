@@ -252,6 +252,32 @@ extension QUICConnection {
             return
         }
         guard let carrier else { return }
+        if txBatchDepth > 0 {
+            if let current = txBatchCarrier, current !== carrier { flushTxBatch() }
+            txBatchCarrier = carrier
+            txBatch.append(datagram)
+            return
+        }
         carrier.assumeIsolated { $0.send(datagram) }
+    }
+    
+    func beginTxBatch() {
+        txBatchDepth += 1
+    }
+
+    func endTxBatch() {
+        txBatchDepth -= 1
+        guard txBatchDepth <= 0 else { return }
+        txBatchDepth = 0
+        flushTxBatch()
+    }
+
+    private func flushTxBatch() {
+        guard let carrier = txBatchCarrier else { return }
+        txBatchCarrier = nil
+        guard !txBatch.isEmpty else { return }
+        let batch = txBatch
+        txBatch = []
+        carrier.assumeIsolated { $0.send(batch: batch) }
     }
 }
