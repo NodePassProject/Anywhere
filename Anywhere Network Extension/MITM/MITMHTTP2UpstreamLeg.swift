@@ -10,22 +10,21 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMHTTP2UpstreamLeg")
 
+nonisolated protocol MITMUpstreamLegDelegate: AnyObject {
+    func upstreamLegWriteToOrigin(_ data: Data)
+    func upstreamLegFatalError(_ message: String)
+    func upstreamLegDraining()
+    func upstreamLegRequestDrained(clientID: UInt32, count: Int)
+}
+
 actor MITMHTTP2UpstreamLeg {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         lwipBridge.executor.asUnownedSerialExecutor()
     }
-
+    
     weak var sink: MITMResponseSink?
-    var onUpstreamBytes: ((Data) -> Void)?
-    var onFatalError: ((String) -> Void)?
-    /// Origin sent GOAWAY: ask the client leg to emit its own so the client redials new
-    /// requests on a fresh connection instead of stalling on this draining one.
-    var onDraining: (() -> Void)?
-    /// Request DATA (`n` body bytes for client stream `clientID`) was flushed to the origin under its
-    /// flow-control window. The client leg credits the client's upload window by the same amount, so a
-    /// slow origin backpressures the client — the upload mirror of `onResponseDrainedToClient`.
-    var onRequestDrainedToUpstream: ((_ clientID: UInt32, _ n: Int) -> Void)?
+    weak var delegate: MITMUpstreamLegDelegate?
 
     private let host: String
     private let rewriter: MITMHTTP2Rewriter
@@ -139,7 +138,7 @@ actor MITMHTTP2UpstreamLeg {
         // MAX_CONCURRENT_STREAMS slots leak. Clean completions and origin-initiated closes
         // (RST/GOAWAY) pass false so we don't re-RST a stream already closing.
         if resetOrigin, let sid = ourStreamID[clientID] {
-            onUpstreamBytes?(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.cancel))
+            delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.cancel))
         }
         responseStreams.removeValue(forKey: clientID)
         drainCoupledStreams.remove(clientID)
@@ -313,11 +312,11 @@ actor MITMHTTP2UpstreamLeg {
         preface.append(contentsOf: [0x00, 0x06, // SETTINGS_MAX_HEADER_LIST_SIZE
                               UInt8((maxHeaderList >> 24) & 0xFF), UInt8((maxHeaderList >> 16) & 0xFF),
                               UInt8((maxHeaderList >> 8) & 0xFF), UInt8(maxHeaderList & 0xFF)])
-        onUpstreamBytes?(preface)
+        delegate?.upstreamLegWriteToOrigin(preface)
         // INITIAL_WINDOW_SIZE doesn't move the connection window (RFC 9113 §6.9.2); raise it
         // explicitly so the connection isn't the ~64 KiB bottleneck. Direct emit (not batched): must
         // reach the origin before any DATA pass, or it throttles the first response to 64 KiB.
-        onUpstreamBytes?(Codec.windowUpdate(streamID: 0, increment: Self.receiveWindow - 65_535))
+        delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: 0, increment: Self.receiveWindow - 65_535))
     }
 
     // MARK: - MITMUpstreamLeg (request IR → upstream h2)
@@ -379,7 +378,7 @@ actor MITMHTTP2UpstreamLeg {
         if case .contentLength(let n) = head.framing {
             block.append((name: "content-length", value: String(n)))
         }
-        onUpstreamBytes?(Codec.emitHeaders(
+        delegate?.upstreamLegWriteToOrigin(Codec.emitHeaders(
             streamID: sid,
             block: HPACKEncoder.encodeHeaderBlock(block, neverIndexed: head.neverIndexed),
             endStream: endStream
@@ -421,7 +420,7 @@ actor MITMHTTP2UpstreamLeg {
         if let backlog = pendingRequestBodies[clientID]?.remaining.count, backlog > Self.maxUpstreamBufferedBytes {
             logger.warning("h2-upstream \(host) stream \(clientID): request backlog \(backlog) B over cap; resetting stream")
             if let sid = ourStreamID[clientID] {
-                onUpstreamBytes?(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.internalError))
+                delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: sid, errorCode: Codec.ErrorCode.internalError))
             }
             releaseStream(clientID: clientID)
             sink?.deliverResponseReset(streamID: clientID)
@@ -476,7 +475,7 @@ actor MITMHTTP2UpstreamLeg {
     /// Emits request trailers as a trailing HEADERS block with END_STREAM (RFC 9113 §8.1).
     private func emitRequestTrailers(sid: UInt32, _ trailers: [(name: String, value: String)]) {
         let block = trailers.map { (name: $0.name.lowercased(), value: $0.value) }
-        onUpstreamBytes?(Codec.emitHeaders(
+        delegate?.upstreamLegWriteToOrigin(Codec.emitHeaders(
             streamID: sid,
             block: HPACKEncoder.encodeHeaderBlock(block),
             endStream: true
@@ -498,12 +497,12 @@ actor MITMHTTP2UpstreamLeg {
             entry.remaining.removeFirst(available)
             let bodyDone = entry.endStream && entry.remaining.isEmpty
             // With trailers pending, END_STREAM rides the trailing HEADERS, not the final DATA.
-            onUpstreamBytes?(Codec.frameData(streamID: sid, payload: chunk,
+            delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: sid, payload: chunk,
                                              endStream: bodyDone && entry.pendingTrailers == nil))
             entry.streamWindow -= available
             // Bytes reached the origin under its window; let the client send that much more upload
             // (drain-coupled flow control).
-            onRequestDrainedToUpstream?(clientID, available)
+            delegate?.upstreamLegRequestDrained(clientID: clientID, count: available)
             if bodyDone {
                 if let trailers = entry.pendingTrailers { emitRequestTrailers(sid: sid, trailers) }
                 pendingRequestBodies.removeValue(forKey: clientID)
@@ -515,7 +514,7 @@ actor MITMHTTP2UpstreamLeg {
             if let trailers = entry.pendingTrailers {
                 emitRequestTrailers(sid: sid, trailers)
             } else {
-                onUpstreamBytes?(Codec.frameData(streamID: sid, payload: Data(), endStream: true))
+                delegate?.upstreamLegWriteToOrigin(Codec.frameData(streamID: sid, payload: Data(), endStream: true))
             }
             pendingRequestBodies.removeValue(forKey: clientID)
             openRequestStreams.remove(clientID)
@@ -599,12 +598,12 @@ actor MITMHTTP2UpstreamLeg {
     /// harmless (the origin ignores WINDOW_UPDATE on a closed stream, RFC 9113 §5.1).
     private func flushBatchedCredits() {
         if batchedConnCredit > 0 {
-            onUpstreamBytes?(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
+            delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: 0, increment: batchedConnCredit))
             batchedConnCredit = 0
         }
         guard !batchedStreamCredit.isEmpty else { return }
         for (sid, n) in batchedStreamCredit where n > 0 {
-            onUpstreamBytes?(Codec.windowUpdate(streamID: sid, increment: n))
+            delegate?.upstreamLegWriteToOrigin(Codec.windowUpdate(streamID: sid, increment: n))
         }
         batchedStreamCredit.removeAll(keepingCapacity: true)
     }
@@ -621,7 +620,7 @@ actor MITMHTTP2UpstreamLeg {
         rxBuffer = MITMByteBuffer()
         pending = nil
         logger.warning("h2-upstream \(host): \(message); tearing down")
-        onFatalError?(message)
+        delegate?.upstreamLegFatalError(message)
     }
 
     private func handleFrame(_ frame: Codec.RawFrame) -> Bool {
@@ -636,7 +635,7 @@ actor MITMHTTP2UpstreamLeg {
         case Codec.FrameType.settings:     handleSettings(frame)
         case Codec.FrameType.windowUpdate: handleWindowUpdate(frame)
         case Codec.FrameType.ping:
-            if frame.flags & 0x1 == 0 { onUpstreamBytes?(Codec.pingAck(opaque: frame.payload)) }
+            if frame.flags & 0x1 == 0 { delegate?.upstreamLegWriteToOrigin(Codec.pingAck(opaque: frame.payload)) }
         case Codec.FrameType.rstStream:    handleUpstreamRST(frame)
         case Codec.FrameType.goaway:       handleGoAway(frame)
         case Codec.FrameType.pushPromise:
@@ -664,7 +663,7 @@ actor MITMHTTP2UpstreamLeg {
             i += 6
         }
         firstSettingsSeen = true
-        onUpstreamBytes?(Codec.settingsAck())
+        delegate?.upstreamLegWriteToOrigin(Codec.settingsAck())
         // The limit may have risen; open anything now permitted.
         drainQueue()
     }
@@ -730,7 +729,7 @@ actor MITMHTTP2UpstreamLeg {
         if !goingAway {
             goingAway = true
             refuseAllQueued()
-            onDraining?()
+            delegate?.upstreamLegDraining()
         }
     }
 
@@ -786,7 +785,7 @@ actor MITMHTTP2UpstreamLeg {
             if streamID >= nextUpstreamStreamID {
                 fail("response HEADERS on idle upstream stream \(streamID)")
             } else {
-                onUpstreamBytes?(Codec.rstStream(streamID: streamID, errorCode: Codec.ErrorCode.cancel))
+                delegate?.upstreamLegWriteToOrigin(Codec.rstStream(streamID: streamID, errorCode: Codec.ErrorCode.cancel))
             }
             return false
         }

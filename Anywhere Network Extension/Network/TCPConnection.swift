@@ -10,7 +10,35 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
-actor TCPConnection {
+nonisolated private final class InFlightDial: DialDeadlineDelegate {
+    enum Target {
+        case connection(any ProxyConnection)
+        case proxyTask(Task<any ProxyConnection, any Error>, ProxyClient)
+    }
+
+    private let target: Target
+    
+    let timedOut = Atomic<Bool>(false)
+
+    init(_ target: Target) { self.target = target }
+
+    func cancel() {
+        switch target {
+        case .connection(let connection):
+            connection.cancel()
+        case .proxyTask(let task, let client):
+            task.cancel()
+            client.cancel()
+        }
+    }
+
+    func dialDeadlineDidExpire() {
+        timedOut.store(true, ordering: .relaxed)
+        cancel()
+    }
+}
+
+actor TCPConnection: MITMSessionHost {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
@@ -78,10 +106,6 @@ actor TCPConnection {
     private var idleCheckTask: Task<Void, Never>?
     
     private var handshakeTimeoutTask: Task<Void, Never>?
-    private final class InFlightDial {
-        var cancel: (() -> Void)?
-    }
-    
     private var inFlightDials: [InFlightDial] = []
     private var sniffDeadlineTask: Task<Void, Never>?
     private var uplinkDone = false
@@ -775,19 +799,18 @@ actor TCPConnection {
 
         let initialClientHello = pendingData
         pendingData.removeAll(keepingCapacity: true)
-
-        // Pass the SNI/authority, not the IP-derived host, so rewrite rules match by hostname.
+        
         let session = MITMSession(
             dstHost: sni,
             dstPort: dstPort,
             clientHello: initialClientHello,
             leafCache: cache,
             policy: stack.mitmPolicy,
-            dialer: makeMITMDialer(),
             lwipBridge: bridge,
             isPlaintext: mitmPlaintext
         )
-        
+        session.assumeIsolated { $0.host = self }
+
         let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
         self.stream = stream
         stream.assumeIsolated { s in
@@ -802,34 +825,8 @@ actor TCPConnection {
                 }
             }
         }
-        session.assumeIsolated { s in
-            s.onSendToClient = { [weak self] data in
-                guard let self else { return }
-                self.bridge.enqueue {
-                    self.assumeIsolated { me in
-                        guard !me.closed, let stream = me.stream else { return }
-                        me.markActivity()
-                        stream.assumeIsolated { $0.deliverDownload(data) }
-                    }
-                }
-            }
-            s.onTeardown = { [weak self] error in
-                guard let self else { return }
-                self.bridge.enqueue {
-                    self.assumeIsolated { me in
-                        guard !me.closed else { return }
-                        if let error {
-                            me.reportFailure("MITM", error: error)
-                            me.abort()
-                        } else {
-                            me.closeWhenDrained()
-                        }
-                    }
-                }
-            }
-        }
         mitmSession = session
-        
+
         if !initialClientHello.isEmpty {
             acknowledgeReceivedBytes(initialClientHello.count)
         }
@@ -843,15 +840,9 @@ actor TCPConnection {
         case proxy(routeTarget: RouteTarget, configuration: ProxyConfiguration)
     }
 
-    private func makeMITMDialer() -> MITMDialer {
-        return { [weak self] host, port in
-            guard let self else { throw AnywhereError.transport(.notConnected) }
-            // Hops onto the actor (lwIP executor); the deadline race and route commit run there.
-            return try await self.dialUpstreamBounded(host: host, port: port)
-        }
-    }
+    // MARK: - MITMSessionHost
     
-    private func dialUpstreamBounded(host: String, port: UInt16) async throws -> MITMDialResult {
+    func mitmDialUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
         guard !closed else { throw AnywhereError.transport(.notConnected) }
         switch commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
@@ -862,35 +853,37 @@ actor TCPConnection {
             return try await dialProxyUpstream(configuration: configuration, host: host, port: port)
         }
     }
-
-    private enum DialRace<T: Sendable>: Sendable { case value(T), timedOut }
     
-    private func raceHandshakeDeadline<T: Sendable>(
-        cancelOnTimeout: @escaping @Sendable () -> Void,
-        _ body: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: DialRace<T>.self) { group in
-            group.addTask { .value(try await body()) }
-            group.addTask {
-                try await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
-                return .timedOut
+    nonisolated func mitmSessionSendToClient(_ data: Data) {
+        bridge.enqueue {
+            self.assumeIsolated { me in
+                guard !me.closed, let stream = me.stream else { return }
+                me.markActivity()
+                stream.assumeIsolated { $0.deliverDownload(data) }
             }
-            defer { group.cancelAll() }
-            while let next = try await group.next() {
-                switch next {
-                case .value(let value):
-                    return value
-                case .timedOut:
-                    cancelOnTimeout()   // abort the in-flight handshake so `body` unwinds
-                    throw AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: "upstream dial"))
+        }
+    }
+    
+    nonisolated func mitmSessionDidTearDown(error: Error?) {
+        bridge.enqueue {
+            self.assumeIsolated { me in
+                guard !me.closed else { return }
+                if let error {
+                    me.reportFailure("MITM", error: error)
+                    me.abort()
+                } else {
+                    me.closeWhenDrained()
                 }
             }
-            throw AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: "upstream dial"))
         }
     }
 
     private func forgetDial(_ dial: InFlightDial) {
         inFlightDials.removeAll { $0 === dial }
+    }
+    
+    private static var upstreamDialTimeout: AnywhereError {
+        .transport(.timedOut(.connect, endpoint: nil, detail: "upstream dial"))
     }
 
     private func commitUpstreamRoute(forDialHost host: String, port: UInt16) -> UpstreamRoute {
@@ -944,23 +937,23 @@ actor TCPConnection {
     }
 
     private func dialDirectUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
-        // Direct/bypass — not a proxied connection. TCPTransport has no dial
-        // timer, so it stays out of the Dial stat automatically.
         let transport = TCPTransport(host: host, port: port)
         let connection = DirectProxyConnection(transport: transport)
-        let dial = InFlightDial()
-        dial.cancel = { connection.cancel() }
+        
+        let dial = InFlightDial(.connection(connection))
         inFlightDials.append(dial)
         defer { forgetDial(dial) }
+        
+        let deadline = DialDeadline(.seconds(TunnelConstants.handshakeTimeout), delegate: dial)
+        deadline.arm()
+        defer { deadline.disarm() }
+        
         do {
-            try await raceHandshakeDeadline(cancelOnTimeout: { connection.cancel() }) {
-                try await transport.connect()
-            }
+            try await transport.connect()
             return MITMDialResult(connection: connection, proxyClient: nil)
         } catch {
-            // onTeardown reports the failure; don't double-report. Cancel a socket the connect may
-            // have opened before failing / timing out.
             connection.cancel()
+            if dial.timedOut.load(ordering: .relaxed) { throw Self.upstreamDialTimeout }
             throw error
         }
     }
@@ -970,25 +963,23 @@ actor TCPConnection {
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
         )
-        // Run the dial as a task the flow owns: teardown and the handshake-deadline race cancel it so a
-        // still-connecting handshake unwinds now (its `CancellationError` runs the connect path's cleanup)
-        // rather than lingering — `client.cancel()` alone only tears down an already-delivered connection.
-        // `client.cancel()` still runs alongside so a dial that completes in the race self-destructs via deliver().
+        
         let dialTask = Task { try await client.connect(to: host, port: port, initialData: nil) }
-        let dial = InFlightDial()
-        dial.cancel = { dialTask.cancel(); client.cancel() }
+        let dial = InFlightDial(.proxyTask(dialTask, client))
         inFlightDials.append(dial)
         defer { forgetDial(dial) }
+        
+        let deadline = DialDeadline(.seconds(TunnelConstants.handshakeTimeout), delegate: dial)
+        deadline.arm()
+        defer { deadline.disarm() }
+        
         do {
-            let connection = try await raceHandshakeDeadline(cancelOnTimeout: { dialTask.cancel() }) {
-                try await dialTask.value
-            }
+            let connection = try await dialTask.value
             return MITMDialResult(connection: connection, proxyClient: client)
         } catch {
-            // onTeardown reports the failure; don't double-report. Cancel the dial task and mark the
-            // client so any half-open socket from a raced success is torn down.
             dialTask.cancel()
             await client.cancel()
+            if dial.timedOut.load(ordering: .relaxed) { throw Self.upstreamDialTimeout }
             throw error
         }
     }
@@ -1053,7 +1044,7 @@ actor TCPConnection {
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
         for dial in inFlightDials {
-            dial.cancel?()
+            dial.cancel()
         }
         inFlightDials.removeAll()
         sniffDeadlineTask?.cancel()

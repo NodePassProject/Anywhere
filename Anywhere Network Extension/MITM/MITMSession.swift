@@ -12,47 +12,38 @@ nonisolated private let logger = AnywhereLogger(category: "MITMSession")
 
 nonisolated struct MITMDialResult {
     let connection: ProxyConnection
-    /// nil for a direct connection; the session owns its lifetime.
     let proxyClient: ProxyClient?
 }
 
-typealias MITMDialer = @Sendable (_ host: String, _ port: UInt16) async throws -> MITMDialResult
+nonisolated protocol MITMSessionHost: AnyObject, Sendable {
+    func mitmDialUpstream(host: String, port: UInt16) async throws -> MITMDialResult
+    func mitmSessionSendToClient(_ data: Data)
+    func mitmSessionDidTearDown(error: Error?)
+}
 
-actor MITMSession {
+actor MITMSession: MITMHTTP1StreamDelegate {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         lwipBridge.executor.asUnownedSerialExecutor()
     }
 
     // MARK: - Inner Transport (async byte transport for the lwIP side)
-
-    /// Bidirectional pipe between the inner-leg TLS record connection and the lwIP-attached caller.
-    /// Client→session bytes arrive via ``feedFromClient(_:)``/``endOfClient()`` and drain through an
-    /// `AsyncThrowingStream`; session→client bytes go out ``onSendToClient`` (fire-and-forget, since the
-    /// lwIP write buffers and gives no backpressure signal).
+    
     final class InnerTransport: ByteTransport, Sendable {
         let lwipBridge: LWIPConcurrencyBridge
-
-        /// Client→session bytes. The producer (`yield`/`finish`) is `Sendable` (fed from the lwIP
-        /// queue); a single consumer pulls via ``receive()``.
+        
         private let inbox = AsyncInbox<Data>()
         private struct State {
             var closed = false
-            /// The client half-closed its send side (TCP FIN): the receive side reports EOF, but sends to
-            /// the client stay open so an in-flight response still drains — matching the non-MITM path,
-            /// which keeps pumping downlink after a client FIN. `closed` (cancel) blocks both sides.
             var receiveClosed = false
-            /// Downlink sink to the lwIP client leg; set once before the pumps start and invoked on
-            /// the lwIP queue. Held in `State` (not a bare `var`) so the transport stays `Sendable`.
-            var onSendToClient: (@Sendable (Data) -> Void)?
+            weak var host: MITMSessionHost?
         }
         private let state = Mutex(State())
 
         var isReady: Bool { state.withLock { !$0.closed } }
-
-        /// Installs the downlink sink; called once before the session's pumps begin.
-        func setOnSendToClient(_ handler: (@Sendable (Data) -> Void)?) {
-            state.withLock { $0.onSendToClient = handler }
+        
+        func setHost(_ host: MITMSessionHost?) {
+            state.withLock { $0.host = host }
         }
 
         init(lwipBridge: LWIPConcurrencyBridge) {
@@ -63,21 +54,15 @@ actor MITMSession {
 
         func send(_ data: Data) async throws {
             guard !state.withLock({ $0.closed }) else { throw AnywhereError.transport(.notConnected) }
-            // Ordered onto the lwIP queue (the confinement for onSendToClient/writeToLWIP); the lwIP
-            // write buffers, so there is no completion to await — enqueueing preserves send order.
             lwipBridge.enqueue { [self] in
-                let handler = state.withLock { $0.closed ? nil : $0.onSendToClient }
-                handler?(data)
+                let host = state.withLock { $0.closed ? nil : $0.host }
+                host?.mitmSessionSendToClient(data)
             }
         }
 
-        func finishSend() async throws {
-            // The inner leg never half-closes the lwIP downlink — an in-flight response still drains
-            // after a client FIN — so there is nothing to signal here.
-        }
+        func finishSend() async throws { }
 
         func receive() async throws -> TransportChunk {
-            // Single-consumer pull.
             if let next = try await inbox.next() { return .bytes(next) }
             return .end
         }
@@ -87,7 +72,7 @@ actor MITMSession {
             inbox.finish()
         }
 
-        // MARK: External Inputs (from the lwIP side, on `queue`)
+        // MARK: External Inputs
 
         func feedFromClient(_ data: Data) {
             guard !state.withLock({ $0.closed || $0.receiveClosed }) else { return }
@@ -112,8 +97,6 @@ actor MITMSession {
     /// nil for a plaintext session; cleartext presents no certificate.
     private let leafCache: MITMLeafCertCache?
     private let policy: MITMRewritePolicy
-
-    private let dialer: MITMDialer
 
     /// Retained so it isn't deallocated mid-stream; nil for a direct connection.
     private var proxyClient: ProxyClient?
@@ -327,14 +310,10 @@ actor MITMSession {
             failBridgeStreamOnTimeout(streamID)
         }
     }
-
-    /// Set by the lwIP-side caller to write inner-leg bytes back to the client (fire-and-forget).
-    var onSendToClient: (@Sendable (Data) -> Void)? {
-        didSet { innerTransport.setOnSendToClient(onSendToClient) }
+    
+    weak var host: MITMSessionHost? {
+        didSet { innerTransport.setHost(host) }
     }
-
-    /// Called on teardown; `error` is nil for a clean close.
-    var onTeardown: ((Error?) -> Void)?
 
     // MARK: - Init
 
@@ -344,7 +323,6 @@ actor MITMSession {
         clientHello: Data,
         leafCache: MITMLeafCertCache?,
         policy: MITMRewritePolicy,
-        dialer: @escaping MITMDialer,
         lwipBridge: LWIPConcurrencyBridge,
         isPlaintext: Bool = false
     ) {
@@ -353,7 +331,6 @@ actor MITMSession {
         self.pendingClientBytes = clientHello
         self.leafCache = leafCache
         self.policy = policy
-        self.dialer = dialer
         self.lwipBridge = lwipBridge
         self.isPlaintext = isPlaintext
         self.innerTransport = InnerTransport(lwipBridge: lwipBridge)
@@ -413,20 +390,8 @@ actor MITMSession {
     }
 
     private func installStreamHandlers() {
-        responseStream.assumeIsolated { $0.onProtocolUpgrade = { [weak self] in
-            self?.assumeIsolated { $0.handleResponseUpgrade() }
-        } }
-        requestStream.assumeIsolated { $0.onFatalClose = { [weak self] in
-            self?.post(.cancel(reason: nil))
-        } }
-        responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
-            self?.post(.failInnerLegWith502(reason: "rejected a malformed or oversized upstream response"))
-        } }
-        let hardClose: @Sendable () -> Void = { [weak self] in
-            self?.post(.cancel(reason: nil))
-        }
-        requestStream.assumeIsolated { $0.onHardClose = hardClose }
-        responseStream.assumeIsolated { $0.onHardClose = hardClose }
+        requestStream.assumeIsolated { $0.delegate = self }
+        responseStream.assumeIsolated { $0.delegate = self }
     }
 
     private func startPlaintext() {
@@ -507,7 +472,7 @@ actor MITMSession {
         innerTransport.cancel()
         deferredActionContinuation.finish()
         deferredActionsTask = nil
-        onTeardown?(error)
+        host?.mitmSessionDidTearDown(error: error)
     }
 
     // MARK: - Inner Handshake
@@ -787,11 +752,13 @@ actor MITMSession {
         dialedPort = port
         let negotiatedInnerALPN = innerRecord?.negotiatedALPN ?? ""
         let innerALPN = negotiatedInnerALPN.isEmpty ? "http/1.1" : negotiatedInnerALPN
-        let dialer = self.dialer
+        guard let sessionHost = self.host else {
+            failInnerLegWith502("upstream connect failed: session detached")
+            return
+        }
         Task {
             do {
-                let dial = try await dialer(host, port)
-                // Resumes on the actor (lwIP queue).
+                let dial = try await sessionHost.mitmDialUpstream(host: host, port: port)
                 guard !torn else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
                 proxyClient = dial.proxyClient
                 outerConnection = dial.connection
@@ -913,6 +880,31 @@ actor MITMSession {
         sendChunkedCancellingOnError(buffered, via: outer)
     }
 
+    // MARK: MITMHTTP1StreamDelegate
+
+    nonisolated func http1StreamDidUpgrade(_ stream: MITMHTTP1Stream) {
+        guard stream.bridgeClientStreamID == nil else { return }
+        assumeIsolated { $0.handleResponseUpgrade() }
+    }
+
+    nonisolated func http1StreamFatalClose(_ stream: MITMHTTP1Stream) {
+        if let sid = stream.bridgeClientStreamID {
+            post(.abortBridgeStream(streamID: sid, acceptResponseAborted: true))
+            return
+        }
+        switch stream.phase {
+        case .httpRequest:
+            post(.cancel(reason: nil))
+        case .httpResponse:
+            post(.failInnerLegWith502(reason: "rejected a malformed or oversized upstream response"))
+        }
+    }
+
+    nonisolated func http1StreamHardClose(_ stream: MITMHTTP1Stream) {
+        guard stream.bridgeClientStreamID == nil else { return }
+        post(.cancel(reason: nil))
+    }
+
     private func startOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) {
         Task {
             let data: Data?
@@ -988,7 +980,7 @@ extension MITMSession: TLSServerDelegate {
     }
 
     private func emitToClient(_ data: Data) {
-        onSendToClient?(data)
+        host?.mitmSessionSendToClient(data)
     }
 
     private func completeInnerHandshake(record: TLSRecordConnection, trailer: Data) {
@@ -1025,10 +1017,7 @@ extension MITMSession: TLSServerDelegate {
 
 // MARK: - h2 → http/1.1 bridge
 
-extension MITMSession: MITMBridgeClientLegDelegate {
-
-    /// Pumps client plaintext into the bridge client leg; the leg drives per-stream
-    /// upstream dials and client-bound writes via the delegate callbacks below. Actor-isolated task.
+extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     private func startBridgeInboundPump(inner: TLSRecordConnection) {
         Task {
             let data: Data?
@@ -1039,18 +1028,12 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             if torn { return }
             if let error { cancel(error: error); return }
             guard let data, !data.isEmpty, let client = bridgeClient else {
-                // Client half-closed (FIN): stop reading frames but keep in-flight response
-                // streams draining to the client; teardown follows on the upstream's EOF or the
-                // connection's downlink-only idle timeout, matching the non-MITM path.
                 return
             }
             await client.feed(data)
             startBridgeInboundPump(inner: inner)
         }
     }
-
-    // `MITMBridgeClientLeg` is a nonisolated collaborator that invokes these synchronously on the
-    // lwIP queue, so each conformance method is a `nonisolated` shim entering via `assumeIsolated`.
 
     nonisolated func clientLegWriteToClient(_ data: Data) {
         assumeIsolated { $0.writeToClient(data) }
@@ -1066,6 +1049,10 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     private func handleClientLegFatalError(_ message: String) {
         logger.warning("\(dstHost): client leg fatal: \(message); tearing down")
         cancel(error: nil)
+    }
+    
+    nonisolated func clientLegResponseDrained(streamID: UInt32, byteCount: Int) {
+        assumeIsolated { $0.h2Upstream?.assumeIsolated { $0.creditDrainedResponse(clientID: streamID, byteCount) } }
     }
 
     // MARK: Request IR routing (client leg → upstream)
@@ -1142,30 +1129,25 @@ extension MITMSession: MITMBridgeClientLegDelegate {
     }
 
     // MARK: First dial (protocol probe) + late binding
-
-    /// Dials once on the first request, offering both ALPNs; the upstream leg is bound
-    /// from the negotiated protocol.
+    
     private func startFirstUpstreamDial() {
         guard !firstUpstreamDialStarted else { return }
         firstUpstreamDialStarted = true
-        // Dial target from the first pending head (captured at its own rewrite time), not the
-        // rewriter's shared last-write-wins field — keeps the probe consistent with that request's
-        // `:authority` even if a later stream rewrote to a different host meanwhile.
         let firstHead = pendingRequestEvents.lazy.compactMap { event -> MITMRequestHead? in
             if case .head(let head, _, _) = event { return head }
             return nil
         }.first
         let resolved = firstHead?.resolvedUpstream
-        let host = resolved?.host ?? dstHost
+        let dialHost = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
-        let dialer = self.dialer
+        guard let host else { failPendingBridgeRequests(error: AnywhereError.transport(.notConnected)); return }
         Task {
             do {
-                let dial = try await dialer(host, port)
+                let dial = try await host.mitmDialUpstream(host: dialHost, port: port)
                 guard !torn else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
                 sharedUpstreamProxyClient = dial.proxyClient
                 sharedUpstreamConnection = dial.connection
-                startFirstUpstreamHandshake(host: host, connection: dial.connection)
+                startFirstUpstreamHandshake(host: dialHost, connection: dial.connection)
             } catch {
                 guard !torn else { return }
                 failPendingBridgeRequests(error: error)
@@ -1241,48 +1223,14 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         upstreamProtocol = .h2
         let leg = MITMHTTP2UpstreamLeg(host: dstHost, rewriter: h2Rewriter, flowController: h2FlowController, lwipBridge: lwipBridge)
         h2Upstream = leg
-        // Drain-coupled backpressure: as response bytes reach the client, credit the upstream's
-        // per-stream receive window so a slow client throttles the origin (h2 only).
-        // The leg shares this actor's executor; enter its isolation to wire the callback/flag.
-        bridgeClient?.assumeIsolated { leg in
-            leg.onResponseDrainedToClient = { [weak self] clientStreamID, n in
-                // Runs on the lwIP queue (the client leg drains there) = the actor's executor.
-                self?.assumeIsolated { $0.h2Upstream?.assumeIsolated { $0.creditDrainedResponse(clientID: clientStreamID, n) } }
-            }
-            // Upload mirror of the response drain-coupling above: as the origin accepts request DATA,
-            // credit the client's upload window by the same amount so a slow origin backpressures the
-            // client. Streams opened from here on are drain-coupled; the first (probe) request stays eager.
-            leg.uploadDrainCoupled = true
-        }
+        bridgeClient?.assumeIsolated { $0.uploadDrainCoupled = true }
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
-        // Read the session-isolated collaborators into locals before entering the leg's isolation
-        // (the closure below is isolated to the leg, a distinct domain on the same executor).
         let client = bridgeClient
         let rewriter = h2Rewriter
-        // The leg is an actor on this same lwIP executor and we are already on the queue, so enter
-        // its isolation synchronously to wire up its sink/callbacks and replay the buffered events.
         leg.assumeIsolated { legSelf in
             legSelf.sink = client
-            // These leg callbacks fire on the lwIP queue = the actor's executor, so each enters the
-            // session's isolation synchronously via `assumeIsolated`; `onFatalError` defers a teardown.
-            legSelf.onRequestDrainedToUpstream = { [weak self] clientStreamID, n in
-                self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.creditUploadDrained(clientStreamID, n) } }
-            }
-            legSelf.onUpstreamBytes = { [weak self] bytes in
-                self?.assumeIsolated { me in
-                    guard !me.torn, !bytes.isEmpty else { return }
-                    me.sendChunkedCancellingOnError(bytes, via: record)
-                }
-            }
-            legSelf.onFatalError = { [weak self] _ in
-                self?.post(.cancel(reason: nil))
-            }
-            // Origin GOAWAY: tell the client we're draining (NO_ERROR — per-stream failures use RST,
-            // not this connection-level frame) so it redials new streams while in-flight ones finish.
-            legSelf.onDraining = { [weak self] in
-                self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.noError) } }
-            }
+            legSelf.delegate = self
             for event in events {
                 switch event {
                 case .head(let head, let url, let endStream):
@@ -1313,6 +1261,25 @@ extension MITMSession: MITMBridgeClientLegDelegate {
             await leg.feed(data)
             startH2UpstreamPump(record: record)
         }
+    }
+    
+    nonisolated func upstreamLegWriteToOrigin(_ data: Data) {
+        assumeIsolated { me in
+            guard !me.torn, !data.isEmpty, let record = me.sharedUpstreamRecord else { return }
+            me.sendChunkedCancellingOnError(data, via: record)
+        }
+    }
+
+    nonisolated func upstreamLegFatalError(_ message: String) {
+        post(.cancel(reason: nil))
+    }
+    
+    nonisolated func upstreamLegDraining() {
+        assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.sendGoAwayToClient(code: MITMHTTP2FrameCodec.ErrorCode.noError) } }
+    }
+
+    nonisolated func upstreamLegRequestDrained(clientID: UInt32, count: Int) {
+        assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.creditUploadDrained(clientID, count) } }
     }
 
     private func bindH1Upstream() {
@@ -1349,13 +1316,10 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         responseLog.recordHTTP1(method: head.method, url: url, originalUrl: head.originalURL)
         let responseStream = MITMHTTP1Stream(
             host: dstHost, phase: .httpResponse, policy: policy, effectiveAuthority: nil,
-            scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipBridge: lwipBridge
+            scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipBridge: lwipBridge,
+            bridgeClientStreamID: streamID
         )
-        // A malformed / oversized upstream response fails just this stream (RST), not the whole
-        // multiplexed h2 connection. The stream shares this actor's executor; enter its isolation.
-        responseStream.assumeIsolated { $0.onFatalClose = { [weak self] in
-            self?.post(.abortBridgeStream(streamID: streamID, acceptResponseAborted: true))
-        } }
+        responseStream.assumeIsolated { $0.delegate = self }
         let bs = BridgeStream(clientStreamID: streamID, responseStream: responseStream, responseLog: responseLog)
         let irSink = BridgeResponseIRSink(streamID: streamID, client: bridgeClient) { [weak self] sid in
             // RST the client stream now (fires on the lwIP queue = the actor's executor); free the
@@ -1390,10 +1354,10 @@ extension MITMSession: MITMBridgeClientLegDelegate {
         let resolved = head.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
-        let dialer = self.dialer
+        guard let sessionHost = self.host else { bridgeAbortStream(streamID); return }
         Task {
             do {
-                let dial = try await dialer(host, port)
+                let dial = try await sessionHost.mitmDialUpstream(host: host, port: port)
                 guard !torn, let bs = bridgeStreams[streamID] else {
                     dial.connection.cancel(); await dial.proxyClient?.cancel(); return
                 }

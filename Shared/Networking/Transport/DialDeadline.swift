@@ -8,29 +8,43 @@
 import Foundation
 import Synchronization
 
-nonisolated func raceDialDeadline<T: Sendable>(
-    _ deadline: Duration,
-    onExpire: @escaping @Sendable () -> Void = {},
-    timeout: @autoclosure @escaping @Sendable () -> Error = AnywhereError.transport(.posix(.connect, errno: ETIMEDOUT)),
-    _ body: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    let expired = Atomic(false)
-    return try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask {
-            do {
-                return try await body()
-            } catch {
-                throw expired.load(ordering: .relaxed) ? timeout() : error
-            }
+protocol DialDeadlineDelegate: AnyObject, Sendable {
+    nonisolated func dialDeadlineDidExpire()
+}
+
+nonisolated final class DialDeadline: Sendable {
+    private struct WeakDelegate: Sendable { weak var value: (any DialDeadlineDelegate)? }
+
+    private let duration: Duration
+    private let delegate: WeakDelegate
+    private let task = Mutex<Task<Void, Never>?>(nil)
+
+    init(_ duration: Duration, delegate: any DialDeadlineDelegate) {
+        self.duration = duration
+        self.delegate = WeakDelegate(value: delegate)
+    }
+    
+    func arm() {
+        let delegate = self.delegate.value
+        let fresh = Task {
+            do { try await Task.sleep(for: duration) } catch { return }
+            guard !Task.isCancelled else { return }
+            delegate?.dialDeadlineDidExpire()
         }
-        group.addTask {
-            try await Task.sleep(for: deadline)
-            expired.store(true, ordering: .relaxed)
-            onExpire()
-            throw timeout()
+        task.withLock { existing in
+            existing?.cancel()
+            existing = fresh
         }
-        defer { group.cancelAll() }
-        guard let result = try await group.next() else { throw timeout() }
-        return result
+    }
+    
+    func disarm() {
+        task.withLock { existing in
+            existing?.cancel()
+            existing = nil
+        }
+    }
+
+    deinit {
+        task.withLock { $0?.cancel() }
     }
 }

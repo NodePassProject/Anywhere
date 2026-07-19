@@ -862,7 +862,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         let aead = VLESSEncryptionAEAD(context: serverRandom, key: unitedKey, useAES: useAES)
         recvState.withLock { $0.readAEAD = aead }
         if let xor = xorConnectionBox.withLock({ $0.value }) {
-            xor.installInboundCTR(try VLESSEncryptionCTR(key: unitedKey, iv: serverRandom))
+            try xor.installInboundCTR(key: unitedKey, iv: serverRandom)
         }
     }
 

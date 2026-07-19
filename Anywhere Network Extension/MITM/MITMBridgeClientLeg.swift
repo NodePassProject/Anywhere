@@ -10,22 +10,14 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "MITMBridgeClientLeg")
 
 nonisolated protocol MITMBridgeClientLegDelegate: AnyObject {
-    /// Session dials (first request) and binds the upstream leg from negotiated ALPN. `url` seeds
-    /// the response-phase rewrite correlation.
     func clientLegSendRequestHead(_ head: MITMRequestHead, url: String?, endStream: Bool)
-    /// Raw (unframed) request body bytes; the upstream leg applies its own framing.
     func clientLegSendRequestData(streamID: UInt32, _ data: Data, endStream: Bool)
-    /// Terminal request trailers (a HEADERS block with no `:method`): h2 forwards a trailing
-    /// HEADERS block with END_STREAM, h1 ends the body without them.
     func clientLegSendRequestTrailers(streamID: UInt32, _ trailers: [(name: String, value: String)])
-    /// Client reset/cancelled the stream: drop its upstream.
     func clientLegAbortRequest(streamID: UInt32)
-    /// The response was fully delivered to the client: the session may close the upstream.
     func clientLegResponseComplete(streamID: UInt32)
-    /// Write h2 bytes to the client (preface, flow control, responses).
     func clientLegWriteToClient(_ data: Data)
-    /// Unrecoverable client-leg error; tear the session down.
     func clientLegFatalError(_ message: String)
+    func clientLegResponseDrained(streamID: UInt32, byteCount: Int)
 }
 
 actor MITMBridgeClientLeg: MITMResponseSink {
@@ -35,11 +27,6 @@ actor MITMBridgeClientLeg: MITMResponseSink {
     }
 
     weak var delegate: MITMBridgeClientLegDelegate?
-
-    /// Set when the session binds an h2 upstream: as passthrough response bytes drain to the
-    /// client, credit the upstream's per-stream flow-control window by the same count so a slow
-    /// client backpressures the origin. nil for an h1 upstream (no h2 receive window to credit).
-    var onResponseDrainedToClient: ((_ clientStreamID: UInt32, _ byteCount: Int) -> Void)?
 
     private let host: String
     private let rewriter: MITMHTTP2Rewriter
@@ -1118,9 +1105,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             paceState.streamWindow -= available
             paceState.pending.removeFirst(available)
             if endOnData { paceState.finished = true }
-            // These bytes have left for the client, so credit the upstream's receive window
-            // (no-op unless an h2 upstream marked this stream drain-coupled).
-            onResponseDrainedToClient?(streamID, available)
+            delegate?.clientLegResponseDrained(streamID: streamID, byteCount: available)
             progressed = true
         }
         // Body drained and stream ended: emit the terminal frame. A trailer HEADERS block isn't

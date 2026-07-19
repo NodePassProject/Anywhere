@@ -22,6 +22,23 @@ nonisolated private enum ServerHelloResult {
     case helloRetryRequest
 }
 
+// MARK: - Handshake Deadline
+
+nonisolated private final class TLSHandshakeGuard: DialDeadlineDelegate {
+    static let deadline: Duration = .seconds(30)
+    
+    private let client: TLSClient
+    
+    let timedOut = Atomic<Bool>(false)
+    
+    init(_ client: TLSClient) { self.client = client }
+    
+    func dialDeadlineDidExpire() {
+        timedOut.store(true, ordering: .relaxed)
+        client.cancel()
+    }
+}
+
 // MARK: - TLSClient
 
 actor TLSClient {
@@ -126,6 +143,10 @@ actor TLSClient {
     /// transport's async surface. The ClientHello rides the connect as initial data, saving a
     /// round trip.
     func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
+        let guardDelegate = TLSHandshakeGuard(self)
+        let deadline = DialDeadline(TLSHandshakeGuard.deadline, delegate: guardDelegate)
+        deadline.arm()
+        defer { deadline.disarm() }
         do {
             try await prepareECH()
 
@@ -148,12 +169,19 @@ actor TLSClient {
             return try await receiveServerResponse()
         } catch {
             releaseOnFailure()
+            if guardDelegate.timedOut.load(ordering: .relaxed) {
+                throw AnywhereError.tls(.handshakeFailed(detail: "handshake timed out"))
+            }
             throw error
         }
     }
 
     /// Performs the TLS handshake over an existing proxy tunnel (proxy chaining).
     func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        let guardDelegate = TLSHandshakeGuard(self)
+        let deadline = DialDeadline(TLSHandshakeGuard.deadline, delegate: guardDelegate)
+        deadline.arm()
+        defer { deadline.disarm() }
         do {
             try await prepareECH()
 
@@ -178,6 +206,9 @@ actor TLSClient {
             return try await receiveServerResponse()
         } catch {
             releaseOnFailure()
+            if guardDelegate.timedOut.load(ordering: .relaxed) {
+                throw AnywhereError.tls(.handshakeFailed(detail: "handshake timed out"))
+            }
             throw error
         }
     }

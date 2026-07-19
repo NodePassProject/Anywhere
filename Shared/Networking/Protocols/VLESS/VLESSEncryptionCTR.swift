@@ -7,14 +7,9 @@
 
 import Foundation
 import CommonCrypto
-import Synchronization
 
-/// AES-256-CTR keystream for VLESS encryption's `xorpub`/`random` modes:
-/// key = BLAKE3-derive(context "VLESS", key), 16-byte IV as the initial
-/// big-endian counter. Stateful — one instance per direction.
-nonisolated final class VLESSEncryptionCTR: Sendable {
-    /// The cryptor advances its keystream on every update, so access is serialized.
-    private let cryptor: Mutex<CCCryptorRef?>
+nonisolated final class VLESSEncryptionCTR {
+    private let cryptor: CCCryptorRef
 
     init(key: Data, iv: Data) throws {
         guard iv.count == 16 else {
@@ -43,49 +38,40 @@ nonisolated final class VLESSEncryptionCTR: Sendable {
         guard status == kCCSuccess, let ref else {
             throw AnywhereError.proxy(.vlessEncryption, .protocolViolation(detail: "framing: CCCryptorCreateWithMode failed: \(status)"))
         }
-        self.cryptor = Mutex(ref)
+        self.cryptor = ref
     }
 
     deinit {
-        cryptor.withLock { cryptor in
-            if let cryptor {
-                CCCryptorRelease(cryptor)
-            }
-        }
+        CCCryptorRelease(cryptor)
     }
-
-    /// Advance the keystream by `data.count` bytes and return the XOR'd output.
+    
     func process(_ data: Data) -> Data {
         if data.isEmpty { return data }
-        return cryptor.withLock { cryptor in
-            let count = data.count
-            var output = Data(count: count)
-            var dataOutMoved: Int = 0
-            _ = output.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
-                data.withUnsafeBytes { inPtr in
-                    CCCryptorUpdate(
-                        cryptor,
-                        inPtr.baseAddress, count,
-                        outPtr.baseAddress, count,
-                        &dataOutMoved
-                    )
-                }
+        let count = data.count
+        var output = Data(count: count)
+        var dataOutMoved: Int = 0
+        _ = output.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
+            data.withUnsafeBytes { inPtr in
+                CCCryptorUpdate(
+                    cryptor,
+                    inPtr.baseAddress, count,
+                    outPtr.baseAddress, count,
+                    &dataOutMoved
+                )
             }
-            return output
         }
+        return output
     }
-
-    /// XOR keystream bytes directly into a mutable buffer, avoiding an extra copy.
-    func processInPlace(_ buffer: UnsafeMutableRawBufferPointer) {
-        if buffer.count == 0 { return }
-        struct Region: @unchecked Sendable { let base: UnsafeMutableRawPointer?; let count: Int }
-        let region = Region(base: buffer.baseAddress, count: buffer.count)
-        cryptor.withLock { cryptor in
-            var dataOutMoved: Int = 0
+    
+    func processInPlace(_ bytes: inout [UInt8], range: Range<Int>) {
+        if range.isEmpty { return }
+        var dataOutMoved: Int = 0
+        bytes.withUnsafeMutableBytes { buffer in
+            let base = buffer.baseAddress! + range.lowerBound
             _ = CCCryptorUpdate(
                 cryptor,
-                region.base, region.count,
-                region.base, region.count,
+                base, range.count,
+                base, range.count,
                 &dataOutMoved
             )
         }

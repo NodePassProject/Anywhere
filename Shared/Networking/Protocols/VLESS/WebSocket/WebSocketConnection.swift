@@ -8,7 +8,18 @@
 import Foundation
 import Synchronization
 
-nonisolated final class WebSocketConnection: Sendable {
+nonisolated final class WebSocketConnection: DialDeadlineDelegate, Sendable {
+    
+    // MARK: Deadline
+    
+    private static let upgradeDeadline: Duration = .seconds(30)
+    
+    private let upgradeTimedOut = Atomic<Bool>(false)
+    
+    func dialDeadlineDidExpire() {
+        upgradeTimedOut.store(true, ordering: .relaxed)
+        cancel()
+    }
 
     // MARK: Transport
 
@@ -53,9 +64,22 @@ nonisolated final class WebSocketConnection: Sendable {
     }
 
     // MARK: - HTTP Upgrade Handshake
-
-    /// Performs the WebSocket HTTP upgrade handshake, optionally embedding early data in a request header.
+    
     func performUpgrade(earlyData: Data? = nil) async throws {
+        let deadline = DialDeadline(Self.upgradeDeadline, delegate: self)
+        deadline.arm()
+        defer { deadline.disarm() }
+        do {
+            try await sendAndAwaitUpgrade(earlyData: earlyData)
+        } catch {
+            if upgradeTimedOut.load(ordering: .relaxed) {
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "handshake timed out"))
+            }
+            throw error
+        }
+    }
+
+    private func sendAndAwaitUpgrade(earlyData: Data?) async throws {
         var keyBytes = [UInt8](repeating: 0, count: 16)
         _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
         let wsKey = Data(keyBytes).base64EncodedString()

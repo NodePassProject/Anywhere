@@ -215,7 +215,7 @@ nonisolated enum AnywhereError: Error {
 
     // MARK: Certificate
     
-    enum Certificate: @unchecked Sendable {
+    enum Certificate: Sendable {
         case keyGenerationFailed(detail: String)
         case keychainWriteFailed(status: OSStatus)
         case keychainReadFailed(status: OSStatus)
@@ -229,7 +229,7 @@ nonisolated enum AnywhereError: Error {
 
     // MARK: Store
     
-    enum Store: @unchecked Sendable {
+    enum Store: Sendable {
         enum Resource: String, Sendable {
             case configurations, chains, subscriptions, certificates
             case routingRuleSets, mitmRuleSets, routingDatabase
@@ -262,7 +262,7 @@ nonisolated enum AnywhereError: Error {
 
     // MARK: Subscription
     
-    enum Subscription: @unchecked Sendable {
+    enum Subscription: Sendable {
         case invalidURL
         case noConfigurations
         case fetchFailed(underlying: any Error)
@@ -270,7 +270,7 @@ nonisolated enum AnywhereError: Error {
 
     // MARK: Tunnel
     
-    enum Tunnel: @unchecked Sendable {
+    enum Tunnel: Sendable {
         case invalidConfiguration
         case settingsApplyFailed(underlying: any Error)
         case ipcFailed(underlying: any Error)

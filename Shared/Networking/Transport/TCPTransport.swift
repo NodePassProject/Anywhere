@@ -9,7 +9,7 @@ import Foundation
 import Network
 import Synchronization
 
-nonisolated final class TCPTransport: ByteTransport, Sendable {
+nonisolated final class TCPTransport: ByteTransport, DialDeadlineDelegate, Sendable {
 
     // MARK: Constants
 
@@ -101,6 +101,10 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             slot.release()
             throw AnywhereError.transport(.terminated)
         }
+        
+        let deadline = DialDeadline(Self.dialDeadline, delegate: self)
+        deadline.arm()
+        defer { deadline.disarm() }
 
         try await withTaskCancellationHandler {
             for try await _ in guts.dialOutcome {}
@@ -143,11 +147,9 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
 
                 if let initialData, hasInitialData {
                     do {
-                        try await raceDialDeadline(Self.dialDeadline, onExpire: {
-                            guts.teardownSignal.finish()
-                        }) {
-                            try await connection.send(initialData, endOfStream: false)
-                        }
+                        // Bounded by the connect-level ``DialDeadline``: on expiry the driver task is
+                        // cancelled, unwinding this send.
+                        try await connection.send(initialData, endOfStream: false)
                     } catch {
                         guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
                         throw error  // exit scope → tear the connection down
@@ -220,6 +222,10 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     }
 
     func cancel() {
+        tearDown(dialError: AnywhereError.transport(.terminated))
+    }
+    
+    private func tearDown(dialError: Error) {
         let task: Task<Void, Never>? = guts.state.withLock { state in
             guard !state.cancelled else { return nil }
             state.cancelled = true
@@ -227,11 +233,13 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             state.driverTask = nil
             return task
         }
-        // Unblock a pending connect() and the driver's hold-open; cancel the driver
-        // so an in-flight establish send unwinds.
-        guts.dialSignal.finish(throwing: AnywhereError.transport(.terminated))
+        guts.dialSignal.finish(throwing: dialError)
         guts.teardownSignal.finish()
         task?.cancel()
+    }
+    
+    func dialDeadlineDidExpire() {
+        tearDown(dialError: AnywhereError.transport(.posix(.connect, errno: ETIMEDOUT)))
     }
 
     // MARK: - Helpers

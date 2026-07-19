@@ -643,12 +643,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         if let prepared = await takePreparedConnection(for: key) {
             return BlockingProxyStream(connection: prepared.connection)
         }
-        let connection = try await raceDialDeadline(
-            .seconds(30),
-            timeout: AnywhereError.proxy(.sudoku, .connectionClosed(detail: "timeout opening transport"))
-        ) { [self] in
-            try await openProxyConnection(host: host, port: port, useTLS: useTLS, serverName: serverName)
-        }
+        let connection = try await openProxyConnection(host: host, port: port, useTLS: useTLS, serverName: serverName)
         guard retainConnection(connection) else {
             connection.cancel()
             throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))
@@ -753,12 +748,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
         headers: [String: String]
     ) async throws -> BlockingProxyStream {
         if stateLock.withLock({ $0.closed }) { throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil)) }
-        let base = try await raceDialDeadline(
-            .seconds(30),
-            timeout: AnywhereError.proxy(.sudoku, .connectionClosed(detail: "timeout opening WebSocket transport"))
-        ) { [self] in
-            try await openProxyConnection(host: host, port: port, useTLS: useTLS, serverName: serverName)
-        }
+        let base = try await openProxyConnection(host: host, port: port, useTLS: useTLS, serverName: serverName)
         guard retainConnection(base) else {
             base.cancel()
             throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))
@@ -773,15 +763,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
             )
         )
         do {
-            // First of {upgrade, 30s deadline} wins; on expiry the ws is cancelled so the
-            // in-flight receive unwinds promptly.
-            try await raceDialDeadline(
-                .seconds(30),
-                onExpire: { ws.cancel() },
-                timeout: AnywhereError.proxy(.sudoku, .connectionClosed(detail: "timeout upgrading WebSocket transport"))
-            ) {
-                try await ws.performUpgrade()
-            }
+            try await ws.performUpgrade()
         } catch {
             releaseConnection(base)
             ws.cancel()

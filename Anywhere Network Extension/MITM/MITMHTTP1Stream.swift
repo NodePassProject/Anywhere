@@ -17,6 +17,12 @@ nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject, Sendable {
     func http1ResponseReset()
 }
 
+nonisolated protocol MITMHTTP1StreamDelegate: AnyObject {
+    func http1StreamDidUpgrade(_ stream: MITMHTTP1Stream)
+    func http1StreamFatalClose(_ stream: MITMHTTP1Stream)
+    func http1StreamHardClose(_ stream: MITMHTTP1Stream)
+}
+
 actor MITMHTTP1Stream {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -44,7 +50,14 @@ actor MITMHTTP1Stream {
     /// Scheme for the absolute request URL (rule gating and script `request.url`):
     /// "https" for a TLS leg, "http" for a cleartext leg.
     private let scheme: String
-    private let phase: MITMPhase
+    /// Nonisolated so the ``MITMHTTP1StreamDelegate`` can dispatch by direction without re-entering
+    /// this stream's isolation.
+    let phase: MITMPhase
+
+    /// The h2 client stream this leg serves when it is a per-stream h1-upstream response in the
+    /// h2→h1 bridge; nil for the session's two inner legs. Lets the delegate scope a framing-violation
+    /// close to just this stream instead of the whole multiplexed connection. Nonisolated `let`.
+    let bridgeClientStreamID: UInt32?
     /// Phase-filtered rules for this host, resolved once at init (one trie walk).
     private let rules: [CompiledMITMRule]
     /// Response-phase rules for this host; the request stream consults them to gate the
@@ -74,20 +87,9 @@ actor MITMHTTP1Stream {
     /// h1 connection. Request phase only; nil for a malformed request line.
     private var currentRequestOriginalURL: String?
 
-    /// Fired once on 101 / CONNECT-2xx so the session can flip the opposite
-    /// leg to passthrough. Response phase only.
-    var onProtocolUpgrade: (() -> Void)?
-    /// Fired when a head is rejected as a request-smuggling / header-injection framing violation,
-    /// or a chunked body overruns the buffer cap. The stream stops forwarding (`.draining`) and
-    /// asks the session to close the connection — fail closed rather than relay malformed bytes or
-    /// deliver a truncated body framed as complete. Used only *before* a head is committed to the
-    /// wire, so the response leg can still answer 502.
-    var onFatalClose: (() -> Void)?
-    /// Fired when chunked framing breaks *mid-body*, after the head is already on the wire. The
-    /// session must tear down both legs (a plain TCP close): it cannot answer a 502, and
-    /// synthesizing a `0\r\n\r\n` terminator + passthrough would frame a truncated body as complete
-    /// and then desync the peer onto the next message.
-    var onHardClose: (() -> Void)?
+    /// Session coordinator for framing-violation and upgrade upcalls. `phase` (a nonisolated `let`
+    /// above) lets it react per direction without a separate handler per stream.
+    weak var delegate: MITMHTTP1StreamDelegate?
     /// Lazy JS runtime, shared across both directions.
     private let scriptEngineProvider: MITMScriptEngine.Provider
     /// Request stream records method/URL; response stream pops them for script ctx.
@@ -105,11 +107,13 @@ actor MITMHTTP1Stream {
         effectiveAuthority: String?,
         scriptEngineProvider: MITMScriptEngine.Provider,
         requestLog: MITMRequestLog,
-        lwipBridge: LWIPConcurrencyBridge
+        lwipBridge: LWIPConcurrencyBridge,
+        bridgeClientStreamID: UInt32? = nil
     ) {
         self.host = host
         self.scheme = scheme
         self.phase = phase
+        self.bridgeClientStreamID = bridgeClientStreamID
         let matchedSet = policy.set(for: host)
         self.rules = matchedSet?.rules.filter { $0.phase == phase } ?? []
         self.responseBodyGateRules = phase == .httpRequest
@@ -567,15 +571,11 @@ actor MITMHTTP1Stream {
         let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
         guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
             if rxBuffer.count > Self.maxHeadBytes {
-                // An over-cap head with no CRLF CRLF (giant headers, or bare-LF framing we never
-                // terminate) would skip every parseHead smuggling check if relayed verbatim. Fail
-                // closed like the `.smuggling` path: never relay an unparseable head. onFatalClose
-                // closes the connection on the request leg, or answers the client 502 on the response leg.
                 logger.warning("HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; closing the connection without forwarding")
                 rxBuffer.removeAll(keepingCapacity: false)
                 headScanned = 0
                 mode = .draining
-                onFatalClose?()
+                delegate?.http1StreamFatalClose(self)
                 return false
             }
             headScanned = rxBuffer.count
@@ -602,7 +602,7 @@ actor MITMHTTP1Stream {
             rxBuffer.removeFirst(headEnd)
             logger.warning("HTTP/1 \(host): rejecting message with a framing/smuggling violation; closing the connection without forwarding")
             mode = .draining
-            onFatalClose?()
+            delegate?.http1StreamFatalClose(self)
             return false
         }
 
@@ -753,7 +753,7 @@ actor MITMHTTP1Stream {
             // 101 / CONNECT-2xx: flip the request leg too, or WebSocket frames
             // stall in the head parser.
             if case .switchingProtocols = framing {
-                onProtocolUpgrade?()
+                delegate?.http1StreamDidUpgrade(self)
             }
             return true
         case .none, .contentLength, .chunked:
@@ -1113,7 +1113,7 @@ actor MITMHTTP1Stream {
             logger.warning("HTTP/1 \(host): chunked framing broke mid-body; closing the connection rather than truncating + desyncing")
             rxBuffer.removeAll(keepingCapacity: false)
             mode = .draining
-            onHardClose?()
+            delegate?.http1StreamHardClose(self)
             return true
         }
     }
@@ -1164,7 +1164,7 @@ actor MITMHTTP1Stream {
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("HTTP/1 \(host): chunked body exceeded \(MITMBodyCodec.maxBufferedBodyBytes) B buffer cap; failing closed rather than truncating to a fake-complete length")
                 mode = .draining
-                onFatalClose?()
+                delegate?.http1StreamFatalClose(self)
                 return false
             }
             mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
@@ -1185,7 +1185,7 @@ actor MITMHTTP1Stream {
             if bridgeResetIfNeeded() { return false }
             logger.warning("HTTP/1 \(host): chunked framing broke while buffering for a rewrite; failing closed")
             mode = .draining
-            onFatalClose?()
+            delegate?.http1StreamFatalClose(self)
             return true
         }
     }
@@ -1231,7 +1231,7 @@ actor MITMHTTP1Stream {
                         logger.warning("HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
                         rxBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
-                        onHardClose?()
+                        delegate?.http1StreamHardClose(self)
                         return true
                     }
                     streaming.lineScanCursor = max(0, rxBuffer.count - 1)
@@ -1248,7 +1248,7 @@ actor MITMHTTP1Stream {
                     logger.warning("HTTP/1 \(host): malformed chunk-size line; closing the connection")
                     rxBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
-                    onHardClose?()
+                    delegate?.http1StreamHardClose(self)
                     return true
                 }
                 if size == 0 {
@@ -1340,7 +1340,7 @@ actor MITMHTTP1Stream {
                     logger.warning("HTTP/1 \(host): missing CRLF after chunk data; closing the connection")
                     rxBuffer.removeAll(keepingCapacity: false)
                     mode = .draining
-                    onHardClose?()
+                    delegate?.http1StreamHardClose(self)
                     return true
                 }
                 rxBuffer.removeFirst(2)
@@ -1355,7 +1355,7 @@ actor MITMHTTP1Stream {
                         logger.warning("HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; closing the connection")
                         rxBuffer.removeAll(keepingCapacity: false)
                         mode = .draining
-                        onHardClose?()
+                        delegate?.http1StreamHardClose(self)
                         return true
                     }
                     streaming.lineScanCursor = max(0, rxBuffer.count - 1)

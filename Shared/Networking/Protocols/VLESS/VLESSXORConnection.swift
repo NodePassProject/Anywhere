@@ -8,50 +8,40 @@
 import Foundation
 import Synchronization
 
-/// Stream-XOR wrapper for VLESS encryption's `random` XOR mode. Per direction:
-/// skip N bytes → XOR the 5-byte record header → skip the decoded body → repeat.
 nonisolated final class VLESSXORConnection: ProxyConnection {
     private let inner: ProxyConnection
 
-    private let outCTR: VLESSEncryptionCTR
-
     private struct SendState {
+        var outCTR: VLESSEncryptionCTR
         var outSkip: Int
-        /// XOR'd header bytes accumulated across call boundaries; decoded at 5 bytes.
         var outHeader = Data()
     }
 
-    private struct RecvState {
-        /// Nil until `installInboundCTR`: 0-RTT derives the inbound key from the first 16 server bytes.
+    private struct ReceiveState {
         var inCTR: VLESSEncryptionCTR?
         var inSkip: Int
-        /// XOR'd header bytes accumulated across call boundaries; decoded at 5 bytes.
         var inHeader = Data()
-        /// Bytes past the inSkip region that arrived before `inCTR` was set; stashed
-        /// verbatim and replayed through the state machine once it's installed.
         var pendingPostSkip = Data()
     }
 
     private let sendState: Mutex<SendState>
-    private let recvState: Mutex<RecvState>
+    private let receiveState: Mutex<ReceiveState>
 
     init(inner: ProxyConnection,
-         outCTR: VLESSEncryptionCTR,
-         inCTR: VLESSEncryptionCTR?,
+         outCTR: sending VLESSEncryptionCTR,
+         inCTR: sending VLESSEncryptionCTR?,
          outSkip: Int,
          inSkip: Int) {
         self.inner = inner
-        self.outCTR = outCTR
-        self.sendState = Mutex(SendState(outSkip: outSkip))
-        self.recvState = Mutex(RecvState(inCTR: inCTR, inSkip: inSkip))
+        self.sendState = Mutex(SendState(outCTR: outCTR, outSkip: outSkip))
+        self.receiveState = Mutex(ReceiveState(inCTR: inCTR, inSkip: inSkip))
     }
 
     var isConnected: Bool { inner.isConnected }
     var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
-
-    /// Call once the 0-RTT path has derived the inbound key from the 16-byte server random.
-    func installInboundCTR(_ ctr: VLESSEncryptionCTR) {
-        recvState.withLock { $0.inCTR = ctr }
+    
+    func installInboundCTR(key: Data, iv: Data) throws {
+        try receiveState.withLock { $0.inCTR = try VLESSEncryptionCTR(key: key, iv: iv) }
     }
 
     // MARK: - Send
@@ -64,9 +54,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         }
         try await inner.sendRaw(Data(bytes))
     }
-
-    /// XORs each TLS-record header in place, leaving sealed bodies and the skip region alone.
-    /// Call inside `sendState.withLock`.
+    
     private func applyOutboundMask(_ bytes: inout [UInt8], state: inout SendState) {
         var offset = 0
         while offset < bytes.count {
@@ -79,12 +67,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
             let needed = 5 - state.outHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
-            bytes.withUnsafeMutableBufferPointer { pointer in
-                let region = UnsafeMutableRawBufferPointer(
-                    rebasing: UnsafeMutableRawBufferPointer(pointer)[offset..<(offset + chunk)]
-                )
-                outCTR.processInPlace(region)
-            }
+            state.outCTR.processInPlace(&bytes, range: offset..<(offset + chunk))
             state.outHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
             offset += chunk
             if state.outHeader.count == 5 {
@@ -100,8 +83,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     // MARK: - Receive
 
     func receiveRaw() async throws -> Data? {
-        // Drain stashed bytes first to preserve record-framing order.
-        let stashed: Data? = recvState.withLock { state in
+        let stashed: Data? = receiveState.withLock { state in
             guard !state.pendingPostSkip.isEmpty, state.inCTR != nil else { return nil }
             var data = state.pendingPostSkip
             state.pendingPostSkip = Data()
@@ -114,18 +96,15 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
         let received = try await inner.receiveRaw()
         guard var data = received, !data.isEmpty else {
-            // EOF (nil) or an empty chunk passes through unchanged.
             return received
         }
-        recvState.withLock { state in
+        receiveState.withLock { state in
             applyInboundMask(&data, state: &state)
         }
         return data
     }
-
-    /// Inbound counterpart of `applyOutboundMask`. Call inside `recvState.withLock`;
-    /// while `inCTR` is nil, bytes past the skip region are stashed and truncated.
-    private func applyInboundMask(_ data: inout Data, state: inout RecvState) {
+    
+    private func applyInboundMask(_ data: inout Data, state: inout ReceiveState) {
         guard data.count > 0 else { return }
         var bytes = [UInt8](data)
         var offset = 0
@@ -144,12 +123,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
             let needed = 5 - state.inHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
-            bytes.withUnsafeMutableBufferPointer { pointer in
-                let region = UnsafeMutableRawBufferPointer(
-                    rebasing: UnsafeMutableRawBufferPointer(pointer)[offset..<(offset + chunk)]
-                )
-                inCTR.processInPlace(region)
-            }
+            inCTR.processInPlace(&bytes, range: offset..<(offset + chunk))
             state.inHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
             offset += chunk
             if state.inHeader.count == 5 {
