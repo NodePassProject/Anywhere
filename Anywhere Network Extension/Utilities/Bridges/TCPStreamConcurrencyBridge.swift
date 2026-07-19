@@ -206,10 +206,10 @@ actor TCPStreamConcurrencyBridge {
     /// full close doesn't truncate the tail. No FIN is sent (half-close removed) — the owner
     /// full-closes once both directions have ended.
     func awaitDownloadDrained() async {
-        guard !terminated else { return }
+        guard !terminated, writeError == nil else { return }
         downloadFinishing = true
         markDrainedIfComplete()
-        while !terminated, !downloadFinished {
+        while !terminated, writeError == nil, !downloadFinished {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 finishWaiter = continuation
             }
@@ -232,8 +232,7 @@ actor TCPStreamConcurrencyBridge {
                 writeError = error
                 downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
                 resumeCreditWaiter()
-                // Surface to the owner now; the awaited relay path (`sendDownload`) also rethrows
-                // it, but the fire-and-forget downlink has no reader, so signal proactively.
+                resumeFinishWaiter()
                 onFatalWrite?(error)
                 return
             }

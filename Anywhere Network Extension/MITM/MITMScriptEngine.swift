@@ -671,7 +671,7 @@ actor MITMScriptEngine {
                 return Self.makeProtobufEntries(entries, in: context)
             } catch {
                 context.exception = JSValue(
-                    newErrorFromMessage: "Anywhere.protobuf.decode: \(error)",
+                    newErrorFromMessage: "Anywhere.protobuf.decode: \(AnywhereError.describe(error))",
                     in: context
                 )
                 return JSValue(undefinedIn: context)
@@ -684,7 +684,7 @@ actor MITMScriptEngine {
                 return Self.makeUint8Array(in: context, from: Self.protobufEncodeWire(entries))
             } catch {
                 context.exception = JSValue(
-                    newErrorFromMessage: "Anywhere.protobuf.encode: \(error)",
+                    newErrorFromMessage: "Anywhere.protobuf.encode: \(AnywhereError.describe(error))",
                     in: context
                 )
                 return JSValue(undefinedIn: context)
@@ -1550,7 +1550,7 @@ actor MITMScriptEngine {
             case .success(let response):
                 resolve?.call(withArguments: [Self.makeHTTPResponse(response, in: context)])
             case .failure(let error):
-                reject?.call(withArguments: [Self.error("Anywhere.http: \(error.localizedDescription)", in: context)])
+                reject?.call(withArguments: [Self.error("Anywhere.http: \(AnywhereError.describe(error))", in: context)])
             }
         }
         if context.exception != nil { context.exception = nil }

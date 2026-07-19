@@ -1547,7 +1547,7 @@ extension MITMSession: MITMBridgeClientLegDelegate {
                 step = .stop
             } else if let bs = bridgeStreams[streamID], let client = bridgeClient {
                 if let error {
-                    logger.warning("\(dstHost): bridge upstream read error for stream \(streamID): \(AnywhereError.describe(error))")
+                    logger.report("\(dstHost): bridge upstream read error for stream \(streamID)", error: error)
                     await client.acceptResponseAborted(streamID: streamID)
                     bridgeAbortStream(streamID) // a reset doesn't notify us; free the dead upstream
                     step = .stop

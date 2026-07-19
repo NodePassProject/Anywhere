@@ -66,51 +66,31 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     // MARK: - Tunnel Lifecycle
     
     override func startTunnel(options: [String : NSObject]? = nil) async throws {
-        // App starts pass the configuration in `options`; Settings/On-Demand starts
-        // pass nil, so fall back to the last persisted configuration.
-        let configuration: ProxyConfiguration?
-        if let messageData = options?[TunnelMessage.optionKey] as? Data,
-           case .setConfiguration(let config) = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) {
-            configuration = config
-        } else if let savedData = AWCore.getLastConfigurationData() {
-            do {
-                configuration = try JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
-            } catch {
-                logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
-                configuration = nil
-            }
-        } else {
-            configuration = nil
-        }
-        
-        guard let configuration else {
+        guard let configuration = resolveStartConfiguration(options: options) else {
             let error = AnywhereError.tunnel(.invalidConfiguration)
             logger.report("[VPN] Start failed", error: error)
             throw error
         }
-        
-        // Drive `setTunnelNetworkSettings` whenever the stack signals a routes/DNS change.
-        // Strong self: the stream ends on cancellation, `stopTunnel` cancels, ARC cleans up.
-        let reapplySignal = tunnelStack.reapplySettingsSignal
-        reapplySettingsTask.withLock { task in
-            task = Task {
-                for await _ in reapplySignal {
-                    self.reapplyTunnelSettings()
-                }
-            }
-        }
 
         let settings = buildTunnelSettings()
-
-        // Await directly (not a detached Task): the OS must observe the real outcome
-        // of `startTunnel`. A settings failure has to propagate so the tunnel is
-        // reported as failed rather than falsely started.
+        
         do {
             try await setTunnelNetworkSettings(settings)
         } catch {
             let wrapped = AnywhereError.tunnel(.settingsApplyFailed(underlying: error))
             logger.report("[VPN]", error: wrapped)
             throw wrapped
+        }
+
+        // Drive `setTunnelNetworkSettings` whenever the stack signals a routes/DNS change.
+        let reapplySignal = tunnelStack.reapplySettingsSignal
+        reapplySettingsTask.withLock { task in
+            task?.cancel()
+            task = Task {
+                for await _ in reapplySignal {
+                    await self.reapplyTunnelSettings()
+                }
+            }
         }
 
 #if os(iOS)
@@ -128,6 +108,25 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
                 udpConnectionCount: FlowGauge.liveUDP,
                 memoryBytes: Self.memoryFootprint()
             )
+        }
+    }
+    
+    private func resolveStartConfiguration(options: [String: NSObject]?) -> ProxyConfiguration? {
+        if let messageData = options?[TunnelMessage.optionKey] as? Data {
+            do {
+                if case .setConfiguration(let config) = try JSONDecoder().decode(TunnelMessage.self, from: messageData) {
+                    return config
+                }
+            } catch {
+                logger.report("[VPN] Start options decode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
+            }
+        }
+        guard let savedData = AWCore.getLastConfigurationData() else { return nil }
+        do {
+            return try JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
+        } catch {
+            logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
+            return nil
         }
     }
 
@@ -243,18 +242,15 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     private static func dottedQuad(_ value: UInt32) -> String {
         "\((value >> 24) & 0xFF).\((value >> 16) & 0xFF).\((value >> 8) & 0xFF).\(value & 0xFF)"
     }
-
-    /// Re-applies tunnel settings from current UserDefaults; resets the virtual
-    /// interface and flushes the OS DNS cache.
-    private func reapplyTunnelSettings() {
+    
+    private func reapplyTunnelSettings() async {
         let settings = buildTunnelSettings()
-        Task {
-            do {
-                try await setTunnelNetworkSettings(settings)
-                logger.info("[VPN] Tunnel settings reapplied")
-            } catch {
-                logger.report("[VPN] Failed to reapply tunnel settings", error: error)
-            }
+        do {
+            try await setTunnelNetworkSettings(settings)
+            logger.info("[VPN] Tunnel settings reapplied")
+        } catch {
+            guard !Task.isCancelled else { return }
+            logger.report("[VPN] Failed to reapply tunnel settings", error: error)
         }
     }
 
@@ -276,7 +272,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     // MARK: - App Messages
 
     override func handleAppMessage(_ messageData: Data) async -> Data? {
-        guard let message = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) else {
+        let message: TunnelMessage
+        do {
+            message = try JSONDecoder().decode(TunnelMessage.self, from: messageData)
+        } catch {
+            logger.report("[IPC] App message decode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
             return nil
         }
 
@@ -287,21 +287,28 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         case .testLatency(let configuration):
             let response = LatencyTestResponse(await LatencyTester.test(configuration))
-            return try? JSONEncoder().encode(response)
+            return encodeReply(response)
 
         case .fetchStats:
-            return try? JSONEncoder().encode(statsRecorder.snapshot())
+            return encodeReply(statsRecorder.snapshot())
 
         case .fetchLogs:
-            return try? JSONEncoder().encode(LogsResponse(logs: tunnelStack.fetchLogs()))
+            return encodeReply(LogsResponse(logs: tunnelStack.fetchLogs()))
 
         case .fetchRequests:
-            return try? JSONEncoder().encode(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
+            return encodeReply(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
         }
     }
-
-    /// Memory footprint in bytes (`phys_footprint`, the figure jetsam uses for the
-    /// extension's tight budget); 0 if the Mach call fails.
+    
+    private func encodeReply(_ reply: some Encodable) -> Data? {
+        do {
+            return try JSONEncoder().encode(reply)
+        } catch {
+            logger.report("[IPC] Reply encode failed", error: AnywhereError.tunnel(.ipcFailed(underlying: error)))
+            return nil
+        }
+    }
+    
     private static func memoryFootprint() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(

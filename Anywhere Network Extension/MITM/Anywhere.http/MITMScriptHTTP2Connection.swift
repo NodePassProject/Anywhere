@@ -780,7 +780,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         let serialized = frame.serialized
         Task {
             do { try await transport.send(serialized) }
-            catch { logger.debug("[MITMScriptHTTP2] control frame send failed: \(error.localizedDescription)") }
+            catch { logger.debug("[MITMScriptHTTP2] control frame send failed: \(AnywhereError.describe(error))") }
         }
     }
 

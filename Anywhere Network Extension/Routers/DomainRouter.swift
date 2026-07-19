@@ -45,9 +45,11 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         // MARK: Streaming ingestion
-
-        mutating func ingestConfigurations(_ slice: Data) {
-            guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else { return }
+        
+        mutating func ingestConfigurations(_ slice: Data) throws(AnywhereError) {
+            guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else {
+                throw AnywhereError.routing(.payloadCorrupted(.malformed))
+            }
             for (key, configuration) in configurations {
                 guard let configurationId = UUID(uuidString: key) else { continue }
                 configurationMap[configurationId] = configuration
@@ -145,14 +147,14 @@ nonisolated final class DomainRouter: Sendable {
             self.data = data
         }
 
-        mutating func run(state: inout RoutingState) throws {
+        mutating func run(state: inout RoutingState) throws(AnywhereError) {
             try expectMagic()
 
             let configLength = Int(try u32())
             let configStart = cursor
             try advance(configLength)
             if configLength > 0 {
-                state.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
+                try state.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
             }
 
             let entryCount = try u32()
@@ -178,7 +180,7 @@ nonisolated final class DomainRouter: Sendable {
             return names
         }
 
-        private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws {
+        private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws(AnywhereError) {
             guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
             let action = try readAction()
             let payload = RulePayload(action: action, entryIndex: entryIndex)
@@ -210,7 +212,7 @@ nonisolated final class DomainRouter: Sendable {
             }
         }
 
-        private mutating func readAction() throws -> RouteTarget {
+        private mutating func readAction() throws(AnywhereError) -> RouteTarget {
             switch RoutingBinaryFormat.Action(rawValue: try u8()) {
             case .direct: return .direct
             case .reject: return .reject
@@ -221,37 +223,37 @@ nonisolated final class DomainRouter: Sendable {
 
         // MARK: Primitives
 
-        private mutating func expectMagic() throws {
+        private mutating func expectMagic() throws(AnywhereError) {
             let magic = RoutingBinaryFormat.magic
             guard cursor + magic.count <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             for k in 0..<magic.count where bytes[cursor + k] != magic[k] { throw AnywhereError.routing(.payloadCorrupted(.badMagic)) }
             cursor += magic.count
         }
 
-        private mutating func u8() throws -> UInt8 {
+        private mutating func u8() throws(AnywhereError) -> UInt8 {
             guard cursor < count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             defer { cursor += 1 }
             return bytes[cursor]
         }
 
-        private mutating func u16() throws -> UInt16 {
+        private mutating func u16() throws(AnywhereError) -> UInt16 {
             guard cursor + 2 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             defer { cursor += 2 }
             return UInt16(bytes[cursor]) | (UInt16(bytes[cursor + 1]) << 8)
         }
 
-        private mutating func u32() throws -> UInt32 {
+        private mutating func u32() throws(AnywhereError) -> UInt32 {
             guard cursor + 4 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             defer { cursor += 4 }
             return UInt32(bytes[cursor]) | (UInt32(bytes[cursor + 1]) << 8) | (UInt32(bytes[cursor + 2]) << 16) | (UInt32(bytes[cursor + 3]) << 24)
         }
 
-        private mutating func advance(_ n: Int) throws {
+        private mutating func advance(_ n: Int) throws(AnywhereError) {
             guard n >= 0, cursor + n <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             cursor += n
         }
 
-        private mutating func readUUID() throws -> UUID {
+        private mutating func readUUID() throws(AnywhereError) -> UUID {
             guard cursor + 16 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             let u = UUID(uuid: (bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
                                 bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],

@@ -517,7 +517,7 @@ nonisolated enum MITMBinaryReader {
             do {
                 return try cursor.readSnapshot()
             } catch {
-                logger.warning("binary payload decode failed: \(AnywhereError.describe(error))")
+                logger.report("binary payload decode failed", error: error)
                 return nil
             }
         }
@@ -531,7 +531,7 @@ nonisolated enum MITMBinaryReader {
 
         init(bytes: UnsafeBufferPointer<UInt8>) { self.bytes = bytes }
 
-        mutating func readSnapshot() throws -> (enabled: Bool, ruleSets: [MITMRuleSet]) {
+        mutating func readSnapshot() throws(AnywhereError) -> (enabled: Bool, ruleSets: [MITMRuleSet]) {
             try expectMagic()
             let payloadVersion = try u8()
             guard payloadVersion >= 1, payloadVersion <= MITMBinaryFormat.version else {
@@ -550,7 +550,7 @@ nonisolated enum MITMBinaryReader {
             return (enabled, sets)
         }
 
-        private mutating func readSet() throws -> MITMRuleSet {
+        private mutating func readSet() throws(AnywhereError) -> MITMRuleSet {
             let id = try readUUID()
             let name = try str16()
             let enabled = try u8() != 0
@@ -583,7 +583,7 @@ nonisolated enum MITMBinaryReader {
             return set
         }
 
-        private mutating func readRule() throws -> MITMRule {
+        private mutating func readRule() throws(AnywhereError) -> MITMRule {
             let phase: MITMPhase
             switch try u8() {
             case MITMBinaryFormat.Phase.httpRequest.rawValue: phase = .httpRequest
@@ -594,7 +594,7 @@ nonisolated enum MITMBinaryReader {
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: try readOperation())
         }
 
-        private mutating func readOperation() throws -> MITMOperation {
+        private mutating func readOperation() throws(AnywhereError) -> MITMOperation {
             guard let kind = MITMBinaryFormat.OpKind(rawValue: try u8()) else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.malformed)) }
             switch kind {
             case .rewrite:       return .rewrite(try readRewrite())
@@ -608,7 +608,7 @@ nonisolated enum MITMBinaryReader {
             }
         }
 
-        private mutating func readRewrite() throws -> MITMRewriteAction {
+        private mutating func readRewrite() throws(AnywhereError) -> MITMRewriteAction {
             guard let kind = MITMBinaryFormat.RewriteKind(rawValue: try u8()) else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.malformed)) }
             switch kind {
             case .transparent:   return .transparent(url: try str32())
@@ -619,7 +619,7 @@ nonisolated enum MITMBinaryReader {
             }
         }
 
-        private mutating func readJSON() throws -> MITMJSONOperation {
+        private mutating func readJSON() throws(AnywhereError) -> MITMJSONOperation {
             guard let action = MITMBinaryFormat.JSONAction(rawValue: try u8()) else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.malformed)) }
             switch action {
             case .add:                  return .add(path: try str32(), value: try str32())
@@ -634,47 +634,47 @@ nonisolated enum MITMBinaryReader {
 
         // MARK: Primitives
 
-        private mutating func expectMagic() throws {
+        private mutating func expectMagic() throws(AnywhereError) {
             let magic = MITMBinaryFormat.magic
             guard readOffset + magic.count <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             for k in 0..<magic.count where bytes[readOffset + k] != magic[k] { throw AnywhereError.mitm(.rewriteRulesCorrupted(.badMagic)) }
             readOffset += magic.count
         }
 
-        private mutating func u8() throws -> UInt8 {
+        private mutating func u8() throws(AnywhereError) -> UInt8 {
             guard readOffset < count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             defer { readOffset += 1 }
             return bytes[readOffset]
         }
 
-        private mutating func u16() throws -> UInt16 {
+        private mutating func u16() throws(AnywhereError) -> UInt16 {
             guard readOffset + 2 <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             defer { readOffset += 2 }
             return UInt16(bytes[readOffset]) | (UInt16(bytes[readOffset + 1]) << 8)
         }
 
-        private mutating func u32() throws -> UInt32 {
+        private mutating func u32() throws(AnywhereError) -> UInt32 {
             guard readOffset + 4 <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             defer { readOffset += 4 }
             return UInt32(bytes[readOffset]) | (UInt32(bytes[readOffset + 1]) << 8)
                  | (UInt32(bytes[readOffset + 2]) << 16) | (UInt32(bytes[readOffset + 3]) << 24)
         }
 
-        private mutating func str16() throws -> String {
+        private mutating func str16() throws(AnywhereError) -> String {
             let n = Int(try u16())
             guard readOffset + n <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             defer { readOffset += n }
             return String(decoding: bytes[readOffset..<readOffset + n], as: UTF8.self)
         }
 
-        private mutating func str32() throws -> String {
+        private mutating func str32() throws(AnywhereError) -> String {
             let n = Int(try u32())
             guard readOffset + n <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             defer { readOffset += n }
             return String(decoding: bytes[readOffset..<readOffset + n], as: UTF8.self)
         }
 
-        private mutating func readUUID() throws -> UUID {
+        private mutating func readUUID() throws(AnywhereError) -> UUID {
             guard readOffset + 16 <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
             let u = UUID(uuid: (
                 bytes[readOffset], bytes[readOffset + 1], bytes[readOffset + 2], bytes[readOffset + 3],

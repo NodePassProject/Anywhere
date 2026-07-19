@@ -44,9 +44,9 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         return state.withLock { $0.cache[scope]?[key] }
     }
 
-    func set(scope: UUID, key: String, value: Data) throws {
+    func set(scope: UUID, key: String, value: Data) throws(AnywhereError) {
         ensureLoaded(scope)
-        let serialized: Data = try state.withLock { state in
+        let serialized: Data = try state.withLock { (state) throws(AnywhereError) -> Data in
             var bucket = state.cache[scope] ?? [:]
             bucket[key] = value
             guard let serialized = serialize(bucket) else {
@@ -166,11 +166,17 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         guard needsLoad else { return }
 
         var bucket: [String: Data] = [:]
-        if let url = fileURL(scope),
-           let data = coordinatedRead(url),
-           let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-           let dictionary = object as? [String: Data] {
-            bucket = dictionary
+        if let url = fileURL(scope), let data = coordinatedRead(url) {
+            do {
+                let object = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+                if let dictionary = object as? [String: Data] {
+                    bucket = dictionary
+                } else {
+                    logger.report(AnywhereError.store(.corrupted(.scripts, detail: "\(scope): unexpected plist shape")))
+                }
+            } catch {
+                logger.report(AnywhereError.store(.corrupted(.scripts, detail: "\(scope): \(AnywhereError.describe(error))")))
+            }
         }
 
         state.withLock { state in
@@ -184,10 +190,24 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?
         var result: Data?
+        var readError: Error?
         coordinator.coordinate(readingItemAt: url, options: [], error: &coordError) { coordinatedURL in
-            result = try? Data(contentsOf: coordinatedURL)
+            do {
+                result = try Data(contentsOf: coordinatedURL)
+            } catch {
+                readError = error
+            }
+        }
+        if let error = coordError ?? (readError as NSError?), !Self.isFileNotFound(error) {
+            logger.report("[MITM][JS] Anywhere.store(onDisk): read failed for \(url.lastPathComponent)",
+                          error: AnywhereError.store(.loadFailed(.scripts, underlying: error)))
         }
         return result
+    }
+
+    private static func isFileNotFound(_ error: NSError) -> Bool {
+        error.domain == NSCocoaErrorDomain
+            && (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError)
     }
 
     private func writeToDisk(scope: UUID, data: Data) -> Bool {

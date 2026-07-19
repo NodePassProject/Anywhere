@@ -36,9 +36,9 @@ nonisolated final class MITMScriptStore: Sendable {
     }
 
     /// Upserts `key` within `scope`; throws without modifying state if the write would exceed either cap.
-    func set(scope: UUID, key: String, value: Data, onDisk: Bool = false) throws {
+    func set(scope: UUID, key: String, value: Data, onDisk: Bool = false) throws(AnywhereError) {
         if onDisk { return try MITMScriptDiskStore.shared.set(scope: scope, key: key, value: value) }
-        try state.withLock { state in
+        try state.withLock { (state) throws(AnywhereError) in
             // Mutate via subscript to stay in-place; aliasing COW storage copies the whole bucket per write.
             let keyBytes = key.utf8.count
             let oldEntryBytes = state.buckets[scope]?[key].map { $0.count + keyBytes } ?? 0

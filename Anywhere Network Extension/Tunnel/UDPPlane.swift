@@ -291,7 +291,7 @@ actor UDPPlane {
 
     /// Returns the shared SS UDP session for `configuration`, creating or replacing terminal ones;
     /// sharing one sessionID + socket across flows restores full-cone NAT.
-    func shadowsocksSession(for configuration: ProxyConfiguration) -> Result<ShadowsocksUDPSession, Error> {
+    func shadowsocksSession(for configuration: ProxyConfiguration) -> Result<ShadowsocksUDPSession, AnywhereError> {
         if let existing = ssSessions[configuration.id], existing.isUsable {
             return .success(existing)
         }

@@ -129,8 +129,12 @@ actor UDPFlow {
             prefix: "[UDP]"
         )
     }
-
-    /// Terminal send errors close the flow; transient ones just log (UDP is lossy).
+    
+    private func noteTransientSendFailure(_ error: Error) {
+        guard !closed, !(error is CancellationError) else { return }
+        logTransientSendFailure(error)
+    }
+    
     private func handleProxySendError(_ error: Error, connection: ProxyConnection) async {
         guard !closed else { return }
         if Self.isTerminalProxySendError(error, connection: connection) {
@@ -141,8 +145,7 @@ actor UDPFlow {
             logTransientSendFailure(error)
         }
     }
-
-    /// Terminal = the connection is gone for good; transient = the connection is still usable.
+    
     nonisolated private static func isTerminalProxySendError(_ error: Error, connection: ProxyConnection) -> Bool {
         if case AnywhereError.quic(let quicError) = error {
             switch quicError {
@@ -173,7 +176,6 @@ actor UDPFlow {
                 return !connection.isConnected
             }
         }
-        // Unknown error types: fall back to the connection's own liveness signal.
         return !connection.isConnected
     }
 
@@ -199,7 +201,7 @@ actor UDPFlow {
                 do {
                     try await transport.send(payload)
                 } catch {
-                    self.logTransientSendFailure(error)
+                    self.noteTransientSendFailure(error)
                 }
             }
             return
@@ -214,7 +216,7 @@ actor UDPFlow {
                 do {
                     try await session.send(token: token, dstHost: host, dstPort: port, payload: payload)
                 } catch {
-                    self.logTransientSendFailure(error)
+                    self.noteTransientSendFailure(error)
                 }
             }
             return
@@ -225,7 +227,7 @@ actor UDPFlow {
                 do {
                     try await session.send(data: payload)
                 } catch {
-                    self.logTransientSendFailure(error)
+                    self.noteTransientSendFailure(error)
                 }
             }
             return
@@ -357,7 +359,7 @@ actor UDPFlow {
                         do {
                             try await session.send(data: payload)
                         } catch {
-                            self.logTransientSendFailure(error)
+                            self.noteTransientSendFailure(error)
                         }
                     }
                 }
@@ -507,7 +509,7 @@ actor UDPFlow {
                     do {
                         try await session.send(token: token, dstHost: host, dstPort: port, payload: payload)
                     } catch {
-                        self.logTransientSendFailure(error)
+                        self.noteTransientSendFailure(error)
                     }
                 }
             }
@@ -596,7 +598,7 @@ actor UDPFlow {
                 do {
                     try await transport.send(payload)
                 } catch {
-                    self.logTransientSendFailure(error)
+                    self.noteTransientSendFailure(error)
                 }
             }
         }

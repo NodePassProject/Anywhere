@@ -133,8 +133,8 @@ actor TunnelStack {
 
     /// Returns the shared MITM leaf-cert cache, creating it on first use. Called by
     /// ``TCPConnection`` on the lwIP queue; the `Mutex` keeps the lazy init single-flighted.
-    nonisolated func mitmLeafCacheCreatingIfNeeded() throws -> MITMLeafCertCache {
-        try _mitmLeafCache.withLock { cache in
+    nonisolated func mitmLeafCacheCreatingIfNeeded() throws(AnywhereError) -> MITMLeafCertCache {
+        try _mitmLeafCache.withLock { (cache) throws(AnywhereError) in
             if let cache { return cache }
             let made = try MITMLeafCertCache(store: mitmCertificateStore)
             cache = made

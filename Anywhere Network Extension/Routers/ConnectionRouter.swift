@@ -112,7 +112,7 @@ nonisolated final class ConnectionRouter: Sendable {
         case .proxy(let id):
             let configuration = domainRouter.resolveConfiguration(action: match.action)
             if configuration == nil {
-                logger.warning("[\(proto)] Routing config not found for \(host)")
+                logger.report("[\(proto)]", error: AnywhereError.routing(.configurationMissing(host: host)))
             }
             return .route(target: .proxy(id), configuration: configuration, ruleSetName: match.ruleSetName)
         }

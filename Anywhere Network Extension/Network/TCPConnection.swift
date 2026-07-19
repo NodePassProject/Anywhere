@@ -10,11 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
-nonisolated private struct HandshakeTimeoutError: LocalizedError {
-    let phase: String
-    var errorDescription: String? { "Handshake timed out during \(phase)" }
-}
-
 actor TCPConnection {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -149,7 +144,7 @@ actor TCPConnection {
         failureReporter.report(
             operation: "Handshake",
             endpoint: endpointDescription,
-            error: HandshakeTimeoutError(phase: phase),
+            error: AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: phase)),
             context: DialDiagnostics.snapshot(bridge: bridge)
         )
         abort()
@@ -279,6 +274,18 @@ actor TCPConnection {
     // MARK: - Relay
     
     private func startRelay(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) {
+        stream.assumeIsolated { s in
+            s.onFatalWrite = { [weak self] error in
+                guard let self else { return }
+                self.bridge.enqueue {
+                    self.assumeIsolated { me in
+                        guard !me.closed else { return }
+                        me.reportFailure("Write", error: error)
+                        me.abort()
+                    }
+                }
+            }
+        }
         if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
         if uplinkDone { stream.assumeIsolated { $0.deliverUploadEOF() } }
         let context = RelayContext(stack: stack, routeTarget: routeTarget)
@@ -499,24 +506,28 @@ actor TCPConnection {
             return
         }
 
-        ruleSetName = match.ruleSetName
         switch match.action {
         case .direct:
+            ruleSetName = match.ruleSetName
             routeTarget = .direct
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .direct, ruleSetName: match.ruleSetName)
         case .reject:
+            ruleSetName = match.ruleSetName
             routeTarget = .reject
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectWithTLSAlert()
         case .proxy(let id):
-            // The domain rule wins over any IP-CIDR route set at accept time.
-            routeTarget = .proxy(id)
-            if let resolved = router.resolveConfiguration(action: match.action) {
-                configuration = resolved
-            } else {
-                logger.warning("[TCP] SNI routing configuration not found for \(sni)")
+            // The domain rule wins over any IP-CIDR route set at accept time — but only with
+            // its configuration in hand. Committing `.proxy(id)` while keeping the accept-time
+            // configuration would dial a proxy the request log doesn't show.
+            guard let resolved = router.resolveConfiguration(action: match.action) else {
+                logger.report("[TCP] SNI route", error: AnywhereError.routing(.configurationMissing(host: sni)))
+                return
             }
+            ruleSetName = match.ruleSetName
+            routeTarget = .proxy(id)
+            configuration = resolved
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .proxy(id), ruleSetName: match.ruleSetName)
         }
     }
@@ -861,7 +872,7 @@ actor TCPConnection {
         try await withThrowingTaskGroup(of: DialRace<T>.self) { group in
             group.addTask { .value(try await body()) }
             group.addTask {
-                try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
+                try await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
                 return .timedOut
             }
             defer { group.cancelAll() }
@@ -871,10 +882,10 @@ actor TCPConnection {
                     return value
                 case .timedOut:
                     cancelOnTimeout()   // abort the in-flight handshake so `body` unwinds
-                    throw HandshakeTimeoutError(phase: "upstream dial")
+                    throw AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: "upstream dial"))
                 }
             }
-            throw HandshakeTimeoutError(phase: "upstream dial")
+            throw AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: "upstream dial"))
         }
     }
 
@@ -910,6 +921,7 @@ actor TCPConnection {
                 if let configuration = router.resolveConfiguration(action: match.action) {
                     return (.proxy(routeTarget: match.action, configuration: configuration), false, match.ruleSetName)
                 }
+                logger.report("[TCP] MITM dial route", error: AnywhereError.routing(.configurationMissing(host: host)))
             }
         }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {

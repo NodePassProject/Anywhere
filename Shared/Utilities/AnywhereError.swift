@@ -186,6 +186,7 @@ nonisolated enum AnywhereError: Error {
         case rejectedByRule(host: String)
         case dropped
         case payloadCorrupted(BinaryPayload)
+        case configurationMissing(host: String)
     }
     
     enum BinaryPayload: Sendable, Equatable {
@@ -526,6 +527,7 @@ nonisolated extension AnywhereError.Routing {
         case .rejectedByRule(let host): "rejected by routing rule: \(host)"
         case .dropped: "dropped by routing policy"
         case .payloadCorrupted(let issue): "routing payload corrupted (\(issue.label))"
+        case .configurationMissing(let host): "configuration for routing rule not found: \(host)"
         }
     }
 }
@@ -696,6 +698,8 @@ nonisolated extension AnywhereError {
              .routing(.rejectedByRule),
              .proxy(_, .streamClosed), .proxy(_, .connectionClosed):
             .info
+        case .routing(.configurationMissing):
+            .warning
         default:
             .error
         }
