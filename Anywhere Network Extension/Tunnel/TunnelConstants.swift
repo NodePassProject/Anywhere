@@ -42,14 +42,11 @@ nonisolated enum TunnelConstants {
     static let tcpMaxWriteSize = 16 * 1024
     /// Max bytes per upload send; UInt16.max stays safe for protocols with 2-byte length framing (e.g. Vision padding).
     static let uploadChunkSize = Int(UInt16.max)
-    /// Safety cap on per-connection pendingData; 2 × TCP_WND so it only fires on runaway bookkeeping drift.
-    static let tcpMaxPendingDataSize = 2 * 1024 * 1460
-    /// Max packets per writePackets call; 128 is the empirical utun ceiling (256 trips ENOSPC).
-    static let tunnelMaxPacketsPerWrite = 128
+    /// Safety cap on per-connection pendingData; 2 × TCP_WND (lwipopts.h) so it only fires on runaway bookkeeping drift.
+    static let tcpMaxPendingDataSize = 2 * 64 * 1460
 
-    /// Downlink backlog low-water mark below which the next proxy receive is prefetched
-    /// (otherwise downlink degrades to stop-and-wait); half TCP_SND_BUF (lwipopts.h).
-    static let drainLowWaterMark = 512 * 1460
+    /// Downlink backlog low-water mark below which the next proxy receive is prefetched.
+    static let drainLowWaterMark = 128 * 1460
 
     // MARK: - UDP Settings
 

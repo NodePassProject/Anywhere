@@ -16,7 +16,6 @@ extension TunnelStack {
     // MARK: - Output Batching
     
     nonisolated func drainOutputLoop(packetFlow: NEPacketTunnelFlow) async {
-        let cap = TunnelConstants.tunnelMaxPacketsPerWrite
         while true {
             var packets: [Data] = []
             var protocols: [NSNumber] = []
@@ -28,24 +27,12 @@ extension TunnelStack {
                     buffer.drainInFlight = false
                     return
                 }
-                if pending <= cap {
-                    packets = buffer.packets
-                    protocols = buffer.protocols
-                    releases = buffer.releases
-                    buffer.packets = []
-                    buffer.protocols = []
-                    buffer.releases = []
-                    buffer.packets.reserveCapacity(cap)
-                    buffer.protocols.reserveCapacity(cap)
-                    buffer.releases.reserveCapacity(cap)
-                } else {
-                    packets = Array(buffer.packets.prefix(cap))
-                    protocols = Array(buffer.protocols.prefix(cap))
-                    releases = Array(buffer.releases.prefix(cap))
-                    buffer.packets.removeFirst(cap)
-                    buffer.protocols.removeFirst(cap)
-                    buffer.releases.removeFirst(cap)
-                }
+                packets = buffer.packets
+                protocols = buffer.protocols
+                releases = buffer.releases
+                buffer.packets = []
+                buffer.protocols = []
+                buffer.releases = []
             }
 
             if packets.isEmpty { return }

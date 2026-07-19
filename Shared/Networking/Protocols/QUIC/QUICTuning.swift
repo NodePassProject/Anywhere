@@ -64,10 +64,6 @@ nonisolated struct QUICTuning {
 }
 
 nonisolated extension QUICTuning {
-
-    /// Naive (HTTP/3 CONNECT) preset: CUBIC matches the Naive server stack; windows target
-    /// 2× BDP for 125 Mbps × 256 ms links, with a 16 MB initial stream window so the first RTT
-    /// can fill a high-BDP pipe; 10 s handshake ≈ three PTOs before the pool's one-shot retry.
     static let naive = QUICTuning(
         cc: .cubic,
         maxStreamWindow: 64 * 1024 * 1024,
@@ -83,11 +79,7 @@ nonisolated extension QUICTuning {
         keepAliveTimeout: 15 * 1_000_000_000,
         disableActiveMigration: false
     )
-
-    /// Brutal windows are deliberately small — ~2× the proxied stream's `TCP_SND_BUF` (≈696 KB)
-    /// prevents burst-then-stall without capping throughput — and `max == initial` disables
-    /// ngtcp2's window auto-tuner. BBR paces from its own estimate, so its windows may auto-scale
-    /// (`max > initial`).
+    
     static func hysteria(congestionControl: HysteriaCongestionControl, uploadMbps: Int) -> QUICTuning {
         switch congestionControl {
         case .brutal:
@@ -125,14 +117,7 @@ nonisolated extension QUICTuning {
             )
         }
     }
-
-    /// Nowhere's auth and TCP streams are client-initiated, so `bidiLocal`
-    /// controls the server-to-client download window. Receive credit is kept
-    /// deliberately small because it can become resident buffered data when the
-    /// Network Extension experiences downstream backpressure. Each stream may
-    /// auto-tune independently while concurrent streams share the larger
-    /// connection cap. The Portal's unused server-initiated stream credit
-    /// remains zero.
+    
     static let nowhere = QUICTuning(
         cc: .bbr,
         maxStreamWindow: 16 * 1024 * 1024,
