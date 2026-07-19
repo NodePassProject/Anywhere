@@ -21,7 +21,7 @@ struct JoinBetaView: View {
             }
 
             Section {
-                if token != nil {
+                if voyagerStore.isMember && token != nil {
                     Button {
                         Task { await copyToken() }
                     } label: {
