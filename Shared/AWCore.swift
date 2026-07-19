@@ -124,6 +124,10 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.voyagerMembership)
     }
 
+    static func clearVoyagerMembership() {
+        userDefaults.removeObject(forKey: UserDefaultsKey.voyagerMembership)
+    }
+
     enum ThemeColorSlot: String {
         case connectedBackgroundStart
         case connectedBackgroundEnd
