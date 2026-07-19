@@ -38,15 +38,15 @@ nonisolated enum TunnelConstants {
 
     // MARK: - TCP Buffer Sizes
 
-    /// Max bytes per tcp_write call (16 KB ≈ 11 segments at TCP_MSS=1460); must stay in sync with lwipopts.h.
-    static let tcpMaxWriteSize = 16 * 1024
-    /// Max bytes per upload send; UInt16.max stays safe for protocols with 2-byte length framing (e.g. Vision padding).
-    static let uploadChunkSize = Int(UInt16.max)
-    /// Safety cap on per-connection pendingData; 2 × TCP_WND (lwipopts.h) so it only fires on runaway bookkeeping drift.
-    static let tcpMaxPendingDataSize = 2 * 64 * 1460
+    /// One lwIP window: mirrors `TCP_WND`/`TCP_SND_BUF` in `port/lwipopts.h`.
+    static let tcpWindowSize = 64 * 1460
+    /// Max bytes per `tcp_write` call: lwIP's `len` is `u16_t`.
+    static let tcpMaxWriteSize = Int(UInt16.max)
+    /// Safety cap on per-connection pendingData.
+    static let tcpMaxPendingDataSize = 2 * tcpWindowSize
 
-    /// Downlink backlog low-water mark below which the next proxy receive is prefetched.
-    static let drainLowWaterMark = 128 * 1460
+    /// Downlink backlog watermark.
+    static let drainLowWaterMark = 2 * tcpWindowSize
 
     // MARK: - UDP Settings
 

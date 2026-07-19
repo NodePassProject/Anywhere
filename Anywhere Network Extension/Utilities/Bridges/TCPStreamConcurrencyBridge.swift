@@ -28,11 +28,8 @@ actor TCPStreamConcurrencyBridge {
     // ``receiveUpload(acking:)``), so TCP_WND caps how far ahead the buffer runs.
 
     private var uploadBuffer = Data()
-    private var uploadBufferOffset = 0
     private var uploadEOF = false
     private var uploadWaiter: CheckedContinuation<Void, Never>?
-
-    private var uploadCount: Int { uploadBuffer.count - uploadBufferOffset }
 
     // MARK: Download (upstream → app)
     //
@@ -120,19 +117,15 @@ actor TCPStreamConcurrencyBridge {
     }
 
     // MARK: - Upload async surface (single upload relay)
-
-    /// The next coalesced upload chunk (≤ `uploadChunkSize`), or `nil` once the app's FIN is
-    /// reached and the buffer is drained. Acks `acking` bytes — the previously delivered chunk,
-    /// now accepted by the upstream — in the same hop (ack-on-take), so each relay cycle crosses
-    /// the lwIP queue once; the final chunk's ack rides the call that returns `nil`. Termination
-    /// wins over buffered data — a torn-down connection's residue must not reach the upstream,
-    /// the relay must exit promptly, and the ack is skipped so it never touches the freed pcb.
+    
     func receiveUpload(acking ackedByteCount: Int) async -> Data? {
         ackUpload(ackedByteCount)
         while true {
             if terminated { return nil }
-            if uploadCount > 0 {
-                return sliceUpload(min(uploadCount, TunnelConstants.uploadChunkSize))
+            if !uploadBuffer.isEmpty {
+                let chunk = uploadBuffer
+                uploadBuffer = Data()
+                return chunk
             }
             if uploadEOF { return nil }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -140,10 +133,7 @@ actor TCPStreamConcurrencyBridge {
             }
         }
     }
-
-    /// Acks `byteCount` upload bytes back to lwIP once the upstream accepted them, reopening the
-    /// receive window. Deferred until acceptance so the app is throttled to the upstream's rate.
-    /// Rides ``receiveUpload(acking:)``'s hop rather than a hop of its own.
+    
     private func ackUpload(_ byteCount: Int) {
         guard !terminated, byteCount > 0 else { return }
         var remaining = byteCount
@@ -153,28 +143,6 @@ actor TCPStreamConcurrencyBridge {
             bridge.tcpRecved(pcb, part)
         }
         bridge.tcpOutput(pcb)
-    }
-
-    /// Removes and returns the `take`-byte head slice; whole-buffer consumption hands off the
-    /// storage so the in-flight chunk's backing isn't mutated under it.
-    private func sliceUpload(_ take: Int) -> Data {
-        if take == uploadCount {
-            let chunk: Data = uploadBufferOffset == 0
-                ? uploadBuffer
-                : uploadBuffer.subdata(in: uploadBufferOffset..<uploadBuffer.count)
-            uploadBuffer = Data()
-            uploadBufferOffset = 0
-            return chunk
-        }
-        let start = uploadBufferOffset
-        let end = start + take
-        let chunk = uploadBuffer.subdata(in: start..<end)
-        uploadBufferOffset = end
-        if uploadBufferOffset > uploadBuffer.count - uploadBufferOffset {
-            uploadBuffer.removeSubrange(0..<uploadBufferOffset)
-            uploadBufferOffset = 0
-        }
-        return chunk
     }
 
     // MARK: - Download async surface (single download relay)
