@@ -18,7 +18,11 @@ nonisolated protocol MITMHTTP1ResponseIRSink: AnyObject, Sendable {
 }
 
 actor MITMHTTP1Stream {
-    
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        lwipBridge.executor.asUnownedSerialExecutor()
+    }
+
     /// Cap on bytes buffered awaiting the CRLF CRLF head terminator (Apache's
     /// 64 KiB default); on exceed the stream downgrades to passthrough.
     private static let maxHeadBytes: Int = 64 * 1024
