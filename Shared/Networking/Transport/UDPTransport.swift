@@ -25,6 +25,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         var driverTask: Task<Void, Never>?
         var ready = false
         var cancelled = false
+        var lastDialState: String?
     }
 
     /// State and one-shot signals shared with the driver task. Both signals are
@@ -96,7 +97,8 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         }
 
         try await withTaskCancellationHandler {
-            try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in cancel() }) {
+            try await raceDialDeadline(Self.dialDeadline, onExpire: { [self] in cancel() },
+                                       timeout: self.dialTimeoutError()) {
                 for try await _ in guts.dialOutcome {}
             }
         } onCancel: {
@@ -105,6 +107,12 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         // A cancelled iteration ends without throwing; only a live, ready
         // transport may report a successful dial.
         guard isReady else { throw AnywhereError.transport(.terminated) }
+    }
+    
+    private func dialTimeoutError() -> AnywhereError {
+        let lastState = guts.state.withLock { $0.lastDialState }
+        return .transport(.timedOut(.connect, endpoint: endpointDescription,
+                                    detail: lastState ?? "no state updates"))
     }
 
     /// Owns the connection scope for the whole session. Publishes the connection,
@@ -121,6 +129,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
                 guard live else { throw CancellationError() }
 
                 conn.onStateUpdate { _, update in
+                    guts.state.withLock { $0.lastDialState = String(describing: update) }
                     switch update {
                     case .ready:
                         guts.state.withLock { $0.ready = true }

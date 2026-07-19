@@ -50,6 +50,7 @@ extension AnywhereError {
     nonisolated static func networkFailure(_ error: Error, op: Transport.Operation) -> AnywhereError {
         if error is CancellationError { return .transport(.terminated) }
         if let nwError = error as? NWError { return nwError.anywhereError(op: op) }
+        if let anywhereError = error as? AnywhereError { return anywhereError }
         return .transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
     }
 
