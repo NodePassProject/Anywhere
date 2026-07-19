@@ -39,6 +39,22 @@ actor NowhereConnection {
     /// Post-result bytes left over from `open()`'s handshake, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
 
+    /// Consumed bytes whose flow-control credit hasn't been returned to QUIC yet. Crediting per
+    /// consumed chunk costs a bridge-queue hop plus a `writeToUDP` pass each time, so credit is
+    /// batched up to `creditFlushThreshold` and flushed in `teardown()` (conn-level credit must be
+    /// returned eventually even for a dying stream, or the connection window leaks).
+    private var uncreditedBytes = 0
+    /// Small against the 4 MiB initial stream window, and far below the half-window granularity at
+    /// which ngtcp2 emits MAX_(STREAM_)DATA — batching at this size doesn't change wire timing.
+    private static let creditFlushThreshold = 256 << 10
+
+    /// Chunks drained from `rawInbox` in one batch but not yet handed downstream. Consumed before
+    /// the inbox so stream order holds; bounds each `nextChunk` return to `maxChunkBytes`.
+    private var backlogChunks: [Data] = []
+    /// Cap on a single coalesced chunk, so a consumer catching up after lwIP backpressure
+    /// forwards a bounded buffer per call instead of everything that queued while it was parked.
+    private static let maxChunkBytes = 512 << 10
+
     /// Guards `teardown()` so the stream is shut down and released exactly once.
     private var closed = false
 
@@ -156,20 +172,56 @@ actor NowhereConnection {
         if !pendingData.isEmpty {
             let out = pendingData
             pendingData = Data()
-            session.extendStreamOffset(streamID, count: out.count)
+            credit(out.count)
             return out
         }
-        guard let chunk = try await nextChunk() else { return nil }
+        guard let chunk = try await nextChunk() else {
+            flushCredit()
+            return nil
+        }
         if !chunk.isEmpty {
-            // Return stream flow-control credit only now the app has taken the bytes.
-            session.extendStreamOffset(streamID, count: chunk.count)
+            // Credit flow control only now the app has taken the bytes (batched).
+            credit(chunk.count)
         }
         return chunk
     }
 
-    /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`).
+    /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`). Drains everything
+    /// buffered per wake-up, so a consumer that fell behind the demux catches up in one hop —
+    /// but hands downstream at most `maxChunkBytes` per call, parking the rest in `backlogChunks`,
+    /// so one call never materializes an unbounded buffer.
     private func nextChunk() async throws -> Data? {
-        try await rawInbox.next()
+        if !backlogChunks.isEmpty { return takeBacklog() }
+        guard let batch = try await rawInbox.nextBatch() else { return nil }
+        if batch.count == 1 { return batch[0] }
+        backlogChunks = batch
+        return takeBacklog()
+    }
+
+    private func takeBacklog() -> Data {
+        var joined = Data(capacity: min(backlogChunks.reduce(0) { $0 + $1.count }, Self.maxChunkBytes))
+        var index = 0
+        while index < backlogChunks.count, joined.count < Self.maxChunkBytes {
+            joined.append(backlogChunks[index])
+            index += 1
+        }
+        backlogChunks.removeFirst(index)
+        return joined
+    }
+
+    private func credit(_ count: Int) {
+        uncreditedBytes += count
+        guard uncreditedBytes >= Self.creditFlushThreshold else { return }
+        flushCredit()
+    }
+
+    private func flushCredit() {
+        guard uncreditedBytes > 0 else { return }
+        let count = uncreditedBytes
+        uncreditedBytes = 0
+        let sid = streamID
+        guard sid >= 0 else { return }
+        session.extendStreamOffset(sid, count: count)
     }
 
     nonisolated func cancel() {
@@ -181,6 +233,7 @@ actor NowhereConnection {
     private func teardown() {
         guard !closed else { return }
         closed = true
+        flushCredit()
         let sid = _streamID.load(ordering: .relaxed)
         if sid >= 0 {
             session.shutdownStream(sid)

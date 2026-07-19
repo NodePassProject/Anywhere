@@ -13,29 +13,32 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
 
 nonisolated final class QUICInboundMailbox: Sendable {
-    private static let capacity = 256
+    private static let capacity = 1024
 
     private struct State {
         var packets: [Data] = []
         var drainScheduled = false
-        var didWarnOverflow = false
+        var dropped = 0
     }
     private let state = Mutex(State())
-    
+
     func push(_ packet: Data) -> Bool {
-        state.withLock { state in
+        let (schedule, droppedToReport): (Bool, Int) = state.withLock { state in
             guard state.packets.count < Self.capacity else {
-                if !state.didWarnOverflow {
-                    state.didWarnOverflow = true
-                    logger.warning("[QUIC] Inbound backlog full; dropping datagrams until the bridge queue drains")
-                }
-                return false
+                state.dropped += 1
+                return (false, 0)
             }
+            let dropped = state.dropped
+            state.dropped = 0
             state.packets.append(packet)
-            if state.drainScheduled { return false }
+            if state.drainScheduled { return (false, dropped) }
             state.drainScheduled = true
-            return true
+            return (true, dropped)
         }
+        if droppedToReport > 0 {
+            logger.warning("[QUIC] Inbound backlog overflowed; dropped \(droppedToReport) datagram(s) before the bridge queue drained")
+        }
+        return schedule
     }
     
     func take() -> [Data] {
