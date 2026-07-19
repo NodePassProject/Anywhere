@@ -59,6 +59,12 @@ final class VoyagerStore {
         isMember = value
         AWCore.setVoyagerMembership(value)
     }
+
+    func reverifyMembership() async {
+        AWCore.clearVoyagerMembership()
+        isMember = false
+        await refreshEntitlement()
+    }
     
     func verificationToken() async -> String? {
         for await result in Transaction.currentEntitlements {
