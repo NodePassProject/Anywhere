@@ -69,6 +69,7 @@ nonisolated final class NowhereSession: Sendable {
         var postAuthCreditObserved = false
 
         var tcpStreams: [Int64: NowhereConnection] = [:]
+        var tcpDeliveredBytes: [Int64: Int] = [:]
         var udpRoutes: [UInt32: UDPRoute] = [:]
         var udpControlStreams: [Int64: NowhereUDPConnection] = [:]
         var reassembly: [ReassemblyKey: ReassemblySlot] = [:]
@@ -206,12 +207,16 @@ nonisolated final class NowhereSession: Sendable {
     // MARK: - Stream dispatch (delivered synchronously on the ngtcp2 queue)
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
-        enum Route { case tcp(NowhereConnection); case udpControl(NowhereUDPConnection); case serverReject; case ignore }
+        enum Route { case tcp(NowhereConnection); case udpControl(NowhereUDPConnection); case serverReject; case orphanData; case ignore }
         let route: Route = lock.withLock { session in
-            if let connection = session.tcpStreams[sid] { return .tcp(connection) }
+            if let connection = session.tcpStreams[sid] {
+                if !data.isEmpty { session.tcpDeliveredBytes[sid, default: 0] += data.count }
+                return .tcp(connection)
+            }
             if let connection = session.udpControlStreams[sid] { return .udpControl(connection) }
-            if (sid & 0x01) == 0x01, !data.isEmpty { return .serverReject }
-            return .ignore
+            if data.isEmpty { return .ignore }
+            if (sid & 0x01) == 0x01 { return .serverReject }
+            return .orphanData
         }
         switch route {
         case .tcp(let connection):
@@ -221,6 +226,8 @@ nonisolated final class NowhereSession: Sendable {
         case .serverReject:
             quic.extendStreamOffset(sid, count: data.count)
             quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
+        case .orphanData:
+            quic.extendStreamOffset(sid, count: data.count)
         case .ignore:
             break
         }
@@ -473,6 +480,7 @@ nonisolated final class NowhereSession: Sendable {
                 return sid
             } catch {
                 quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
+                releaseTCPStream(sid, credited: 0)
                 throw error
             }
         }
@@ -513,13 +521,19 @@ nonisolated final class NowhereSession: Sendable {
     func shutdownStream(_ sid: Int64) {
         quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
     }
-
-    func releaseTCPStream(_ sid: Int64) {
-        let removed = lock.withLock { $0.tcpStreams.removeValue(forKey: sid) != nil }
-        if removed {
-            poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
-            updateIdleCloseTimer()
+    
+    func releaseTCPStream(_ sid: Int64, credited: Int) {
+        let (routeRemoved, delivered): (Bool, Int) = lock.withLock { session in
+            (session.tcpStreams.removeValue(forKey: sid) != nil,
+             session.tcpDeliveredBytes.removeValue(forKey: sid) ?? 0)
         }
+        let residual = delivered - credited
+        if residual > 0 {
+            quic.extendStreamOffset(sid, count: residual)
+        }
+        guard routeRemoved else { return }
+        poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
+        updateIdleCloseTimer()
     }
 
     func releaseUDPControlStream(_ sid: Int64) {
@@ -640,6 +654,7 @@ nonisolated final class NowhereSession: Sendable {
             session.idleCloseTask = nil
             session.reassemblyExpiryTask = nil
             session.tcpStreams.removeAll()
+            session.tcpDeliveredBytes.removeAll()
             session.udpRoutes.removeAll()
             session.reassembly.removeAll()
             session.udpControlStreams.removeAll()

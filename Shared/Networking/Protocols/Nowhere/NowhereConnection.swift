@@ -19,8 +19,7 @@ protocol NowhereTerminationObservable: AnyObject {
     nonisolated func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?)
 }
 
-actor NowhereConnection {
-
+actor NowhereConnection: ProxyConnection {
     private let session: NowhereSession
     private let destination: NowhereProtocol.Target
     private let flowHeader: NowhereProtocol.FlowHeader
@@ -38,14 +37,9 @@ actor NowhereConnection {
     private let rawInbox = AsyncInbox<Data>()
     /// Post-result bytes left over from `open()`'s handshake, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
-
-    /// Consumed bytes whose flow-control credit hasn't been returned to QUIC yet. Crediting per
-    /// consumed chunk costs a bridge-queue hop plus a `writeToUDP` pass each time, so credit is
-    /// batched up to `creditFlushThreshold` and flushed in `teardown()` (conn-level credit must be
-    /// returned eventually even for a dying stream, or the connection window leaks).
+    
     private var uncreditedBytes = 0
-    /// Small against the 4 MiB initial stream window, and far below the half-window granularity at
-    /// which ngtcp2 emits MAX_(STREAM_)DATA — batching at this size doesn't change wire timing.
+    private var creditedBytes = 0
     private static let creditFlushThreshold = 256 << 10
 
     /// Chunks drained from `rawInbox` in one batch but not yet handed downstream. Consumed before
@@ -115,8 +109,7 @@ actor NowhereConnection {
                 guard let result = NowhereProtocol.decodeFlowResult(buffer) else {
                     throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid flow result"))
                 }
-                // Credit the consumed result frame; post-result data is credited lazily in `receiveRaw`.
-                session.extendStreamOffset(sid, count: NowhereProtocol.flowResultSize)
+                recordCredit(sid, count: NowhereProtocol.flowResultSize)
                 switch result {
                 case .ready:
                     pendingData = Data(buffer.dropFirst(NowhereProtocol.flowResultSize))
@@ -221,6 +214,12 @@ actor NowhereConnection {
         uncreditedBytes = 0
         let sid = streamID
         guard sid >= 0 else { return }
+        recordCredit(sid, count: count)
+    }
+    
+    private func recordCredit(_ sid: Int64, count: Int) {
+        guard !closed, count > 0 else { return }
+        creditedBytes += count
         session.extendStreamOffset(sid, count: count)
     }
 
@@ -233,11 +232,10 @@ actor NowhereConnection {
     private func teardown() {
         guard !closed else { return }
         closed = true
-        flushCredit()
         let sid = _streamID.load(ordering: .relaxed)
         if sid >= 0 {
             session.shutdownStream(sid)
-            session.releaseTCPStream(sid)
+            session.releaseTCPStream(sid, credited: creditedBytes)
         }
     }
 }
@@ -1182,5 +1180,3 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 }
-
-extension NowhereConnection: ProxyConnection {}
