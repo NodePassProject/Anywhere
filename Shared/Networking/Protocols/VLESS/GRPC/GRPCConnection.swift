@@ -139,7 +139,7 @@ nonisolated final class GRPCConnection: Sendable {
         do {
             try await transport.send(initData)
         } catch {
-            throw AnywhereError.proxy(.grpc, .handshakeFailed(detail: "H2 preface/HEADERS write failed: \(error.localizedDescription)"))
+            throw AnywhereError.capture(error, context: "gRPC preface/HEADERS write")
         }
         try await processInitialServerFrames()
     }
@@ -152,7 +152,7 @@ nonisolated final class GRPCConnection: Sendable {
             do {
                 frame = try await readH2Frame()
             } catch {
-                throw AnywhereError.proxy(.grpc, .handshakeFailed(detail: "H2 setup read failed: \(error.localizedDescription)"))
+                throw AnywhereError.capture(error, context: "gRPC SETTINGS read")
             }
 
             switch frame.type {

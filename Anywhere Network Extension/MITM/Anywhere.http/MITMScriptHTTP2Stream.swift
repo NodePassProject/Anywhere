@@ -278,7 +278,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
 
     func handleReset(errorCode: UInt32) {
         // The connection has already removed us from its stream table.
-        finish(.failure(AnywhereError.proxy(.http2, .streamReset(code: streamID))), removeFromConnection: false, sendRST: false)
+        finish(.failure(AnywhereError.proxy(.http2, .streamReset(code: errorCode))), removeFromConnection: false, sendRST: false)
     }
 
     /// The connection is tearing down and has already removed this stream; don't call back into it.

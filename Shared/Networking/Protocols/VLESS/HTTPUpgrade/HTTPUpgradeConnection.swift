@@ -76,7 +76,7 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
         do {
             try await transport.send(requestData)
         } catch {
-            throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: error.localizedDescription))
+            throw AnywhereError.capture(error, context: "HTTPUpgrade request")
         }
 
         try await receiveUpgradeResponse()
@@ -89,7 +89,7 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
             do {
                 chunk = try await transport.receive()
             } catch {
-                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: error.localizedDescription))
+                throw AnywhereError.capture(error, context: "HTTPUpgrade response")
             }
 
             guard case .bytes(let data) = chunk, !data.isEmpty else {

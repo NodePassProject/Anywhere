@@ -2532,7 +2532,7 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
         // Cancel the reader, then close the record it is parked on; its strong self dies with it.
         drained.reader?.cancel()
         for stream in drained.streams {
-            stream.markClosed(discardQueuedData: true)
+            stream.markClosed(discardQueuedData: true, error: error)
         }
         record.close()
         factory?.closeAll()
@@ -2596,7 +2596,9 @@ nonisolated final class SudokuMuxClient: Multiplexer, Sendable {
                     removeStream(id: streamID)
                 default: throw AnywhereError.proxy(.sudoku, .protocolViolation(detail: "bad mux frame"))
                 }
-            } catch AnywhereError.proxy(.sudoku, .connectionClosed) {
+            } catch AnywhereError.proxy(.sudoku, .connectionClosed(nil)) {
+                // Clean record EOF (nil detail); a detailed .connectionClosed is a real failure
+                // (e.g. HTTPMask non-200) and falls through to the error branch below.
                 close()
                 return
             } catch {

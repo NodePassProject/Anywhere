@@ -90,7 +90,7 @@ nonisolated final class WebSocketConnection: Sendable {
         do {
             try await transport.send(requestData)
         } catch {
-            throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: error.localizedDescription))
+            throw AnywhereError.capture(error, context: "WebSocket upgrade request")
         }
 
         try await receiveUpgradeResponse()
@@ -103,7 +103,7 @@ nonisolated final class WebSocketConnection: Sendable {
             do {
                 chunk = try await transport.receive()
             } catch {
-                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: error.localizedDescription))
+                throw AnywhereError.capture(error, context: "WebSocket upgrade response")
             }
 
             guard case .bytes(let data) = chunk, !data.isEmpty else {

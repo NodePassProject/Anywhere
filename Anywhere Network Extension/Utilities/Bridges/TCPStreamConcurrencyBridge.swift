@@ -16,9 +16,10 @@ actor TCPStreamConcurrencyBridge {
 
     private let bridge: LWIPConcurrencyBridge
     private let pcb: UnsafeMutableRawPointer
-
-    /// Torn down: intake is dropped and in-flight I/O calls unwind. Set by ``terminate()``.
+    
     private var terminated = false
+    
+    var onFatalWrite: (@Sendable (AnywhereError) -> Void)?
 
     // MARK: Upload (app → upstream)
     //
@@ -259,9 +260,13 @@ actor TCPStreamConcurrencyBridge {
                 return feedLWIP(base + pendingWriteOffset, count: live, retryOnEmpty: true)
             }
             if written < 0 {
-                writeError = .transport(.sendBufferFull(pending: live, capacity: bridge.tcpSendBuffer(pcb)))
+                let error = AnywhereError.transport(.writeFailed(pending: live, sndbuf: bridge.tcpSendBuffer(pcb)))
+                writeError = error
                 downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
                 resumeCreditWaiter()
+                // Surface to the owner now; the awaited relay path (`sendDownload`) also rethrows
+                // it, but the fire-and-forget downlink has no reader, so signal proactively.
+                onFatalWrite?(error)
                 return
             }
             if written > 0 {

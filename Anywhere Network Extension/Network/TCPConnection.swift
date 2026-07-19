@@ -334,7 +334,7 @@ actor TCPConnection {
                 do {
                     try await stream.sendDownload(data)
                 } catch {
-                    if case AnywhereError.transport(.sendBufferFull) = error {
+                    if case AnywhereError.transport(.writeFailed) = error {
                         await relayFailed("Write", error: error)
                     }
                     return
@@ -776,12 +776,21 @@ actor TCPConnection {
             lwipBridge: bridge,
             isPlaintext: mitmPlaintext
         )
-        // Downlink bridge: inner-leg output (TLS records or cleartext) rides the per-connection
-        // relay bridge — the backlog, backpressure, and `tcp_*` writes are confined there.
+        
         let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
         self.stream = stream
-        // The session is an actor on this same lwIP executor; wire its callbacks and kick it off via
-        // `assumeIsolated` (we are already on the queue), the same seam its own legs use.
+        stream.assumeIsolated { s in
+            s.onFatalWrite = { [weak self] error in
+                guard let self else { return }
+                self.bridge.enqueue {
+                    self.assumeIsolated { me in
+                        guard !me.closed else { return }
+                        me.reportFailure("MITM downlink", error: error)
+                        me.abort()
+                    }
+                }
+            }
+        }
         session.assumeIsolated { s in
             s.onSendToClient = { [weak self] data in
                 guard let self else { return }
@@ -809,8 +818,7 @@ actor TCPConnection {
             }
         }
         mitmSession = session
-
-        // Ack the consumed ClientHello so the client can keep sending.
+        
         if !initialClientHello.isEmpty {
             acknowledgeReceivedBytes(initialClientHello.count)
         }

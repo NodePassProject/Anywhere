@@ -405,8 +405,11 @@ class RoutingRuleSetStore {
     }
 
     private func saveCustomRuleSets() {
-        if let data = try? JSONEncoder().encode(customRuleSets + customTombstones) {
+        do {
+            let data = try JSONEncoder().encode(customRuleSets + customTombstones)
             JSONBlobStore.shared.save(.customRuleSets, data: data)
+        } catch {
+            logger.report(AnywhereError.store(.saveFailed(.routingRuleSets, underlying: error)))
         }
         scheduleSyncToAppGroup()
     }

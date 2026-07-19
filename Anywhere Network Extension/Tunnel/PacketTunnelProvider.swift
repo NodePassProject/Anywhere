@@ -73,7 +73,12 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
            case .setConfiguration(let config) = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) {
             configuration = config
         } else if let savedData = AWCore.getLastConfigurationData() {
-            configuration = try? JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
+            do {
+                configuration = try JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
+            } catch {
+                logger.report(AnywhereError.store(.corrupted(.configurations, detail: AnywhereError.describe(error))))
+                configuration = nil
+            }
         } else {
             configuration = nil
         }

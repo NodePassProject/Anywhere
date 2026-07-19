@@ -7,6 +7,8 @@
 
 import Foundation
 
+nonisolated private let logger = AnywhereLogger(category: "MITMRule")
+
 nonisolated enum MITMPhase: String, Codable, CaseIterable, Identifiable {
     case httpRequest
     case httpResponse
@@ -647,7 +649,13 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
 
     /// Persists the snapshot and fires the Darwin notification the extension observes.
     func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(self)
+        } catch {
+            logger.report(AnywhereError.store(.saveFailed(.mitmRuleSets, underlying: error)))
+            return
+        }
         JSONBlobStore.shared.save(.mitm, data: data)
         exportBinaryToAppGroup()
         AWNotificationCenter.notifyMITMChanged()

@@ -122,7 +122,7 @@ nonisolated extension ProxyClient {
         do {
             try await vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData)
         } catch {
-            throw AnywhereError.proxy(.vless, .handshakeFailed(detail: error.localizedDescription))
+            throw AnywhereError.capture(error, context: "VLESS handshake")
         }
 
         let proxyConnection: ProxyConnection = (command == .udp)
@@ -144,7 +144,7 @@ nonisolated extension ProxyClient {
                 }
                 return vision
             } catch {
-                throw AnywhereError.proxy(.vless, .handshakeFailed(detail: error.localizedDescription))
+                throw AnywhereError.capture(error, context: "VLESS Vision intro")
             }
         } else {
             return proxyConnection

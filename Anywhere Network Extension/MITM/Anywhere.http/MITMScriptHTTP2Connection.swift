@@ -86,6 +86,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         /// `teardown` cancels it and the transport, ending the parked receive.
         var readTask: Task<Void, Never>?
 
+        /// Bounds the pre-ready dial + TLS + SETTINGS phase (TLSClient has no built-in timeout).
+        /// Cancelled once `.ready` is reached and on teardown.
+        var setupDeadlineTask: Task<Void, Never>?
+
         /// HPACK dynamic table for inbound HEADERS. Confined to the read-loop task (headers decode
         /// serially there), but kept in `State` so the connection has no non-`Sendable` stored
         /// property; the decode runs under the lock's synchronous, uncontended critical section.
@@ -258,8 +262,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func beginSetup() {
-        // Strong self: the setup task owns the connection until the dial settles — bounded by
-        // the dial's own timeout; a mid-dial teardown is resolved by the `proceed` guard below.
+        armSetupDeadline()
         Task {
             do {
                 let dialed = try await OutboundConnector.dial(host: host, port: port)
@@ -279,6 +282,17 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 self.failSetup(error)
             }
         }
+    }
+    
+    private func armSetupDeadline() {
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
+            guard let self, !Task.isCancelled else { return }
+            let stillSettingUp = self.lock.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
+            guard stillSettingUp else { return }
+            self.failSetup(AnywhereError.proxy(.http2, .connectionClosed(detail: "handshake/SETTINGS timed out")))
+        }
+        lock.withLock { $0.setupDeadlineTask = task }
     }
 
     private func startTLS(dialed: OutboundConnector.Dialed) {
@@ -591,6 +605,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             if state.phase == .prefaceSent {
                 state.phase = .ready
                 becameReady = true
+                state.setupDeadlineTask?.cancel()
+                state.setupDeadlineTask = nil
             }
             return state.connection
         }
@@ -828,6 +844,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             state.pendingHeaders = nil
             let read = state.readTask
             state.readTask = nil
+            state.setupDeadlineTask?.cancel()
+            state.setupDeadlineTask = nil
             return (victims, read)
         }
         guard let (victims, readTask) = teardownState else { return }

@@ -68,9 +68,9 @@ nonisolated enum AnywhereError: Error {
         case notConnected
         case connectionFailed(endpoint: String?, detail: String)
         case timedOut(Operation, endpoint: String?, detail: String?)
-        case closedByPeer
         case terminated
-        case sendBufferFull(pending: Int, capacity: Int)
+        /// A fatal `tcp_write` on the downlink (not backpressure — that retries silently).
+        case writeFailed(pending: Int, sndbuf: Int)
     }
 
     // MARK: TLS
@@ -350,10 +350,9 @@ nonisolated extension AnywhereError.Transport {
             "connect" + (endpoint.map { " to \($0)" } ?? "") + " failed: \(detail)"
         case .timedOut(let op, let endpoint, let detail):
             "\(op.rawValue) timed out" + (endpoint.map { ": \($0)" } ?? "") + (detail.map { " (\($0))" } ?? "")
-        case .closedByPeer: "closed by peer"
         case .terminated: "transport terminated"
-        case .sendBufferFull(let pending, let capacity):
-            "send buffer full (pending \(pending)/\(capacity))"
+        case .writeFailed(let pending, let sndbuf):
+            "downlink write failed (pending \(pending), send buffer \(sndbuf))"
         }
     }
     
@@ -662,7 +661,7 @@ nonisolated extension AnywhereError {
     var peerClose: PeerClose? {
         switch self {
         case .transport(.posix(_, errno: EPIPE)): .cascade
-        case .transport(.posix(_, errno: ECONNRESET)), .transport(.closedByPeer): .reset
+        case .transport(.posix(_, errno: ECONNRESET)): .reset
         default: nil
         }
     }
@@ -694,7 +693,6 @@ nonisolated extension AnywhereError {
              .proxy(.naive, _):
             .debug
         case .transport(.posix(_, errno: ECONNRESET)),
-             .transport(.closedByPeer),
              .routing(.rejectedByRule),
              .proxy(_, .streamClosed), .proxy(_, .connectionClosed):
             .info

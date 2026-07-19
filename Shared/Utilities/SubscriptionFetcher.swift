@@ -38,6 +38,10 @@ nonisolated struct SubscriptionFetcher {
             } else {
                 (data, response) = try await URLSession.shared.data(for: request)
             }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw error
         } catch {
             throw AnywhereError.subscription(.fetchFailed(underlying: error))
         }
