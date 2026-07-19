@@ -193,7 +193,7 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
     /// (age-based idle eviction is the base's sweep).
     private func reusableMultiplexer() throws -> SudokuMuxClient? {
         try pool.state.withLock { st in
-            if st.extra { throw SudokuNativeError.closed }
+            if st.extra { throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil)) }
             st.multiplexers[Self.bucket]?.removeAll { multiplexer in
                 guard multiplexer.isClosed else { return false }
                 st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
@@ -232,7 +232,7 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
         }
         if wasClosed {
             multiplexer.close(error: nil)
-            throw SudokuNativeError.closed
+            throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))
         }
         logger.debug("[SudokuMultiplexerPool] new session \(configuration.serverAddress):\(configuration.serverPort)")
         return multiplexer

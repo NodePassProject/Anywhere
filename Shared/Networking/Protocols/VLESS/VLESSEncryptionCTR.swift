@@ -18,7 +18,7 @@ nonisolated final class VLESSEncryptionCTR: Sendable {
 
     init(key: Data, iv: Data) throws {
         guard iv.count == 16 else {
-            throw VLESSEncryptionError.framingError("VLESS CTR IV must be 16 bytes, got \(iv.count)")
+            throw AnywhereError.proxy(.vlessEncryption, .protocolViolation(detail: "framing: VLESS CTR IV must be 16 bytes, got \(iv.count)"))
         }
         let derivedKey = BLAKE3Hasher.deriveKey(context: "VLESS", input: key, count: 32)
 
@@ -41,7 +41,7 @@ nonisolated final class VLESSEncryptionCTR: Sendable {
             }
         }
         guard status == kCCSuccess, let ref else {
-            throw VLESSEncryptionError.framingError("CCCryptorCreateWithMode failed: \(status)")
+            throw AnywhereError.proxy(.vlessEncryption, .protocolViolation(detail: "framing: CCCryptorCreateWithMode failed: \(status)"))
         }
         self.cryptor = Mutex(ref)
     }

@@ -76,7 +76,7 @@ nonisolated final class JSONBlobStore: Sendable {
         do {
             return try ModelContainer(for: JSONBlob.self, configurations: config)
         } catch {
-            logger.error("Failed to open JSONBlob store (cloudKit: \(cloudKit)): \(error)")
+            logger.report("Failed to open JSONBlob store (cloudKit: \(cloudKit))", error: error)
             return nil
         }
     }
@@ -122,7 +122,7 @@ nonisolated final class JSONBlobStore: Sendable {
             do {
                 try context.save()
             } catch {
-                logger.error("Failed to compact duplicate JSON blobs: \(error)")
+                logger.report("Failed to compact duplicate JSON blobs", error: error)
             }
         }
     }
@@ -145,7 +145,7 @@ nonisolated final class JSONBlobStore: Sendable {
                 }
                 try context.save()
             } catch {
-                logger.error("Failed to save JSON blob \(raw): \(error)")
+                logger.report("Failed to save JSON blob \(raw)", error: error)
             }
         }
     }

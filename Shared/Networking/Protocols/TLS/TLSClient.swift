@@ -131,7 +131,7 @@ actor TLSClient {
 
             ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
             guard let privateKey = ephemeralPrivateKey else {
-                throw TLSError.handshakeFailed("No ephemeral key")
+                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
             }
 
             let clientHello = try buildTLSClientHello(privateKey: privateKey)
@@ -142,7 +142,7 @@ actor TLSClient {
             do {
                 try await transport.connect(initialData: clientHello)
             } catch {
-                throw TLSError.connectionFailed(error.localizedDescription)
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
             }
 
             return try await receiveServerResponse()
@@ -159,7 +159,7 @@ actor TLSClient {
 
             ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
             guard let privateKey = ephemeralPrivateKey else {
-                throw TLSError.handshakeFailed("No ephemeral key")
+                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
             }
             adoptTransport(TunneledTransport(tunnel: tunnel))
 
@@ -167,12 +167,12 @@ actor TLSClient {
             storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
             guard let connection = self.connection else {
-                throw TLSError.connectionFailed("Connection cancelled")
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
             }
             do {
                 try await connection.send(clientHello)
             } catch {
-                throw TLSError.handshakeFailed(error.localizedDescription)
+                throw AnywhereError.tls(.handshakeFailed(detail: error.localizedDescription))
             }
 
             return try await receiveServerResponse()
@@ -203,8 +203,8 @@ actor TLSClient {
         let serverName = configuration.serverName
         let config: Data? = await DNSResolver.shared.resolveECHConfigList(for: serverName)
         guard let config else {
-            throw TLSError.handshakeFailed(
-                "Opportunistic ECH: no ECH config published in DNS for \(serverName)")
+            throw AnywhereError.tls(.handshakeFailed(detail:
+                "Opportunistic ECH: no ECH config published in DNS for \(serverName)"))
         }
         self.resolvedECHConfigList = config
     }
@@ -212,13 +212,13 @@ actor TLSClient {
     private func buildTLSClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         var random = Data(count: 32)
         guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
-            throw TLSError.handshakeFailed("Failed to generate random bytes")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate random bytes"))
         }
         clientRandom = random
 
         var sessionId = Data(count: 32)
         guard sessionId.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
-            throw TLSError.handshakeFailed("Failed to generate session ID")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate session ID"))
         }
         sentSessionID = sessionId
 
@@ -227,15 +227,15 @@ actor TLSClient {
            let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) ?? resolvedECHConfigList {
             let configs = try ECHConfigParser.parseConfigList(echConfigData)
             guard let config = ECHConfig.pick(from: configs) else {
-                throw TLSError.handshakeFailed("ECHConfigList contains no usable config")
+                throw AnywhereError.tls(.handshakeFailed(detail: "ECHConfigList contains no usable config"))
             }
             guard let cipherSuite = config.pickCipherSuite() else {
-                throw TLSError.handshakeFailed("ECH config offers no supported cipher suite")
+                throw AnywhereError.tls(.handshakeFailed(detail: "ECH config offers no supported cipher suite"))
             }
 
             var innerRandom = Data(count: 32)
             guard innerRandom.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
-                throw TLSError.handshakeFailed("Failed to generate inner random")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate inner random"))
             }
 
             let (outerMessage, context) = try TLSClientHelloBuilder.buildECHClientHello(
@@ -252,10 +252,10 @@ actor TLSClient {
             return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: outerMessage)
         } else if configuration.echEnabled, configuration.echConfig != nil {
             // Fail rather than silently send the real SNI in the clear.
-            throw TLSError.handshakeFailed("ECH requested but its ECHConfigList is not valid base64")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ECH requested but its ECHConfigList is not valid base64"))
         } else if configuration.echEnabled {
             // `prepareECH` is fail-closed; guard defensively rather than leak the SNI.
-            throw TLSError.handshakeFailed("Opportunistic ECH requested but no ECH config was discovered")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Opportunistic ECH requested but no ECH config was discovered"))
         }
 
         var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
@@ -282,13 +282,13 @@ actor TLSClient {
         var buffer = buffer
         while buffer.count < 5 {
             guard let connection else {
-                throw TLSError.connectionFailed("Connection cancelled")
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
             }
             switch try await connection.receive() {
             case .bytes(let data):
                 buffer.append(data)
             case .end:
-                throw TLSError.handshakeFailed("No server response")
+                throw AnywhereError.tls(.handshakeFailed(detail: "No server response"))
             }
         }
 
@@ -298,9 +298,9 @@ actor TLSClient {
         } else if contentType == TLSContentType.alert {
             let alertLevel = buffer.count > 5 ? buffer[buffer.startIndex + 5] : 0
             let alertDesc = buffer.count > 6 ? buffer[buffer.startIndex + 6] : 0
-            throw TLSError.alert(level: alertLevel, description: alertDesc)
+            throw AnywhereError.tls(.alert(level: alertLevel, code: alertDesc))
         } else {
-            throw TLSError.handshakeFailed("Unexpected content type: \(contentType)")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unexpected content type: \(contentType)"))
         }
     }
 
@@ -309,26 +309,26 @@ actor TLSClient {
         var buffer = buffer
         while !bufferContainsCompleteServerHello(buffer) {
             guard let connection else {
-                throw TLSError.connectionFailed("Connection cancelled")
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
             }
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
             case .end:
-                throw TLSError.handshakeFailed("Connection closed before ServerHello")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before ServerHello"))
             }
         }
 
         guard let serverHelloResult = parseServerHello(data: buffer),
               let clientHello = storedClientHello else {
-            throw TLSError.handshakeFailed("Failed to parse ServerHello")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Failed to parse ServerHello"))
         }
 
         switch serverHelloResult {
         case .helloRetryRequest:
             // We don't implement the second ClientHello flight HRR requires. Aborting
             // here doesn't leak the inner SNI, since the ClientHello is already sent.
-            throw TLSError.helloRetryRequest
+            throw AnywhereError.tls(.helloRetryRequest)
 
         case .tls13(let serverKeyShare, let cipherSuite):
             return try await handleTLS13Handshake(
@@ -545,7 +545,7 @@ actor TLSClient {
         case .trusted:
             return
         case .rejected(let reason):
-            throw TLSError.certificateValidationFailed(reason)
+            throw AnywhereError.tls(.certificateValidationFailed(detail: reason))
         }
     }
 

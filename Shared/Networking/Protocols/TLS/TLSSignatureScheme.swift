@@ -59,7 +59,7 @@ nonisolated enum TLS13CertificateVerifier {
         keyDerivation: TLS13KeyDerivation?
     ) -> Error? {
         guard let keyDerivation else {
-            return TLSError.handshakeFailed("Missing key derivation")
+            return AnywhereError.tls(.handshakeFailed(detail: "Missing key derivation"))
         }
 
         // Mandatory in a full handshake: the CertificateVerify (transcript + signature)
@@ -67,16 +67,16 @@ nonisolated enum TLS13CertificateVerifier {
         guard let transcript = transcriptBeforeCertVerify,
               let signature,
               let serverCert = serverCertificates.first else {
-            return TLSError.certificateValidationFailed("Full handshake missing CertificateVerify")
+            return AnywhereError.tls(.certificateValidationFailed(detail: "Full handshake missing CertificateVerify"))
         }
 
         // Legal for a TLS 1.3 handshake signature (RFC 8446 §4.2.3).
         guard TLSSignatureScheme.tls13HandshakeSignatureAlgorithms.contains(algorithm) else {
-            return TLSError.certificateValidationFailed("CertificateVerify algorithm not permitted")
+            return AnywhereError.tls(.certificateValidationFailed(detail: "CertificateVerify algorithm not permitted"))
         }
 
         guard let serverPublicKey = SecCertificateCopyKey(serverCert) else {
-            return TLSError.certificateValidationFailed("Failed to extract public key from certificate")
+            return AnywhereError.tls(.certificateValidationFailed(detail: "Failed to extract public key from certificate"))
         }
 
         let transcriptHash = keyDerivation.transcriptHash(transcript)
@@ -98,7 +98,7 @@ nonisolated enum TLS13CertificateVerifier {
 
         guard isValid else {
             let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
-            return TLSError.certificateValidationFailed("CertificateVerify failed: \(message)")
+            return AnywhereError.tls(.certificateValidationFailed(detail: "CertificateVerify failed: \(message)"))
         }
 
         return nil

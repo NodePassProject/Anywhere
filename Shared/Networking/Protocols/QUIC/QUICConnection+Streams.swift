@@ -81,7 +81,7 @@ extension QUICConnection {
     nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
             guard let conn = me.connectionOpaquePointer, me.state == .connected else {
-                continuation.resume(throwing: QUICError.closed)
+                continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
             me.writeStreamImpl(conn: conn, streamId: streamId,
@@ -101,7 +101,7 @@ extension QUICConnection {
     nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
             guard me.connectionOpaquePointer != nil, me.state == .connected else {
-                continuation.resume(throwing: QUICError.closed)
+                continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
             if datagrams.isEmpty { continuation.resume(); return }
@@ -114,7 +114,7 @@ extension QUICConnection {
     nonisolated func writeDatagramsAtomically(_ datagrams: [Data]) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
             guard me.connectionOpaquePointer != nil, me.state == .connected else {
-                continuation.resume(throwing: QUICError.closed)
+                continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
             if datagrams.isEmpty { continuation.resume(); return }
@@ -122,7 +122,7 @@ extension QUICConnection {
                 pendingCount: me.pendingDatagrams.count,
                 batchCount: datagrams.count
             ) else {
-                continuation.resume(throwing: QUICError.datagramQueueFull)
+                continuation.resume(throwing: AnywhereError.quic(.datagramQueueFull))
                 return
             }
             let latch = DatagramBatchLatch(count: datagrams.count, continuation: continuation)
@@ -147,7 +147,7 @@ extension QUICConnection {
             didWarnDatagramOverflow = true
             logger.warning("[QUIC] Datagram send queue overflowed (cap \(Self.maxPendingDatagrams)); dropping oldest")
         }
-        let overflowError = QUICError.connectionFailed("Datagram send queue overflowed")
+        let overflowError = AnywhereError.quic(.connectionFailed(detail: "Datagram send queue overflowed"))
         for d in dropped { d.latch?.settle(overflowError) }
     }
     
@@ -300,7 +300,7 @@ extension QUICConnection {
         guard state == .connected else {
             let writes = pendingWrites
             pendingWrites.removeAll()
-            for pendingWrite in writes { pendingWrite.continuation?.resume(throwing: QUICError.closed) }
+            for pendingWrite in writes { pendingWrite.continuation?.resume(throwing: AnywhereError.quic(.closed(graceful: false))) }
             return
         }
 

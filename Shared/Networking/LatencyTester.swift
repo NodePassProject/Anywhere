@@ -9,16 +9,6 @@ import Foundation
 
 nonisolated private let logger = AnywhereLogger(category: "LatencyTester")
 
-nonisolated private enum LatencyTestError: Error, LocalizedError {
-    case unexpectedStatus(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .unexpectedStatus(let status): return "Unexpected status: \(status)"
-        }
-    }
-}
-
 nonisolated enum LatencyTester {
 
     private static let timeout: Duration = .seconds(10)
@@ -50,8 +40,8 @@ nonisolated enum LatencyTester {
                 return result
             }
             return .success(latencyMilliseconds)
-        } catch let error as TLSError {
-            if case .certificateValidationFailed = error {
+        } catch let error as AnywhereError {
+            if case .tls(.certificateValidationFailed) = error {
                 logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")
                 return .insecure
             }
@@ -121,7 +111,7 @@ nonisolated enum LatencyTester {
                 let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
                     .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
                 guard let statusLine, statusLine.contains("200") else {
-                    throw LatencyTestError.unexpectedStatus(statusLine ?? "no response")
+                    throw AnywhereError.diagnostics(.latencyProbeFailed(status: statusLine ?? "no response"))
                 }
 
                 return Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
@@ -153,7 +143,7 @@ nonisolated enum LatencyTester {
         let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
             .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
         guard let warmupStatus, warmupStatus.contains("200") else {
-            throw LatencyTestError.unexpectedStatus(warmupStatus ?? "no response")
+            throw AnywhereError.diagnostics(.latencyProbeFailed(status: warmupStatus ?? "no response"))
         }
 
         return proxyConnection

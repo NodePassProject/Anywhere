@@ -18,7 +18,7 @@ extension ProxyClient {
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
         guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let obfuscation, let sni) = configuration.outbound else {
-            throw ProxyError.protocolError("Hysteria password not set")
+            throw AnywhereError.proxy(.hysteria, .protocolViolation(detail: "Hysteria password not set"))
         }
 
         let hysteriaConfiguration = HysteriaConfiguration(

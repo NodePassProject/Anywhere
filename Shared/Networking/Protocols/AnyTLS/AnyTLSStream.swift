@@ -53,7 +53,7 @@ actor AnyTLSStream {
 
     func sendRaw(_ data: Data) async throws {
         guard let multiplexer else {
-            throw ProxyError.connectionFailed("AnyTLS multiplexer deallocated")
+            throw AnywhereError.proxy(.anyTLS, .connectionClosed(detail: "AnyTLS multiplexer deallocated"))
         }
         try await multiplexer.writeData(sid: sid, data: data)
     }

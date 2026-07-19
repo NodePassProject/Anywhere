@@ -30,7 +30,7 @@ extension XHTTPConnection {
             do {
                 try await download.send(initData)
             } catch {
-                throw XHTTPError.setupFailed("H2 upload setup send failed: \(error.localizedDescription)")
+                throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "H2 upload setup send failed: \(error.localizedDescription)"))
             }
             try await processInitialServerFrames()
             startH2UploadPump()
@@ -41,7 +41,7 @@ extension XHTTPConnection {
             do {
                 try await download.send(initData)
             } catch {
-                throw XHTTPError.setupFailed("H2 download setup send failed: \(error.localizedDescription)")
+                throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "H2 download setup send failed: \(error.localizedDescription)"))
             }
             try await processInitialServerFrames()
 
@@ -60,7 +60,7 @@ extension XHTTPConnection {
             do {
                 try await download.send(initData)
             } catch {
-                throw XHTTPError.setupFailed("H2 setup send failed: \(error.localizedDescription)")
+                throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "H2 setup send failed: \(error.localizedDescription)"))
             }
             try await processInitialServerFrames()
         }
@@ -121,7 +121,7 @@ extension XHTTPConnection {
             do {
                 frame = try await h2FrameReader.readFrame()
             } catch {
-                throw XHTTPError.setupFailed("H2 setup read failed: \(error.localizedDescription)")
+                throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "H2 setup read failed: \(error.localizedDescription)"))
             }
 
             switch frame.type {
@@ -138,7 +138,7 @@ extension XHTTPConnection {
                 let isDownload = frame.streamId == 0 || frame.streamId == downloadStreamId
                 if isDownload {
                     if let rejection = checkH2ResponseStatus(frame.payload) {
-                        throw XHTTPError.setupFailed("H2 response rejected: \(rejection)")
+                        throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "H2 response rejected: \(rejection)"))
                     }
                     state.withLock { $0.h2ResponseReceived = true }
                 }
@@ -169,7 +169,7 @@ extension XHTTPConnection {
                 continue
 
             case Self.h2FrameGoaway:
-                throw XHTTPError.setupFailed("Server sent GOAWAY")
+                throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Server sent GOAWAY"))
 
             default:
                 continue
@@ -236,7 +236,7 @@ extension XHTTPConnection {
 
             switch step {
             case .closed:
-                throw XHTTPError.connectionClosed
+                throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))
             case .park:
                 await parkForH2Flow { state in min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow) > 0 }
             case .built(let frames, let nextOffset):
@@ -305,7 +305,7 @@ extension XHTTPConnection {
 
         switch build {
         case .closed:
-            throw XHTTPError.connectionClosed
+            throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))
         case .headersOnly(let outbound):
             // Rate limiting between POSTs is enforced upstream by `rateLimitPacketUp`.
             do {
@@ -374,7 +374,7 @@ extension XHTTPConnection {
 
             switch step {
             case .closed:
-                throw XHTTPError.connectionClosed
+                throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))
             case .park:
                 await parkForH2Flow { state in min(state.h2PeerConnectionWindow, state.h2PacketStreamWindows[streamId] ?? currentStreamWindow) > 0 }
             case .built(let frames, let nextOffset, let newStreamWindow):
@@ -413,7 +413,7 @@ extension XHTTPConnection {
             do {
                 frame = try await h2FrameReader.readFrame()
             } catch {
-                if let xhttpError = error as? XHTTPError, case .streamEnded = xhttpError {
+                if case AnywhereError.proxy(.xhttp, .streamClosed) = error {
                     // Graceful end of stream (clean transport FIN) → EOF.
                     markH2Closed()
                     return nil
@@ -541,7 +541,7 @@ extension XHTTPConnection {
     /// Setup over a shared multiplexing H2 connection; mirrors the H3 path but with HPACK headers.
     func performSharedH2Setup() async throws {
         guard let shared = sharedH2 else {
-            throw XHTTPError.setupFailed("no shared H2 connection")
+            throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "no shared H2 connection"))
         }
         switch role {
         case .downloadOnly:
@@ -562,7 +562,7 @@ extension XHTTPConnection {
                 try await stream.sendHeaders(headers, endStream: false)
             case .streamUp:
                 try await setupSharedH2Download(shared)
-                guard let shared = sharedH2 else { throw XHTTPError.connectionClosed }
+                guard let shared = sharedH2 else { throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil)) }
                 try await openSharedH2Upload(shared)
             default: // packet-up (and .auto already resolved)
                 try await setupSharedH2Download(shared)
@@ -592,7 +592,7 @@ extension XHTTPConnection {
     /// Sends one packet-up batch as its own shared-H2 stream; the response only acks receipt.
     /// Called on the `packetUpChain` serializer.
     func sendSharedH2PacketUp(data: Data) async throws {
-        guard let shared = sharedH2 else { throw XHTTPError.connectionClosed }
+        guard let shared = sharedH2 else { throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil)) }
         let seq = state.withLock { state -> Int64 in let s = state.nextSeq; state.nextSeq += 1; return s }
         xmuxLease?.noteRequest()
 

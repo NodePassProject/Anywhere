@@ -63,7 +63,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         self.responseSignal = responseSignal
         self.responseTask = Task {
             for try await status in responseStream { return status }
-            throw HTTP3Error.streamClosed
+            throw AnywhereError.proxy(.http3, .streamClosed)
         }
     }
 
@@ -74,7 +74,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
     /// the response `:status`.
     func sendRequest(headerBlock: Data, endStream: Bool) async throws {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
-            throw HTTP3Error.streamClosed
+            throw AnywhereError.proxy(.http3, .streamClosed)
         }
         try await multiplexer.ensureReady()
 
@@ -94,7 +94,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         // `awaitResponseStatus()` (via `responseTask`) — never lost.
         guard let sid = await multiplexer.openStream(events: events) else {
             lock.withLock { $0.phase = .closed }
-            throw HTTP3Error.streamIdBlocked
+            throw AnywhereError.proxy(.http3, .streamIDsExhausted)
         }
         lock.withLock { state in
             state.quicStreamID = sid
@@ -113,18 +113,18 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
     /// Suspends until the response `:status` arrives (or the stream fails). If the HEADERS were
     /// already parsed, the promise is resolved and returns immediately.
     func awaitResponseStatus() async throws -> Int {
-        guard multiplexerBox.withLock({ $0.value }) != nil else { throw HTTP3Error.streamClosed }
+        guard multiplexerBox.withLock({ $0.value }) != nil else { throw AnywhereError.proxy(.http3, .streamClosed) }
         return try await responseTask.value
     }
 
     func sendBody(_ data: Data, fin: Bool) async throws {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
-            throw HTTP3Error.streamClosed
+            throw AnywhereError.proxy(.http3, .streamClosed)
         }
         let sid: Int64? = lock.withLock { state in
             state.phase == .closed ? nil : state.quicStreamID
         }
-        guard let sid else { throw HTTP3Error.streamClosed }
+        guard let sid else { throw AnywhereError.proxy(.http3, .streamClosed) }
         if data.isEmpty && !fin { return }
         // An empty payload with fin==true is a bare half-close (FIN, no DATA frame).
         let frame = data.isEmpty ? Data() : HTTP3Framer.dataFrame(payload: data)
@@ -132,7 +132,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
     }
 
     func receive() async throws -> Data? {
-        guard multiplexerBox.withLock({ $0.value }) != nil else { throw HTTP3Error.streamClosed }
+        guard multiplexerBox.withLock({ $0.value }) != nil else { throw AnywhereError.proxy(.http3, .streamClosed) }
         let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
@@ -168,7 +168,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         }
         guard let detach else { return }
         detachFromMultiplexer(sid: detach.sid, code: detach.code)
-        responseSignal.finish(throwing: HTTP3Error.streamClosed)
+        responseSignal.finish(throwing: AnywhereError.proxy(.http3, .streamClosed))
         inbox.finish()
     }
 
@@ -192,8 +192,8 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
     private func handleSessionError(_ error: Error) {
         // A benign QUIC connection close (NO_ERROR / H3_NO_ERROR) is a graceful end of the
         // response — surface EOF rather than a reset.
-        if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
-            responseSignal.finish(throwing: HTTP3Error.streamClosed)
+        if case AnywhereError.quic(.closed(graceful: true)) = error {
+            responseSignal.finish(throwing: AnywhereError.proxy(.http3, .streamClosed))
             inbox.finish()
             return
         }
@@ -266,7 +266,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
             responseSignal.yield(status)
             responseSignal.finish()
         case .missingStatus:
-            responseSignal.finish(throwing: HTTP3Error.connectionFailed("Response missing :status"))
+            responseSignal.finish(throwing: AnywhereError.proxy(.http3, .connectionClosed(detail: "Response missing :status")))
         case .failed(let error):
             handleStreamError(error)
         }
@@ -284,10 +284,10 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
     /// teardown) are carried in the returned outcome.
     private static func processResponseHeaders(_ frame: HTTP3Framer.Frame, state: inout State) -> HeadersOutcome {
         guard frame.type == HTTP3FrameType.headers.rawValue else {
-            return .failed(HTTP3Error.connectionFailed("Expected HEADERS, got type \(frame.type)"))
+            return .failed(AnywhereError.proxy(.http3, .connectionClosed(detail: "Expected HEADERS, got type \(frame.type)")))
         }
         guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
-            return .failed(HTTP3Error.connectionFailed("Malformed QPACK header block"))
+            return .failed(AnywhereError.proxy(.http3, .connectionClosed(detail: "Malformed QPACK header block")))
         }
 
         let statusValue = headers.first(where: { $0.name == ":status" })?.value

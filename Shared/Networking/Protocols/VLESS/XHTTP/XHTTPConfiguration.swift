@@ -783,24 +783,3 @@ nonisolated final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable, 
         hasher.combine(value)
     }
 }
-
-nonisolated enum XHTTPError: Error, LocalizedError {
-    case setupFailed(String)
-    case httpError(String)
-    case connectionClosed
-    /// Clean transport EOF at an HTTP/2 frame boundary.
-    case streamEnded
-
-    var errorDescription: String? {
-        switch self {
-        case .setupFailed(let reason):
-            return "XHTTP setup failed: \(reason)"
-        case .httpError(let reason):
-            return "XHTTP HTTP error: \(reason)"
-        case .connectionClosed:
-            return "XHTTP connection closed"
-        case .streamEnded:
-            return "XHTTP stream ended"
-        }
-    }
-}

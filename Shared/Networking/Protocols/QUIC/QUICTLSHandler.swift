@@ -139,7 +139,7 @@ nonisolated class QUICTLSHandler {
 
     func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
         guard state == .completed, let keyDerivation, let exporterMasterSecret, length > 0 else {
-            throw QUICConnection.QUICError.connectionFailed("TLS exporter unavailable")
+            throw AnywhereError.quic(.connectionFailed(detail: "TLS exporter unavailable"))
         }
         return keyDerivation.exportKeyingMaterial(
             exporterMasterSecret: exporterMasterSecret,
@@ -209,7 +209,7 @@ nonisolated class QUICTLSHandler {
     
     private func fail(_ reason: String, error: Error? = nil) -> QUICTLSResult {
         if handshakeError == nil {
-            handshakeError = error ?? TLSError.handshakeFailed(reason)
+            handshakeError = error ?? AnywhereError.tls(.handshakeFailed(detail: reason))
         }
         return .error(NGTCP2_ERR_CALLBACK_FAILURE)
     }
@@ -297,7 +297,7 @@ nonisolated class QUICTLSHandler {
 
         let serverRandom = Data(body[2..<34])
         if serverRandom == TLSRandom.helloRetryRequest {
-            return fail("server sent HelloRetryRequest (unsupported)", error: TLSError.helloRetryRequest)
+            return fail("server sent HelloRetryRequest (unsupported)", error: AnywhereError.tls(.helloRetryRequest))
         }
 
         var offset = 34
@@ -890,7 +890,7 @@ nonisolated class QUICTLSHandler {
         case .trusted:
             return nil
         case .rejected(let reason):
-            return TLSError.certificateValidationFailed(reason)
+            return AnywhereError.tls(.certificateValidationFailed(detail: reason))
         }
     }
 

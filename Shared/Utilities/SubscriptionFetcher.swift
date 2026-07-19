@@ -17,26 +17,9 @@ nonisolated struct SubscriptionFetcher {
         let expire: Date?
     }
 
-    enum FetchError: Error, LocalizedError {
-        case invalidURL
-        case noConfigurations
-        case networkError(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidURL:
-                return String(localized: "Invalid subscription URL.")
-            case .noConfigurations:
-                return String(localized: "No valid configurations found in subscription.")
-            case .networkError(let message):
-                return String(localized: "Network error: \(message)")
-            }
-        }
-    }
-
     static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
         guard let url = URL(string: urlString) else {
-            throw FetchError.invalidURL
+            throw AnywhereError.subscription(.invalidURL)
         }
 
         var request = URLRequest(url: url)
@@ -56,7 +39,7 @@ nonisolated struct SubscriptionFetcher {
                 (data, response) = try await URLSession.shared.data(for: request)
             }
         } catch {
-            throw FetchError.networkError(error.localizedDescription)
+            throw AnywhereError.subscription(.fetchFailed(underlying: error))
         }
 
         let httpResponse = response as? HTTPURLResponse
@@ -72,13 +55,13 @@ nonisolated struct SubscriptionFetcher {
         } else if let rawString = String(data: data, encoding: .utf8) {
             bodyString = rawString
         } else {
-            throw FetchError.noConfigurations
+            throw AnywhereError.subscription(.noConfigurations)
         }
 
         if bodyString.contains("proxies:") {
             let result = try ClashProxyParser.parse(yaml: bodyString)
             guard !result.configurations.isEmpty else {
-                throw FetchError.noConfigurations
+                throw AnywhereError.subscription(.noConfigurations)
             }
             return Result(
                 configurations: result.configurations,
@@ -97,7 +80,7 @@ nonisolated struct SubscriptionFetcher {
             .compactMap { try? ProxyConfiguration.parse(url: $0) }
 
         guard !configurations.isEmpty else {
-            throw FetchError.noConfigurations
+            throw AnywhereError.subscription(.noConfigurations)
         }
 
         return Result(

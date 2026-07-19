@@ -38,9 +38,9 @@ nonisolated extension ProxyClient {
         if let tunnel = self.tunnel {
             // SS UDP needs real datagrams; a TCP tunnel here is a config error — fail rather than silently truncate.
             guard tunnel.deliversDatagrams else {
-                throw ProxyError.protocolError(
-                    "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."
-                )
+                throw AnywhereError.proxy(.shadowsocks, .protocolViolation(
+                    detail: "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."
+                ))
             }
             setChainTunnel(nil)
             udpInner = tunnel
@@ -64,16 +64,16 @@ nonisolated extension ProxyClient {
         destinationPort: UInt16
     ) -> Result<ProxyConnection, Error> {
         guard case .shadowsocks(let password, let method) = configuration.outbound else {
-            return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+            return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Shadowsocks password not set")))
         }
         guard let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(ProxyError.protocolError("Invalid Shadowsocks method: \(method)"))
+            return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Invalid Shadowsocks method: \(method)")))
         }
 
         if cipher.isSS2022 {
             // Shadowsocks 2022: base64-encoded PSK(s), BLAKE3 key derivation
             guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
-                return .failure(ProxyError.protocolError("Invalid Shadowsocks 2022 PSK"))
+                return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Invalid Shadowsocks 2022 PSK")))
             }
 
             if command == .udp {

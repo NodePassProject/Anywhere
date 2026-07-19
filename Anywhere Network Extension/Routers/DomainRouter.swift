@@ -122,7 +122,7 @@ nonisolated final class DomainRouter: Sendable {
                 state.matcher.finalize(base: base)
             }
         } catch {
-            logger.error("[DomainRouter] Routing payload parse failed: \(error)")
+            logger.report("[DomainRouter] Routing payload parse failed", error: error)
             return RoutingState()
         }
 
@@ -134,7 +134,6 @@ nonisolated final class DomainRouter: Sendable {
     // MARK: - Payload reader
 
     private struct RoutingBinaryReader {
-        enum ReadError: Error { case badMagic, truncated, malformed }
 
         let bytes: UnsafeBufferPointer<UInt8>
         let data: Data
@@ -180,7 +179,7 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         private mutating func readEntry(state: inout RoutingState, entryIndex: UInt16) throws {
-            guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw ReadError.malformed }
+            guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
             let action = try readAction()
             let payload = RulePayload(action: action, entryIndex: entryIndex)
 
@@ -216,7 +215,7 @@ nonisolated final class DomainRouter: Sendable {
             case .direct: return .direct
             case .reject: return .reject
             case .proxy: return .proxy(try readUUID())
-            case nil: throw ReadError.malformed
+            case nil: throw AnywhereError.routing(.payloadCorrupted(.malformed))
             }
         }
 
@@ -224,36 +223,36 @@ nonisolated final class DomainRouter: Sendable {
 
         private mutating func expectMagic() throws {
             let magic = RoutingBinaryFormat.magic
-            guard cursor + magic.count <= count else { throw ReadError.truncated }
-            for k in 0..<magic.count where bytes[cursor + k] != magic[k] { throw ReadError.badMagic }
+            guard cursor + magic.count <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
+            for k in 0..<magic.count where bytes[cursor + k] != magic[k] { throw AnywhereError.routing(.payloadCorrupted(.badMagic)) }
             cursor += magic.count
         }
 
         private mutating func u8() throws -> UInt8 {
-            guard cursor < count else { throw ReadError.truncated }
+            guard cursor < count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             defer { cursor += 1 }
             return bytes[cursor]
         }
 
         private mutating func u16() throws -> UInt16 {
-            guard cursor + 2 <= count else { throw ReadError.truncated }
+            guard cursor + 2 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             defer { cursor += 2 }
             return UInt16(bytes[cursor]) | (UInt16(bytes[cursor + 1]) << 8)
         }
 
         private mutating func u32() throws -> UInt32 {
-            guard cursor + 4 <= count else { throw ReadError.truncated }
+            guard cursor + 4 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             defer { cursor += 4 }
             return UInt32(bytes[cursor]) | (UInt32(bytes[cursor + 1]) << 8) | (UInt32(bytes[cursor + 2]) << 16) | (UInt32(bytes[cursor + 3]) << 24)
         }
 
         private mutating func advance(_ n: Int) throws {
-            guard n >= 0, cursor + n <= count else { throw ReadError.truncated }
+            guard n >= 0, cursor + n <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             cursor += n
         }
 
         private mutating func readUUID() throws -> UUID {
-            guard cursor + 16 <= count else { throw ReadError.truncated }
+            guard cursor + 16 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
             let u = UUID(uuid: (bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
                                 bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],
                                 bytes[cursor + 8], bytes[cursor + 9], bytes[cursor + 10], bytes[cursor + 11],

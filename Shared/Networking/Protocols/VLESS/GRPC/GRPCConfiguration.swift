@@ -126,34 +126,3 @@ nonisolated struct GRPCConfiguration: Codable, Equatable, Hashable {
         return value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 }
-
-nonisolated enum GRPCError: Error, LocalizedError {
-    case setupFailed(String)
-    case invalidResponse(String)
-    case compressedMessageUnsupported
-    /// Server closed the stream with a non-OK gRPC status code in trailer headers.
-    case callFailed(status: Int, name: String, message: String?)
-    case connectionClosed
-    /// Transport reached a clean EOF at an HTTP/2 frame boundary.
-    case streamEnded
-    
-    var errorDescription: String? {
-        switch self {
-        case .setupFailed(let reason):
-            return "gRPC setup failed: \(reason)"
-        case .invalidResponse(let reason):
-            return "gRPC invalid response: \(reason)"
-        case .compressedMessageUnsupported:
-            return "gRPC compressed messages are not supported"
-        case .callFailed(let status, let name, let message):
-            if let message, !message.isEmpty {
-                return "gRPC call failed: \(name) (\(status)) — \(message)"
-            }
-            return "gRPC call failed: \(name) (\(status))"
-        case .connectionClosed:
-            return "gRPC connection closed"
-        case .streamEnded:
-            return "gRPC stream ended"
-        }
-    }
-}

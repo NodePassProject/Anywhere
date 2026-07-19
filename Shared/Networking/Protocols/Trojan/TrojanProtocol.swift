@@ -106,7 +106,7 @@ nonisolated enum TrojanProtocol {
             offset += 1
             addrLen = domainLen
         default:
-            throw ProxyError.protocolError("Trojan: unknown ATYP \(atyp)")
+            throw AnywhereError.proxy(.trojan, .protocolViolation(detail: "Trojan: unknown ATYP \(atyp)"))
         }
 
         // Need address + port (2) + length (2) + CRLF (2) before the payload.
@@ -119,7 +119,7 @@ nonisolated enum TrojanProtocol {
         offset += 2
 
         guard length <= maxUDPPayloadLength else {
-            throw ProxyError.protocolError("Trojan: oversize UDP payload (\(length))")
+            throw AnywhereError.proxy(.trojan, .protocolViolation(detail: "Trojan: oversize UDP payload (\(length))"))
         }
 
         guard buffer.endIndex - offset >= length else { return nil }

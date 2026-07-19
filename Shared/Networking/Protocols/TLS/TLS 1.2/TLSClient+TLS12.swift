@@ -36,13 +36,13 @@ extension TLSClient {
             }
 
             guard let connection else {
-                throw TLSError.connectionFailed("Connection cancelled")
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
             }
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
             case .end:
-                throw TLSError.handshakeFailed("Connection closed before TLS 1.2 handshake completed")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before TLS 1.2 handshake completed"))
             }
         }
     }
@@ -158,7 +158,7 @@ extension TLSClient {
 
         if TLSCipherSuite.isECDHE(self.tls12CipherSuite) {
             guard let ske = messages.serverKeyExchange else {
-                throw TLSError.handshakeFailed("ECDHE cipher suite but no ServerKeyExchange")
+                throw AnywhereError.tls(.handshakeFailed(detail: "ECDHE cipher suite but no ServerKeyExchange"))
             }
             try self.verifyServerKeyExchange(ske, certificates: messages.certificates)
             (preMasterSecret, clientKeyExchangeBody) = try self.processECDHEServerKeyExchange(ske)
@@ -177,18 +177,18 @@ extension TLSClient {
 
     private func processECDHEServerKeyExchange(_ body: Data) throws -> (preMasterSecret: Data, clientKeyExchange: Data) {
         guard body.count >= 4 else {
-            throw TLSError.handshakeFailed("ServerKeyExchange too short")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ServerKeyExchange too short"))
         }
 
         let curveType = body[0]
         guard curveType == 0x03 else {
-            throw TLSError.handshakeFailed("Unsupported curve type: \(curveType)")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unsupported curve type: \(curveType)"))
         }
 
         let namedCurve = UInt16(body[1]) << 8 | UInt16(body[2])
         let pubKeyLen = Int(body[3])
         guard body.count >= 4 + pubKeyLen else {
-            throw TLSError.handshakeFailed("ServerKeyExchange public key truncated")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ServerKeyExchange public key truncated"))
         }
 
         let serverPubKeyData = body.subdata(in: 4..<(4 + pubKeyLen))
@@ -197,7 +197,7 @@ extension TLSClient {
         case TLSNamedGroup.x25519:
             let serverPubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPubKeyData)
             guard let privateKey = ephemeralPrivateKey else {
-                throw TLSError.handshakeFailed("No ephemeral key")
+                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
             }
             let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: serverPubKey)
             let preMasterSecret = sharedSecret.withUnsafeBytes { Data($0) }
@@ -232,39 +232,39 @@ extension TLSClient {
             return (preMasterSecret, cke)
 
         default:
-            throw TLSError.handshakeFailed("Unsupported ECDHE curve: 0x\(String(format: "%04x", namedCurve))")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Unsupported ECDHE curve: 0x\(String(format: "%04x", namedCurve))"))
         }
     }
 
     private func verifyServerKeyExchange(_ body: Data, certificates: [SecCertificate]) throws {
         guard let serverCert = certificates.first else {
-            throw TLSError.certificateValidationFailed("No server certificate for ServerKeyExchange verification")
+            throw AnywhereError.tls(.certificateValidationFailed(detail: "No server certificate for ServerKeyExchange verification"))
         }
 
         guard body.count >= 4 else {
-            throw TLSError.handshakeFailed("ServerKeyExchange too short for signature")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ServerKeyExchange too short for signature"))
         }
 
         let pubKeyLen = Int(body[3])
         let paramsEnd = 4 + pubKeyLen
         guard body.count >= paramsEnd + 4 else {
-            throw TLSError.handshakeFailed("ServerKeyExchange missing signature")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ServerKeyExchange missing signature"))
         }
 
         let sigAlgorithm = UInt16(body[paramsEnd]) << 8 | UInt16(body[paramsEnd + 1])
         let sigLen = Int(body[paramsEnd + 2]) << 8 | Int(body[paramsEnd + 3])
         guard body.count >= paramsEnd + 4 + sigLen else {
-            throw TLSError.handshakeFailed("ServerKeyExchange signature truncated")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ServerKeyExchange signature truncated"))
         }
 
         let signature = body.subdata(in: (paramsEnd + 4)..<(paramsEnd + 4 + sigLen))
 
         guard let serverPublicKey = SecCertificateCopyKey(serverCert) else {
-            throw TLSError.certificateValidationFailed("Failed to extract public key")
+            throw AnywhereError.tls(.certificateValidationFailed(detail: "Failed to extract public key"))
         }
 
         guard let clientRandom = clientRandom, let serverRandom = serverRandom else {
-            throw TLSError.handshakeFailed("Missing randoms for signature verification")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Missing randoms for signature verification"))
         }
 
         var content = clientRandom
@@ -287,7 +287,7 @@ extension TLSClient {
                 return
             }
             let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
-            throw TLSError.certificateValidationFailed("ServerKeyExchange signature failed: \(message)")
+            throw AnywhereError.tls(.certificateValidationFailed(detail: "ServerKeyExchange signature failed: \(message)"))
         }
     }
 
@@ -296,7 +296,7 @@ extension TLSClient {
     private func processRSAKeyExchange(certificates: [SecCertificate]) throws -> (preMasterSecret: Data, clientKeyExchange: Data) {
         guard let serverCert = certificates.first,
               let serverPublicKey = SecCertificateCopyKey(serverCert) else {
-            throw TLSError.handshakeFailed("No server certificate for RSA key exchange")
+            throw AnywhereError.tls(.handshakeFailed(detail: "No server certificate for RSA key exchange"))
         }
 
         var preMasterSecret = Data(count: 48)
@@ -305,7 +305,7 @@ extension TLSClient {
         guard preMasterSecret.withUnsafeMutableBytes({ pointer in
             SecRandomCopyBytes(kSecRandomDefault, 46, pointer.baseAddress! + 2)
         }) == errSecSuccess else {
-            throw TLSError.handshakeFailed("Failed to generate pre-master secret")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate pre-master secret"))
         }
 
         var encryptError: Unmanaged<CFError>?
@@ -316,7 +316,7 @@ extension TLSClient {
             &encryptError
         ) as Data? else {
             let message = encryptError?.takeRetainedValue().localizedDescription ?? "RSA encryption failed"
-            throw TLSError.handshakeFailed("RSA key exchange failed: \(message)")
+            throw AnywhereError.tls(.handshakeFailed(detail: "RSA key exchange failed: \(message)"))
         }
 
         var cke = Data()
@@ -335,7 +335,7 @@ extension TLSClient {
         remainingBuffer: Data?
     ) async throws -> TLSRecordConnection {
         guard let cRandom = clientRandom, let sRandom = serverRandom else {
-            throw TLSError.handshakeFailed("Missing randoms")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Missing randoms"))
         }
 
         let useSHA384 = TLSCipherSuite.usesSHA384(tls12CipherSuite)
@@ -351,7 +351,7 @@ extension TLSClient {
         tls12Transcript?.append(ckeMessage)
 
         guard let transcript = tls12Transcript else {
-            throw TLSError.handshakeFailed("Missing transcript")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Missing transcript"))
         }
 
         let masterSecret: Data
@@ -423,19 +423,19 @@ extension TLSClient {
                 clientMACKey: keys.clientMACKey
             )
         } catch {
-            throw TLSError.handshakeFailed("Failed to encrypt Finished: \(error.localizedDescription)")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Failed to encrypt Finished: \(error.localizedDescription)"))
         }
         wireData.append(encryptedFinished)
 
         tls12Transcript?.append(finishedMessage)
 
         guard let connection else {
-            throw TLSError.connectionFailed("Connection cancelled")
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
         }
         do {
             try await connection.send(wireData)
         } catch {
-            throw TLSError.handshakeFailed(error.localizedDescription)
+            throw AnywhereError.tls(.handshakeFailed(detail: error.localizedDescription))
         }
 
         return try await receiveTLS12ServerFinished(
@@ -540,7 +540,7 @@ extension TLSClient {
 
             var iv = Data(count: blockSize)
             guard iv.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }) == errSecSuccess else {
-                throw TLSError.handshakeFailed("Failed to generate IV")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate IV"))
             }
 
             var encrypted = Data(count: data.count)
@@ -565,7 +565,7 @@ extension TLSClient {
             }
 
             guard status == kCCSuccess else {
-                throw TLSError.handshakeFailed("AES-CBC encryption failed")
+                throw AnywhereError.tls(.handshakeFailed(detail: "AES-CBC encryption failed"))
             }
 
             let recordPayloadLen = blockSize + numBytesEncrypted
@@ -597,13 +597,13 @@ extension TLSClient {
             }
 
             guard let connection else {
-                throw TLSError.connectionFailed("Connection cancelled")
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
             }
             switch try await connection.receive() {
             case .bytes(let moreData):
                 buffer.append(moreData)
             case .end:
-                throw TLSError.handshakeFailed("Connection closed before server Finished")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before server Finished"))
             }
         }
     }
@@ -645,13 +645,13 @@ extension TLSClient {
                     )
 
                     guard decrypted.count >= 16, decrypted[0] == TLSHandshakeType.finished else {
-                        return .failure(TLSError.handshakeFailed("Invalid server Finished"))
+                        return .failure(AnywhereError.tls(.handshakeFailed(detail: "Invalid server Finished")))
                     }
 
                     let verifyData = decrypted.subdata(in: 4..<16)
 
                     guard let ms = masterSecret, let transcript = tls12Transcript else {
-                        return .failure(TLSError.handshakeFailed("Missing state for Finished verification"))
+                        return .failure(AnywhereError.tls(.handshakeFailed(detail: "Missing state for Finished verification")))
                     }
 
                     let useSHA384 = TLSCipherSuite.usesSHA384(tls12CipherSuite)
@@ -663,7 +663,7 @@ extension TLSClient {
 
                     guard verifyData.count == expectedVerifyData.count,
                           constantTimeEqual(verifyData, expectedVerifyData) else {
-                        return .failure(TLSError.handshakeFailed("Server Finished verification failed"))
+                        return .failure(AnywhereError.tls(.handshakeFailed(detail: "Server Finished verification failed")))
                     }
 
                     offset += 5 + recordLen
@@ -697,7 +697,7 @@ extension TLSClient {
             let explicitNonceLen = isChaCha ? 0 : 8
 
             guard ciphertext.count >= explicitNonceLen + 16 else {
-                throw TLSError.handshakeFailed("Ciphertext too short")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Ciphertext too short"))
             }
 
             let explicitNonce = isChaCha ? Data() : Data(ciphertext.prefix(explicitNonceLen))
@@ -742,7 +742,7 @@ extension TLSClient {
         } else {
             let blockSize = 16
             guard ciphertext.count >= blockSize * 2 else {
-                throw TLSError.handshakeFailed("CBC ciphertext too short")
+                throw AnywhereError.tls(.handshakeFailed(detail: "CBC ciphertext too short"))
             }
 
             let iv = Data(ciphertext.prefix(blockSize))
@@ -770,7 +770,7 @@ extension TLSClient {
             }
 
             guard status == kCCSuccess else {
-                throw TLSError.handshakeFailed("CBC decryption failed")
+                throw AnywhereError.tls(.handshakeFailed(detail: "CBC decryption failed"))
             }
 
             decrypted = decrypted.prefix(numBytesDecrypted)
@@ -788,13 +788,13 @@ extension TLSClient {
             }
 
             guard paddingGood == 0 else {
-                throw TLSError.handshakeFailed("Invalid CBC padding")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Invalid CBC padding"))
             }
             decrypted = decrypted.prefix(decrypted.count - paddingLen)
 
             let macSize = TLSCipherSuite.macLength(tls12CipherSuite)
             guard decrypted.count >= macSize else {
-                throw TLSError.handshakeFailed("Decrypted data too short for MAC")
+                throw AnywhereError.tls(.handshakeFailed(detail: "Decrypted data too short for MAC"))
             }
 
             let payload = Data(decrypted.prefix(decrypted.count - macSize))
@@ -820,7 +820,7 @@ extension TLSClient {
 
             guard receivedMAC.count == expectedMAC.count,
                   constantTimeEqual(receivedMAC, expectedMAC) else {
-                throw TLSError.handshakeFailed("MAC verification failed")
+                throw AnywhereError.tls(.handshakeFailed(detail: "MAC verification failed"))
             }
 
             return payload

@@ -88,7 +88,7 @@ nonisolated final class AWCore {
         do {
             try fileManager.moveItem(at: oldURL, to: newURL)
         } catch {
-            print("Failed to migrate \(fileName): \(error)")
+            logger.report(AnywhereError.store(.migrationFailed(file: fileName, underlying: error)))
         }
     }
 
@@ -419,7 +419,7 @@ nonisolated final class AWCore {
             // Drop the obsolete UserDefaults copy now that routing lives in a file.
             userDefaults.removeObject(forKey: "routingData")
         } catch {
-            logger.error("Failed to write routing data: \(error)")
+            logger.report(AnywhereError.store(.saveFailed(.routingPayload, underlying: error)))
         }
     }
 
@@ -437,7 +437,7 @@ nonisolated final class AWCore {
         do {
             try data.write(to: mitmDataURL, options: [.atomic, .noFileProtection])
         } catch {
-            logger.error("Failed to write MITM data: \(error)")
+            logger.report(AnywhereError.store(.saveFailed(.mitmPayload, underlying: error)))
         }
     }
 }

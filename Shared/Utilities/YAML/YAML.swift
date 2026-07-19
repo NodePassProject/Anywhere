@@ -16,18 +16,6 @@ nonisolated enum YAML {
         case map
     }
 
-    enum ParseError: Error, LocalizedError {
-        case initializationFailed
-        case parse(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .initializationFailed: return "Failed to initialize the YAML parser"
-            case .parse(let message):   return message
-            }
-        }
-    }
-
     final class Node {
         enum Storage {
             case undefined
@@ -76,7 +64,7 @@ nonisolated enum YAML {
     static func load(_ input: String) throws -> Node {
         var parser = yaml_parser_t()
         guard yaml_parser_initialize(&parser) == 1 else {
-            throw ParseError.initializationFailed
+            throw AnywhereError.parse(.yaml(detail: "parser initialization failed"))
         }
         defer { yaml_parser_delete(&parser) }
 
@@ -132,7 +120,7 @@ nonisolated private final class Loader {
             } else {
                 message = "YAML parse error"
             }
-            throw YAML.ParseError.parse(message)
+            throw AnywhereError.parse(.yaml(detail: message))
         }
         return event
     }

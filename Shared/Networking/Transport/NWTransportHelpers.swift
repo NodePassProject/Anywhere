@@ -12,16 +12,16 @@ import Network
 
 extension NWError {
 
-    /// The `TransportError` equivalent of this error for operation `op`.
-    nonisolated func transportError(op: TransportError.Operation) -> TransportError {
+    /// The `AnywhereError` equivalent of this error for operation `op`.
+    nonisolated func anywhereError(op: AnywhereError.Transport.Operation) -> AnywhereError {
         switch self {
         case .posix(let code):
-            return .posixError(op, errno: code.rawValue)
+            return .transport(.posix(op, errno: code.rawValue))
         case .dns:
-            return .resolutionFailed(localizedDescription)
+            return .dns(.resolutionFailed(host: nil, detail: localizedDescription))
         default:
             // .tls and any SDK-newer cases (e.g. .wifiAware) fold to a generic failure.
-            return .connectionFailed(localizedDescription)
+            return .transport(.connectionFailed(endpoint: nil, detail: localizedDescription))
         }
     }
 
@@ -40,21 +40,21 @@ extension NWError {
 
 }
 
-// MARK: - TransportError mapping
+// MARK: - AnywhereError mapping
 
-extension TransportError {
+extension AnywhereError {
 
     /// Maps an arbitrary throw from a `NetworkConnection` connect/send/receive to
-    /// a `TransportError` for operation `op`. Shared by the byte-stream and
+    /// an `AnywhereError` for operation `op`. Shared by the byte-stream and
     /// datagram transports.
-    nonisolated static func from(_ error: Error, op: Operation) -> TransportError {
-        if error is CancellationError { return .connectionFailed("Cancelled") }
-        if let nwError = error as? NWError { return nwError.transportError(op: op) }
-        return .connectionFailed(error.localizedDescription)
+    nonisolated static func networkFailure(_ error: Error, op: Transport.Operation) -> AnywhereError {
+        if error is CancellationError { return .transport(.terminated) }
+        if let nwError = error as? NWError { return nwError.anywhereError(op: op) }
+        return .transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
     }
 
     /// The raw `errno` for such a throw; the QUIC datagram carrier feeds a code to
-    /// ngtcp2 rather than a `TransportError`.
+    /// ngtcp2 rather than an `AnywhereError`.
     nonisolated static func errnoCode(from error: Error) -> Int32 {
         if error is CancellationError { return ECANCELED }
         if let nwError = error as? NWError, case .posix(let posix) = nwError { return posix.rawValue }

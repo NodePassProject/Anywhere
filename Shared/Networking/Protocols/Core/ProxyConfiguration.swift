@@ -7,29 +7,6 @@
 
 import Foundation
 
-nonisolated enum ProxyError: Error, LocalizedError {
-    case invalidURL(String)
-    case connectionFailed(String)
-    case protocolError(String)
-    case invalidResponse(String)
-    case dropped
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidURL(let message):
-            return "Invalid URL: \(message)"
-        case .connectionFailed(let message):
-            return "Connection failed: \(message)"
-        case .protocolError(let message):
-            return "Protocol error: \(message)"
-        case .invalidResponse(let message):
-            return "Invalid response: \(message)"
-        case .dropped:
-            return nil
-        }
-    }
-}
-
 nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
     case nowhere
     case vless

@@ -90,19 +90,19 @@ actor NowhereUDPConnection {
                 var buffer = Data()
                 while true {
                     guard let chunk = try await nextControlChunk() else {
-                        throw NowhereError.connectionFailed("UDP control stream closed before READY")
+                        throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP control stream closed before READY"))
                     }
                     buffer.append(chunk)
                     session.extendStreamOffset(sid, count: chunk.count)
                     guard buffer.count >= NowhereProtocol.flowResultSize else { continue }
                     guard let result = NowhereProtocol.decodeFlowResult(buffer) else {
-                        throw NowhereError.connectionFailed("Invalid UDP flow result")
+                        throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid UDP flow result"))
                     }
                     switch result {
                     case .ready:
                         break
                     case .reject(let code):
-                        throw NowhereError.flowRejected(code)
+                        throw AnywhereError.proxy(.nowhere, .flowRejected(code: code.rawValue))
                     }
                     break
                 }
@@ -146,7 +146,7 @@ actor NowhereUDPConnection {
     }
 
     nonisolated func handleSessionError(_ error: Error) {
-        if let quicError = error as? QUICConnection.QUICError, case .closedOK = quicError {
+        if case AnywhereError.quic(.closed(graceful: true)) = error {
             terminate(error: nil, sendAdvisory: false)
         } else {
             terminate(error: error, sendAdvisory: false)
@@ -169,7 +169,7 @@ actor NowhereUDPConnection {
 
     func sendRaw(_ data: Data) async throws {
         guard _isReady.load(ordering: .relaxed) else {
-            throw NowhereError.streamClosed
+            throw AnywhereError.proxy(.nowhere, .streamClosed)
         }
         // Packet IDs are allocated only when the final PMTU requires fragmentation.
         try await attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1)
@@ -197,18 +197,17 @@ actor NowhereUDPConnection {
                 payload: data,
                 maxDatagramSize: maxSize
             )
-        } catch NowhereError.udpPacketTooLarge {
+        } catch AnywhereError.proxy(.nowhere, .packetTooLarge) {
             // UDP is lossy by contract. Drop only this packet; keep the flow alive.
             return
         }
         do {
             try await session.writeDatagrams(frames)
         } catch {
-            if let quicError = error as? QUICConnection.QUICError,
-               case .datagramTooLarge(let maxBound) = quicError,
+            if case AnywhereError.quic(.datagramTooLarge(let maxBound)) = error,
                retriesLeft > 0 {
                 guard _isReady.load(ordering: .relaxed) else {
-                    throw NowhereError.streamClosed
+                    throw AnywhereError.proxy(.nowhere, .streamClosed)
                 }
                 // A new identity prevents the receiver from mixing fragments encoded with
                 // different geometry after the path MTU changed mid-send.
@@ -219,12 +218,10 @@ actor NowhereUDPConnection {
                 )
                 return
             }
-            if let quicError = error as? QUICConnection.QUICError,
-               case .datagramTooLarge = quicError {
+            if case AnywhereError.quic(.datagramTooLarge) = error {
                 return  // path bound changed again; drop without closing the flow
             }
-            if let quicError = error as? QUICConnection.QUICError,
-               case .datagramQueueFull = quicError {
+            if case AnywhereError.quic(.datagramQueueFull) = error {
                 return  // reject newest packet; preserve queued packets and the flow
             }
             throw error

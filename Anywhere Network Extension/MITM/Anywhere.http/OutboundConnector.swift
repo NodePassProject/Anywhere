@@ -48,16 +48,6 @@ nonisolated enum OutboundConnector {
         context.withLock { $0 }
     }
 
-    enum ConnectError: Error, LocalizedError {
-        case rejected(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .rejected(let host): return "rejected by routing rule: \(host)"
-            }
-        }
-    }
-
     // MARK: - Route resolution
 
     /// Resolves the route, whether it came from the global default (vs. an explicit
@@ -85,7 +75,7 @@ nonisolated enum OutboundConnector {
         routingContext()?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
         switch route {
         case .reject:
-            throw ConnectError.rejected(host)
+            throw AnywhereError.routing(.rejectedByRule(host: host))
         case .direct:
             return try await dialDirect(host: host, port: port)
         case .proxy:

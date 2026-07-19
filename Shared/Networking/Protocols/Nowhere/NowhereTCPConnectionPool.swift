@@ -187,7 +187,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
         }
 
         if unavailable {
-            throw ProxyError.connectionFailed("Nowhere TCP pool closed")
+            throw AnywhereError.transport(.terminated)
         }
         for connection in stale {
             connection.setPreparedCloseHandler(nil)
@@ -198,7 +198,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
         if let selected {
             selected.setPreparedCloseHandler(nil)
             guard attempt.bind(selected) else {
-                throw NowhereError.streamClosed
+                throw AnywhereError.proxy(.nowhere, .streamClosed)
             }
             do {
                 try await selected.activate(
@@ -255,7 +255,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
             tunnel: nil
         )
         guard attempt.bind(connection) else {
-            throw NowhereError.streamClosed
+            throw AnywhereError.proxy(.nowhere, .streamClosed)
         }
         do {
             try await connection.openFresh(

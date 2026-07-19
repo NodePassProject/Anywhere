@@ -10,14 +10,6 @@ import CryptoKit
 import Security
 import Synchronization
 
-nonisolated enum MITMCertificateStoreError: Error {
-    case keyGenerationFailed(String)
-    case keychainWriteFailed(OSStatus)
-    case keychainReadFailed(OSStatus)
-    case certificateBuildFailed(Error)
-    case missingCAComponents
-}
-
 nonisolated final class MITMCertificateStore: Sendable {
 
     // MARK: - Configuration
@@ -196,7 +188,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         var error: Unmanaged<CFError>?
         guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
             let message = (error?.takeRetainedValue()).flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"
-            throw MITMCertificateStoreError.keyGenerationFailed(message)
+            throw AnywhereError.certificate(.keyGenerationFailed(detail: message))
         }
         return key
     }
@@ -247,7 +239,7 @@ nonisolated final class MITMCertificateStore: Sendable {
             // The key was already persisted (kSecAttrIsPermanent); delete it or
             // the next call hits errSecDuplicateItem on the same tag.
             deletePrivateKey()
-            throw MITMCertificateStoreError.certificateBuildFailed(error)
+            throw AnywhereError.certificate(.buildFailed(underlying: error))
         }
     }
 
@@ -311,7 +303,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         var error: Unmanaged<CFError>?
         guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
             let message = (error?.takeRetainedValue()).flatMap { CFErrorCopyDescription($0) as String? } ?? "unknown"
-            throw MITMCertificateStoreError.keyGenerationFailed(message)
+            throw AnywhereError.certificate(.keyGenerationFailed(detail: message))
         }
         return key
     }
@@ -327,7 +319,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let item, CFGetTypeID(item) == SecKeyGetTypeID() else {
-            throw MITMCertificateStoreError.keychainReadFailed(status)
+            throw AnywhereError.certificate(.keychainReadFailed(status: status))
         }
         return item as! SecKey
     }
@@ -355,7 +347,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         ]
         let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else {
-            throw MITMCertificateStoreError.keychainWriteFailed(status)
+            throw AnywhereError.certificate(.keychainWriteFailed(status: status))
         }
     }
 
@@ -370,7 +362,7 @@ nonisolated final class MITMCertificateStore: Sendable {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else {
-            throw MITMCertificateStoreError.keychainReadFailed(status)
+            throw AnywhereError.certificate(.keychainReadFailed(status: status))
         }
         return data
     }

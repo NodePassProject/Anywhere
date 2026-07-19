@@ -215,9 +215,9 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
         case .ready:
             return
         case .drainingFail:
-            throw HTTP3Error.connectionFailed("Session draining (GOAWAY)")
+            throw AnywhereError.proxy(.http3, .connectionClosed(detail: "Session draining (GOAWAY)"))
         case .closedFail:
-            throw HTTP3Error.connectionFailed("Session closed")
+            throw AnywhereError.proxy(.http3, .connectionClosed(detail: "Session closed"))
         case .beginAndPark:
             startConnection()
             // Resolves on `.ready` (success) or teardown (fail/close).
@@ -341,13 +341,13 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
             case 0x00: // Control stream (RFC 9114 §6.2.1)
                 guard session.serverControlStreamID == nil else {
                     // RFC 9114 §6.2.1: a second control stream is H3_STREAM_CREATION_ERROR.
-                    return [.fail(HTTP3Error.connectionFailed("Duplicate server control stream"))]
+                    return [.fail(AnywhereError.proxy(.http3, .connectionClosed(detail: "Duplicate server control stream")))]
                 }
                 session.serverControlStreamID = streamID
                 session.serverControlBuffer = Data(buffer.dropFirst())
                 return Self.processServerControlFrames(&session)
             case 0x01: // Push (RFC 9114 §6.2.2) — we never send MAX_PUSH_ID
-                return [.fail(HTTP3Error.connectionFailed("Server opened push stream without MAX_PUSH_ID"))]
+                return [.fail(AnywhereError.proxy(.http3, .connectionClosed(detail: "Server opened push stream without MAX_PUSH_ID")))]
             case 0x02, 0x03: // QPACK encoder / decoder (RFC 9204 §4.2)
                 // We advertised QPACK_MAX_TABLE_CAPACITY=0; drain silently.
                 return []
@@ -400,12 +400,12 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
 
             if !session.serverSettingsReceived {
                 guard frame.type == HTTP3FrameType.settings.rawValue else {
-                    effects.append(.fail(HTTP3Error.connectionFailed("First control-stream frame was not SETTINGS")))
+                    effects.append(.fail(AnywhereError.proxy(.http3, .connectionClosed(detail: "First control-stream frame was not SETTINGS"))))
                     return effects
                 }
                 session.serverSettingsReceived = true
                 if !parseServerSettings(frame.payload, into: &session) {
-                    effects.append(.fail(HTTP3Error.connectionFailed("Malformed SETTINGS frame")))
+                    effects.append(.fail(AnywhereError.proxy(.http3, .connectionClosed(detail: "Malformed SETTINGS frame"))))
                     return effects
                 }
                 continue
@@ -421,13 +421,13 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
                 }
             case HTTP3FrameType.settings.rawValue:
                 // Only one SETTINGS frame is permitted (RFC 9114 §7.2.4).
-                effects.append(.fail(HTTP3Error.connectionFailed("Duplicate SETTINGS frame")))
+                effects.append(.fail(AnywhereError.proxy(.http3, .connectionClosed(detail: "Duplicate SETTINGS frame"))))
                 return effects
             case HTTP3FrameType.data.rawValue,
                  HTTP3FrameType.headers.rawValue,
                  HTTP3FrameType.pushPromise.rawValue:
                 // Forbidden on the control stream (RFC 9114 §7.2.1/§7.2.2/§7.2.5): H3_FRAME_UNEXPECTED.
-                effects.append(.fail(HTTP3Error.connectionFailed("Forbidden frame type \(frame.type) on control stream")))
+                effects.append(.fail(AnywhereError.proxy(.http3, .connectionClosed(detail: "Forbidden frame type \(frame.type) on control stream"))))
                 return effects
             default:
                 break
@@ -491,7 +491,7 @@ nonisolated final class HTTP3Multiplexer: Multiplexer, Sendable {
     /// Idempotent; the pool-visible `isClosed` flips before this returns, so no new
     /// streams are handed out afterwards.
     func close(error: Error? = nil) {
-        failSession(error ?? HTTP3Error.connectionFailed("Session closed"))
+        failSession(error ?? AnywhereError.proxy(.http3, .connectionClosed(detail: "Session closed")))
     }
 
     /// Central teardown: flips to `.closed`, fails every waiter and live stream, and

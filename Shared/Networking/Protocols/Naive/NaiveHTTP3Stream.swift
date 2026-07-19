@@ -81,7 +81,7 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
 
     func openTunnel() async throws {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
-            throw HTTP3Error.connectionFailed("No multiplexer")
+            throw AnywhereError.proxy(.http3, .connectionClosed(detail: "No multiplexer"))
         }
         try await multiplexer.ensureReady()
 
@@ -100,7 +100,7 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
         // no demuxed byte can race the registration.
         guard let streamID = await multiplexer.openStream(events: events) else {
             lock.withLock { $0.phase = .closed }
-            connectSignal.finish(throwing: HTTP3Error.streamIdBlocked)
+            connectSignal.finish(throwing: AnywhereError.proxy(.http3, .streamIDsExhausted))
             try await connectTask.value
             return
         }
@@ -128,7 +128,7 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
         allHeaders.insert((name: ":authority", value: destination), at: 1)
         guard multiplexer.isWithinPeerFieldSectionLimit(allHeaders) else {
             // handleStreamError resolves connectSignal with the failure and tears the stream down.
-            handleStreamError(HTTP3Error.connectionFailed("Request headers exceed peer MAX_FIELD_SECTION_SIZE"))
+            handleStreamError(AnywhereError.proxy(.http3, .connectionClosed(detail: "Request headers exceed peer MAX_FIELD_SECTION_SIZE")))
             try await connectTask.value
             return
         }
@@ -152,7 +152,7 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
 
     func sendData(_ data: Data) async throws {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
-            throw HTTP3Error.streamClosed
+            throw AnywhereError.proxy(.http3, .streamClosed)
         }
         enum Gate { case ok(Int64); case closed; case notReady }
         let gate: Gate = lock.withLock { state in
@@ -163,9 +163,9 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
         }
         switch gate {
         case .closed:
-            throw HTTP3Error.streamClosed
+            throw AnywhereError.proxy(.http3, .streamClosed)
         case .notReady:
-            throw HTTP3Error.notReady
+            throw AnywhereError.proxy(.http3, .notReady)
         case .ok(let sid):
             let frame = HTTP3Framer.dataFrame(payload: data)
             try await multiplexer.writeStream(sid, data: frame)
@@ -173,7 +173,7 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
     }
 
     func receiveData() async throws -> Data? {
-        guard multiplexerBox.withLock({ $0.value }) != nil else { throw HTTP3Error.streamClosed }
+        guard multiplexerBox.withLock({ $0.value }) != nil else { throw AnywhereError.proxy(.http3, .streamClosed) }
         let data = try await nextInboxChunk()
         guard let data else {
             // Clean EOF: reclaim the mux slot + STOP_SENDING once the consumer has drained.
@@ -195,7 +195,7 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
         }
         guard let detach else { return }
         detachFromMultiplexer(sid: detach.sid, code: detach.code)
-        connectSignal.finish(throwing: HTTP3Error.streamClosed)
+        connectSignal.finish(throwing: AnywhereError.proxy(.http3, .streamClosed))
         inbox.finish()
     }
 
@@ -310,20 +310,20 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
     /// resolution or teardown) are carried in the returned outcome.
     private static func processResponseHeaders(_ frame: HTTP3Framer.Frame, state: inout State) -> HeadersOutcome {
         guard frame.type == HTTP3FrameType.headers.rawValue else {
-            return .failed(HTTP3Error.connectionFailed("Expected HEADERS, got type \(frame.type)"))
+            return .failed(AnywhereError.proxy(.http3, .connectionClosed(detail: "Expected HEADERS, got type \(frame.type)")))
         }
 
         guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
-            return .failed(HTTP3Error.connectionFailed("Malformed QPACK header block"))
+            return .failed(AnywhereError.proxy(.http3, .connectionClosed(detail: "Malformed QPACK header block")))
         }
         let statusHeader = headers.first(where: { $0.name == ":status" })
 
         guard let status = statusHeader?.value, status == "200" else {
             let code = statusHeader?.value ?? "unknown"
             if code == "407" {
-                return .failed(HTTP3Error.authenticationRequired)
+                return .failed(AnywhereError.proxy(.http3, .authenticationRequired))
             } else {
-                return .failed(HTTP3Error.tunnelFailed(statusCode: code))
+                return .failed(AnywhereError.proxy(.http3, .tunnelRejected(detail: code)))
             }
         }
 
@@ -346,9 +346,9 @@ nonisolated final class NaiveHTTP3Stream: NaiveTunnel, Sendable {
         let detach: (sid: Int64?, code: HTTP3ErrorCode)? = lock.withLock { state in
             guard state.phase != .closed else { return nil }
             let code: HTTP3ErrorCode
-            if let http3Error = error as? HTTP3Error, case .tunnelFailed = http3Error {
+            if case AnywhereError.proxy(.http3, .tunnelRejected) = error {
                 code = .connectError
-            } else if error is HTTP3Error {
+            } else if case AnywhereError.proxy(.http3, _) = error {
                 code = .requestCancelled
             } else {
                 code = .internalError

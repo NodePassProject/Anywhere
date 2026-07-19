@@ -14,8 +14,10 @@ nonisolated enum TransportErrorLogger {
 
     // MARK: - Formatting
 
-    /// Strips the operation prefix `TransportError.errorDescription` bakes in; the log line repeats it.
+    /// Concise text for a log line that already names its operation. `AnywhereError`s
+    /// drop their subsystem tag; legacy enums get their baked-in prefix stripped.
     static func conciseErrorDescription(_ error: Error) -> String {
+        if let error = error as? AnywhereError { return error.conciseDescription }
         var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         let redundantPrefixes = [
             "Connection failed: ",
@@ -32,51 +34,8 @@ nonisolated enum TransportErrorLogger {
         return message
     }
 
-    /// Classifies a `TransportError`'s errno as a peer-initiated close, or nil.
-    private static func peerCloseClass(for error: Error) -> PeerCloseClass? {
-        guard let errno = (error as? TransportError)?.posixErrno else { return nil }
-        switch errno {
-        case EPIPE:        return .cascade     // write after we've seen EOF/RST
-        case ECONNRESET:   return .reset       // remote sent RST
-        default:           return nil
-        }
-    }
-
-    private enum PeerCloseClass {
-        /// Secondary failure behind an earlier RST/EOF; logging would double-report.
-        case cascade
-        /// Peer-initiated RST — expected termination, not our failure.
-        case reset
-    }
-
-    // MARK: - lwIP Error Codes
-
-    /// Human-readable lwIP `err_t` description. Must mirror lwip/src/include/lwip/err.h.
-    static func describeLwIPError(_ err: Int32) -> String {
-        switch err {
-        case 0:   return "ERR_OK"
-        case -1:  return "ERR_MEM (out of memory)"
-        case -2:  return "ERR_BUF (buffer error)"
-        case -3:  return "ERR_TIMEOUT (timed out)"
-        case -4:  return "ERR_RTE (routing problem)"
-        case -5:  return "ERR_INPROGRESS"
-        case -6:  return "ERR_VAL (illegal value)"
-        case -7:  return "ERR_WOULDBLOCK"
-        case -8:  return "ERR_USE (address in use)"
-        case -9:  return "ERR_ALREADY (already connecting)"
-        case -10: return "ERR_ISCONN (already connected)"
-        case -11: return "ERR_CONN (not connected)"
-        case -12: return "ERR_IF (low-level netif error)"
-        case -13: return "ERR_ABRT (aborted locally)"
-        case -14: return "ERR_RST (reset by peer)"
-        case -15: return "ERR_CLSD (connection closed)"
-        case -16: return "ERR_ARG (illegal argument)"
-        default:  return "lwIP err=\(err)"
-        }
-    }
-
     // MARK: - Terminal Failure Logging
-    
+
     fileprivate static func logTerminal(
         operation: String,
         endpoint: String,
@@ -88,12 +47,14 @@ nonisolated enum TransportErrorLogger {
         let errorDescription = conciseErrorDescription(error)
         let suffix = context.map { " [\($0)]" } ?? ""
 
-        if error is NaiveHTTP2Error {
+        if case AnywhereError.proxy(.naive, _) = error {
             logger.debug("\(prefix) \(operation) error: \(endpoint): \(errorDescription)\(suffix)")
             return
         }
 
-        switch peerCloseClass(for: error) {
+        // Peer-initiated closes get distinct wording; the error's suggested level
+        // covers everything else (unmigrated error types default to .error).
+        switch (error as? AnywhereError)?.peerClose {
         case .cascade:
             logger.debug("\(prefix) \(operation) after peer close: \(endpoint): \(errorDescription)\(suffix)")
             return
@@ -104,7 +65,13 @@ nonisolated enum TransportErrorLogger {
             break
         }
 
-        logger.error("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)\(suffix)")
+        let line = "\(prefix) \(operation) failed: \(endpoint): \(errorDescription)\(suffix)"
+        switch AnywhereError.severity(of: error) {
+        case .debug: logger.debug(line)
+        case .info: logger.info(line)
+        case .warning: logger.warning(line)
+        case .error: logger.error(line)
+        }
     }
 
     // MARK: - Transient Failure Logging

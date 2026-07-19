@@ -334,7 +334,7 @@ actor TCPConnection {
                 do {
                     try await stream.sendDownload(data)
                 } catch {
-                    if case TCPStreamConcurrencyBridge.StreamError.writeFailed = error {
+                    if case AnywhereError.transport(.sendBufferFull) = error {
                         await relayFailed("Write", error: error)
                     }
                     return
@@ -412,7 +412,7 @@ actor TCPConnection {
     }
     
     func handleError(err: Int32) {
-        let reason = TransportErrorLogger.describeLwIPError(err)
+        let reason = AnywhereError.Transport.lwipName(err)
         if err == -15 { // ERR_CLSD — orderly close, not a failure
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
@@ -446,7 +446,7 @@ actor TCPConnection {
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
         failureReporter.report(operation: "Connect", endpoint: endpointDescription,
                                error: error, context: DialDiagnostics.snapshot(bridge: bridge))
-        guard case TransportError.resolutionFailed = error else {
+        guard case AnywhereError.dns(.resolutionFailed) = error else {
             abort()
             return
         }
@@ -826,17 +826,17 @@ actor TCPConnection {
 
     private func makeMITMDialer() -> MITMDialer {
         return { [weak self] host, port in
-            guard let self else { throw TransportError.notConnected }
+            guard let self else { throw AnywhereError.transport(.notConnected) }
             // Hops onto the actor (lwIP executor); the deadline race and route commit run there.
             return try await self.dialUpstreamBounded(host: host, port: port)
         }
     }
     
     private func dialUpstreamBounded(host: String, port: UInt16) async throws -> MITMDialResult {
-        guard !closed else { throw TransportError.notConnected }
+        guard !closed else { throw AnywhereError.transport(.notConnected) }
         switch commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
-            throw TransportError.connectionFailed("rejected by routing rule: \(host)")
+            throw AnywhereError.routing(.rejectedByRule(host: host))
         case .direct:
             return try await dialDirectUpstream(host: host, port: port)
         case .proxy(_, let configuration):

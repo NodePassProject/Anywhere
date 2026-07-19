@@ -24,23 +24,15 @@ nonisolated struct TLSClientHelloParsed {
     let handshakeMessage: Data
 }
 
-nonisolated enum TLSClientHelloParserError: Error {
-    case truncated
-    case malformed(String)
-    case notHandshake
-    case notClientHello
-    case lengthMismatch
-}
-
 nonisolated enum TLSClientHelloParser {
 
     /// Parses a single ClientHello record (including the 5-byte record header); trailing records are not tolerated.
     static func parse(_ record: Data) throws -> TLSClientHelloParsed {
-        guard record.count >= 5 else { throw TLSClientHelloParserError.truncated }
-        guard record[record.startIndex] == TLSContentType.handshake else { throw TLSClientHelloParserError.notHandshake }
+        guard record.count >= 5 else { throw AnywhereError.tls(.clientHello(.truncated)) }
+        guard record[record.startIndex] == TLSContentType.handshake else { throw AnywhereError.tls(.clientHello(.notHandshake)) }
 
         let recordLen = (Int(record[record.startIndex + 3]) << 8) | Int(record[record.startIndex + 4])
-        guard record.count >= 5 + recordLen else { throw TLSClientHelloParserError.lengthMismatch }
+        guard record.count >= 5 + recordLen else { throw AnywhereError.tls(.clientHello(.lengthMismatch)) }
         let body = record.subdata(in: (record.startIndex + 5)..<(record.startIndex + 5 + recordLen))
 
         return try parseHandshakeBody(body)
@@ -49,10 +41,10 @@ nonisolated enum TLSClientHelloParser {
     /// Parses a handshake fragment without the outer 5-byte record header.
     static func parseHandshakeBody(_ body: Data) throws -> TLSClientHelloParsed {
         var current = Cursor(body)
-        guard let msgType = current.readU8() else { throw TLSClientHelloParserError.truncated }
-        guard msgType == TLSHandshakeType.clientHello else { throw TLSClientHelloParserError.notClientHello }
+        guard let msgType = current.readU8() else { throw AnywhereError.tls(.clientHello(.truncated)) }
+        guard msgType == TLSHandshakeType.clientHello else { throw AnywhereError.tls(.clientHello(.notClientHello)) }
         guard let bodyLen = current.readU24(), let chBody = current.readBytes(bodyLen) else {
-            throw TLSClientHelloParserError.truncated
+            throw AnywhereError.tls(.clientHello(.truncated))
         }
 
         let handshakeMessage = body.subdata(in: body.startIndex..<(body.startIndex + 4 + bodyLen))
@@ -64,13 +56,13 @@ nonisolated enum TLSClientHelloParser {
 
     private static func parseClientHello(_ body: Data, handshakeMessage: Data) throws -> TLSClientHelloParsed {
         var current = Cursor(body)
-        guard let legacyVersion = current.readU16() else { throw TLSClientHelloParserError.truncated }
-        guard let random = current.readBytes(32) else { throw TLSClientHelloParserError.truncated }
+        guard let legacyVersion = current.readU16() else { throw AnywhereError.tls(.clientHello(.truncated)) }
+        guard let random = current.readBytes(32) else { throw AnywhereError.tls(.clientHello(.truncated)) }
         guard let sessionIDLength = current.readU8(), sessionIDLength <= 32, let sessionID = current.readBytes(Int(sessionIDLength)) else {
-            throw TLSClientHelloParserError.truncated
+            throw AnywhereError.tls(.clientHello(.truncated))
         }
         guard let cipherSuitesLength = current.readU16(), let cipherSuitesData = current.readBytes(cipherSuitesLength) else {
-            throw TLSClientHelloParserError.truncated
+            throw AnywhereError.tls(.clientHello(.truncated))
         }
         var cipherSuites: [UInt16] = []
         cipherSuites.reserveCapacity(cipherSuitesLength / 2)
@@ -78,7 +70,7 @@ nonisolated enum TLSClientHelloParser {
         while let cipherSuite = cipherSuiteCursor.readU16() { cipherSuites.append(UInt16(cipherSuite)) }
 
         guard let compressionMethodsLength = current.readU8(), let compressionMethodsData = current.readBytes(Int(compressionMethodsLength)) else {
-            throw TLSClientHelloParserError.truncated
+            throw AnywhereError.tls(.clientHello(.truncated))
         }
         var compressionMethods: [UInt8] = []
         compressionMethods.reserveCapacity(Int(compressionMethodsLength))
@@ -86,7 +78,7 @@ nonisolated enum TLSClientHelloParser {
         while let m = compressionMethodCursor.readU8() { compressionMethods.append(m) }
 
         guard let extLen = current.readU16(), let extensions = current.readBytes(extLen) else {
-            throw TLSClientHelloParserError.truncated
+            throw AnywhereError.tls(.clientHello(.truncated))
         }
 
         let parsedExtensions = try parseExtensions(extensions)
@@ -131,11 +123,11 @@ nonisolated enum TLSClientHelloParser {
             guard let extType = current.readU16(),
                   let extLen = current.readU16(),
                   let extData = current.readBytes(extLen) else {
-                throw TLSClientHelloParserError.truncated
+                throw AnywhereError.tls(.clientHello(.truncated))
             }
             let (inserted, _) = observedExtensionTypes.insert(UInt16(extType))
             if !inserted {
-                throw TLSClientHelloParserError.malformed("duplicate extension \(extType)")
+                throw AnywhereError.tls(.clientHello(.malformed(detail: "duplicate extension \(extType)")))
             }
             switch UInt16(extType) {
             case TLSExtensionType.serverName:

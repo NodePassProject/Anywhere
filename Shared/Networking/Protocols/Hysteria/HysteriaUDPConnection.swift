@@ -166,7 +166,7 @@ actor HysteriaUDPConnection {
         // The wire format requires ≥1 data byte after the address; the server discards zero-byte payloads.
         guard !data.isEmpty else { return }
         guard _isReady.load(ordering: .relaxed) else {
-            throw HysteriaError.streamClosed
+            throw AnywhereError.proxy(.hysteria, .streamClosed)
         }
         // No send lock: actor isolation makes PacketID allocation atomic (distinct ids per
         // concurrent send), and QUIC writes each fragment batch atomically. UDP tolerates
@@ -187,7 +187,7 @@ actor HysteriaUDPConnection {
         }
         let headerSize = HysteriaProtocol.udpHeaderSize(address: destination)
         guard maxSize > headerSize else {
-            throw HysteriaError.destinationTooLargeForDatagram(maxFrame: maxSize, headerSize: headerSize)
+            throw AnywhereError.proxy(.hysteria, .datagramTooLarge(maxFrame: maxSize, headerSize: headerSize))
         }
         let packetID = newPacketID()
         let fragments = HysteriaProtocol.fragmentUDP(
@@ -198,17 +198,16 @@ actor HysteriaUDPConnection {
             maxDatagramSize: maxSize
         )
         guard !fragments.isEmpty else {
-            throw HysteriaError.connectionFailed("UDP payload too large to fragment")
+            throw AnywhereError.proxy(.hysteria, .connectionClosed(detail: "UDP payload too large to fragment"))
         }
         let encoded = fragments.map { $0.encoded }
         do {
             try await session.writeDatagrams(encoded)
         } catch {
-            if let qErr = error as? QUICConnection.QUICError,
-               case .datagramTooLarge(let maxBound) = qErr,
+            if case AnywhereError.quic(.datagramTooLarge(let maxBound)) = error,
                retriesLeft > 0 {
                 guard _isReady.load(ordering: .relaxed) else {
-                    throw HysteriaError.streamClosed
+                    throw AnywhereError.proxy(.hysteria, .streamClosed)
                 }
                 try await attemptSend(data: data, maxSizeOverride: maxBound, retriesLeft: retriesLeft - 1)
                 return

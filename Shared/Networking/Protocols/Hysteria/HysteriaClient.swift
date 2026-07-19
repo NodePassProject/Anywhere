@@ -190,7 +190,7 @@ nonisolated final class HysteriaClient: Sendable {
             try await existing.ensureReady()
             return existing
         case .transportSpent:
-            throw HysteriaError.streamClosed
+            throw AnywhereError.proxy(.hysteria, .streamClosed)
         case .fresh(let newSession):
             newSession.setOnClose { [weak self, weak newSession] in
                 guard let self, let newSession else { return }
@@ -280,8 +280,8 @@ nonisolated final class HysteriaClient: Sendable {
     /// True for failures meaning the cached session went away mid-acquire;
     /// `udpNotSupported` is excluded as a permanent server-side property.
     private static func isStaleSessionError(_ error: Error) -> Bool {
-        guard let hysteriaError = error as? HysteriaError else { return false }
-        switch hysteriaError {
+        guard case AnywhereError.proxy(.hysteria, let failure) = error else { return false }
+        switch failure {
         case .notReady, .streamClosed: return true
         default: return false
         }

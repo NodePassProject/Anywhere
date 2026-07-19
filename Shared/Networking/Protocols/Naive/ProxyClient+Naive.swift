@@ -96,7 +96,7 @@ extension ProxyClient {
             try await stream.openTunnel()
         } catch {
             stream.close()
-            if retriesLeft > 0 && Self.isRetryableHTTP3Error(error) {
+            if retriesLeft > 0 && Self.isRetryableHTTP3Failure(error) {
                 return try await acquireHTTP3StreamWithRetry(
                     proxyHost: proxyHost,
                     naiveConfig: naiveConfig,
@@ -114,13 +114,13 @@ extension ProxyClient {
 
     /// Session-level failures warrant a fresh-session retry; stream-level
     /// protocol errors (407, tunnel status) would fail identically.
-    private static func isRetryableHTTP3Error(_ error: Error) -> Bool {
-        if error is QUICConnection.QUICError { return true }
-        if case HTTP3Error.streamIdBlocked = error { return true }
-        if case HTTP3Error.streamClosed = error { return true }
-        if case let HTTP3Error.connectionFailed(msg) = error {
-            // connectionFailed mixes session and protocol errors; our session errors start with "Session ".
-            return msg.hasPrefix("Session ")
+    private static func isRetryableHTTP3Failure(_ error: Error) -> Bool {
+        if case AnywhereError.quic = error { return true }
+        if case AnywhereError.proxy(.http3, .streamIDsExhausted) = error { return true }
+        if case AnywhereError.proxy(.http3, .streamClosed) = error { return true }
+        if case AnywhereError.proxy(.http3, .connectionClosed(let msg)) = error {
+            // connectionClosed mixes session and protocol errors; our session errors start with "Session ".
+            return msg?.hasPrefix("Session ") == true
         }
         return false
     }

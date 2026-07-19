@@ -33,32 +33,6 @@ nonisolated struct VLESSEncryptionConfig: Equatable, Hashable {
         rttMode == .zeroRTT ? 1 : 0
     }
 
-    enum ParseError: Error, LocalizedError, Equatable {
-        case wrongScheme
-        case missingFields
-        case unknownXORMode(String)
-        case unknownRTTMode(String)
-        case invalidPublicKey(String)
-        case noPublicKeys
-
-        var errorDescription: String? {
-            switch self {
-            case .wrongScheme:
-                return "VLESS encryption: unsupported scheme (expected \"mlkem768x25519plus\")"
-            case .missingFields:
-                return "VLESS encryption: too few fields"
-            case .unknownXORMode(let s):
-                return "VLESS encryption: unknown XOR mode \"\(s)\""
-            case .unknownRTTMode(let s):
-                return "VLESS encryption: unknown RTT mode \"\(s)\""
-            case .invalidPublicKey(let s):
-                return "VLESS encryption: invalid public key \"\(s)\""
-            case .noPublicKeys:
-                return "VLESS encryption: no public keys"
-            }
-        }
-    }
-
     /// Returns `nil` for the `"none"`/empty sentinels; throws for any other malformed
     /// value rather than silently downgrading to plaintext.
     static func parse(_ string: String) throws -> VLESSEncryptionConfig? {
@@ -68,10 +42,10 @@ nonisolated struct VLESSEncryptionConfig: Equatable, Hashable {
 
         let segments = string.split(separator: ".", omittingEmptySubsequences: false)
         guard segments.count >= 4 else {
-            throw ParseError.missingFields
+            throw AnywhereError.parse(.proxyURI(.missingFields))
         }
         guard segments[0] == "mlkem768x25519plus" else {
-            throw ParseError.wrongScheme
+            throw AnywhereError.parse(.proxyURI(.unsupportedScheme(nil)))
         }
 
         let xorMode: XORMode
@@ -80,7 +54,7 @@ nonisolated struct VLESSEncryptionConfig: Equatable, Hashable {
         case "xorpub": xorMode = .xorpub
         case "random": xorMode = .random
         default:
-            throw ParseError.unknownXORMode(String(segments[1]))
+            throw AnywhereError.parse(.proxyURI(.invalidValue(field: "xorMode", value: String(segments[1]))))
         }
 
         let rttMode: RTTMode
@@ -88,7 +62,7 @@ nonisolated struct VLESSEncryptionConfig: Equatable, Hashable {
         case "1rtt": rttMode = .oneRTT
         case "0rtt": rttMode = .zeroRTT
         default:
-            throw ParseError.unknownRTTMode(String(segments[2]))
+            throw AnywhereError.parse(.proxyURI(.invalidValue(field: "rttMode", value: String(segments[2]))))
         }
 
         // Segments under 20 chars are padding specs; longer ones are base64url keys.
@@ -102,13 +76,13 @@ nonisolated struct VLESSEncryptionConfig: Equatable, Hashable {
             }
             guard let key = Data(base64URLEncoded: segment),
                   key.count == 32 || key.count == 1184 else {
-                throw ParseError.invalidPublicKey(segment)
+                throw AnywhereError.parse(.proxyURI(.invalidValue(field: "publicKey", value: segment)))
             }
             publicKeys.append(key)
         }
 
         guard !publicKeys.isEmpty else {
-            throw ParseError.noPublicKeys
+            throw AnywhereError.parse(.proxyURI(.noPublicKeys))
         }
 
         return VLESSEncryptionConfig(

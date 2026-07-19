@@ -54,30 +54,6 @@ nonisolated enum HTTP3ErrorCode: UInt64 {
     case versionFallback        = 0x0110
 }
 
-// MARK: - Error
-
-nonisolated enum HTTP3Error: Error, LocalizedError {
-    case notReady
-    case connectionFailed(String)
-    case tunnelFailed(statusCode: String)
-    case authenticationRequired
-    case streamClosed
-    /// ngtcp2 returned STREAM_ID_BLOCKED — the peer hasn't granted more bidi stream
-    /// credit; the pool marks the multiplexer blocked so the caller retries on a fresh one.
-    case streamIdBlocked
-
-    var errorDescription: String? {
-        switch self {
-        case .notReady: return "HTTP/3 connection not ready"
-        case .connectionFailed(let message): return "HTTP/3 connection failed: \(message)"
-        case .tunnelFailed(let code): return "HTTP/3 CONNECT tunnel failed with status \(code)"
-        case .authenticationRequired: return "HTTP/3 proxy authentication required (407)"
-        case .streamClosed: return "HTTP/3 stream closed"
-        case .streamIdBlocked: return "HTTP/3 peer stream limit reached"
-        }
-    }
-}
-
 // MARK: - HTTP3Framer
 
 nonisolated enum HTTP3Framer {

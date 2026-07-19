@@ -175,46 +175,46 @@ nonisolated extension TLSServer {
             case TLSContentType.alert:
                 let level = payload.count > 0 ? payload[payload.startIndex] : 0
                 let description = payload.count > 1 ? payload[payload.startIndex + 1] : 0
-                throw TLSError.handshakeFailed("client TLS 1.2 alert level=\(level) desc=\(description) (\(TLSRecordError.alertName(description)))")
+                throw AnywhereError.tls(.handshakeFailed(detail: "client TLS 1.2 alert level=\(level) desc=\(description) (\(TLSRecordCrypto.alertName(description)))"))
             default:
-                throw TLSError.handshakeFailed("unexpected content type \(contentType) during TLS 1.2 handshake")
+                throw AnywhereError.tls(.handshakeFailed(detail: "unexpected content type \(contentType) during TLS 1.2 handshake"))
             }
         }
     }
 
     private func handleClientKeyExchange12(_ recordBody: Data) throws {
         guard recordBody.count >= 4 else {
-            throw TLSError.handshakeFailed("ClientKeyExchange too short")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ClientKeyExchange too short"))
         }
         let msgType = recordBody[recordBody.startIndex]
         guard msgType == TLSHandshakeType.clientKeyExchange else {
-            throw TLSError.handshakeFailed("expected ClientKeyExchange, got \(msgType)")
+            throw AnywhereError.tls(.handshakeFailed(detail: "expected ClientKeyExchange, got \(msgType)"))
         }
         let length = (Int(recordBody[recordBody.startIndex + 1]) << 16)
                 | (Int(recordBody[recordBody.startIndex + 2]) << 8)
                 | Int(recordBody[recordBody.startIndex + 3])
         guard recordBody.count >= 4 + length else {
-            throw TLSError.handshakeFailed("ClientKeyExchange truncated")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ClientKeyExchange truncated"))
         }
 
         let body = recordBody.subdata(in: (recordBody.startIndex + 4)..<(recordBody.startIndex + 4 + length))
         guard body.count >= 1 else {
-            throw TLSError.handshakeFailed("ClientKeyExchange empty")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ClientKeyExchange empty"))
         }
         let pubLen = Int(body[body.startIndex])
         guard body.count >= 1 + pubLen else {
-            throw TLSError.handshakeFailed("ClientKeyExchange pubkey truncated")
+            throw AnywhereError.tls(.handshakeFailed(detail: "ClientKeyExchange pubkey truncated"))
         }
         let clientPubData = body.subdata(in: (body.startIndex + 1)..<(body.startIndex + 1 + pubLen))
 
         guard let serverPriv = ephemeralKey12 else {
-            throw TLSError.handshakeFailed("missing server ephemeral key")
+            throw AnywhereError.tls(.handshakeFailed(detail: "missing server ephemeral key"))
         }
         let preMaster: Data
         do {
             preMaster = try serverPriv.sharedSecret(with: clientPubData)
         } catch {
-            throw TLSError.handshakeFailed("invalid client ECDHE key share")
+            throw AnywhereError.tls(.handshakeFailed(detail: "invalid client ECDHE key share"))
         }
 
         let clientKeyExchange = recordBody.subdata(in: recordBody.startIndex..<(recordBody.startIndex + 4 + length))
@@ -255,7 +255,7 @@ nonisolated extension TLSServer {
 
     private func handleClientFinished12(_ encryptedRecord: Data) throws {
         guard let keys = handshake12.keys, let ms = handshake12.masterSecret else {
-            throw TLSError.handshakeFailed("missing TLS 1.2 keys")
+            throw AnywhereError.tls(.handshakeFailed(detail: "missing TLS 1.2 keys"))
         }
 
         let plaintext = try decryptTLS12HandshakeRecord(
@@ -266,7 +266,7 @@ nonisolated extension TLSServer {
         )
 
         guard plaintext.count >= 16, plaintext[plaintext.startIndex] == TLSHandshakeType.finished else {
-            throw TLSError.handshakeFailed("expected Finished message")
+            throw AnywhereError.tls(.handshakeFailed(detail: "expected Finished message"))
         }
         let received = plaintext.subdata(in: (plaintext.startIndex + 4)..<(plaintext.startIndex + 16))
 
@@ -279,14 +279,14 @@ nonisolated extension TLSServer {
             useSHA384: useSHA384
         )
         guard expected.count == received.count else {
-            throw TLSError.handshakeFailed("Finished length mismatch")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Finished length mismatch"))
         }
         var diff: UInt8 = 0
         for i in 0..<expected.count {
             diff |= expected[expected.startIndex + i] ^ received[received.startIndex + i]
         }
         guard diff == 0 else {
-            throw TLSError.handshakeFailed("Client Finished verify failed")
+            throw AnywhereError.tls(.handshakeFailed(detail: "Client Finished verify failed"))
         }
 
         let clientFinished = plaintext.subdata(in: plaintext.startIndex..<(plaintext.startIndex + 16))
@@ -423,7 +423,7 @@ nonisolated extension TLSServer {
         let explicitNonceLen = isChaCha ? 0 : 8
 
         guard ciphertext.count >= explicitNonceLen + 16 else {
-            throw TLSError.handshakeFailed("TLS 1.2 handshake ciphertext too short")
+            throw AnywhereError.tls(.handshakeFailed(detail: "TLS 1.2 handshake ciphertext too short"))
         }
 
         let explicitNonce = isChaCha ? Data() : Data(ciphertext.prefix(explicitNonceLen))

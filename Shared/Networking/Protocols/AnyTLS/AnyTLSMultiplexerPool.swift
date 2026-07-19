@@ -51,7 +51,7 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
         let reused: AnyTLSMultiplexer? = try pool.state.withLock { st throws -> AnyTLSMultiplexer? in
             if st.extra.closed {
                 logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
-                throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
+                throw AnywhereError.transport(.terminated)
             }
             if let reused = st.multiplexers[Self.bucket]?.first(where: { $0.tryReserveStream() }) {
                 st.lastActivity[ObjectIdentifier(reused)] = MonotonicClock.now
@@ -70,7 +70,7 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
             if st.extra.closed {
                 connection.cancel()
                 logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
-                throw ProxyError.connectionFailed("AnyTLSMultiplexerPool closed")
+                throw AnywhereError.transport(.terminated)
             }
             st.extra.sessionCounter &+= 1
             let multiplexer = AnyTLSMultiplexer(
@@ -117,7 +117,7 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
         }
         guard let stream = await multiplexer.openStream(onEnd: onEnd) else {
             logger.debug("[AnyTLSMultiplexerPool] openStream failed on multiplexer seq=\(multiplexer.seq)")
-            throw ProxyError.connectionFailed("Failed to open AnyTLS stream")
+            throw AnywhereError.proxy(.anyTLS, .connectionClosed(detail: "Failed to open AnyTLS stream"))
         }
         return stream
     }

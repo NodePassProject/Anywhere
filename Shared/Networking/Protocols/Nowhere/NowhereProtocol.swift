@@ -77,22 +77,22 @@ nonisolated enum NowhereProtocol {
 
         func validate(on carrier: NowhereNetwork? = nil) throws {
             guard flowID != 0 else {
-                throw NowhereError.connectionFailed("Invalid zero flow ID")
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid zero flow ID"))
             }
             switch role {
             case .duplex:
                 guard uplink == downlink else {
-                    throw NowhereError.connectionFailed("Duplex carrier mismatch")
+                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Duplex carrier mismatch"))
                 }
             case .open, .attach:
                 guard uplink != downlink else {
-                    throw NowhereError.connectionFailed("Split carriers must differ")
+                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Split carriers must differ"))
                 }
             }
             if let carrier {
                 let expected = role == .attach ? downlink : uplink
                 guard carrier == expected else {
-                    throw NowhereError.connectionFailed("Flow carrier mismatch")
+                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Flow carrier mismatch"))
                 }
             }
         }
@@ -104,7 +104,7 @@ nonisolated enum NowhereProtocol {
         case domain(String, UInt16)
 
         init(host: String, port: UInt16) throws {
-            guard port != 0 else { throw NowhereError.connectionFailed("Invalid zero target port") }
+            guard port != 0 else { throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid zero target port")) }
             let unwrapped = host.hasPrefix("[") && host.hasSuffix("]")
                 ? String(host.dropFirst().dropLast())
                 : host
@@ -155,14 +155,14 @@ nonisolated enum NowhereProtocol {
         }
 
         private static func asciiWireHost(_ host: String) throws -> String {
-            guard !host.isEmpty else { throw NowhereError.connectionFailed("Empty target host") }
+            guard !host.isEmpty else { throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Empty target host")) }
             if host.unicodeScalars.allSatisfy(\.isASCII) { return host.lowercased() }
             var components = URLComponents()
             components.scheme = "https"
             components.host = host
             guard let converted = components.url?.host,
                   converted.unicodeScalars.allSatisfy(\.isASCII) else {
-                throw NowhereError.connectionFailed("Target is not valid IDNA")
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Target is not valid IDNA"))
             }
             return converted.lowercased()
         }
@@ -170,7 +170,7 @@ nonisolated enum NowhereProtocol {
         private static func validateDomain(_ domain: String) throws {
             let bytes = Array(domain.utf8)
             guard !bytes.isEmpty, bytes.count <= maxDomainLength else {
-                throw NowhereError.invalidTargetLength(bytes.count)
+                throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "invalid target length (\(bytes.count))"))
             }
             for label in domain.split(separator: ".", omittingEmptySubsequences: false) {
                 let scalars = label.utf8
@@ -178,7 +178,7 @@ nonisolated enum NowhereProtocol {
                       scalars.first != Character("-").asciiValue,
                       scalars.last != Character("-").asciiValue,
                       scalars.allSatisfy({ $0.isASCIIAlphaNumeric || $0 == 0x2d }) else {
-                    throw NowhereError.connectionFailed("Invalid DNS target")
+                    throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid DNS target"))
                 }
             }
         }
@@ -204,9 +204,9 @@ nonisolated enum NowhereProtocol {
 
     static func deriveAuthKey(sharedKey: String) throws -> AuthKey {
         let keyBytes = Data(sharedKey.utf8)
-        guard !keyBytes.isEmpty else { throw ProxyError.protocolError("Missing Nowhere shared key") }
+        guard !keyBytes.isEmpty else { throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Missing Nowhere shared key")) }
         guard keyBytes.count <= UInt8.max else {
-            throw ProxyError.protocolError("Nowhere shared key exceeds 255 bytes")
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Nowhere shared key exceeds 255 bytes"))
         }
         let salt = Data(SHA256.hash(data: Data("nowhere/now/1/auth-root".utf8)))
         let authRoot = hmacSHA256(key: salt, message: keyBytes)
@@ -222,7 +222,7 @@ nonisolated enum NowhereProtocol {
         sessionID: Data
     ) throws -> Data {
         guard authKey.count == 32, exporter.count == 32, sessionID.count == 16 else {
-            throw NowhereError.authFailed("Invalid authentication material")
+            throw AnywhereError.proxy(.nowhere, .authenticationRejected(status: nil, detail: "Invalid authentication material"))
         }
         var message = Data(capacity: 49)
         message.append(transport.rawValue)
@@ -274,7 +274,7 @@ nonisolated enum NowhereProtocol {
     ) throws -> Data {
         try header.validate()
         guard header.carriesTarget == (target != nil) else {
-            throw NowhereError.connectionFailed("Flow target does not match role")
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Flow target does not match role"))
         }
         let initialCount = initialData?.count ?? 0
         var output = Data(capacity: flowHeaderSize + (target?.encodedLength ?? 0) + initialCount)
@@ -303,7 +303,7 @@ nonisolated enum NowhereProtocol {
 
     static func encodeUDPControl(type: UDPType, flowID: UInt32) throws -> Data {
         guard type == .close, flowID != 0 else {
-            throw NowhereError.connectionFailed("Invalid UDP CLOSE frame")
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid UDP CLOSE frame"))
         }
         var output = Data(capacity: udpHeaderSize)
         output.append(type.rawValue)
@@ -317,10 +317,10 @@ nonisolated enum NowhereProtocol {
         payload: Data,
         maxDatagramSize: Int
     ) throws -> [Data] {
-        guard flowID != 0 else { throw NowhereError.connectionFailed("Invalid flow ID") }
-        guard payload.count <= maxUDPPacketSize else { throw NowhereError.udpPacketTooLarge }
+        guard flowID != 0 else { throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Invalid flow ID")) }
+        guard payload.count <= maxUDPPacketSize else { throw AnywhereError.proxy(.nowhere, .packetTooLarge) }
         guard maxDatagramSize >= udpHeaderSize else {
-            throw NowhereError.destinationTooLargeForDatagram(maxFrame: maxDatagramSize, headerSize: udpHeaderSize)
+            throw AnywhereError.proxy(.nowhere, .datagramTooLarge(maxFrame: maxDatagramSize, headerSize: udpHeaderSize))
         }
         if payload.count <= maxDatagramSize - udpHeaderSize {
             var frame = Data(capacity: udpHeaderSize + payload.count)
@@ -331,11 +331,11 @@ nonisolated enum NowhereProtocol {
         }
 
         guard packetID != 0, maxDatagramSize > udpFragmentHeaderSize else {
-            throw NowhereError.destinationTooLargeForDatagram(maxFrame: maxDatagramSize, headerSize: udpFragmentHeaderSize)
+            throw AnywhereError.proxy(.nowhere, .datagramTooLarge(maxFrame: maxDatagramSize, headerSize: udpFragmentHeaderSize))
         }
         let payloadCapacity = maxDatagramSize - udpFragmentHeaderSize
         let count = (payload.count + payloadCapacity - 1) / payloadCapacity
-        guard (2...Int(UInt8.max)).contains(count) else { throw NowhereError.udpPacketTooLarge }
+        guard (2...Int(UInt8.max)).contains(count) else { throw AnywhereError.proxy(.nowhere, .packetTooLarge) }
 
         var frames: [Data] = []
         frames.reserveCapacity(count)
@@ -402,7 +402,7 @@ nonisolated enum NowhereProtocol {
     // MARK: - UDP over stream
 
     static func encodeUDPStreamPacket(_ payload: Data) throws -> Data {
-        guard payload.count <= maxUDPPacketSize else { throw NowhereError.udpPacketTooLarge }
+        guard payload.count <= maxUDPPacketSize else { throw AnywhereError.proxy(.nowhere, .packetTooLarge) }
         var output = Data(capacity: 2 + payload.count)
         output.appendUInt16(UInt16(payload.count))
         output.append(payload)

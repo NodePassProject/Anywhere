@@ -10,20 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TLSStreamTransport")
 
-// MARK: - Error
-
-nonisolated enum TLSStreamError: Error, LocalizedError {
-    case connectionFailed(String)
-    case notConnected
-
-    var errorDescription: String? {
-        switch self {
-        case .connectionFailed(let message): return "TLS stream connection failed: \(message)"
-        case .notConnected: return "TLS stream not connected"
-        }
-    }
-}
-
 // MARK: - TLSStreamTransport
 
 nonisolated final class TLSStreamTransport: Sendable {
@@ -94,7 +80,7 @@ nonisolated final class TLSStreamTransport: Sendable {
 
     func send(_ data: Data) async throws {
         guard let tlsConnection = state.withLock({ $0.isReady ? $0.tlsConnection : nil }) else {
-            throw TLSStreamError.notConnected
+            throw AnywhereError.transport(.notConnected)
         }
         try await tlsConnection.send(data)
     }
@@ -103,7 +89,7 @@ nonisolated final class TLSStreamTransport: Sendable {
 
     func receive() async throws -> Data? {
         guard let tlsConnection = state.withLock({ $0.isReady ? $0.tlsConnection : nil }) else {
-            throw TLSStreamError.notConnected
+            throw AnywhereError.transport(.notConnected)
         }
         return try await tlsConnection.receive()
     }

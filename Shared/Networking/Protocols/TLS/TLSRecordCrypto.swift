@@ -31,7 +31,7 @@ nonisolated struct TLSRecordCrypto {
         let nonce = buildNonce(iv: iv, seqNum: seqNum)
 
         guard ciphertext.count >= 16 else {
-            throw TLSRecordError.ciphertextTooShort
+            throw AnywhereError.tls(.record(.ciphertextTooShort))
         }
 
         let ct = ciphertext.prefix(ciphertext.count - 16)
@@ -40,7 +40,7 @@ nonisolated struct TLSRecordCrypto {
         let decrypted = try openAEAD(ciphertext: Data(ct), tag: Data(tag), key: key, nonce: nonce, aad: recordHeader, cipherSuite: cipherSuite)
 
         guard !decrypted.isEmpty else {
-            throw TLSRecordError.emptyDecryptedData
+            throw AnywhereError.tls(.record(.emptyPlaintext))
         }
 
         var contentEnd = decrypted.count - 1
@@ -49,7 +49,7 @@ nonisolated struct TLSRecordCrypto {
         }
 
         guard contentEnd >= 0 else {
-            throw TLSRecordError.noContentTypeFound
+            throw AnywhereError.tls(.record(.missingContentType))
         }
 
         return Data(decrypted.prefix(contentEnd))
@@ -90,7 +90,7 @@ nonisolated struct TLSRecordCrypto {
                 return Data(try AES.GCM.open(sealedBox, using: key, authenticating: aad))
             }
         } catch CryptoKitError.authenticationFailure {
-            throw TLSRecordError.recordAuthenticationFailed
+            throw AnywhereError.tls(.record(.authenticationFailed))
         }
     }
 
@@ -102,51 +102,6 @@ nonisolated struct TLSRecordCrypto {
             nonce[nonce.count - 8 + i] ^= UInt8((seqNum >> (56 - i * 8)) & 0xFF)
         }
         return nonce
-    }
-}
-
-nonisolated enum TLSRecordError: Error, LocalizedError {
-    case ciphertextTooShort
-    case emptyDecryptedData
-    case noContentTypeFound
-    case encryptionFailed
-    case recordAuthenticationFailed
-    case macVerificationFailed
-    case invalidPadding
-    case malformedRecord(String)
-    case ivGenerationFailed
-    case connectionUnavailable
-    case tlsAlert(level: UInt8, description: UInt8)
-    case unexpectedAlert
-
-    var errorDescription: String? {
-        switch self {
-        case .ciphertextTooShort:
-            return "Ciphertext too short for decryption"
-        case .emptyDecryptedData:
-            return "Empty decrypted data"
-        case .noContentTypeFound:
-            return "No content type found in decrypted data"
-        case .encryptionFailed:
-            return "AES-GCM encryption failed"
-        case .recordAuthenticationFailed:
-            return "TLS record authentication failed (bad tag)"
-        case .macVerificationFailed:
-            return "TLS record MAC verification failed"
-        case .invalidPadding:
-            return "Invalid TLS record padding"
-        case .malformedRecord(let reason):
-            return "Malformed TLS record: \(reason)"
-        case .ivGenerationFailed:
-            return "Failed to generate TLS record IV"
-        case .connectionUnavailable:
-            return "TLS record transport unavailable"
-        case .tlsAlert(let level, let description):
-            let kind = level == 2 ? "fatal" : "warning"
-            return "TLS alert received: \(TLSRecordError.alertName(description)) (\(kind), code \(description))"
-        case .unexpectedAlert:
-            return "Unexpected TLS alert record"
-        }
     }
 
     static func alertName(_ code: UInt8) -> String {

@@ -83,8 +83,8 @@ nonisolated final class H2FrameReader: Sendable {
     }
 
     /// Yields the next complete frame, reading from the transport as needed. Throws
-    /// ``XHTTPError/streamEnded`` on a clean transport FIN at a frame boundary (a graceful
-    /// end of stream, which consumers convert to EOF).
+    /// `AnywhereError.proxy(.xhttp, .streamClosed)` on a clean transport FIN at a frame boundary
+    /// (a graceful end of stream, which consumers convert to EOF).
     func readFrame() async throws -> H2Framing.Frame {
         while true {
             if let frame = buffer.withLock({ H2Framing.parseFrame(from: &$0) }) {
@@ -93,7 +93,7 @@ nonisolated final class H2FrameReader: Sendable {
 
             let chunk = try await receive()
             guard case .bytes(let data) = chunk, !data.isEmpty else {
-                throw XHTTPError.streamEnded
+                throw AnywhereError.proxy(.xhttp, .streamClosed)
             }
 
             let overflowed = buffer.withLock { buffer -> Bool in
@@ -105,7 +105,7 @@ nonisolated final class H2FrameReader: Sendable {
                 return false
             }
             if overflowed {
-                throw XHTTPError.connectionClosed
+                throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))
             }
         }
     }

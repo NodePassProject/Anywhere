@@ -59,7 +59,7 @@ extension QUICConnection {
             self.pendingDatagrams.removeAll()
             self.inflightStreamBuffers.removeAll()
             self.streamTxOffset.removeAll()
-            let closeError = error ?? QUICError.closed
+            let closeError = error ?? AnywhereError.quic(.closed(graceful: false))
             self.finishConnect(closeError)
             for pendingWrite in writes { pendingWrite.continuation?.resume(throwing: closeError) }
             for d in datagrams { d.latch?.settle(closeError) }

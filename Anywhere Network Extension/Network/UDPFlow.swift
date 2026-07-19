@@ -144,29 +144,33 @@ actor UDPFlow {
 
     /// Terminal = the connection is gone for good; transient = the connection is still usable.
     nonisolated private static func isTerminalProxySendError(_ error: Error, connection: ProxyConnection) -> Bool {
-        if let quicError = error as? QUICConnection.QUICError {
+        if case AnywhereError.quic(let quicError) = error {
             switch quicError {
-            case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
+            case .handshakeFailed, .streamReset, .streamClosedWithError, .closed:
                 return true
-            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamError, .timeout:
+            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamFailed, .timedOut:
                 return false
             }
         }
-        if let hysteriaError = error as? HysteriaError {
-            switch hysteriaError {
-            case .authRejected, .udpNotSupported, .destinationTooLargeForDatagram, .streamClosed:
+        if case AnywhereError.proxy(.hysteria, let failure) = error {
+            switch failure {
+            case .authenticationRejected, .unsupported, .datagramTooLarge, .streamClosed:
                 return true
-            case .notReady, .connectionFailed, .tunnelFailed:
+            case .notReady, .connectionClosed, .tunnelRejected:
                 return false
+            default:
+                return !connection.isConnected
             }
         }
-        if let nowhereError = error as? NowhereError {
-            switch nowhereError {
-            case .authFailed, .invalidTargetLength, .destinationTooLargeForDatagram, .streamClosed,
-                    .flowRejected, .flowOpenTimeout:
+        if case AnywhereError.proxy(.nowhere, let failure) = error {
+            switch failure {
+            case .authenticationRejected, .protocolViolation, .datagramTooLarge, .streamClosed,
+                    .flowRejected, .openTimeout:
                 return true
-            case .notReady, .connectionFailed, .udpPacketTooLarge:
+            case .notReady, .connectionClosed, .packetTooLarge:
                 return false
+            default:
+                return !connection.isConnected
             }
         }
         // Unknown error types: fall back to the connection's own liveness signal.
@@ -360,7 +364,7 @@ actor UDPFlow {
             }
 
         case .failure(let error):
-            if case .dropped = error as? ProxyError {} else {
+            if case AnywhereError.routing(.dropped) = error {} else {
                 reportFailure("Connect", error: error)
             }
             close()
@@ -429,7 +433,7 @@ actor UDPFlow {
             startProxyReceiving(proxyConnection: proxyConnection)
 
         case .failure(let error):
-            if case .dropped = error as? ProxyError {} else {
+            if case AnywhereError.routing(.dropped) = error {} else {
                 reportFailure("Connect", error: error)
             }
             close()

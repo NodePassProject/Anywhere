@@ -82,7 +82,7 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
                 resourceTimeout: resourceTimeout
             )
             return .response(response)
-        } catch MITMScriptHTTP2Error.needsHTTP1Fallback {
+        } catch AnywhereError.mitm(.needsHTTP1Fallback) {
             return .fallbackToHTTP1
         }
     }

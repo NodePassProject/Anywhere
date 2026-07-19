@@ -46,7 +46,7 @@ nonisolated extension TLSRecordConnection {
     /// holds under the `receiveState` lock.
     func decryptTLS13Record(ciphertext: Data, header: Data, ingress: DirectionState, receive state: inout ReceiveState) throws -> Data {
         guard ciphertext.count >= 16 else {
-            throw TLSRecordError.ciphertextTooShort
+            throw AnywhereError.tls(.record(.ciphertextTooShort))
         }
 
         var nonce = ingress.iv
@@ -58,7 +58,7 @@ nonisolated extension TLSRecordConnection {
         let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: header, key: ingress.symmetricKey)
 
         guard !decrypted.isEmpty else {
-            throw TLSRecordError.emptyDecryptedData
+            throw AnywhereError.tls(.record(.emptyPlaintext))
         }
 
         var innerContentType: UInt8 = 0
@@ -72,7 +72,7 @@ nonisolated extension TLSRecordConnection {
         }
 
         guard contentLen >= 0 else {
-            throw TLSRecordError.noContentTypeFound
+            throw AnywhereError.tls(.record(.missingContentType))
         }
 
         // A KeyUpdate must rekey the read side here or every subsequent record fails AEAD
@@ -90,7 +90,7 @@ nonisolated extension TLSRecordConnection {
                 state.receivedCloseNotify = true
                 return Data()
             }
-            throw TLSRecordError.tlsAlert(level: level, description: description)
+            throw AnywhereError.tls(.alert(level: level, code: description))
         }
 
         return decrypted.prefix(Int(contentLen))

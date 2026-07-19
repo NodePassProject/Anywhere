@@ -55,14 +55,14 @@ nonisolated struct NowhereConfiguration: Hashable {
         let supportsPool = uplink == .tcp && downlink == .tcp
         guard (!supportsPool && pool == 0)
                 || (supportsPool && NowherePool.validRange.contains(pool)) else {
-            throw ProxyError.protocolError("Invalid Nowhere pool value")
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere pool value"))
         }
         guard sessionID.count == 16 else {
-            throw ProxyError.protocolError("Invalid Nowhere session ID")
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere session ID"))
         }
         let alpn = tls.alpn?.first ?? NowhereProtocol.defaultALPN
         guard !alpn.isEmpty, alpn.utf8.count <= UInt8.max else {
-            throw ProxyError.protocolError("Invalid Nowhere ALPN")
+            throw AnywhereError.proxy(.nowhere, .protocolViolation(detail: "Invalid Nowhere ALPN"))
         }
         self.proxyHost = proxyHost
         self.proxyPort = proxyPort
@@ -121,7 +121,7 @@ nonisolated final class NowhereTransportIdentityRegistry: Sendable {
                 return SecRandomCopyBytes(kSecRandomDefault, 16, base)
             }
             guard status == errSecSuccess else {
-                throw NowhereError.connectionFailed("Failed to generate session ID")
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Failed to generate session ID"))
             }
             states[identityKey] = State(sessionID: bytes, nextFlowID: 1, activeFlowIDs: [])
             return bytes
@@ -134,7 +134,7 @@ nonisolated final class NowhereTransportIdentityRegistry: Sendable {
     ) throws -> NowhereFlowIDLease {
         let flowID = try states.withLock { states -> UInt32 in
             guard var state = states[identityKey], state.sessionID == expectedSessionID else {
-                throw NowhereError.streamClosed
+                throw AnywhereError.proxy(.nowhere, .streamClosed)
             }
             var candidate = max(state.nextFlowID, 1)
             for _ in 0...state.activeFlowIDs.count {
@@ -148,7 +148,7 @@ nonisolated final class NowhereTransportIdentityRegistry: Sendable {
                 candidate &+= 1
                 if candidate == 0 { candidate = 1 }
             }
-            throw NowhereError.connectionFailed("Nowhere flow ID space exhausted")
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Nowhere flow ID space exhausted"))
         }
         return NowhereFlowIDLease(flowID: flowID) { [weak self] released in
             self?.releaseFlowID(released, for: identityKey, sessionID: expectedSessionID)

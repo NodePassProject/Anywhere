@@ -8,33 +8,6 @@
 import Foundation
 import Synchronization
 
-nonisolated enum NowhereError: Error, LocalizedError {
-    case notReady
-    case connectionFailed(String)
-    case authFailed(String)
-    case streamClosed
-    case invalidTargetLength(Int)
-    case destinationTooLargeForDatagram(maxFrame: Int, headerSize: Int)
-    case udpPacketTooLarge
-    case flowRejected(NowhereProtocol.FlowRejectCode)
-    case flowOpenTimeout
-
-    var errorDescription: String? {
-        switch self {
-        case .notReady: return "Nowhere session not ready"
-        case .connectionFailed(let message): return "Nowhere connection failed: \(message)"
-        case .authFailed(let message): return "Nowhere auth failed: \(message)"
-        case .streamClosed: return "Nowhere stream closed"
-        case .invalidTargetLength(let length): return "Nowhere target length is invalid (\(length))"
-        case .destinationTooLargeForDatagram(let frame, let header):
-            return "Nowhere destination too large for DATAGRAM (peer max \(frame) <= header \(header))"
-        case .udpPacketTooLarge: return "Nowhere UDP packet is too large"
-        case .flowRejected(let code): return "Nowhere flow rejected: \(code.description)"
-        case .flowOpenTimeout: return "Nowhere flow open timed out"
-        }
-    }
-}
-
 nonisolated final class NowhereQueuedDatagram: Sendable {
     let payload: Data
     private let reservation: NowhereUDPBudgetReservation
@@ -257,7 +230,7 @@ nonisolated final class NowhereSession: Sendable {
         enum Effect { case none; case failAuth(Error); case tcp(NowhereConnection); case udpControl(NowhereUDPConnection) }
         let effect: Effect = lock.withLock { session in
             if session.firstStreamID == sid, session.state == .authenticating {
-                return .failAuth(error ?? NowhereError.authFailed("Bootstrap stream closed before authentication"))
+                return .failAuth(error ?? AnywhereError.proxy(.nowhere, .authenticationRejected(status: nil, detail: "Bootstrap stream closed before authentication")))
             }
             if let connection = session.tcpStreams.removeValue(forKey: sid) { return .tcp(connection) }
             if let connection = session.udpControlStreams.removeValue(forKey: sid) { return .udpControl(connection) }
@@ -455,7 +428,7 @@ nonisolated final class NowhereSession: Sendable {
 
         switch bootstrap {
         case .failed:
-            throw NowhereError.connectionFailed("Failed to open bootstrap stream")
+            throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Failed to open bootstrap stream"))
         case .ok(let sid, let authFrame):
             afterRegister(sid)
             var payload = Data(capacity: authFrame.count + request.count)
@@ -477,7 +450,7 @@ nonisolated final class NowhereSession: Sendable {
 
         // Steady state: wait for auth to finish, then open a normal stream.
         try await authTask.value
-        guard lock.withLock({ $0.state == .ready }) else { throw NowhereError.streamClosed }
+        guard lock.withLock({ $0.state == .ready }) else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
         // Honor cancellation before spending a stream ID (the write below also surfaces it).
         try Task.checkCancellation()
 
@@ -489,9 +462,9 @@ nonisolated final class NowhereSession: Sendable {
         }
         switch opened {
         case .failed:
-            let error = NowhereError.connectionFailed("Failed to open QUIC stream")
+            let error = AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Failed to open QUIC stream"))
             failSession(error)
-            throw NowhereError.streamClosed
+            throw AnywhereError.proxy(.nowhere, .streamClosed)
         case .ok(let sid):
             afterRegister(sid)
             do {
@@ -560,12 +533,12 @@ nonisolated final class NowhereSession: Sendable {
         requestedFlowID: UInt32? = nil
     ) async throws -> UInt32 {
         let flowID: UInt32 = try lock.withLock { session in
-            guard session.state != .closed, session.state != .idle else { throw NowhereError.notReady }
+            guard session.state != .closed, session.state != .idle else { throw AnywhereError.proxy(.nowhere, .notReady) }
             guard session.udpRoutes.count < Self.maxUDPFlows else {
-                throw NowhereError.connectionFailed("UDP flow pool exhausted")
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP flow pool exhausted"))
             }
             guard let flowID = requestedFlowID, flowID != 0, session.udpRoutes[flowID] == nil else {
-                throw NowhereError.connectionFailed("UDP flow ID collision")
+                throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP flow ID collision"))
             }
             session.udpRoutes[flowID] = UDPRoute(connection: connection, ready: false)
             return flowID
@@ -634,13 +607,13 @@ nonisolated final class NowhereSession: Sendable {
         guard lock.withLock({ $0.state == .ready }) else { return }
         let liveCount = poolState.withLock { $0.tcpCount + $0.udpCount }
         guard liveCount == 0 else { return }
-        performTeardown(readyError: NowhereError.streamClosed, handleClean: true)
+        performTeardown(readyError: AnywhereError.proxy(.nowhere, .streamClosed), handleClean: true)
     }
 
     // MARK: - Close
 
     func close() {
-        performTeardown(readyError: NowhereError.streamClosed, handleClean: true)
+        performTeardown(readyError: AnywhereError.proxy(.nowhere, .streamClosed), handleClean: true)
     }
 
     private func failSession(_ error: Error) {
@@ -693,7 +666,7 @@ nonisolated final class NowhereSession: Sendable {
             for connection in teardown.tcp { connection.handleSessionClose() }
             for connection in teardown.udp { connection.handleSessionClose() }
         } else {
-            let failure = error ?? NowhereError.streamClosed
+            let failure = error ?? AnywhereError.proxy(.nowhere, .streamClosed)
             for connection in teardown.tcp { connection.handleSessionError(failure) }
             for connection in teardown.udp { connection.handleSessionError(failure) }
         }

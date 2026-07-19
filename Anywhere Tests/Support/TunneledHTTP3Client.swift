@@ -65,7 +65,7 @@ private nonisolated final class HTTP3GetRequest: Sendable {
         self.resultSignal = resultSignal
         self.resultTask = Task {
             for try await response in resultStream { return response }
-            throw HTTP3Error.streamClosed
+            throw AnywhereError.proxy(.http3, .streamClosed)
         }
     }
 
@@ -81,7 +81,7 @@ private nonisolated final class HTTP3GetRequest: Sendable {
             }
         )
         guard let streamID = await multiplexer.openStream(events: events) else {
-            throw HTTP3Error.streamIdBlocked
+            throw AnywhereError.proxy(.http3, .streamIDsExhausted)
         }
         lock.withLock { $0.quicStreamID = streamID }
 
@@ -155,7 +155,7 @@ private nonisolated final class HTTP3GetRequest: Sendable {
         }
 
         if malformed {
-            complete(.failure(HTTP3Error.connectionFailed("Malformed QPACK header block")))
+            complete(.failure(AnywhereError.proxy(.http3, .connectionClosed(detail: "Malformed QPACK header block"))))
             return
         }
         if consumedBytes > 0, let streamID = lock.withLock({ $0.quicStreamID }) {
@@ -167,7 +167,7 @@ private nonisolated final class HTTP3GetRequest: Sendable {
         let snapshot: (status: Int?, headers: [(name: String, value: String)], body: Data) =
             lock.withLock { (status: $0.status, headers: $0.responseHeaders, body: $0.body) }
         guard let status = snapshot.status else {
-            complete(.failure(HTTP3Error.connectionFailed("stream ended before response headers")))
+            complete(.failure(AnywhereError.proxy(.http3, .connectionClosed(detail: "stream ended before response headers"))))
             return
         }
         complete(.success(HTTPResponse(statusCode: status, headers: snapshot.headers, body: snapshot.body)))

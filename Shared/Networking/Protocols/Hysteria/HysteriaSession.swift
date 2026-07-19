@@ -10,34 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaSession")
 
-// MARK: - Errors
-
-nonisolated enum HysteriaError: Error, LocalizedError {
-    case notReady
-    case connectionFailed(String)
-    case authRejected(statusCode: Int)
-    case tunnelFailed(message: String)
-    case streamClosed
-    case udpNotSupported
-    /// The Hysteria UDP header for this destination alone meets the peer's
-    /// DATAGRAM ceiling. Permanent for the flow (fixed address), so callers
-    /// tear it down instead of retrying.
-    case destinationTooLargeForDatagram(maxFrame: Int, headerSize: Int)
-
-    var errorDescription: String? {
-        switch self {
-        case .notReady: return "Hysteria session not ready"
-        case .connectionFailed(let m): return "Hysteria connection failed: \(m)"
-        case .authRejected(let c): return "Hysteria auth rejected (status \(c))"
-        case .tunnelFailed(let m): return "Hysteria tunnel failed: \(m)"
-        case .streamClosed: return "Hysteria stream closed"
-        case .udpNotSupported: return "Hysteria server does not support UDP"
-        case .destinationTooLargeForDatagram(let frame, let header):
-            return "Hysteria destination too large for DATAGRAM (peer max \(frame) ≤ header \(header))"
-        }
-    }
-}
-
 // MARK: - HysteriaSession
 
 nonisolated final class HysteriaSession: Sendable {
@@ -201,7 +173,7 @@ nonisolated final class HysteriaSession: Sendable {
             // in one ngtcp2-queue turn, so the demux can't observe a half-registered auth stream.
             let opened: Bool = await quic.run { self.openControlAndAuthOnQueue() }
             if !opened {
-                failSession(HysteriaError.connectionFailed("Failed to open auth stream"))
+                failSession(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Failed to open auth stream")))
             }
         }
     }
@@ -320,36 +292,36 @@ nonisolated final class HysteriaSession: Sendable {
 
             session.authBuffer.append(data)
             if session.authBuffer.count > Self.authBufferMaxBytes {
-                return .fail(HysteriaError.connectionFailed(
+                return .fail(AnywhereError.proxy(.hysteria, .connectionClosed(detail:
                     "Auth response exceeded \(Self.authBufferMaxBytes)-byte buffer cap"
-                ))
+                )))
             }
 
             guard let (frameType, payload, consumed) = Self.parseNextHTTP3Frame(session.authBuffer) else {
                 // FIN before a parseable HEADERS frame — fail fast instead of
                 // waiting for the QUIC idle timeout.
                 if fin {
-                    return .fail(HysteriaError.connectionFailed("Auth stream ended before HEADERS frame"))
+                    return .fail(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth stream ended before HEADERS frame")))
                 }
                 return .needMore
             }
             session.authBuffer = Data(session.authBuffer.dropFirst(consumed))
 
             guard frameType == 0x01 else {
-                return .fail(HysteriaError.connectionFailed("Auth response wasn't HEADERS"))
+                return .fail(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth response wasn't HEADERS")))
             }
             guard let headers = HysteriaHTTP3Codec.decodeHeaderBlock(payload) else {
-                return .fail(HysteriaError.connectionFailed("Malformed auth QPACK block"))
+                return .fail(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Malformed auth QPACK block")))
             }
 
             session.authHeadersReceived = true
 
             let status = headers.first(where: { $0.name == ":status" })?.value
             guard let statusStr = status, let code = Int(statusStr) else {
-                return .fail(HysteriaError.connectionFailed("Missing :status on auth response"))
+                return .fail(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Missing :status on auth response")))
             }
             if code != HysteriaProtocol.authSuccessStatus {
-                return .fail(HysteriaError.authRejected(statusCode: code))
+                return .fail(AnywhereError.proxy(.hysteria, .authenticationRejected(status: code, detail: nil)))
             }
 
             session.udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
@@ -409,7 +381,7 @@ nonisolated final class HysteriaSession: Sendable {
                 // Pre-ready: server aborted auth — fail fast. Post-ready: our
                 // own STOP_SENDING reflecting back — absorb silently.
                 if session.state != .ready {
-                    return .failAuth(error ?? HysteriaError.connectionFailed("Auth stream closed before completion"))
+                    return .failAuth(error ?? AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth stream closed before completion")))
                 }
                 return .none
             }
@@ -453,9 +425,9 @@ nonisolated final class HysteriaSession: Sendable {
         }
         switch result {
         case .notReady:
-            throw HysteriaError.notReady
+            throw AnywhereError.proxy(.hysteria, .notReady)
         case .openFailed:
-            throw HysteriaError.connectionFailed("Failed to open TCP stream")
+            throw AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Failed to open TCP stream"))
         case .ok(let sid):
             _poolState.withLock { $0.tcpCount += 1 }
             updateIdleCloseTimer()
@@ -488,10 +460,10 @@ nonisolated final class HysteriaSession: Sendable {
 
     func registerUDPSession(_ conn: HysteriaUDPConnection) async throws -> UInt32 {
         let sid: UInt32 = try lock.withLock { session in
-            guard session.state == .ready else { throw HysteriaError.notReady }
-            guard session.udpSupported else { throw HysteriaError.udpNotSupported }
+            guard session.state == .ready else { throw AnywhereError.proxy(.hysteria, .notReady) }
+            guard session.udpSupported else { throw AnywhereError.proxy(.hysteria, .unsupported(feature: "UDP")) }
             guard session.udpSessions.count < Int(UInt32.max) else {
-                throw HysteriaError.connectionFailed("UDP session pool exhausted")
+                throw AnywhereError.proxy(.hysteria, .connectionClosed(detail: "UDP session pool exhausted"))
             }
             var sid = session.nextUDPSessionID
             while session.udpSessions[sid] != nil {
@@ -545,8 +517,8 @@ nonisolated final class HysteriaSession: Sendable {
         guard lock.withLock({ $0.state == .ready }) else { return }
         let liveCount = _poolState.withLock { $0.tcpCount + $0.udpCount }
         guard liveCount == 0 else { return }
-        performTeardown(readyError: HysteriaError.streamClosed,
-                        connectionError: HysteriaError.connectionFailed("Session closed"))
+        performTeardown(readyError: AnywhereError.proxy(.hysteria, .streamClosed),
+                        connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed")))
     }
 
     /// Async DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
@@ -562,8 +534,8 @@ nonisolated final class HysteriaSession: Sendable {
     // MARK: - Close
 
     func close() {
-        performTeardown(readyError: HysteriaError.streamClosed,
-                        connectionError: HysteriaError.connectionFailed("Session closed"))
+        performTeardown(readyError: AnywhereError.proxy(.hysteria, .streamClosed),
+                        connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed")))
     }
 
     private func failSession(_ error: Error) {

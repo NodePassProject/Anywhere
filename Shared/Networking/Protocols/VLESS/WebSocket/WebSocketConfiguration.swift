@@ -50,20 +50,3 @@ nonisolated struct WebSocketConfiguration: Codable, Equatable, Hashable {
         )
     }
 }
-
-nonisolated enum WebSocketError: Error, LocalizedError {
-    case upgradeFailed(String)
-    case invalidFrame(String)
-    case connectionClosed(UInt16, String)
-
-    var errorDescription: String? {
-        switch self {
-        case .upgradeFailed(let reason):
-            return "WebSocket upgrade failed: \(reason)"
-        case .invalidFrame(let reason):
-            return "WebSocket invalid frame: \(reason)"
-        case .connectionClosed(let code, let reason):
-            return "WebSocket closed (\(code)): \(reason)"
-        }
-    }
-}

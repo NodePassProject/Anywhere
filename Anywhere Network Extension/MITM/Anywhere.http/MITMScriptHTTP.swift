@@ -51,23 +51,6 @@ nonisolated final class MITMScriptHTTPClient: Sendable {
         let finalURL: String?
     }
 
-    enum ClientError: Error, LocalizedError {
-        case notHTTP
-        case responseTooLarge(Int)
-        case globalBudgetExceeded(Int)
-
-        var errorDescription: String? {
-            switch self {
-            case .notHTTP:
-                return "response was not HTTP"
-            case .responseTooLarge(let cap):
-                return "response body exceeds the \(cap)-byte cap"
-            case .globalBudgetExceeded(let cap):
-                return "aggregate in-flight response bytes exceed the \(cap)-byte global budget; retry once other requests finish"
-            }
-        }
-    }
-
     /// Runs the request through the tunnel; response-size caps are enforced as the body streams.
     func send(
         _ request: URLRequest,
@@ -80,7 +63,7 @@ nonisolated final class MITMScriptHTTPClient: Sendable {
         // https. The engine already guarantees an absolute http(s) URL with a host.
         guard let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https",
               request.url?.host?.isEmpty == false else {
-            throw ClientError.notHTTP
+            throw AnywhereError.mitm(.notHTTP)
         }
         return try await sendViaTunnel(request: request, followRedirects: followRedirects, insecure: insecure,
                                        maxBytes: maxBytes, resourceTimeout: resourceTimeout)
@@ -130,7 +113,7 @@ nonisolated final class MITMScriptHTTPClient: Sendable {
         resourceTimeout: TimeInterval
     ) async throws -> Response {
         guard let scheme = request.url?.scheme?.lowercased(), let host = request.url?.host, !host.isEmpty else {
-            throw ClientError.notHTTP
+            throw AnywhereError.mitm(.notHTTP)
         }
         let isTLS = scheme == "https"
         let defaultPort: UInt16 = isTLS ? 443 : 80

@@ -70,13 +70,13 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
         request += "\r\n"
 
         guard let requestData = request.data(using: .utf8) else {
-            throw HTTPUpgradeError.upgradeFailed("Failed to encode upgrade request")
+            throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Failed to encode upgrade request"))
         }
 
         do {
             try await transport.send(requestData)
         } catch {
-            throw HTTPUpgradeError.upgradeFailed(error.localizedDescription)
+            throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: error.localizedDescription))
         }
 
         try await receiveUpgradeResponse()
@@ -89,11 +89,11 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
             do {
                 chunk = try await transport.receive()
             } catch {
-                throw HTTPUpgradeError.upgradeFailed(error.localizedDescription)
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: error.localizedDescription))
             }
 
             guard case .bytes(let data) = chunk, !data.isEmpty else {
-                throw HTTPUpgradeError.upgradeFailed("Empty response from server")
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Empty response from server"))
             }
 
             let headerData: Data? = state.withLock { state in
@@ -115,16 +115,16 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
             }
 
             guard let headerString = String(data: headerData, encoding: .utf8) else {
-                throw HTTPUpgradeError.upgradeFailed("Cannot decode response headers")
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Cannot decode response headers"))
             }
 
             let lines = headerString.split(separator: "\r\n")
             guard let statusLine = lines.first else {
-                throw HTTPUpgradeError.upgradeFailed("Empty response")
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Empty response"))
             }
 
             guard statusLine.contains("101") else {
-                throw HTTPUpgradeError.upgradeFailed("Expected HTTP 101, got: \(statusLine)")
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Expected HTTP 101, got: \(statusLine)"))
             }
 
             var hasUpgradeWebSocket = false
@@ -143,7 +143,7 @@ nonisolated final class HTTPUpgradeConnection: Sendable {
             }
 
             guard hasUpgradeWebSocket && hasConnectionUpgrade else {
-                throw HTTPUpgradeError.upgradeFailed("Missing Upgrade/Connection headers in 101 response")
+                throw AnywhereError.proxy(.httpUpgrade, .upgradeFailed(detail: "Missing Upgrade/Connection headers in 101 response"))
             }
 
             return

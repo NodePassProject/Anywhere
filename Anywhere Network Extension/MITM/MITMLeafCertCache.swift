@@ -85,7 +85,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
 
     private func mintLeaf(for hostname: String) throws -> Leaf {
         guard let (caKey, caCertDER) = store.loadCA() else {
-            throw MITMCertificateStoreError.missingCAComponents
+            throw AnywhereError.certificate(.missingCAComponents)
         }
 
         let now = Date()
@@ -101,7 +101,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
         )
 
         guard let secCert = SecCertificateCreateWithData(nil, der as CFData) else {
-            throw X509BuilderError.asn1ParseFailed("SecCertificateCreateWithData failed")
+            throw AnywhereError.certificate(.asn1ParseFailed(detail: "SecCertificateCreateWithData failed"))
         }
 
         return Leaf(
@@ -132,7 +132,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
         var error: Unmanaged<CFError>?
         guard let secKey = SecKeyCreateWithData(key.x963Representation as CFData, attributes as CFDictionary, &error) else {
             _ = error?.takeRetainedValue()
-            throw MITMCertificateStoreError.keyGenerationFailed("Failed to import leaf key")
+            throw AnywhereError.certificate(.keyGenerationFailed(detail: "Failed to import leaf key"))
         }
         return secKey
     }

@@ -16,7 +16,7 @@ extension ProxyClient {
         destinationPort: UInt16
     ) async throws -> ProxyConnection {
         guard case .socks5(let username, let password) = configuration.outbound else {
-            throw ProxyError.protocolError("SOCKS5 outbound expected")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 outbound expected"))
         }
 
         let transport: any ByteTransport

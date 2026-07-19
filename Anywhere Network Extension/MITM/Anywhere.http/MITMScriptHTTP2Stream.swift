@@ -100,7 +100,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             guard !state.finished else { return }
             state.deadlineTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(timeout))
-                self?.fail(TransportError.connectionFailed("request exceeded \(Int(timeout))s deadline"))
+                self?.fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request exceeded \(Int(timeout))s deadline")))
             }
         }
         rearmIdleTimer()
@@ -120,7 +120,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self else { return }
                 let expired = self.lock.withLock { !$0.finished && $0.idleGeneration == generation }
-                if expired { self.fail(TransportError.connectionFailed("request idle for \(Int(interval))s")) }
+                if expired { self.fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s"))) }
             }
         }
     }
@@ -130,9 +130,9 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     /// Sends HEADERS then (if present) the body. The response arrives separately via
     /// `handleHeaders`/`handleData`; here we only surface a send-side failure.
     private func sendRequest() async {
-        guard let connection else { fail(MITMScriptHTTP2Error.notReady); return }
+        guard let connection else { fail(AnywhereError.proxy(.http2, .notReady)); return }
         guard let headerBlock = buildHeaderBlock() else {
-            fail(MITMScriptHTTP2Error.protocolError("could not serialize request"))
+            fail(AnywhereError.mitm(.invalidScriptRequest))
             return
         }
         let requestBody = request.httpBody ?? Data()
@@ -219,7 +219,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         case .ignore:
             break
         case .failStatus:
-            fail(MITMScriptHTTP2Error.protocolError("missing or invalid :status"))
+            fail(AnywhereError.proxy(.http2, .protocolViolation(detail: "missing or invalid :status")))
         case .finishOK:
             finishSuccess()
         }
@@ -241,10 +241,10 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             // Enforce the per-response and global byte caps before buffering.
             if !body.isEmpty {
                 if state.body.count + body.count > maxBytes {
-                    return .fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
+                    return .fail(AnywhereError.mitm(.responseTooLarge(limit: maxBytes)))
                 }
                 guard MITMScriptHTTPClient.reserveInFlight(body.count) else {
-                    return .fail(MITMScriptHTTPClient.ClientError.globalBudgetExceeded(MITMScriptHTTPClient.maxGlobalInFlightBytes))
+                    return .fail(AnywhereError.mitm(.scriptBudgetExceeded(limit: MITMScriptHTTPClient.maxGlobalInFlightBytes)))
                 }
                 state.reservedBytes += body.count
                 state.body.append(body)
@@ -267,7 +267,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         case .ignore:
             break
         case .failNoHead:
-            fail(MITMScriptHTTP2Error.protocolError("DATA before response head"))
+            fail(AnywhereError.proxy(.http2, .protocolViolation(detail: "DATA before response head")))
         case .fail(let error):
             fail(error)
         case .ok(let windowUpdate, let finish):
@@ -278,7 +278,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
 
     func handleReset(errorCode: UInt32) {
         // The connection has already removed us from its stream table.
-        finish(.failure(MITMScriptHTTP2Error.streamReset(streamID)), removeFromConnection: false, sendRST: false)
+        finish(.failure(AnywhereError.proxy(.http2, .streamReset(code: streamID))), removeFromConnection: false, sendRST: false)
     }
 
     /// The connection is tearing down and has already removed this stream; don't call back into it.
@@ -308,7 +308,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         if plan.requiresDecompression,
            let decoded = MITMBodyCodec.decompress(snapshot.body, plan: plan, host: request.url?.host ?? "") {
             if decoded.count > maxBytes {
-                fail(MITMScriptHTTPClient.ClientError.responseTooLarge(maxBytes))
+                fail(AnywhereError.mitm(.responseTooLarge(limit: maxBytes)))
                 return
             }
             responseBody = decoded

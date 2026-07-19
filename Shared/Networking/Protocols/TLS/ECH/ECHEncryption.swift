@@ -34,20 +34,20 @@ nonisolated final class ECHClientContext {
         self.cipherSuite = cipherSuite
 
         guard config.kemID == ECHKemID.dhkemX25519HKDFSHA256 else {
-            throw ECHEncryptionError.unsupportedKEM
+            throw AnywhereError.tls(.ech(.unsupportedKEM))
         }
         guard let kdf = ECHEncryption.hpkeKDF(cipherSuite.kdfID) else {
-            throw ECHEncryptionError.unsupportedKDF
+            throw AnywhereError.tls(.ech(.unsupportedKDF))
         }
         guard let aead = ECHEncryption.hpkeAEAD(cipherSuite.aeadID) else {
-            throw ECHEncryptionError.unsupportedAEAD
+            throw AnywhereError.tls(.ech(.unsupportedAEAD))
         }
 
         let recipientKey: Curve25519.KeyAgreement.PublicKey
         do {
             recipientKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: config.publicKey)
         } catch {
-            throw ECHEncryptionError.invalidPublicKey
+            throw AnywhereError.tls(.ech(.invalidPublicKey))
         }
 
         let suite = HPKE.Ciphersuite(kem: .Curve25519_HKDF_SHA256, kdf: kdf, aead: aead)
@@ -61,7 +61,7 @@ nonisolated final class ECHClientContext {
         do {
             createdSender = try HPKE.Sender(recipientKey: recipientKey, ciphersuite: suite, info: info)
         } catch {
-            throw ECHEncryptionError.senderSetupFailed
+            throw AnywhereError.tls(.ech(.hpkeSetupFailed))
         }
         self.sender = createdSender
         self.encapsulatedKey = createdSender.encapsulatedKey
@@ -74,29 +74,7 @@ nonisolated final class ECHClientContext {
         do {
             return try sender.seal(plaintext, authenticating: aad)
         } catch {
-            throw ECHEncryptionError.sealFailed
-        }
-    }
-}
-
-nonisolated enum ECHEncryptionError: Error, LocalizedError {
-    case unsupportedKEM
-    case unsupportedKDF
-    case unsupportedAEAD
-    case invalidPublicKey
-    case senderSetupFailed
-    case sealFailed
-    case malformedInnerHello
-
-    var errorDescription: String? {
-        switch self {
-        case .unsupportedKEM:      return "ECH config uses an unsupported HPKE KEM"
-        case .unsupportedKDF:      return "ECH cipher suite uses an unsupported HPKE KDF"
-        case .unsupportedAEAD:     return "ECH cipher suite uses an unsupported HPKE AEAD"
-        case .invalidPublicKey:    return "ECH config public key is invalid"
-        case .senderSetupFailed:   return "Failed to set up HPKE sender for ECH"
-        case .sealFailed:          return "Failed to seal inner ClientHello"
-        case .malformedInnerHello: return "Inner ClientHello is malformed"
+            throw AnywhereError.tls(.ech(.sealFailed))
         }
     }
 }
@@ -135,7 +113,7 @@ nonisolated enum ECHEncryption {
     /// length + body) whose `legacy_session_id` is empty, with no
     /// ech_outer_extensions compression (we send the inner extensions in full).
     static func encodeInnerClientHello(_ innerMessage: Data, serverName: String, maxNameLength: Int) throws -> Data {
-        guard innerMessage.count >= 4 else { throw ECHEncryptionError.malformedInnerHello }
+        guard innerMessage.count >= 4 else { throw AnywhereError.tls(.ech(.malformedInnerHello)) }
 
         // Drop the 4-byte handshake header (type + uint24 length).
         var encodedHelloBody = Data(innerMessage.dropFirst(4))

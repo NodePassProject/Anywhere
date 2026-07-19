@@ -167,34 +167,3 @@ nonisolated extension TLSConfiguration: Equatable, Hashable {
         hasher.combine(echConfig)
     }
 }
-
-nonisolated enum TLSError: Error, LocalizedError {
-    case handshakeFailed(String)
-    case certificateValidationFailed(String)
-    case connectionFailed(String)
-    case unsupportedTLSVersion
-    case alert(level: UInt8, description: UInt8)
-    /// Unsupported: handling it would require a second ClientHello flight.
-    case helloRetryRequest
-    /// `retryConfigList`, if present, is a fresh ECHConfigList the server offered.
-    case echRejected(retryConfigList: Data?)
-
-    var errorDescription: String? {
-        switch self {
-        case .handshakeFailed(let reason):
-            return "TLS handshake failed: \(reason)"
-        case .certificateValidationFailed(let reason):
-            return "TLS certificate validation failed: \(reason)"
-        case .connectionFailed(let reason):
-            return "TLS connection failed: \(reason)"
-        case .unsupportedTLSVersion:
-            return "Server TLS version not supported"
-        case .alert(let level, let description):
-            return "TLS alert: level=\(level), description=\(description)"
-        case .helloRetryRequest:
-            return "TLS server sent HelloRetryRequest (unsupported)"
-        case .echRejected(let retryConfigList):
-            return "TLS server rejected ECH" + (retryConfigList != nil ? " (retry config offered)" : "")
-        }
-    }
-}

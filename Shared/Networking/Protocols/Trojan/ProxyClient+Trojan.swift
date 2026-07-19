@@ -17,7 +17,7 @@ extension ProxyClient {
     ) async throws -> ProxyConnection {
         guard case .trojan(let password, let securityLayer) = configuration.outbound, !password.isEmpty,
               let tlsConfig = securityLayer.tlsConfiguration else {
-            throw ProxyError.protocolError("Trojan password not set")
+            throw AnywhereError.proxy(.trojan, .protocolViolation(detail: "Trojan password not set"))
         }
 
         let tlsClient = TLSClient(configuration: tlsConfig)
@@ -72,7 +72,7 @@ extension ProxyClient {
                 destinationPort: destinationPort
             )
         case .mux:
-            throw ProxyError.protocolError("Mux is not supported with Trojan")
+            throw AnywhereError.proxy(.trojan, .protocolViolation(detail: "Mux is not supported with Trojan"))
         }
     }
 }

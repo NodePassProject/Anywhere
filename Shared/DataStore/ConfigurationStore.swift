@@ -9,6 +9,8 @@ import Foundation
 import Observation
 import SwiftUI
 
+nonisolated private let logger = AnywhereLogger(category: "ConfigurationStore")
+
 @MainActor
 @Observable
 class ConfigurationStore {
@@ -165,7 +167,7 @@ class ConfigurationStore {
                 let data = try encoder.encode(snapshot)
                 JSONBlobStore.shared.save(.configurations, data: data)
             } catch {
-                print("Failed to save configurations: \(error)")
+                logger.report(AnywhereError.store(.saveFailed(.configurations, underlying: error)))
             }
         }
     }

@@ -50,19 +50,19 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             var bucket = state.cache[scope] ?? [:]
             bucket[key] = value
             guard let serialized = serialize(bucket) else {
-                throw MITMScriptStore.StoreError.writeFailed
+                throw AnywhereError.mitm(.scriptStoreWriteFailed)
             }
             if serialized.count > Self.maxBytesPerScope {
-                throw MITMScriptStore.StoreError.capacityExceeded
+                throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
             let oldSize = state.fileSizes[scope] ?? 0
             if state.totalBytes - oldSize + serialized.count > Self.maxTotalBytes {
-                throw MITMScriptStore.StoreError.capacityExceeded
+                throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
             return serialized
         }
         guard writeToDisk(scope: scope, data: serialized) else {
-            throw MITMScriptStore.StoreError.writeFailed
+            throw AnywhereError.mitm(.scriptStoreWriteFailed)
         }
         state.withLock { state in
             var bucket = state.cache[scope] ?? [:]
@@ -210,7 +210,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             }
         }
         if let error = coordError ?? writeError {
-            logger.error("[MITM][JS] Anywhere.store(onDisk): write failed for \(scope): \(error)")
+            logger.error("[MITM][JS] Anywhere.store(onDisk): write failed for \(scope): \(AnywhereError.describe(error))")
             return false
         }
         return true

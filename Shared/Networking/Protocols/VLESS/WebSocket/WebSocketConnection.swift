@@ -84,13 +84,13 @@ nonisolated final class WebSocketConnection: Sendable {
         request += "\r\n"
 
         guard let requestData = request.data(using: .utf8) else {
-            throw WebSocketError.upgradeFailed("Failed to encode upgrade request")
+            throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Failed to encode upgrade request"))
         }
 
         do {
             try await transport.send(requestData)
         } catch {
-            throw WebSocketError.upgradeFailed(error.localizedDescription)
+            throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: error.localizedDescription))
         }
 
         try await receiveUpgradeResponse()
@@ -103,11 +103,11 @@ nonisolated final class WebSocketConnection: Sendable {
             do {
                 chunk = try await transport.receive()
             } catch {
-                throw WebSocketError.upgradeFailed(error.localizedDescription)
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: error.localizedDescription))
             }
 
             guard case .bytes(let data) = chunk, !data.isEmpty else {
-                throw WebSocketError.upgradeFailed("Empty response from server")
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Empty response from server"))
             }
 
             let headerData: Data? = self.state.withLock { state in
@@ -129,12 +129,12 @@ nonisolated final class WebSocketConnection: Sendable {
             }
 
             guard let headerString = String(data: headerData, encoding: .utf8) else {
-                throw WebSocketError.upgradeFailed("Cannot decode response headers")
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Cannot decode response headers"))
             }
 
             let firstLine = headerString.split(separator: "\r\n", maxSplits: 1).first ?? ""
             guard firstLine.contains("101") else {
-                throw WebSocketError.upgradeFailed("Expected HTTP 101, got: \(firstLine)")
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Expected HTTP 101, got: \(firstLine)"))
             }
 
             self.state.withLock { $0.upgraded = true }
@@ -178,7 +178,7 @@ nonisolated final class WebSocketConnection: Sendable {
                     if code == 1000 || code == 1005 {
                         return nil
                     }
-                    throw WebSocketError.connectionClosed(code, reason)
+                    throw AnywhereError.proxy(.webSocket, .webSocketClosed(code: code, reason: reason))
                 }
             }
 
@@ -196,7 +196,7 @@ nonisolated final class WebSocketConnection: Sendable {
                 return false
             }
             if overflow {
-                throw WebSocketError.invalidFrame("Receive buffer exceeded limit")
+                throw AnywhereError.proxy(.webSocket, .protocolViolation(detail: "invalid frame: Receive buffer exceeded limit"))
             }
         }
     }

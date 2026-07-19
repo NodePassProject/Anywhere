@@ -30,7 +30,7 @@ extension QUICConnection {
     
     func armActiveCarrier(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage) {
         armReceive(carrier, localAddr: localAddr) { [weak self] errno in
-            self?.close(error: QUICError.connectionFailed("recv errno=\(errno)"))
+            self?.close(error: AnywhereError.quic(.connectionFailed(detail: "recv errno=\(errno)")))
         }
         installMigrationTriggers(on: carrier)
     }
@@ -78,17 +78,17 @@ extension QUICConnection {
             switch rv {
             case NGTCP2_ERR_DRAINING:
                 if let ccerr = bridge.closeError(connectionOpaquePointer), isBenignConnectionClose(ccerr.pointee) {
-                    error = QUICError.closedOK
+                    error = AnywhereError.quic(.closed(graceful: true))
                 } else {
-                    error = QUICError.closed
+                    error = AnywhereError.quic(.closed(graceful: false))
                 }
             case NGTCP2_ERR_CLOSING:
-                error = QUICError.closed
+                error = AnywhereError.quic(.closed(graceful: false))
             case NGTCP2_ERR_CALLBACK_FAILURE, NGTCP2_ERR_CRYPTO:
                 error = tlsHandler?.handshakeError
-                    ?? QUICError.handshakeFailed("ngtcp2 error: \(rv) (\(bridge.errorString(rv)))")
+                    ?? AnywhereError.quic(.handshakeFailed(detail: "ngtcp2 error: \(rv) (\(bridge.errorString(rv)))"))
             default:
-                error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv) (\(bridge.errorString(rv)))")
+                error = AnywhereError.quic(.connectionFailed(detail: "ngtcp2 read_pkt: \(rv) (\(bridge.errorString(rv)))"))
             }
             finishConnect(error)
             close(error: error)
@@ -141,7 +141,7 @@ extension QUICConnection {
             if nwrite < 0 {
                 logger.warning("[QUIC] Dropping \(datagram.count)-byte datagram: ngtcp2 err \(nwrite)")
                 let popped = pendingDatagrams.removeFirst()
-                settlements.append((popped.latch, QUICError.connectionFailed("ngtcp2 write_datagram err \(nwrite)")))
+                settlements.append((popped.latch, AnywhereError.quic(.connectionFailed(detail: "ngtcp2 write_datagram err \(nwrite)"))))
                 continue
             }
             if nwrite > 0 {
@@ -160,7 +160,7 @@ extension QUICConnection {
             if datagram.count > bound {
                 logger.warning("[QUIC] Dropping \(datagram.count)-byte datagram: exceeds path-MTU bound (\(bound) B)")
                 let popped = pendingDatagrams.removeFirst()
-                settlements.append((popped.latch, QUICError.datagramTooLarge(maxBound: bound)))
+                settlements.append((popped.latch, AnywhereError.quic(.datagramTooLarge(limit: bound))))
                 continue
             }
             
@@ -208,7 +208,7 @@ extension QUICConnection {
                     let rv = me.bridge.handleExpiry(connectionOpaquePointer, ts: ts)
                     me.bridge.exitConnHeld(prevBusy)
                     if rv != 0 {
-                        let error = QUICError.connectionFailed("expiry error: \(rv) (\(me.bridge.errorString(rv)))")
+                        let error = AnywhereError.quic(.connectionFailed(detail: "expiry error: \(rv) (\(me.bridge.errorString(rv)))"))
                         me.finishConnect(error)
                         me.close(error: error)
                         return

@@ -82,7 +82,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     /// `host` (or uses it directly for an IP literal) and races addresses.
     func connect(initialData: Data? = nil) async throws {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw TransportError.connectionFailed("Invalid port \(port)")
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "invalid port \(port)"))
         }
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
@@ -99,7 +99,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         }
         guard started else {
             slot.release()
-            throw TransportError.connectionFailed("Cancelled")
+            throw AnywhereError.transport(.terminated)
         }
 
         try await withTaskCancellationHandler {
@@ -109,7 +109,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         }
         // A cancelled iteration ends without throwing; only a live, ready
         // transport may report a successful dial.
-        guard isReady else { throw TransportError.connectionFailed("Cancelled") }
+        guard isReady else { throw AnywhereError.transport(.terminated) }
     }
 
     /// Owns the connection scope for the whole session. Publishes the connection,
@@ -131,7 +131,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
                     case .ready:
                         guts.state.withLock { $0.ready = true }
                     case .failed(let error), .waiting(let error):
-                        guts.dialSignal.finish(throwing: error.transportError(op: .connect))
+                        guts.dialSignal.finish(throwing: error.anywhereError(op: .connect))
                         guts.teardownSignal.finish()
                     default:
                         break  // .setup, .preparing, .cancelled
@@ -149,7 +149,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
                             try await connection.send(initialData, endOfStream: false)
                         }
                     } catch {
-                        guts.dialSignal.finish(throwing: TransportError.from(error, op: .connect))
+                        guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
                         throw error  // exit scope → tear the connection down
                     }
                 }
@@ -163,7 +163,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             }
         } catch {
             // No-op if the dial already resolved; covers a pre-ready scope failure.
-            guts.dialSignal.finish(throwing: TransportError.from(error, op: .connect))
+            guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
         }
         slot.release()
         guts.state.withLock { $0.connection = nil }
@@ -177,7 +177,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             try await connection.send(data, endOfStream: false)
         } catch {
             guts.teardownSignal.finish()
-            throw TransportError.from(error, op: .send)
+            throw AnywhereError.networkFailure(error, op: .send)
         }
     }
 
@@ -187,7 +187,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             try await connection.send(Data(), endOfStream: true)
         } catch {
             guts.teardownSignal.finish()
-            throw TransportError.from(error, op: .send)
+            throw AnywhereError.networkFailure(error, op: .send)
         }
     }
 
@@ -201,7 +201,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
                 message = try await connection.receive(atLeast: 1, atMost: Self.maxReceiveLength)
             } catch {
                 guts.teardownSignal.finish()
-                throw TransportError.from(error, op: .receive)
+                throw AnywhereError.networkFailure(error, op: .receive)
             }
 
             let endOfStream = message.metadata.endOfStream
@@ -229,7 +229,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         }
         // Unblock a pending connect() and the driver's hold-open; cancel the driver
         // so an in-flight establish send unwinds.
-        guts.dialSignal.finish(throwing: TransportError.connectionFailed("Cancelled"))
+        guts.dialSignal.finish(throwing: AnywhereError.transport(.terminated))
         guts.teardownSignal.finish()
         task?.cancel()
     }
@@ -239,8 +239,8 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     /// The live connection, or a throw if cancelled / not yet published.
     private func activeConnection() throws -> NetworkConnection<TCP> {
         try guts.state.withLock { state in
-            if state.cancelled { throw TransportError.connectionFailed("Cancelled") }
-            guard let connection = state.connection else { throw TransportError.notConnected }
+            if state.cancelled { throw AnywhereError.transport(.terminated) }
+            guard let connection = state.connection else { throw AnywhereError.transport(.notConnected) }
             return connection
         }
     }

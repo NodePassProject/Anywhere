@@ -41,14 +41,3 @@ nonisolated struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
         )
     }
 }
-
-nonisolated enum HTTPUpgradeError: Error, LocalizedError {
-    case upgradeFailed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .upgradeFailed(let reason):
-            return "HTTP upgrade failed: \(reason)"
-        }
-    }
-}

@@ -150,7 +150,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         state.synDoneTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }
-            self?.close(error: ProxyError.connectionFailed("AnyTLS SYN-ACK timeout"))
+            self?.close(error: AnywhereError.proxy(.anyTLS, .openTimeout))
         }
     }
 
@@ -290,7 +290,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         switch action {
         case .rejected:
             logger.debug("[AnyTLSMultiplexer] writeConn rejected — multiplexer closed (\(bytes.count)B)")
-            throw ProxyError.connectionFailed("AnyTLS multiplexer closed")
+            throw AnywhereError.proxy(.anyTLS, .connectionClosed(detail: "AnyTLS multiplexer closed"))
         case .buffered:
             return
         case .send(let task):
@@ -430,7 +430,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             if !payload.isEmpty {
                 let message = String(data: payload, encoding: .utf8) ?? "<binary>"
                 logger.debug("[AnyTLSMultiplexer] cmdSYNACK error sid=\(sid): \(message)")
-                stream?.deliverClose(error: ProxyError.protocolError("AnyTLS remote: \(message)"))
+                stream?.deliverClose(error: AnywhereError.proxy(.anyTLS, .protocolViolation(detail: "AnyTLS remote: \(message)")))
                 lock.withLock { $0.streams[sid] = nil }
             } else {
                 logger.debug("[AnyTLSMultiplexer] cmdSYNACK ok sid=\(sid)")
@@ -456,7 +456,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         case AnyTLSProtocol.cmdAlert:
             let message = String(data: payload, encoding: .utf8) ?? "<binary>"
             logger.debug("[AnyTLSMultiplexer] cmdAlert from server: \(message)")
-            close(error: ProxyError.protocolError("AnyTLS alert: \(message)"))
+            close(error: AnywhereError.proxy(.anyTLS, .protocolViolation(detail: "AnyTLS alert: \(message)")))
 
         case AnyTLSProtocol.cmdUpdatePaddingScheme:
             if let new = AnyTLSPaddingScheme.parse(payload) {

@@ -14,7 +14,7 @@ import Foundation
 nonisolated func raceDialDeadline<T: Sendable>(
     _ deadline: Duration,
     onExpire: @escaping @Sendable () -> Void = {},
-    timeout: @autoclosure @escaping @Sendable () -> Error = TransportError.posixError(.connect, errno: ETIMEDOUT),
+    timeout: @autoclosure @escaping @Sendable () -> Error = AnywhereError.transport(.posix(.connect, errno: ETIMEDOUT)),
     _ body: @escaping @Sendable () async throws -> T
 ) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in

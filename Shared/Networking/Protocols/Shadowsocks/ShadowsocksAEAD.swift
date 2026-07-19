@@ -136,7 +136,7 @@ nonisolated enum ShadowsocksAEADCrypto {
             let nonceObj = try AES.GCM.Nonce(data: nonce)
             let sealed = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonceObj)
             // combined = nonce(12) + ciphertext + tag; skip nonce prefix
-            guard let combined = sealed.combined else { throw ShadowsocksError.decryptionFailed }
+            guard let combined = sealed.combined else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
             return combined.suffix(from: 12)
 
         case .chacha20poly1305, .blake3chacha20poly1305:
@@ -156,7 +156,7 @@ nonisolated enum ShadowsocksAEADCrypto {
         let symmetricKey = SymmetricKey(data: key)
         let tagSize = cipher.tagSize
         guard ciphertext.count >= tagSize else {
-            throw ShadowsocksError.decryptionFailed
+            throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed))
         }
 
         let ciphertextWithoutTag = ciphertext.prefix(ciphertext.count - tagSize)
@@ -316,11 +316,11 @@ nonisolated struct ShadowsocksAEADReader {
                 let encryptedLength = buffer[bufferOffset..<(bufferOffset + needed)]
                 bufferOffset += needed
 
-                guard let subkey else { throw ShadowsocksError.decryptionFailed }
+                guard let subkey else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
                 let lengthData = try ShadowsocksAEADCrypto.open(
                     cipher: cipher, key: subkey, nonce: nonce.next(), ciphertext: encryptedLength
                 )
-                guard lengthData.count == 2 else { throw ShadowsocksError.decryptionFailed }
+                guard lengthData.count == 2 else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
 
                 pendingPayloadLength = Int(UInt16(lengthData[lengthData.startIndex]) << 8 | UInt16(lengthData[lengthData.startIndex + 1]))
                 phase = .readingPayload
@@ -333,7 +333,7 @@ nonisolated struct ShadowsocksAEADReader {
                 let encryptedPayload = buffer[bufferOffset..<(bufferOffset + needed)]
                 bufferOffset += needed
 
-                guard let subkey else { throw ShadowsocksError.decryptionFailed }
+                guard let subkey else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
                 let payload = try ShadowsocksAEADCrypto.open(
                     cipher: cipher, key: subkey, nonce: nonce.next(), ciphertext: encryptedPayload
                 )
@@ -388,7 +388,7 @@ nonisolated enum ShadowsocksUDPCrypto {
         guard cipher != .none else { return data }
 
         guard data.count > cipher.saltSize + cipher.tagSize else {
-            throw ShadowsocksError.decryptionFailed
+            throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed))
         }
 
         let salt = data.prefix(cipher.saltSize)
@@ -402,36 +402,5 @@ nonisolated enum ShadowsocksUDPCrypto {
         return try ShadowsocksAEADCrypto.open(
             cipher: cipher, key: subkey, nonce: nonce, ciphertext: ciphertext
         )
-    }
-}
-
-// MARK: - Errors
-
-nonisolated enum ShadowsocksError: Error, LocalizedError {
-    case invalidMethod(String)
-    case decryptionFailed
-    case invalidAddress
-    case badTimestamp
-    case badRequestSalt
-    case badHeaderType
-    case invalidPSK
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidMethod(let method):
-            return "Unsupported Shadowsocks method: \(method)"
-        case .decryptionFailed:
-            return "Shadowsocks AEAD decryption failed"
-        case .invalidAddress:
-            return "Invalid Shadowsocks address header"
-        case .badTimestamp:
-            return "Shadowsocks 2022 bad timestamp"
-        case .badRequestSalt:
-            return "Shadowsocks 2022 bad request salt"
-        case .badHeaderType:
-            return "Shadowsocks 2022 bad header type"
-        case .invalidPSK:
-            return "Invalid Shadowsocks 2022 PSK"
-        }
     }
 }

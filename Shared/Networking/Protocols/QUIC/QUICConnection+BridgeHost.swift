@@ -85,9 +85,9 @@ extension QUICConnection {
     func handleStreamClose(streamId: Int64, appErrorCode: UInt64, hasAppError: Bool) {
         flushStreamDelivery(streamId: streamId)
         let error: Error? = (hasAppError && !Self.isBenignCloseCode(appErrorCode))
-            ? QUICError.streamClosedWithError(appErrorCode: appErrorCode)
+            ? AnywhereError.quic(.streamClosedWithError(applicationCode: appErrorCode))
             : nil
-        failPendingWrites(streamId: streamId, error: error ?? QUICError.closed)
+        failPendingWrites(streamId: streamId, error: error ?? AnywhereError.quic(.closed(graceful: false)))
         releaseStreamSendState(streamId: streamId)
         handlers.withLock { $0.streamTermination }?(streamId, error)
     }
@@ -96,8 +96,8 @@ extension QUICConnection {
         flushStreamDelivery(streamId: streamId)
         let error: Error? = Self.isBenignCloseCode(appErrorCode)
             ? nil
-            : QUICError.streamReset(appErrorCode: appErrorCode)
-        failPendingWrites(streamId: streamId, error: error ?? QUICError.closed)
+            : AnywhereError.quic(.streamReset(applicationCode: appErrorCode))
+        failPendingWrites(streamId: streamId, error: error ?? AnywhereError.quic(.closed(graceful: false)))
         handlers.withLock { $0.streamTermination }?(streamId, error)
     }
     

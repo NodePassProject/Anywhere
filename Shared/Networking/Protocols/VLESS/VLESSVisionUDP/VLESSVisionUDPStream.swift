@@ -54,15 +54,15 @@ actor VLESSVisionUDPStream {
 
     func send(data: Data) async throws {
         guard !closed else {
-            throw ProxyError.connectionFailed("Mux stream closed")
+            throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux stream closed"))
         }
         guard let multiplexer else {
-            throw ProxyError.connectionFailed("Mux multiplexer deallocated")
+            throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux multiplexer deallocated"))
         }
         let previous = sendTail
         let task = Task<Void, Error> { [weak self] in
             _ = try? await previous?.value
-            guard let self else { throw ProxyError.connectionFailed("Mux stream closed") }
+            guard let self else { throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux stream closed")) }
             try await self.buildAndSend(data: data, multiplexer: multiplexer)
         }
         sendTail = task

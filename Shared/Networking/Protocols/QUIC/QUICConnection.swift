@@ -34,41 +34,6 @@ actor QUICConnection: NGTCP2BridgeHost {
         case idle, connecting, handshaking, connected, closing, closed
     }
 
-    enum QUICError: Error, LocalizedError {
-        case connectionFailed(String)
-        case handshakeFailed(String)
-        case streamError(String)
-        /// Peer sent RESET_STREAM (read side aborted).
-        case streamReset(appErrorCode: UInt64)
-        /// `stream_close` fired with an application error code set.
-        case streamClosedWithError(appErrorCode: UInt64)
-        /// Queued DATAGRAM exceeded the path's max frame size and was dropped; re-fragment to `maxBound` for a retry.
-        case datagramTooLarge(maxBound: Int)
-        /// An atomic DATAGRAM batch did not fit the bounded send queue. Nothing
-        /// from that batch was enqueued and the existing queue was unchanged.
-        case datagramQueueFull
-        case timeout
-        case closed
-        /// Peer closed the whole connection with a benign code (transport NO_ERROR, or
-        /// application H3_NO_ERROR / `closeErrCodeOK` 0x100).
-        case closedOK
-
-        var errorDescription: String? {
-            switch self {
-            case .connectionFailed(let m): return "QUIC: \(m)"
-            case .handshakeFailed(let m): return "QUIC TLS: \(m)"
-            case .streamError(let m): return "QUIC stream: \(m)"
-            case .streamReset(let c): return "QUIC stream reset (app code \(c))"
-            case .streamClosedWithError(let c): return "QUIC stream closed (app code \(c))"
-            case .datagramTooLarge(let b): return "QUIC datagram exceeds path MTU (max \(b) B)"
-            case .datagramQueueFull: return "QUIC datagram send queue is full"
-            case .timeout: return "QUIC timeout"
-            case .closed: return "QUIC closed"
-            case .closedOK: return "QUIC closed (OK)"
-            }
-        }
-    }
-
     // MARK: Properties
 
     let host: String

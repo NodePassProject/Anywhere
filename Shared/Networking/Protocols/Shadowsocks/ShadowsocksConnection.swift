@@ -103,7 +103,7 @@ nonisolated final class ShadowsocksUDPConnection: ProxyConnection {
         }
         let decrypted = try ShadowsocksUDPCrypto.decrypt(cipher: cipher, masterKey: masterKey, data: data)
         guard let parsed = ShadowsocksProtocol.decodeUDPPacket(data: decrypted) else {
-            throw ShadowsocksError.invalidAddress
+            throw AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "invalid address header"))
         }
         return parsed.payload
     }

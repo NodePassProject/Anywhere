@@ -28,11 +28,11 @@ nonisolated final class RealityProxyConnection: ProxyConnection {
     func receiveRaw() async throws -> Data? {
         do {
             return try await realityConnection.receive()
-        } catch TLSRecordError.recordAuthenticationFailed {
+        } catch AnywhereError.tls(.record(.authenticationFailed)) {
             // AEAD auth failure means the record no longer decrypts with the derived
             // keys — the server may have switched to Vision direct-copy. Only that
             // case maps to the Reality-specific error; everything else propagates.
-            throw RealityError.decryptionFailed
+            throw AnywhereError.tls(.reality(.decryptionFailed))
         }
     }
 

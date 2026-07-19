@@ -298,16 +298,16 @@ actor UDPPlane {
         ssSessions.removeValue(forKey: configuration.id)
 
         guard case .shadowsocks(let password, let method) = configuration.outbound else {
-            return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+            return .failure(AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "Shadowsocks password not set")))
         }
         guard let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(ShadowsocksError.invalidMethod(method))
+            return .failure(AnywhereError.proxy(.shadowsocks, .cipher(.unsupportedMethod(method))))
         }
 
         let mode: ShadowsocksUDPSession.Mode
         if cipher.isSS2022 {
             guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
-                return .failure(ShadowsocksError.invalidPSK)
+                return .failure(AnywhereError.proxy(.shadowsocks, .cipher(.invalidKey)))
             }
             if cipher == .blake3chacha20poly1305 {
                 mode = .ss2022ChaCha(psk: pskList.last!)

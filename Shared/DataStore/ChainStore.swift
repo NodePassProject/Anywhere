@@ -9,6 +9,8 @@ import Foundation
 import Observation
 import SwiftUI
 
+nonisolated private let logger = AnywhereLogger(category: "ChainStore")
+
 @MainActor
 @Observable
 class ChainStore {
@@ -112,7 +114,7 @@ class ChainStore {
             let data = try encoder.encode(chains + tombstones)
             JSONBlobStore.shared.save(.chains, data: data)
         } catch {
-            print("Failed to save chains: \(error)")
+            logger.report(AnywhereError.store(.saveFailed(.chains, underlying: error)))
         }
     }
 }

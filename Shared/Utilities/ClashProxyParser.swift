@@ -13,35 +13,16 @@ nonisolated struct ClashProxyParser {
         let skippedCount: Int
     }
 
-    enum ParseError: Error, LocalizedError {
-        case invalidYAML(String)
-        case missingProxiesKey
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidYAML(let reason):
-                return "Invalid Clash YAML: \(reason)"
-            case .missingProxiesKey:
-                return "Clash YAML is missing 'proxies' key."
-            }
-        }
-    }
-
     static func parse(yaml yamlString: String) throws -> ParseResult {
-        let root: YAML.Node
-        do {
-            root = try YAML.load(yamlString)
-        } catch {
-            throw ParseError.invalidYAML(error.localizedDescription)
-        }
+        let root = try YAML.load(yamlString)
 
         guard root.type == .map else {
-            throw ParseError.invalidYAML("Root document is not a mapping")
+            throw AnywhereError.parse(.yaml(detail: "root document is not a mapping"))
         }
 
         let proxies = root["proxies"]
         guard proxies.type == .sequence else {
-            throw ParseError.missingProxiesKey
+            throw AnywhereError.parse(.clashConfigMissingProxies)
         }
 
         var configurations: [ProxyConfiguration] = []

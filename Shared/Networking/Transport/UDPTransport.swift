@@ -75,7 +75,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     /// failure/timeout/cancellation.
     func connect() async throws {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw TransportError.connectionFailed("Invalid port \(port)")
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "invalid port \(port)"))
         }
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
@@ -92,7 +92,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         }
         guard started else {
             slot.release()
-            throw TransportError.connectionFailed("Cancelled")
+            throw AnywhereError.transport(.terminated)
         }
 
         try await withTaskCancellationHandler {
@@ -104,7 +104,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         }
         // A cancelled iteration ends without throwing; only a live, ready
         // transport may report a successful dial.
-        guard isReady else { throw TransportError.connectionFailed("Cancelled") }
+        guard isReady else { throw AnywhereError.transport(.terminated) }
     }
 
     /// Owns the connection scope for the whole session. Publishes the connection,
@@ -128,7 +128,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
                     case .failed(let error), .waiting(let error):
                         // UDP drops viability before a receive would error; any
                         // failure/waiting fails the transport.
-                        guts.dialSignal.finish(throwing: error.transportError(op: .connect))
+                        guts.dialSignal.finish(throwing: error.anywhereError(op: .connect))
                         guts.teardownSignal.finish()
                     default:
                         break  // .setup, .preparing, .cancelled
@@ -150,7 +150,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
             }
         } catch {
             // No-op if the dial already resolved; covers a pre-ready scope failure.
-            guts.dialSignal.finish(throwing: TransportError.from(error, op: .connect))
+            guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
         }
         slot.release()
         guts.state.withLock { $0.connection = nil }
@@ -164,7 +164,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
             try await connection.send(datagram)
         } catch {
             guts.teardownSignal.finish()
-            throw TransportError.from(error, op: .send)
+            throw AnywhereError.networkFailure(error, op: .send)
         }
     }
 
@@ -176,7 +176,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
                 message = try await connection.receive()
             } catch {
                 guts.teardownSignal.finish()
-                throw TransportError.from(error, op: .receive)
+                throw AnywhereError.networkFailure(error, op: .receive)
             }
             // Skip empty datagrams (keepalive artifacts).
             if !message.content.isEmpty { return message.content }
@@ -191,7 +191,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
             state.driverTask = nil
             return task
         }
-        guts.dialSignal.finish(throwing: TransportError.connectionFailed("Cancelled"))
+        guts.dialSignal.finish(throwing: AnywhereError.transport(.terminated))
         guts.teardownSignal.finish()
         task?.cancel()
     }
@@ -201,8 +201,8 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     /// The live connection, or a throw if cancelled / not yet published.
     private func activeConnection() throws -> NetworkConnection<UDP> {
         try guts.state.withLock { state in
-            if state.cancelled { throw TransportError.connectionFailed("Cancelled") }
-            guard let connection = state.connection else { throw TransportError.notConnected }
+            if state.cancelled { throw AnywhereError.transport(.terminated) }
+            guard let connection = state.connection else { throw AnywhereError.transport(.notConnected) }
             return connection
         }
     }

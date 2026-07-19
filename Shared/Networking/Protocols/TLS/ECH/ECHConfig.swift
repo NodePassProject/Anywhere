@@ -67,24 +67,6 @@ nonisolated struct ECHConfig {
     let extensions: [ECHConfigExtension]
 }
 
-// MARK: - Errors
-
-nonisolated enum ECHConfigError: Error, LocalizedError {
-    case malformedConfigList
-    case malformedConfig
-    case noCompatibleConfig
-    case noCompatibleCipherSuite
-
-    var errorDescription: String? {
-        switch self {
-        case .malformedConfigList:     return "Malformed ECHConfigList"
-        case .malformedConfig:         return "Malformed ECHConfig"
-        case .noCompatibleConfig:      return "ECHConfigList contains no usable config"
-        case .noCompatibleCipherSuite: return "ECHConfig offers no supported HPKE cipher suite"
-        }
-    }
-}
-
 // MARK: - Parsing
 
 nonisolated enum ECHConfigParser {
@@ -94,20 +76,20 @@ nonisolated enum ECHConfigParser {
     /// for forward compatibility.
     static func parseConfigList(_ data: Data) throws -> [ECHConfig] {
         let bytes = [UInt8](data)
-        guard bytes.count >= 2 else { throw ECHConfigError.malformedConfigList }
+        guard bytes.count >= 2 else { throw AnywhereError.tls(.ech(.malformedConfigList)) }
 
         let listLength = Int(bytes[0]) << 8 | Int(bytes[1])
-        guard listLength == bytes.count - 2 else { throw ECHConfigError.malformedConfigList }
+        guard listLength == bytes.count - 2 else { throw AnywhereError.tls(.ech(.malformedConfigList)) }
 
         var configs: [ECHConfig] = []
         var position = 2
         while position < bytes.count {
             // Record header: version(2) + length(2).
-            guard position + 4 <= bytes.count else { throw ECHConfigError.malformedConfig }
+            guard position + 4 <= bytes.count else { throw AnywhereError.tls(.ech(.malformedConfig)) }
             let version = UInt16(bytes[position]) << 8 | UInt16(bytes[position + 1])
             let bodyLength = Int(bytes[position + 2]) << 8 | Int(bytes[position + 3])
             let recordEnd = position + 4 + bodyLength
-            guard recordEnd <= bytes.count else { throw ECHConfigError.malformedConfig }
+            guard recordEnd <= bytes.count else { throw AnywhereError.tls(.ech(.malformedConfig)) }
 
             let raw = Data(bytes[position..<recordEnd])
             if version == echExtensionCodepoint {
@@ -128,13 +110,13 @@ nonisolated enum ECHConfigParser {
               let kemID = reader.readUInt16(),
               let publicKey = reader.readUInt16LengthPrefixed(),
               let cipherSuiteBytes = reader.readUInt16LengthPrefixed()
-        else { throw ECHConfigError.malformedConfig }
+        else { throw AnywhereError.tls(.ech(.malformedConfig)) }
 
         var csReader = ECHByteReader(cipherSuiteBytes)
         var cipherSuites: [ECHCipherSuite] = []
         while !csReader.isEmpty {
             guard let kdfID = csReader.readUInt16(), let aeadID = csReader.readUInt16() else {
-                throw ECHConfigError.malformedConfig
+                throw AnywhereError.tls(.ech(.malformedConfig))
             }
             cipherSuites.append(ECHCipherSuite(kdfID: kdfID, aeadID: aeadID))
         }
@@ -142,19 +124,19 @@ nonisolated enum ECHConfigParser {
         guard let maxNameLength = reader.readUInt8(),
               let publicNameRaw = reader.readUInt8LengthPrefixed(),
               let extensionBytes = reader.readUInt16LengthPrefixed()
-        else { throw ECHConfigError.malformedConfig }
+        else { throw AnywhereError.tls(.ech(.malformedConfig)) }
 
         var extReader = ECHByteReader(extensionBytes)
         var extensions: [ECHConfigExtension] = []
         while !extReader.isEmpty {
             guard let type = extReader.readUInt16(), let data = extReader.readUInt16LengthPrefixed() else {
-                throw ECHConfigError.malformedConfig
+                throw AnywhereError.tls(.ech(.malformedConfig))
             }
             extensions.append(ECHConfigExtension(type: type, data: data))
         }
 
         // Trailing bytes past the declared fields mean a malformed config.
-        guard reader.isEmpty else { throw ECHConfigError.malformedConfig }
+        guard reader.isEmpty else { throw AnywhereError.tls(.ech(.malformedConfig)) }
 
         return ECHConfig(
             raw: raw,

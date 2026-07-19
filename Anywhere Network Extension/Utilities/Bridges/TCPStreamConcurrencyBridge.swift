@@ -14,13 +14,6 @@ actor TCPStreamConcurrencyBridge {
         bridge.executor.asUnownedSerialExecutor()
     }
 
-    enum StreamError: Error {
-        /// The relay was torn down (teardown/cancel) while an I/O call was in flight.
-        case terminated
-        /// `tcp_write` returned a fatal (non-`ERR_MEM`) error; the connection must abort.
-        case writeFailed(pending: Int, sndbuf: Int)
-    }
-
     private let bridge: LWIPConcurrencyBridge
     private let pcb: UnsafeMutableRawPointer
 
@@ -52,7 +45,7 @@ actor TCPStreamConcurrencyBridge {
     private var downloadFinishing = false
     private var downloadFinished = false
     private var finishWaiter: CheckedContinuation<Void, Never>?
-    private var writeError: StreamError?
+    private var writeError: AnywhereError?
 
     /// Producer-side mirror of the download backlog: `pendingWriteCount` plus bytes handed to
     /// ``pushDownload(_:)`` whose hop hasn't landed yet. Credited at push/deliver time and
@@ -226,10 +219,10 @@ actor TCPStreamConcurrencyBridge {
     }
 
     /// Hands `data` to lwIP for the local app, parking until the backlog drains below the
-    /// low-water mark so the upstream is throttled. Throws ``StreamError`` on teardown or a
-    /// fatal `tcp_write`.
+    /// low-water mark so the upstream is throttled. Throws `AnywhereError.transport` on teardown
+    /// or a fatal `tcp_write`.
     func sendDownload(_ data: Data) async throws {
-        guard !terminated else { throw StreamError.terminated }
+        guard !terminated else { throw AnywhereError.transport(.terminated) }
         deliverDownload(data)
         while !terminated, writeError == nil, pendingWriteCount >= TunnelConstants.drainLowWaterMark {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -237,7 +230,7 @@ actor TCPStreamConcurrencyBridge {
             }
         }
         if let writeError { throw writeError }
-        if terminated { throw StreamError.terminated }
+        if terminated { throw AnywhereError.transport(.terminated) }
     }
 
     /// The upstream EOF'd: wait until the download backlog has fully drained into lwIP so the
@@ -266,7 +259,7 @@ actor TCPStreamConcurrencyBridge {
                 return feedLWIP(base + pendingWriteOffset, count: live, retryOnEmpty: true)
             }
             if written < 0 {
-                writeError = .writeFailed(pending: live, sndbuf: bridge.tcpSendBuffer(pcb))
+                writeError = .transport(.sendBufferFull(pending: live, capacity: bridge.tcpSendBuffer(pcb)))
                 downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
                 resumeCreditWaiter()
                 return

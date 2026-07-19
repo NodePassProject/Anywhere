@@ -389,21 +389,21 @@ nonisolated private struct SudokuLayout {
 
     static func custom(_ pattern: String) throws -> SudokuLayout {
         let cleaned = pattern.lowercased().filter { $0 != " " }
-        guard cleaned.count == 8 else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }
+        guard cleaned.count == 8 else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table")) }
         var xbits = [UInt8](), pbits = [UInt8](), vbits = [UInt8]()
         for (i, ch) in cleaned.enumerated() {
             let bit = UInt8(7 - i)
             switch ch {
-            case "x": guard xbits.count < 2 else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }; xbits.append(bit)
-            case "p": guard pbits.count < 2 else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }; pbits.append(bit)
-            case "v": guard vbits.count < 4 else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }; vbits.append(bit)
-            default: throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table")
+            case "x": guard xbits.count < 2 else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table")) }; xbits.append(bit)
+            case "p": guard pbits.count < 2 else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table")) }; pbits.append(bit)
+            case "v": guard vbits.count < 4 else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table")) }; vbits.append(bit)
+            default: throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table"))
             }
         }
-        guard xbits.count == 2, pbits.count == 2, vbits.count == 4 else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }
+        guard xbits.count == 2, pbits.count == 2, vbits.count == 4 else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table")) }
         var padding = [UInt8](); var encodeHint = Array(repeating: Array(repeating: UInt8(0), count: 16), count: 4)
         for value in 0..<4 { for position in 0..<16 { for i in 0..<2 { var out = UInt8((1 << xbits[0]) | (1 << xbits[1])); out &= ~UInt8(1 << xbits[i]); if (value & 2) != 0 { out |= UInt8(1 << pbits[0]) }; if (value & 1) != 0 { out |= UInt8(1 << pbits[1]) }; for group in 0..<4 where ((position >> (3 - group)) & 1) != 0 { out |= UInt8(1 << vbits[group]) }; if out.nonzeroBitCount >= 5, !padding.contains(out) { padding.append(out) } } } }
-        guard !padding.isEmpty else { throw SudokuNativeError.invalidConfiguration("invalid custom Sudoku table") }
+        guard !padding.isEmpty else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid custom Sudoku table")) }
         padding.sort()
         var hint = Array(repeating: false, count: 256), groupValid = hint
         var decode = Array(repeating: UInt8(0), count: 256)
@@ -577,10 +577,10 @@ nonisolated final class SudokuTablePair: Sendable {
         let lower = raw.isEmpty ? "prefer_entropy" : raw.lowercased()
         if lower == "entropy" || lower == "prefer_entropy" { return ("entropy", "entropy") }
         if lower == "ascii" || lower == "prefer_ascii" { return ("ascii", "ascii") }
-        guard lower.hasPrefix("up_"), let range = lower.range(of: "_down_", range: lower.index(lower.startIndex, offsetBy: 3)..<lower.endIndex) else { throw SudokuNativeError.invalidConfiguration("invalid ASCII mode") }
+        guard lower.hasPrefix("up_"), let range = lower.range(of: "_down_", range: lower.index(lower.startIndex, offsetBy: 3)..<lower.endIndex) else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid ASCII mode")) }
         let up = String(lower[lower.index(lower.startIndex, offsetBy: 3)..<range.lowerBound])
         let down = String(lower[range.upperBound...])
-        guard ["ascii", "entropy"].contains(up), ["ascii", "entropy"].contains(down) else { throw SudokuNativeError.invalidConfiguration("invalid ASCII mode") }
+        guard ["ascii", "entropy"].contains(up), ["ascii", "entropy"].contains(down) else { throw AnywhereError.proxy(.sudoku, .invalidConfiguration(detail: "invalid ASCII mode")) }
         return (up, down)
     }
 
@@ -676,7 +676,7 @@ nonisolated struct SudokuPureDecoder {
                         if hintTable[Int(b0)], hintTable[Int(b1)], hintTable[Int(b2)], hintTable[Int(b3)] {
                             let key = sudokuPackHints(b0, b1, b2, b3)
                             guard let value = table.decodePackedKey(key) else {
-                                throw SudokuNativeError.protocolError("Sudoku decode failed")
+                                throw AnywhereError.proxy(.sudoku, .protocolViolation(detail: "Sudoku decode failed"))
                             }
                             outBytes[written] = value
                             written += 1
@@ -693,7 +693,7 @@ nonisolated struct SudokuPureDecoder {
                     guard hintCount == 4 else { continue }
                     let key = sudokuPackHints(hintBuffer[0], hintBuffer[1], hintBuffer[2], hintBuffer[3])
                     hintCount = 0
-                    guard let value = table.decodePackedKey(key) else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
+                    guard let value = table.decodePackedKey(key) else { throw AnywhereError.proxy(.sudoku, .protocolViolation(detail: "Sudoku decode failed")) }
                     appendDecoded(value, to: outBytes, written: &written, limit: outputLimit)
                 }
             }
@@ -767,7 +767,7 @@ nonisolated struct SudokuPackedDecoder {
                         }
                         continue
                     }
-                    guard groupValid[Int(b)] else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
+                    guard groupValid[Int(b)] else { throw AnywhereError.proxy(.sudoku, .protocolViolation(detail: "Sudoku decode failed")) }
                     let group = UInt64(decodeGroup[Int(b)])
                     bitBuffer = (bitBuffer << 6) | group
                     bitCount += 6

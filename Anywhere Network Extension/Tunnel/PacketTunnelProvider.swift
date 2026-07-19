@@ -79,8 +79,9 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
         
         guard let configuration else {
-            logger.error("[VPN] Invalid or missing configuration")
-            throw NSError(domain: AWCore.Identifier.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"])
+            let error = AnywhereError.tunnel(.invalidConfiguration)
+            logger.report("[VPN] Start failed", error: error)
+            throw error
         }
         
         // Drive `setTunnelNetworkSettings` whenever the stack signals a routes/DNS change.
@@ -102,8 +103,9 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         do {
             try await setTunnelNetworkSettings(settings)
         } catch {
-            logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription)")
-            throw error
+            let wrapped = AnywhereError.tunnel(.settingsApplyFailed(underlying: error))
+            logger.report("[VPN]", error: wrapped)
+            throw wrapped
         }
 
 #if os(iOS)
@@ -246,7 +248,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
                 try await setTunnelNetworkSettings(settings)
                 logger.info("[VPN] Tunnel settings reapplied")
             } catch {
-                logger.error("[VPN] Failed to reapply tunnel settings: \(error.localizedDescription)")
+                logger.report("[VPN] Failed to reapply tunnel settings", error: error)
             }
         }
     }

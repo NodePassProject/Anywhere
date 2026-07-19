@@ -1265,14 +1265,14 @@ actor MITMScriptEngine {
             let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             do {
                 try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes, onDisk: onDisk)
-            } catch MITMScriptStore.StoreError.capacityExceeded {
+            } catch AnywhereError.mitm(.scriptStoreCapacityExceeded) {
                 let cap = onDisk ? MITMScriptDiskStore.maxBytesPerScope : MITMScriptStore.maxBytesPerScope
                 let error = JSValue(
                     newErrorFromMessage: "Anywhere.store: capacity exceeded (per-scope cap is \(cap) bytes)",
                     in: context
                 )
                 context.exception = error
-            } catch MITMScriptStore.StoreError.writeFailed {
+            } catch AnywhereError.mitm(.scriptStoreWriteFailed) {
                 let error = JSValue(newErrorFromMessage: "Anywhere.store: on-disk write failed", in: context)
                 context.exception = error
             } catch {
@@ -1735,10 +1735,6 @@ actor MITMScriptEngine {
         let value: ProtobufFieldValue
     }
 
-    private struct ProtobufError: Error, CustomStringConvertible {
-        let description: String
-    }
-    
     fileprivate static func readVarint(_ data: Data, from offset: Int) -> (UInt64, Int)? {
         guard offset >= data.startIndex, offset <= data.endIndex else { return nil }
         var result: UInt64 = 0
@@ -1780,50 +1776,50 @@ actor MITMScriptEngine {
         let end = data.endIndex
         while index < end {
             guard let (tag, next) = readVarint(data, from: index) else {
-                throw ProtobufError(description: "truncated or oversized tag varint at offset \(index - data.startIndex)")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "truncated or oversized tag varint at offset \(index - data.startIndex)"))
             }
             index = next
             let wire = UInt8(tag & 0x7)
             let fieldRaw = tag >> 3
             // Field 0 is reserved; max is 2^29-1 per the protobuf spec.
             guard fieldRaw > 0, fieldRaw <= 536870911 else {
-                throw ProtobufError(description: "invalid field number \(fieldRaw)")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "invalid field number \(fieldRaw)"))
             }
             let field = UInt32(fieldRaw)
             switch wire {
             case 0:
                 guard let (v, n) = readVarint(data, from: index) else {
-                    throw ProtobufError(description: "truncated varint for field \(field)")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "truncated varint for field \(field)"))
                 }
                 index = n
                 entries.append(ProtobufEntry(field: field, wire: 0, value: .varint(v)))
             case 1:
                 guard index + 8 <= end else {
-                    throw ProtobufError(description: "truncated fixed64 for field \(field)")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "truncated fixed64 for field \(field)"))
                 }
                 entries.append(ProtobufEntry(field: field, wire: 1, value: .bytes(data.subdata(in: index..<index + 8))))
                 index += 8
             case 2:
                 guard let (length, n) = readVarint(data, from: index) else {
-                    throw ProtobufError(description: "truncated length for field \(field)")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "truncated length for field \(field)"))
                 }
                 index = n
                 guard length <= UInt64(end - index) else {
-                    throw ProtobufError(description: "length-delimited field \(field) (len=\(length)) exceeds message")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "length-delimited field \(field) (len=\(length)) exceeds message"))
                 }
                 let needed = Int(length)
                 entries.append(ProtobufEntry(field: field, wire: 2, value: .bytes(data.subdata(in: index..<index + needed))))
                 index += needed
             case 5:
                 guard index + 4 <= end else {
-                    throw ProtobufError(description: "truncated fixed32 for field \(field)")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "truncated fixed32 for field \(field)"))
                 }
                 entries.append(ProtobufEntry(field: field, wire: 5, value: .bytes(data.subdata(in: index..<index + 4))))
                 index += 4
             case 3, 4:
-                throw ProtobufError(description: "deprecated group wire type \(wire) is not supported")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "deprecated group wire type \(wire) is not supported"))
             default:
-                throw ProtobufError(description: "unknown wire type \(wire)")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "unknown wire type \(wire)"))
             }
         }
         return entries
@@ -1849,57 +1845,57 @@ actor MITMScriptEngine {
 
     fileprivate static func parseProtobufEntries(_ val: JSValue, in context: JSContext) throws -> [ProtobufEntry] {
         guard val.isArray else {
-            throw ProtobufError(description: "expected an array of {field, wire, value} entries")
+            throw AnywhereError.mitm(.scriptMessageMalformed(detail: "expected an array of {field, wire, value} entries"))
         }
         guard let count = Self.validatedArrayLength(val, max: 10_000_000) else {
-            throw ProtobufError(description: "input array length is missing, negative, or too large")
+            throw AnywhereError.mitm(.scriptMessageMalformed(detail: "input array length is missing, negative, or too large"))
         }
         var entries: [ProtobufEntry] = []
         entries.reserveCapacity(count)
         for index in 0..<count {
             guard let entryVal = val.objectAtIndexedSubscript(index),
                   !entryVal.isUndefined, !entryVal.isNull else {
-                throw ProtobufError(description: "entry \(index) is null/undefined")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index) is null/undefined"))
             }
             let fieldVal = entryVal.objectForKeyedSubscript("field")
             guard let fieldVal, fieldVal.isNumber else {
-                throw ProtobufError(description: "entry \(index).field must be a Number")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).field must be a Number"))
             }
             let fieldNum = fieldVal.toInt32()
             guard fieldNum > 0, fieldNum <= 536_870_911 else {
-                throw ProtobufError(description: "entry \(index).field \(fieldNum) out of range (1…2^29-1)")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).field \(fieldNum) out of range (1…2^29-1)"))
             }
             let wireVal = entryVal.objectForKeyedSubscript("wire")
             guard let wireVal, wireVal.isNumber else {
-                throw ProtobufError(description: "entry \(index).wire must be a Number")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).wire must be a Number"))
             }
             let wireNum = UInt8(truncatingIfNeeded: wireVal.toInt32())
             let valueVal = entryVal.objectForKeyedSubscript("value")
             switch wireNum {
             case 0:
                 guard let v = valueVal.flatMap({ uint64FromJSValue($0) }) else {
-                    throw ProtobufError(description: "entry \(index).value (wire 0) must be a non-negative integer Number or BigInt")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).value (wire 0) must be a non-negative integer Number or BigInt"))
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 0, value: .varint(v)))
             case 1:
                 guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }), bytes.count == 8 else {
-                    throw ProtobufError(description: "entry \(index).value (wire 1) must be a Uint8Array of length 8")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).value (wire 1) must be a Uint8Array of length 8"))
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 1, value: .bytes(bytes)))
             case 2:
                 guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }) else {
-                    throw ProtobufError(description: "entry \(index).value (wire 2) must be Uint8Array/ArrayBuffer/string")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).value (wire 2) must be Uint8Array/ArrayBuffer/string"))
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 2, value: .bytes(bytes)))
             case 5:
                 guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }), bytes.count == 4 else {
-                    throw ProtobufError(description: "entry \(index).value (wire 5) must be a Uint8Array of length 4")
+                    throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).value (wire 5) must be a Uint8Array of length 4"))
                 }
                 entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 5, value: .bytes(bytes)))
             case 3, 4:
-                throw ProtobufError(description: "entry \(index).wire = \(wireNum): deprecated group wire types not supported")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).wire = \(wireNum): deprecated group wire types not supported"))
             default:
-                throw ProtobufError(description: "entry \(index).wire = \(wireNum): unknown wire type")
+                throw AnywhereError.mitm(.scriptMessageMalformed(detail: "entry \(index).wire = \(wireNum): unknown wire type"))
             }
         }
         return entries

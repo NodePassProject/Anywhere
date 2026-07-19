@@ -35,12 +35,12 @@ actor MITMProfileServer {
                     portSignal.yield(port)
                     portSignal.finish()
                 } else {
-                    portSignal.finish(throwing: ProfileServerError.bindFailed)
+                    portSignal.finish(throwing: AnywhereError.mitm(.profileServerBindFailed))
                 }
             case .failed(let error):
                 portSignal.finish(throwing: error)
             case .cancelled:
-                portSignal.finish(throwing: ProfileServerError.bindFailed)
+                portSignal.finish(throwing: AnywhereError.mitm(.profileServerBindFailed))
             default:
                 break
             }
@@ -57,11 +57,11 @@ actor MITMProfileServer {
             for try await port in portStream { boundPort = port }
         } catch {
             stop()
-            throw ProfileServerError.bindFailed
+            throw AnywhereError.mitm(.profileServerBindFailed)
         }
         guard let boundPort else {
             stop()
-            throw ProfileServerError.bindFailed
+            throw AnywhereError.mitm(.profileServerBindFailed)
         }
 
         shutdownTask = Task { [weak self] in
@@ -72,7 +72,7 @@ actor MITMProfileServer {
 
         guard let url = URL(string: "http://127.0.0.1:\(boundPort.rawValue)/AnywhereMITMRoot.mobileconfig") else {
             stop()
-            throw ProfileServerError.bindFailed
+            throw AnywhereError.mitm(.profileServerBindFailed)
         }
         return url
     }
@@ -117,13 +117,4 @@ actor MITMProfileServer {
         try await connection.send(response, endOfStream: true)
     }
 
-    enum ProfileServerError: Error, LocalizedError {
-        case bindFailed
-
-        var errorDescription: String? {
-            switch self {
-            case .bindFailed: return "Failed to start local profile server."
-            }
-        }
-    }
 }

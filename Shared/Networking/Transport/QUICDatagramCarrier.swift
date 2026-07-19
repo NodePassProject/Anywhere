@@ -53,8 +53,6 @@ actor QUICDatagramCarrier {
         bridge.executor.asUnownedSerialExecutor()
     }
 
-    private typealias QUICError = QUICConnection.QUICError
-    
     private let bridge: NGTCP2ConcurrencyBridge
     
     private let obfuscator: QUICPacketObfuscator?
@@ -100,7 +98,7 @@ actor QUICDatagramCarrier {
     
     func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
         guard let endpoint = Self.nwEndpoint(from: remoteAddr) else {
-            throw QUICError.connectionFailed("invalid remote address")
+            throw AnywhereError.quic(.connectionFailed(detail: "invalid remote address"))
         }
         Self.fillAnyLocalAddr(&localAddr, family: remoteAddr.ss_family)
 
@@ -186,10 +184,10 @@ actor QUICDatagramCarrier {
                         let interfaceType = connection.currentPath?.availableInterfaces.first?.type
                         bridge.enqueue { carrier.value?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
                     case .failed(let error):
-                        let code = TransportError.errnoCode(from: error)
+                        let code = AnywhereError.errnoCode(from: error)
                         bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
                     case .waiting(let error):
-                        let code = TransportError.errnoCode(from: error)
+                        let code = AnywhereError.errnoCode(from: error)
                         bridge.enqueue { carrier.value?.assumeIsolated { $0.handleWaiting(code) } }
                     default:
                         break  // .setup, .preparing, .cancelled
@@ -261,7 +259,7 @@ actor QUICDatagramCarrier {
                 }
             }
         } catch {
-            let code = TransportError.errnoCode(from: error)
+            let code = AnywhereError.errnoCode(from: error)
             bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
             throw error
         }

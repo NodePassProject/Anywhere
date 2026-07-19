@@ -19,12 +19,6 @@ nonisolated final class MITMScriptStore: Sendable {
     /// Process-wide ceiling so many rule sets can't pin tens of MiB between reloads.
     static let maxTotalBytes: Int = 16 * 1024 * 1024
 
-    enum StoreError: Error {
-        case capacityExceeded
-        /// On-disk backing only: the atomic file write (or serialization) failed.
-        case writeFailed
-    }
-
     private struct State {
         var buckets: [UUID: [String: Data]] = [:]
         /// Incremental sum of all scopes' bytes for O(1) aggregate-cap checks in `set`.
@@ -52,11 +46,11 @@ nonisolated final class MITMScriptStore: Sendable {
             let delta = newEntryBytes - oldEntryBytes
             let projected = (state.bucketSizes[scope] ?? 0) + delta
             if projected > Self.maxBytesPerScope {
-                throw StoreError.capacityExceeded
+                throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
             let projectedTotal = state.totalBytes + delta
             if projectedTotal > Self.maxTotalBytes {
-                throw StoreError.capacityExceeded
+                throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
             state.buckets[scope, default: [:]][key] = value
             state.bucketSizes[scope] = projected

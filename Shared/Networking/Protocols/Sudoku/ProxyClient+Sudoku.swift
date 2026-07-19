@@ -26,11 +26,11 @@ extension ProxyClient {
         case .udp:
             sudokuCommand = .udp
         case .mux:
-            throw ProxyError.protocolError("Sudoku does not use the host mux manager")
+            throw AnywhereError.proxy(.sudoku, .protocolViolation(detail: "Sudoku does not use the host mux manager"))
         }
 
         guard case .sudoku(let sudoku) = configuration.outbound else {
-            throw ProxyError.protocolError("missing Sudoku protocol settings")
+            throw AnywhereError.proxy(.sudoku, .protocolViolation(detail: "missing Sudoku protocol settings"))
         }
 
         if case .tcp = sudokuCommand, sudoku.multiplex == .on, tunnel == nil {
@@ -87,7 +87,7 @@ extension ProxyClient {
             for: configuration,
             directDialHost: directDialHost
         ) else {
-            throw ProxyError.connectionFailed("Failed to acquire Sudoku mux pool")
+            throw AnywhereError.proxy(.sudoku, .notReady)
         }
 
         let (multiplexer, stream) = try await pool.dialTCP(host: destinationHost, port: destinationPort)

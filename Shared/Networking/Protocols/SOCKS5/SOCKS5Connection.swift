@@ -156,17 +156,17 @@ nonisolated enum SOCKS5Handshake {
 
         try await transport.send(greeting)
         guard let data = try await buffer.readExact(count: 2) else {
-            throw ProxyError.protocolError("SOCKS5 server closed during greeting")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed during greeting"))
         }
         guard data[0] == SOCKS5.version else {
-            throw ProxyError.protocolError("SOCKS5 unexpected server version: \(data[0])")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 unexpected server version: \(data[0])"))
         }
         let expectedMethod = hasAuth ? SOCKS5.authPassword : SOCKS5.authNone
         guard data[1] == expectedMethod else {
             if data[1] == SOCKS5.authNoMatch {
-                throw ProxyError.protocolError("SOCKS5 server: no matching auth method")
+                throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server: no matching auth method"))
             }
-            throw ProxyError.protocolError("SOCKS5 auth method mismatch: expected \(expectedMethod), got \(data[1])")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 auth method mismatch: expected \(expectedMethod), got \(data[1])"))
         }
         if hasAuth {
             try await sendAuth(buffer: buffer, transport: transport, username: username!, password: password!)
@@ -192,10 +192,10 @@ nonisolated enum SOCKS5Handshake {
 
         try await transport.send(authData)
         guard let data = try await buffer.readExact(count: 2) else {
-            throw ProxyError.protocolError("SOCKS5 server closed during auth")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed during auth"))
         }
         guard data[1] == 0x00 else {
-            throw ProxyError.protocolError("SOCKS5 authentication failed (status \(data[1]))")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 authentication failed (status \(data[1]))"))
         }
     }
 
@@ -223,16 +223,16 @@ nonisolated enum SOCKS5Handshake {
         buffer: SOCKS5AsyncBuffer
     ) async throws -> UDPRelayInfo {
         guard let data = try await buffer.readExact(count: 4) else {
-            throw ProxyError.protocolError("SOCKS5 server closed during command")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed during command"))
         }
         guard data[1] == SOCKS5.statusSuccess else {
-            throw ProxyError.protocolError("SOCKS5 command failed (reply \(data[1]))")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 command failed (reply \(data[1]))"))
         }
 
         switch data[3] {
         case SOCKS5.addrIPv4:
             guard let addrData = try await buffer.readExact(count: 4 + 2) else {
-                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
+                throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed reading bound address"))
             }
             let ip = "\(addrData[0]).\(addrData[1]).\(addrData[2]).\(addrData[3])"
             let port = UInt16(addrData[4]) << 8 | UInt16(addrData[5])
@@ -240,7 +240,7 @@ nonisolated enum SOCKS5Handshake {
 
         case SOCKS5.addrIPv6:
             guard let addrData = try await buffer.readExact(count: 16 + 2) else {
-                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
+                throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed reading bound address"))
             }
             var parts: [String] = []
             for i in stride(from: 0, to: 16, by: 2) {
@@ -252,18 +252,18 @@ nonisolated enum SOCKS5Handshake {
 
         case SOCKS5.addrDomain:
             guard let lenData = try await buffer.readExact(count: 1) else {
-                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
+                throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed reading bound address"))
             }
             let domainLen = Int(lenData[0])
             guard let domainData = try await buffer.readExact(count: domainLen + 2) else {
-                throw ProxyError.protocolError("SOCKS5 server closed reading bound address")
+                throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 server closed reading bound address"))
             }
             let domain = String(data: domainData.prefix(domainLen), encoding: .utf8) ?? ""
             let port = UInt16(domainData[domainLen]) << 8 | UInt16(domainData[domainLen + 1])
             return UDPRelayInfo(host: domain, port: port)
 
         default:
-            throw ProxyError.protocolError("SOCKS5 unknown address type: \(data[3])")
+            throw AnywhereError.proxy(.socks5, .protocolViolation(detail: "SOCKS5 unknown address type: \(data[3])"))
         }
     }
 
@@ -347,7 +347,7 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
 
     func sendRaw(_ data: Data) async throws {
         guard !cancelled.load(ordering: .relaxed) else {
-            throw ProxyError.connectionFailed("SOCKS5 UDP not connected")
+            throw AnywhereError.transport(.terminated)
         }
         var packet = udpHeader
         packet.append(data)
@@ -358,7 +358,7 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
     func receiveRaw() async throws -> Data? {
         while true {
             guard !cancelled.load(ordering: .relaxed) else {
-                throw ProxyError.connectionFailed("SOCKS5 UDP not connected")
+                throw AnywhereError.transport(.terminated)
             }
             guard let data = try await relay.receive(), !data.isEmpty else {
                 return nil

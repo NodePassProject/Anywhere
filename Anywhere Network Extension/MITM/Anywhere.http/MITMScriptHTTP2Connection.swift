@@ -10,31 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2")
 
-// MARK: - Errors
-
-nonisolated enum MITMScriptHTTP2Error: Error, LocalizedError {
-    case notReady
-    case protocolError(String)
-    case connectionClosed(String)
-    case goaway
-    case streamReset(UInt32)
-    case requestHeadersTooLarge
-    /// Sentinel: the TLS ALPN came back non-`h2`; retry over HTTP/1.1.
-    case needsHTTP1Fallback
-
-    var errorDescription: String? {
-        switch self {
-        case .notReady: return "HTTP/2 connection not ready"
-        case .protocolError(let message): return "HTTP/2 protocol error: \(message)"
-        case .connectionClosed(let message): return "HTTP/2 connection closed: \(message)"
-        case .goaway: return "HTTP/2 GOAWAY received"
-        case .streamReset(let sid): return "HTTP/2 stream \(sid) reset"
-        case .requestHeadersTooLarge: return "HTTP/2 request header block exceeds one frame"
-        case .needsHTTP1Fallback: return "origin did not negotiate HTTP/2"
-        }
-    }
-}
-
 // MARK: - MITMScriptHTTP2Connection
 
 nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
@@ -217,8 +192,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         enum Start { case rejected(Error); case go(MITMScriptHTTP2Stream) }
         let outcome: Start = lock.withLock { state in
             guard state.phase != .closed else {
-                return .rejected(state.negotiatedHTTP1 ? MITMScriptHTTP2Error.needsHTTP1Fallback
-                                                       : MITMScriptHTTP2Error.connectionClosed("connection closed"))
+                return .rejected(state.negotiatedHTTP1 ? AnywhereError.mitm(.needsHTTP1Fallback)
+                                                       : AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed")))
             }
             let sid = state.nextStreamID
             state.nextStreamID &+= 2   // client streams are odd (RFC 7540 §5.1.1)
@@ -247,7 +222,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
         // The stream yields exactly one response (or finishes throwing); pull it.
         for try await response in responseStream { return response }
-        throw MITMScriptHTTP2Error.connectionClosed("stream ended without a response")
+        throw AnywhereError.proxy(.http2, .connectionClosed(detail: "stream ended without a response"))
     }
 
     // MARK: - Setup
@@ -266,8 +241,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             case .connecting, .prefaceSent:
                 return .awaitReady
             case .goingAway, .closed:
-                return .fail(state.negotiatedHTTP1 ? MITMScriptHTTP2Error.needsHTTP1Fallback
-                                                   : MITMScriptHTTP2Error.connectionClosed("connection closed"))
+                return .fail(state.negotiatedHTTP1 ? AnywhereError.mitm(.needsHTTP1Fallback)
+                                                   : AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed")))
             }
         }
         switch kick {
@@ -334,7 +309,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                     break
                 case .http1:
                     onNegotiatedHTTP1?()
-                    failSetup(MITMScriptHTTP2Error.needsHTTP1Fallback)
+                    failSetup(AnywhereError.mitm(.needsHTTP1Fallback))
                 case .proceed:
                     sendConnectionPreface()
                 }
@@ -346,7 +321,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     private func sendConnectionPreface() {
         let transport: ProxyConnection? = lock.withLock { $0.connection }
-        guard let transport else { failSetup(MITMScriptHTTP2Error.notReady); return }
+        guard let transport else { failSetup(AnywhereError.proxy(.http2, .notReady)); return }
 
         var data = Data()
         data.append(Self.connectionPreface)
@@ -399,7 +374,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 catch { handleSessionError(error); return }
 
                 guard let data, !data.isEmpty else {
-                    handleSessionError(MITMScriptHTTP2Error.connectionClosed("connection closed by peer"))
+                    handleSessionError(AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed by peer")))
                     return
                 }
 
@@ -410,7 +385,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 }
                 if overflow {
                     // The loop drains fully each pass, so this only trips if a single frame is absurd.
-                    handleSessionError(MITMScriptHTTP2Error.protocolError("receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    handleSessionError(AnywhereError.proxy(.http2, .protocolViolation(detail: "receive buffer exceeded \(Self.maxReceiveBufferSize) bytes")))
                     return
                 }
 
@@ -653,9 +628,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
 
         refreshPoolSnapshot()
-        for stream in doomed { stream.failFromSession(MITMScriptHTTP2Error.goaway) }
-        if failReadiness { readySignal.finish(throwing: MITMScriptHTTP2Error.goaway) }
-        if closeNow { close(error: MITMScriptHTTP2Error.goaway) }
+        for stream in doomed { stream.failFromSession(AnywhereError.proxy(.http2, .goaway)) }
+        if failReadiness { readySignal.finish(throwing: AnywhereError.proxy(.http2, .goaway)) }
+        if closeNow { close(error: AnywhereError.proxy(.http2, .goaway)) }
     }
 
     private func handleWindowUpdate(_ frame: NaiveHTTP2Frame) {
@@ -694,7 +669,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     /// The header block must fit one frame; we don't emit CONTINUATION on the send side.
     func sendHeaders(streamID: UInt32, headerBlock: Data, endStream: Bool) async throws {
         guard headerBlock.count <= Int(Self.maxFrameSize) else {
-            throw MITMScriptHTTP2Error.requestHeadersTooLarge
+            throw AnywhereError.mitm(.requestHeadersTooLarge)
         }
         let frame = NaiveHTTP2Framer.headersFrame(streamID: streamID, headerBlock: headerBlock, endStream: endStream)
         let transport = try currentTransport()
@@ -719,9 +694,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             let step = buildDataStep(data, on: stream, offset: offset, endStream: endStream)
             switch step {
             case .notReady:
-                throw MITMScriptHTTP2Error.notReady
+                throw AnywhereError.proxy(.http2, .notReady)
             case .streamGone(let sid):
-                throw MITMScriptHTTP2Error.streamReset(sid)
+                throw AnywhereError.proxy(.http2, .streamReset(code: sid))
             case .done:
                 return
             case .park:
@@ -795,7 +770,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     private func currentTransport() throws -> ProxyConnection {
         guard let connection = lock.withLock({ $0.connection }) else {
-            throw MITMScriptHTTP2Error.notReady
+            throw AnywhereError.proxy(.http2, .notReady)
         }
         return connection
     }
@@ -820,7 +795,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
         refreshPoolSnapshot()
         if closeGoaway {
-            close(error: MITMScriptHTTP2Error.goaway)
+            close(error: AnywhereError.proxy(.http2, .goaway))
         }
     }
 
@@ -828,7 +803,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     private func connectionError(_ message: String) {
         logger.warning("[MITMScriptHTTP2] \(message)")
-        handleSessionError(MITMScriptHTTP2Error.protocolError(message))
+        handleSessionError(AnywhereError.proxy(.http2, .protocolViolation(detail: message)))
     }
 
     private func handleSessionError(_ error: Error) {
@@ -889,6 +864,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     // MARK: - Multiplexer.close
 
     func close(error: Error?) {
-        teardown(reason: error ?? MITMScriptHTTP2Error.connectionClosed("connection closed"))
+        teardown(reason: error ?? AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed")))
     }
 }

@@ -8,6 +8,8 @@
 import SwiftUI
 import AVFoundation
 
+nonisolated private let logger = AnywhereLogger(category: "DIQRScanner")
+
 fileprivate struct CameraProperties {
     var session: AVCaptureSession = .init()
     var output: AVCaptureMetadataOutput = .init()
@@ -332,7 +334,7 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                     session.startRunning()
                 }
             } catch {
-                print(error.localizedDescription)
+                logger.report("Camera configuration failed", error: error)
             }
         }
         

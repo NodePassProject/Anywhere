@@ -182,7 +182,7 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
         case .ready:
             return
         case .fail:
-            throw NaiveHTTP2Error.notReady
+            throw AnywhereError.proxy(.naive, .notReady)
         case .beginAndPark:
             refreshPoolSnapshot()
             beginSetup()
@@ -330,7 +330,7 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
                 catch { handleSessionError(error); return }
 
                 guard let data, !data.isEmpty else {
-                    handleSessionError(NaiveHTTP2Error.connectionFailed("Connection closed"))
+                    handleSessionError(AnywhereError.proxy(.naive, .connectionClosed(detail: "Connection closed")))
                     return
                 }
 
@@ -344,7 +344,7 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
                     return false
                 }
                 if overflow {
-                    handleSessionError(NaiveHTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    handleSessionError(AnywhereError.proxy(.naive, .connectionClosed(detail: "Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes")))
                     return
                 }
 
@@ -396,7 +396,7 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
             if let decoded = hpackDecoder.decodeHeaders(from: frame.payload) {
                 stream.handleHeaders(fields: decoded.fields)
             } else {
-                stream.handleStreamError(NaiveHTTP2Error.protocolError("Failed to decode headers on stream \(frame.streamID)"))
+                stream.handleStreamError(AnywhereError.proxy(.naive, .protocolViolation(detail: "Failed to decode headers on stream \(frame.streamID)")))
             }
 
         case .data:
@@ -470,9 +470,9 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
         }
 
         refreshPoolSnapshot()
-        for stream in doomed { stream.handleSessionError(NaiveHTTP2Error.goaway) }
+        for stream in doomed { stream.handleSessionError(AnywhereError.proxy(.naive, .goaway)) }
         if failReady {
-            completeReadyContinuations(NaiveHTTP2Error.goaway)
+            completeReadyContinuations(AnywhereError.proxy(.naive, .goaway))
         }
     }
 
@@ -536,7 +536,7 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
             let step = buildDataStep(data, on: stream, offset: offset)
             switch step {
             case .closed:
-                throw NaiveHTTP2Error.notReady
+                throw AnywhereError.proxy(.naive, .notReady)
             case .park:
                 await parkForFlow(stream: stream)
             case .built(let frames, let nextOffset):
@@ -624,7 +624,7 @@ nonisolated final class NaiveHTTP2Multiplexer: Multiplexer, Sendable {
     }
 
     func close(error: Error? = nil) {
-        teardown(reason: error ?? NaiveHTTP2Error.connectionFailed("Session closed"))
+        teardown(reason: error ?? AnywhereError.proxy(.naive, .connectionClosed(detail: "Session closed")))
     }
 
     /// Central close/teardown: flips to `.closed`, cancels the transport/pump, and fails every

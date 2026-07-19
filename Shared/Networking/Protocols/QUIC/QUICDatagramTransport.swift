@@ -68,30 +68,32 @@ nonisolated final class ProxyConnectionDatagramTransport: QUICDatagramTransport,
     /// True for per-datagram errors (packet didn't fit), false for terminal ones; the outer
     /// QUIC must not close on transient errors.
     private static func isTransientDatagramError(_ error: Error) -> Bool {
-        if let quicError = error as? QUICConnection.QUICError {
+        if case AnywhereError.quic(let quicError) = error {
             switch quicError {
-            case .handshakeFailed, .streamReset, .streamClosedWithError, .closed, .closedOK:
+            case .handshakeFailed, .streamReset, .streamClosedWithError, .closed:
                 return false
-            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamError, .timeout:
+            case .datagramTooLarge, .datagramQueueFull, .connectionFailed, .streamFailed, .timedOut:
                 return true
             }
         }
-        if let hysteriaError = error as? HysteriaError {
-            switch hysteriaError {
-            case .authRejected, .udpNotSupported, .destinationTooLargeForDatagram, .streamClosed:
+        if case AnywhereError.proxy(.hysteria, let failure) = error {
+            switch failure {
+            case .authenticationRejected, .unsupported, .datagramTooLarge, .streamClosed:
                 return false
-            case .notReady, .connectionFailed, .tunnelFailed:
-                // connectionFailed covers per-packet outcomes; notReady is a
+            case .notReady, .connectionClosed, .tunnelRejected:
+                // connectionClosed covers per-packet outcomes; notReady is a
                 // transient session-state window.
                 return true
+            default:
+                return false
             }
         }
-        if let nowhereError = error as? NowhereError {
+        if case AnywhereError.proxy(.nowhere, let failure) = error {
             // Conservatively allowlist only errors that describe a transient
             // per-datagram/session window. New protocol errors remain terminal
             // without coupling this transport adapter to every Nowhere case.
-            if case .notReady = nowhereError { return true }
-            if case .connectionFailed = nowhereError { return true }
+            if case .notReady = failure { return true }
+            if case .connectionClosed = failure { return true }
             return false
         }
         return false

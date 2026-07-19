@@ -24,15 +24,15 @@ nonisolated struct RealityConfiguration {
         guard params["security"] == "reality" else { return nil }
 
         guard let sni = params["sni"], !sni.isEmpty else {
-            throw RealityError.missingParameter("sni")
+            throw AnywhereError.proxy(.vless, .invalidConfiguration(detail: "missing parameter: sni"))
         }
 
         guard let pbkString = params["pbk"], !pbkString.isEmpty else {
-            throw RealityError.missingParameter("pbk (public key)")
+            throw AnywhereError.proxy(.vless, .invalidConfiguration(detail: "missing parameter: pbk (public key)"))
         }
 
         guard let publicKey = Data(base64URLEncoded: pbkString), publicKey.count == 32 else {
-            throw RealityError.invalidPublicKey
+            throw AnywhereError.tls(.reality(.invalidPublicKey))
         }
 
         let sidString = params["sid"] ?? ""
@@ -138,31 +138,5 @@ nonisolated enum TLSFingerprint: String, Codable, CaseIterable {
          .firefox148, .firefox120,
          .safari26,
          .edge106]
-    }
-}
-
-nonisolated enum RealityError: Error, LocalizedError {
-    case missingParameter(String)
-    case invalidPublicKey
-    case handshakeFailed(String)
-    case authenticationFailed
-    case connectionFailed(String)
-    case decryptionFailed  // Record no longer decrypts — server may have switched to direct copy
-
-    var errorDescription: String? {
-        switch self {
-        case .missingParameter(let parameter):
-            return "Missing Reality parameter: \(parameter)"
-        case .invalidPublicKey:
-            return "Invalid Reality public key"
-        case .handshakeFailed(let reason):
-            return "Reality handshake failed: \(reason)"
-        case .authenticationFailed:
-            return "Reality authentication failed"
-        case .connectionFailed(let reason):
-            return "Reality connection failed: \(reason)"
-        case .decryptionFailed:
-            return "Reality decryption failed - server may have switched to direct copy"
-        }
     }
 }
