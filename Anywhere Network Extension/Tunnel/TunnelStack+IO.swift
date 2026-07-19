@@ -70,41 +70,31 @@ extension TunnelStack {
 
     func startReadingPackets() {
         guard let packetFlow else { return }
-        let plane = udpPlane!
-        let bridge = lwipBridge
-        readTask = Task.detached { [self, packetFlow, plane, bridge] in
+        readTask = Task { [self, packetFlow, lwipBridge, udpPlane] in
             while !Task.isCancelled {
-                guard let (packets, _) = await PacketFlowConcurrencyBridge.read(from: packetFlow),
-                      running, !Task.isCancelled else { return }
-                
+                let (packets, _) = await packetFlow.readPackets()
+
                 let reflector = self.reflector()
-                var udpBatch: [Data] = []
                 var lwipBatch: [Data] = []
+                var udpBatch: [Data] = []
+                
                 for packet in packets {
                     if reflector.isActive, let reflected = reflector.reflect(packet) {
                         self.enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
                         continue
                     }
-                    if let info = UDPPacket.ipProtocol(of: packet), info.proto == UDPPacket.ipProtocolUDP {
+                    if UDPPacket.ipProtocol(of: packet)?.proto == UDPPacket.ipProtocolUDP {
                         udpBatch.append(packet)
                     } else {
                         lwipBatch.append(packet)
                     }
                 }
                 
-                if udpBatch.isEmpty {
-                    if !lwipBatch.isEmpty {
-                        await bridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { [lwipBatch] in
+                        await lwipBridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
                     }
-                } else if lwipBatch.isEmpty {
-                    await plane.feed(udpBatch)
-                } else {
-                    await withTaskGroup(of: Void.self) { group in
-                        group.addTask { [lwipBatch] in
-                            await bridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
-                        }
-                        group.addTask { [udpBatch] in await plane.feed(udpBatch) }
-                    }
+                    group.addTask { [udpBatch] in await udpPlane!.feed(udpBatch) }
                 }
             }
         }

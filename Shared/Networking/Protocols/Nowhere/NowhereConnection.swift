@@ -19,7 +19,7 @@ protocol NowhereTerminationObservable: AnyObject {
     nonisolated func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?)
 }
 
-actor NowhereConnection: ProxyConnection {
+actor NowhereConnection {
     private let session: NowhereSession
     private let destination: NowhereProtocol.Target
     private let flowHeader: NowhereProtocol.FlowHeader
@@ -1180,3 +1180,5 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
         }
     }
 }
+
+extension NowhereConnection: ProxyConnection {}
