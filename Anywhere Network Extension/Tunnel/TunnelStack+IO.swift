@@ -105,13 +105,17 @@ extension TunnelStack {
                     }
                 }
                 
-                await withTaskGroup(of: Void.self) { group in
+                if udpBatch.isEmpty {
                     if !lwipBatch.isEmpty {
+                        await bridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
+                    }
+                } else if lwipBatch.isEmpty {
+                    await plane.feed(udpBatch)
+                } else {
+                    await withTaskGroup(of: Void.self) { group in
                         group.addTask { [lwipBatch] in
                             await bridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
                         }
-                    }
-                    if !udpBatch.isEmpty {
                         group.addTask { [udpBatch] in await plane.feed(udpBatch) }
                     }
                 }

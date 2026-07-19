@@ -14,15 +14,11 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Lifecycle
 extension TunnelStack {
 
     // MARK: - Lifecycle
-
-    /// Brings the stack up. An actor method, so its body runs on the lwIP queue — the former
-    /// `lwipBridge.enqueue { … }` wrapper is gone; the isolation *is* the confinement. The provider
-    /// `await`s it.
-    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
+    
+    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) async {
         AnywhereLogger.installLogSink { [weak self] message, level in
             let logLevel: TunnelLogLevel
             switch level {
-            // `debug` never reaches the sink; mapped defensively.
             case .debug, .info: logLevel = .info
             case .warning: logLevel = .warning
             case .error: logLevel = .error
@@ -31,33 +27,31 @@ extension TunnelStack {
         }
         self.packetFlow = packetFlow
         self.configuration = configuration
-        // Create the UDP plane now that the actor is fully formed (it back-references the stack).
-        udpPlane = UDPPlane(stack: self)
-
-        // Single output-drain consumer for the stack's lifetime. Detached so `writePackets` runs off
-        // the lwIP queue; `packetFlow` is captured so the nonisolated drain names no isolated state.
-        // Strong self: `stop()` cancels this task, ending the `for await` and releasing the stack.
+        
         let outputKick = self.outputKick
         outputDrainTask = Task.detached { [self, outputKick, packetFlow] in
             for await _ in outputKick {
                 await self.drainOutputLoop(packetFlow: packetFlow)
             }
         }
-
-        // Single ordered driver for UDP plane mux/reclaim commands. Started before the runtime is
-        // configured so the initial `setMultiplexerPool` command (submitted below) is applied.
-        // Captures the plane (owned by the stack); `stop()` finishes `planeCommands` and awaits this
-        // task so the loop ends and its final reclaim closes the UDP flows.
+        
         let planeCommands = self.planeCommands
-        let plane = udpPlane!
-        planeCommandTask = Task { [planeCommands, plane] in
+        let udpPlane = UDPPlane(stack: self)
+        self.udpPlane = udpPlane
+        planeCommandTask = Task { [planeCommands, udpPlane] in
             for await command in planeCommands {
-                await plane.apply(command)
+                await udpPlane.apply(command)
             }
         }
 
         _running.store(true, ordering: .relaxed)
-        configureRuntime(for: configuration)
+        
+        var precompiledRouting: DomainRouter.CompiledRouting?
+        if Self.effectiveProxyMode(settings: TunnelSettings.load(), network: networkContext) == .rule {
+            precompiledRouting = await domainRouter.compileRoutingConfiguration()
+        }
+        configureRuntime(for: configuration, precompiledRouting: precompiledRouting)
+        
         lwipBridge.installCallbacks(host: self)
         lwipBridge.initEngine()
         startTimeoutTimer()
@@ -276,11 +270,6 @@ extension TunnelStack {
     }
 
     // MARK: - Settings Observation
-    //
-    // Three Darwin notifications: "tunnelSettingsChanged" restarts the stack;
-    // "routingChanged" and "mitmChanged" reload in place — routing/MITM
-    // decisions bind when a connection opens, so already-open connections
-    // deliberately keep their old rules until they close.
 
     private func startObservingSettings() {
         // Names precomputed once for the switch; `DarwinNotificationConcurrencyBridge` yields the
@@ -299,7 +288,7 @@ extension TunnelStack {
             ]) {
                 switch name {
                 case settings: handleSettingsChanged()
-                case routing: handleRoutingChanged()
+                case routing: await handleRoutingChanged()
                 case mitm: handleMITMChanged()
                 default: break
                 }
@@ -311,11 +300,7 @@ extension TunnelStack {
         settingsObserverTask?.cancel()
         settingsObserverTask = nil
     }
-
-    /// Reloads the settings snapshot and applies the diff. Flags consumed
-    /// per-datagram or at connection time reload in place; route changes
-    /// reapply the tunnel network settings; an effective-mode, VPN-icon, or
-    /// IPv6 change restarts the stack.
+    
     private func handleSettingsChanged() {
         guard running, let configuration else { return }
 
@@ -372,19 +357,14 @@ extension TunnelStack {
 
         restartStack(configuration: configuration)
     }
-
-    /// Reloads the routing rules in place — no restart; routing binds at
-    /// connection accept, so active flows stay valid. No-op unless in rule mode
-    /// (global and trusted-network direct reset the router and ignore rules).
-    private func handleRoutingChanged() {
+    
+    private func handleRoutingChanged() async {
         guard running else { return }
         guard proxyMode == .rule else { return }
         logger.info("[VPN] Routing changed")
-        domainRouter.loadRoutingConfiguration()
+        domainRouter.install(await domainRouter.compileRoutingConfiguration())
     }
-
-    /// Rebuilds the MITM matcher in place — no restart; sessions snapshot their rules at
-    /// connection open, so only new connections see the change.
+    
     private func handleMITMChanged() {
         guard running else { return }
         logger.info("[VPN] MITM settings changed")

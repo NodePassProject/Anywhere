@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Synchronization
 
 actor TCPStreamConcurrencyBridge {
 
@@ -53,6 +54,16 @@ actor TCPStreamConcurrencyBridge {
     private var finishWaiter: CheckedContinuation<Void, Never>?
     private var writeError: StreamError?
 
+    /// Producer-side mirror of the download backlog: `pendingWriteCount` plus bytes handed to
+    /// ``pushDownload(_:)`` whose hop hasn't landed yet. Credited at push/deliver time and
+    /// debited as bytes drain into lwIP, so the relay's fast-path check can never run ahead of
+    /// hops still queued. A hint only — real backpressure still parks on `creditWaiter`.
+    private let backlogBytesMirror = Atomic<Int>(0)
+
+    /// Latched on teardown and on a fatal `tcp_write` to force the relay onto the awaited
+    /// ``sendDownload(_:)`` path, whose checks end the relay loop by throwing.
+    private let downloadNeedsAwaitedSend = Atomic<Bool>(false)
+
     private var pendingWriteCount: Int { pendingWrite.count - pendingWriteOffset }
     
     init(bridge: LWIPConcurrencyBridge, pcb: LWIPPCBHandle) {
@@ -87,6 +98,7 @@ actor TCPStreamConcurrencyBridge {
     func terminate() {
         guard !terminated else { return }
         terminated = true
+        downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
         resumeUploadWaiter()
         resumeCreditWaiter()
         resumeFinishWaiter()
@@ -177,6 +189,38 @@ actor TCPStreamConcurrencyBridge {
     /// backpressure. Ordering is preserved by the single lwIP-queue caller.
     func deliverDownload(_ data: Data) {
         guard !terminated, !data.isEmpty else { return }
+        backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
+        pendingWrite.append(data)
+        drainPendingWrite()
+    }
+
+    /// True when the download relay may hand its next chunk to ``pushDownload(_:)``: no
+    /// teardown/write-error latched and the backlog mirror below the low-water mark.
+    nonisolated var canPushDownload: Bool {
+        !downloadNeedsAwaitedSend.load(ordering: .relaxed)
+            && backlogBytesMirror.load(ordering: .relaxed) < TunnelConstants.drainLowWaterMark
+    }
+
+    /// Fire-and-forget counterpart of ``sendDownload(_:)`` for the uncontended case: one hop
+    /// onto the lwIP queue and no suspension, so the relay loop goes straight back into its
+    /// upstream `receive()` instead of crossing the busiest queue twice per chunk. Ordering
+    /// against the awaited path holds because both funnel through the same serial queue. Valid
+    /// only while ``canPushDownload`` — at/over the low-water mark the relay must take the
+    /// awaited path so the upstream peer is throttled to what the app drains.
+    nonisolated func pushDownload(_ data: Data) {
+        backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
+        bridge.enqueue { [self] in
+            assumeIsolated { $0.acceptPushedDownload(data) }
+        }
+    }
+
+    /// Lands a ``pushDownload(_:)`` hop. The mirror was credited at push time, so a drop here
+    /// (teardown won the race) must hand the credit back.
+    private func acceptPushedDownload(_ data: Data) {
+        guard !terminated else {
+            backlogBytesMirror.wrappingSubtract(data.count, ordering: .relaxed)
+            return
+        }
         pendingWrite.append(data)
         drainPendingWrite()
     }
@@ -223,10 +267,12 @@ actor TCPStreamConcurrencyBridge {
             }
             if written < 0 {
                 writeError = .writeFailed(pending: live, sndbuf: bridge.tcpSendBuffer(pcb))
+                downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
                 resumeCreditWaiter()
                 return
             }
             if written > 0 {
+                backlogBytesMirror.wrappingSubtract(written, ordering: .relaxed)
                 pendingWriteOffset += written
                 if pendingWriteOffset >= pendingWrite.count {
                     pendingWrite.removeAll(keepingCapacity: true)

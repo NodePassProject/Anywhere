@@ -384,40 +384,39 @@ actor TunnelStack {
 
     // MARK: - Runtime Configuration
 
-    func configureRuntime(for configuration: ProxyConfiguration) {
+    func configureRuntime(
+        for configuration: ProxyConfiguration,
+        precompiledRouting: DomainRouter.CompiledRouting? = nil
+    ) {
         settings = TunnelSettings.load()
         connectionRouter.setPreventDNSLeak(settings.preventDNSLeak)
         proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
-
+        
         if proxyMode == .direct {
-            // Router is reset below, so every connection falls through to this
-            // direct default, bypassing all proxies and rules.
             defaultRouteTarget = .direct
         } else {
-            // Prefer the app's persisted selection — never a composited chain's throwaway id.
             defaultRouteTarget = AWCore.getSelectedChainId().map(RouteTarget.proxy)
-                ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
-                ?? .proxy(configuration.id)
+            ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
+            ?? .proxy(configuration.id)
         }
-
+        
         loadMITMSetting()
-
+        
         publishUDPConfig()
         publishReflector()
         publishOutboundRoutingContext(configuration: configuration)
-
-        // Build the Vision mux pool here on lwipQueue (which owns `configuration`), then hand it
-        // to the UDP plane through the ordered command channel (so it can't be reordered against a
-        // restart's reclaim).
+        
         let multiplexerPool = configuration.outboundProtocol == .vless
-            ? VLESSVisionUDPMultiplexerPool(configuration: configuration)
-            : nil
+        ? VLESSVisionUDPMultiplexerPool(configuration: configuration)
+        : nil
         submitPlaneCommand(.setMultiplexerPool(multiplexerPool))
-
-        // Only rule mode consults the router; global and direct reset it and
-        // rely on the default outbound.
+        
         if proxyMode == .rule {
-            domainRouter.loadRoutingConfiguration()
+            if let precompiledRouting {
+                domainRouter.install(precompiledRouting)
+            } else {
+                domainRouter.loadRoutingConfiguration()
+            }
         } else {
             domainRouter.reset()
         }

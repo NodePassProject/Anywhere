@@ -13,37 +13,25 @@ nonisolated private let logger = AnywhereLogger(category: "DomainRouter")
 nonisolated final class DomainRouter: Sendable {
 
     // MARK: - Tier model
-    //
-    // Cross-source priority is tier query order (User > ADBlock > Built-in > Country
-    // Bypass); within a tier, suffix beats keyword and deepest/longest match wins.
-    // The matching machinery lives in TieredRouteMatcher (Shared). Payloads carry
-    // the action plus the payload's entry index.
-
-    private enum Tier: Int, CaseIterable {
+    
+    fileprivate enum Tier: Int, CaseIterable {
         case user = 0
         case adBlock = 1
         case builtIn = 2
         case bypass = 3
     }
-
-    /// Matcher payload: POD so hot-path lookups stay ARC-free. `entryIndex`
-    /// resolves to a display name via `RoutingState.ruleSetNames`.
-    private struct RulePayload: Hashable, Sendable {
+    
+    fileprivate struct RulePayload: Hashable, Sendable {
         var action: RouteTarget
         var entryIndex: UInt16
     }
-
-    /// A routing decision plus the rule set behind it. `ruleSetName` is nil when
-    /// the loaded payload predates the names section.
+    
     struct Match: Sendable {
         let action: RouteTarget
         let ruleSetName: String?
     }
-
-    /// `matcher` + `configurationMap`, guarded as one unit (lookups run on both the lwIP and UDP
-    /// queues); reloads build a whole new state off-lock and swap it in atomically, so a lookup
-    /// never sees a half-built tier and never stalls behind a compile.
-    private struct RoutingState: Sendable {
+    
+    fileprivate struct RoutingState: Sendable {
         var matcher = TieredRouteMatcher<RulePayload>(tierCount: Tier.allCases.count)
         var configurationMap: [UUID: ProxyConfiguration] = [:]
         /// Rule-set display names by payload entry index; empty for older payloads.
@@ -96,19 +84,27 @@ nonisolated final class DomainRouter: Sendable {
     private let routingState = Mutex(RoutingState())
 
     // MARK: - Loading
-
-    /// Clears all rules and configurations (e.g. when switching to global mode).
+    
     func reset() {
         routingState.withLock { $0 = RoutingState() }
     }
-
-    /// Compiles rules from the App Group routing file into per-tier matchers. The compile runs
-    /// off-lock on a fresh `RoutingState` (it never reads the old one), then a single short
-    /// critical section swaps it in — concurrent lookups keep matching against the old tiers
-    /// instead of stalling for the whole parse.
+    
     func loadRoutingConfiguration() {
         let newState = Self.makeRoutingState()
         routingState.withLock { $0 = newState }
+    }
+    
+    struct CompiledRouting: Sendable {
+        fileprivate let state: RoutingState
+    }
+    
+    @concurrent
+    func compileRoutingConfiguration() async -> CompiledRouting {
+        CompiledRouting(state: Self.makeRoutingState())
+    }
+    
+    func install(_ compiled: CompiledRouting) {
+        routingState.withLock { $0 = compiled.state }
     }
 
     private static func makeRoutingState() -> RoutingState {
@@ -272,8 +268,7 @@ nonisolated final class DomainRouter: Sendable {
     var hasRules: Bool {
         routingState.withLock { $0.matcher.hasRules }
     }
-
-    /// Matches a domain by walking tiers in priority order. First hit wins.
+    
     func matchDomain(_ domain: String) -> Match? {
         guard !domain.isEmpty else { return nil }
         // Lowercase once, outside the lock, and share the UTF-8 bytes across tiers.
@@ -283,16 +278,14 @@ nonisolated final class DomainRouter: Sendable {
             return state.match(resolving: payload)
         }
     }
-
-    /// Matches an IP address against per-tier CIDR tries in priority order.
+    
     func matchIP(_ ip: String) -> Match? {
         routingState.withLock { state in
             let payload = state.matcher.matchIP(ip)
             return state.match(resolving: payload)
         }
     }
-
-    /// Returns nil for .direct/.reject or when the configuration UUID is unknown.
+    
     func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
         case .direct, .reject:

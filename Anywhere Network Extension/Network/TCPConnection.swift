@@ -15,7 +15,6 @@ nonisolated private struct HandshakeTimeoutError: LocalizedError {
     var errorDescription: String? { "Handshake timed out during \(phase)" }
 }
 
-
 actor TCPConnection {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -329,13 +328,17 @@ actor TCPConnection {
                 return
             }
             guard let data, !data.isEmpty else { break }
-            do {
-                try await stream.sendDownload(data)
-            } catch {
-                if case TCPStreamConcurrencyBridge.StreamError.writeFailed = error {
-                    await relayFailed("Write", error: error)
+            if stream.canPushDownload {
+                stream.pushDownload(data)
+            } else {
+                do {
+                    try await stream.sendDownload(data)
+                } catch {
+                    if case TCPStreamConcurrencyBridge.StreamError.writeFailed = error {
+                        await relayFailed("Write", error: error)
+                    }
+                    return
                 }
-                return
             }
             markActivity()
             context.stack?.addBytesIn(Int64(data.count), target: context.routeTarget)
@@ -359,12 +362,9 @@ actor TCPConnection {
         guard !closed else { return }
         close()
     }
-
-    /// Acks local-app bytes to lwIP once the proxy leg accepted them, then
-    /// flushes the window update so the peer can resume sending promptly.
+    
     private func acknowledgeReceivedBytes(_ byteCount: Int) {
         guard byteCount > 0 else { return }
-        // Single uplink tally point; rejects call tcp_recved directly, uncounted.
         stack?.addBytesOut(Int64(byteCount), target: routeTarget)
         var remaining = byteCount
         while remaining > 0 {
@@ -372,11 +372,9 @@ actor TCPConnection {
             remaining -= Int(part)
             bridge.tcpRecved(pcb, part)
         }
-        // tcp_output synchronously fires the output callback and kicks the drain loop.
         bridge.tcpOutput(pcb)
     }
-
-    /// Client ACK freed lwIP send-buffer space: feed the download backpressure/drain in the bridge.
+    
     func handleSent(len: UInt16) {
         guard !closed else { return }
         stream?.assumeIsolated { $0.deliverSendCredit() }
@@ -412,9 +410,7 @@ actor TCPConnection {
             setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
-
-    /// Logs why lwIP tore this connection down — by the time `tcp_err` runs
-    /// the PCB is already freed, so no other error path fires.
+    
     func handleError(err: Int32) {
         let reason = TransportErrorLogger.describeLwIPError(err)
         if err == -15 { // ERR_CLSD — orderly close, not a failure
@@ -440,9 +436,7 @@ actor TCPConnection {
     private func reportFailure(_ operation: String, error: Error) {
         failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
     }
-
-    /// Balances `FlowGauge.pendingTCP` exactly once — when the outbound dial
-    /// starts (the transport's own gauge count takes over) or on teardown.
+    
     private func settlePendingAdmission() {
         guard pendingAdmissionCounted else { return }
         pendingAdmissionCounted = false
@@ -465,17 +459,14 @@ actor TCPConnection {
             rejectGracefully()
         }
     }
-
-    /// True when `pendingData` starts with a TLS handshake record (0x16, 0x03);
-    /// iterates rather than subscripts so it is index-offset safe on sliced `Data`.
+    
     private func bufferedBytesAreTLSHandshake() -> Bool {
         var iterator = pendingData.makeIterator()
         return iterator.next() == 0x16 && iterator.next() == 0x03
     }
 
     // MARK: - Route Commit
-
-    /// Kicks off the outbound connection on the committed route. Idempotent.
+    
     private func beginConnecting() {
         guard !closed, !proxyConnecting, proxyConnection == nil, mitmSession == nil else { return }
         // MITM defers the dial into the session: a rewrite may change the host,
@@ -490,8 +481,7 @@ actor TCPConnection {
             connectProxy()
         }
     }
-
-    /// Evaluates routing from the sniffed SNI; call only after the sniffer is cleared.
+    
     private func applySNI(_ sni: String) {
         guard let stack else { return }
 
@@ -530,9 +520,7 @@ actor TCPConnection {
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .proxy(id), ruleSetName: match.ruleSetName)
         }
     }
-
-    /// Resolves a cleartext HTTP sniff: starts a plaintext MITM session when a rule matches the
-    /// request authority, otherwise commits the plain (non-intercepted) route.
+    
     private func handleHTTPSniff(_ state: HTTPRequestSniffer.State) {
         switch state {
         case .needMore:
@@ -549,8 +537,7 @@ actor TCPConnection {
             beginConnecting()
         }
     }
-
-    /// Enables plaintext MITM when a rewrite rule matches the request's authority.
+    
     private func applyHTTPMITM(authority: String?) {
         guard let stack, stack.mitmEnabled else { return }
         let matchHost = hostIsResolvedDomain ? dstHost : authority
@@ -591,8 +578,7 @@ actor TCPConnection {
             self.finishDirectConnect(connection: connection, error: error, initialData: initialData)
         }
     }
-
-    /// Completes a direct dial on the actor: wires the activity timer and starts the relay.
+    
     private func finishDirectConnect(connection: DirectProxyConnection, error: Error?, initialData: Data?) {
         proxyConnecting = false
         proxyDialTask = nil
@@ -694,23 +680,18 @@ actor TCPConnection {
     }
 
     // MARK: - Idle Timer (actor-isolated)
-
-    /// Arms the idle timer at `initialIdleTimeout`; `close()` fires once the connection is quiet that long.
+    
     private func startIdleTimer() {
         idleTimeout = initialIdleTimeout
         markActivity()
         idleActive = true
         scheduleIdleCheck(after: idleTimeout)
     }
-
-    /// Records traffic so the idle check sees the connection as active. Callable off-actor
-    /// (the relay loops stamp it from the concurrent pool).
+    
     private nonisolated func markActivity() {
         lastActivityTick.store(MonotonicClock.now, ordering: .relaxed)
     }
-
-    /// Changes the idle window (e.g. tightened after a half-close). `<= 0`, or a window already
-    /// exceeded by the elapsed idle time, closes immediately.
+    
     private func setIdleTimeout(_ timeout: TimeInterval) {
         guard idleActive else { return }
         if timeout <= 0 {
@@ -850,11 +831,7 @@ actor TCPConnection {
             return try await self.dialUpstreamBounded(host: host, port: port)
         }
     }
-
-    /// Bounds the deferred MITM upstream dial (TCP connect + proxy protocol handshake) — the gap between the
-    /// per-connection handshake timeout and the session's TLS-only `armUpstreamHandshakeTimeout`, where a
-    /// stalled protocol handshake would otherwise linger on the 300 s idle timer. On expiry the transport is
-    /// cancelled, not just failed (see ``raceHandshakeDeadline``). Actor-isolated.
+    
     private func dialUpstreamBounded(host: String, port: UInt16) async throws -> MITMDialResult {
         guard !closed else { throw TransportError.notConnected }
         switch commitUpstreamRoute(forDialHost: host, port: port) {
@@ -868,11 +845,7 @@ actor TCPConnection {
     }
 
     private enum DialRace<T: Sendable>: Sendable { case value(T), timedOut }
-
-    /// Races `body` against a `handshakeTimeout` `Task.sleep`. On timeout, `cancelOnTimeout` aborts the
-    /// in-flight transport so the (uncancellable) handshake fails instead of leaking a socket, and a
-    /// `HandshakeTimeoutError` is thrown; a `body` failure propagates as-is. Replaces the old per-dial
-    /// `DispatchWorkItem` deadline + settled-flag race with structured concurrency.
+    
     private func raceHandshakeDeadline<T: Sendable>(
         cancelOnTimeout: @escaping @Sendable () -> Void,
         _ body: @escaping @Sendable () async throws -> T
