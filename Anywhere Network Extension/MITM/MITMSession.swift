@@ -147,24 +147,16 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     private let requestStream: MITMHTTP1Stream
     private let responseStream: MITMHTTP1Stream
 
-    // MARK: - Decoupled HTTP/2 client leg (late-bound upstream)
-    //
-    // An h2 client's `bridgeClient` decodes into protocol-neutral request IR. The first request
-    // triggers one dial offering both ALPNs; the upstream leg is bound from the negotiated protocol
-    // (one multiplexed h2 leg, or per-stream h1 legs). An h2 upstream multiplexes every stream over
-    // its one connection, so a later stream resolving a different host is still sent there; the h1
-    // bridge dials per stream and so follows each stream's host.
+    // MARK: - Decoupled HTTP/2 client leg
 
     private var bridgeClient: MITMBridgeClientLeg?
-
-    /// Multiplexed HTTP/2 upstream leg, bound when the first dial negotiates `h2`.
+    
     private var h2Upstream: MITMHTTP2UpstreamLeg?
 
     private enum UpstreamProtocol { case undetermined, h2, h1 }
     private var upstreamProtocol: UpstreamProtocol = .undetermined
     private var firstUpstreamDialStarted = false
-
-    /// Request events buffered until the first dial binds the upstream protocol.
+    
     private enum PendingRequestEvent {
         case head(MITMRequestHead, url: String?, endStream: Bool)
         case data(streamID: UInt32, Data, endStream: Bool)
@@ -172,26 +164,18 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         case abort(streamID: UInt32)
     }
     private var pendingRequestEvents: [PendingRequestEvent] = []
-
-    /// One http/1.1 upstream connection per client h2 stream: carries one request/response, then closes.
+    
     private final class BridgeStream {
         let clientStreamID: UInt32
         var proxyClient: ProxyClient?
         var connection: ProxyConnection?
         var tlsClient: TLSClient?
         var upstreamRecord: TLSRecordConnection?
-        /// Response-phase rewriter; delivers rewritten response IR straight to the client leg via
-        /// `responseIRSink` (no HTTP/1.1 re-serialize → re-parse round-trip).
         let responseStream: MITMHTTP1Stream
-        /// Holds the IR sink strongly (the stream references it weakly) for this stream's lifetime.
         var responseIRSink: MITMHTTP1ResponseIRSink?
-        /// Single-entry request log so HEAD/URL correlation can't interleave across streams.
         let responseLog: MITMRequestLog
         var framing: MITMBridgeBodyFraming = .none
-        /// Serialized request bytes held until the per-stream TLS handshake completes.
         var pendingToUpstream = Data()
-        /// Upstream-bound bytes accepted from the client but not yet confirmed written. Bounds the
-        /// eagerly credited client against a slow upstream (see `maxBridgeUpstreamBufferedBytes`).
         var unsentUpstreamBytes = 0
         var handshakeDone = false
 
@@ -204,8 +188,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
 
     private final class BridgeResponseIRSink: MITMHTTP1ResponseIRSink {
         let streamID: UInt32
-        /// Weak back-reference to the client leg, boxed so this set-once value stays a `let` and the
-        /// sink is honestly `Sendable` (the leg is an actor = Sendable; a weak load is atomic).
         private struct WeakClient: Sendable { weak var value: MITMBridgeClientLeg? }
         private let clientBox: WeakClient
         private var client: MITMBridgeClientLeg? { clientBox.value }
@@ -228,50 +210,63 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             onReset(streamID)
         }
     }
+    
     private var bridgeStreams: [UInt32: BridgeStream] = [:]
-
-    /// Bounds concurrent upstream sockets per bridged client connection; excess streams
-    /// are refused (REFUSED_STREAM) so the client may retry later.
     private static let maxConcurrentBridgeStreams = 128
-
-    /// Per-stream cap on h2→h1 bridge upstream-bound bytes buffered or in flight. The client leg credits
-    /// the upload window eagerly (else one stalled stream freezes the multiplexed connection), so a fast
-    /// client to a slow h1 origin would otherwise grow memory unbounded. Over cap the stream is reset.
     private static let maxBridgeUpstreamBufferedBytes = 8 * 1024 * 1024
-
-    /// The first dial's established upstream connection. For h2 it's the multiplexed connection (kept
-    /// for the session); for h1.1 the first stream reuses it then clears it (others dial their own).
+    
     private var sharedUpstreamRecord: TLSRecordConnection?
     private var sharedUpstreamConnection: ProxyConnection?
     private var sharedUpstreamProxyClient: ProxyClient?
     private var sharedUpstreamTLSClient: TLSClient?
-
-    /// Active inbound/outbound rewriter for an HTTP/1.1 *inner* leg (h2 inner uses the decoupled
-    /// client leg above, not these).
+    
     private var inbound: any MITMMessageRewriter { requestStream }
     private var outbound: any MITMMessageRewriter { responseStream }
 
     private let h2Rewriter: MITMHTTP2Rewriter
-
-    /// Tracks the client's HTTP/2 receive windows so synthesized bodies are paced rather than
-    /// truncated; shared by both h2 legs.
+    
     private let h2FlowController = MITMHTTP2FlowController()
-
-    /// JS engine handle, shared per rule set; materializes only when a script rule fires.
+    
     private let scriptEngineProvider: MITMScriptEngine.Provider
-
-    /// Records the in-flight request's method+URL for response-phase scripts.
+    
     private let requestLog = MITMRequestLog()
 
     private var torn = false
 
+    // MARK: - Task tree
+    
+    private enum SessionJob: Sendable {
+        case mintLeaf(sni: String, alpns: [String], tlsVersions: Set<UInt16>)
+        case inboundPump(inner: any MITMByteLeg)
+        case outboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg)
+        case bridgeInboundPump(inner: TLSRecordConnection)
+        case h2UpstreamPump(record: TLSRecordConnection)
+        case bridgeUpstreamPump(streamID: UInt32)
+        case deferredDial(host: String, port: UInt16, innerALPN: String)
+        case outerHandshake(connection: ProxyConnection, host: String, innerALPN: String)
+        case firstUpstreamDial
+        case firstUpstreamHandshake(host: String, connection: ProxyConnection)
+        case bridgeStreamDial(streamID: UInt32, host: String, port: UInt16)
+        case bridgeStreamHandshake(streamID: UInt32, host: String)
+        case awaitDrain(pending: SerialSender.Pending, completion: DrainCompletion)
+    }
+    
+    private enum DrainCompletion: Sendable {
+        case cancelOnError
+        case thenCancel
+        case bridgeUpstream(streamID: UInt32, count: Int)
+    }
+
+    private let sessionJobs: AsyncStream<SessionJob>
+    private nonisolated let sessionJobContinuation: AsyncStream<SessionJob>.Continuation
+    
+    private func spawn(_ job: SessionJob) {
+        sessionJobContinuation.yield(job)
+    }
+    
+    private var rootTask: Task<Void, Never>?
+
     // MARK: - Deferred actions
-    //
-    // Upcalls from queue-confined child callbacks (stream hooks, writer completions, handshake
-    // timeouts) that must run off the caller's stack — a teardown mid-parse would be re-entrant.
-    // A callback yields an action instead of spawning an unowned `Task`; the single session-owned
-    // ``deferredActionsTask`` applies them in FIFO order. Same deferral as the former per-event
-    // task hops, but with ordering, ownership, and deterministic teardown.
 
     private enum DeferredAction {
         case cancel(reason: Error?)
@@ -283,17 +278,11 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     }
     private let deferredActions: AsyncStream<DeferredAction>
     private nonisolated let deferredActionContinuation: AsyncStream<DeferredAction>.Continuation
-    /// The single ordered consumer; spawned by ``start(sni:)``, ended by `cancel()` finishing the
-    /// channel (the loop then falls out on its own, releasing the strongly captured session).
-    private var deferredActionsTask: Task<Void, Never>?
-
-    /// Defers `action` off the current call stack; safe from any domain, ordered per producer.
+    
     private nonisolated func post(_ action: DeferredAction) {
         deferredActionContinuation.yield(action)
     }
-
-    /// Applies one deferred action on the actor; anything arriving after teardown drops at the
-    /// target method's own `torn` guard.
+    
     private func apply(_ action: DeferredAction) {
         switch action {
         case .cancel(let reason):
@@ -335,6 +324,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         self.isPlaintext = isPlaintext
         self.innerTransport = InnerTransport(lwipBridge: lwipBridge)
         (self.deferredActions, self.deferredActionContinuation) = AsyncStream.makeStream(of: DeferredAction.self)
+        (self.sessionJobs, self.sessionJobContinuation) = AsyncStream.makeStream(of: SessionJob.self)
         let scheme = isPlaintext ? "http" : "https"
         self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
         self.requestStream = MITMHTTP1Stream(
@@ -352,7 +342,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             scheme: scheme,
             phase: .httpResponse,
             policy: policy,
-            effectiveAuthority: nil, // Host headers do not apply on responses.
+            effectiveAuthority: nil,
             scriptEngineProvider: scriptEngineProvider,
             requestLog: requestLog,
             lwipBridge: lwipBridge
@@ -369,11 +359,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     // MARK: - Lifecycle
     
     func start(sni: String) {
-        deferredActionsTask = Task {
-            for await action in deferredActions {
-                apply(action)
-            }
-        }
+        rootTask = Task { await self.run() }
         installStreamHandlers()
         guard !isPlaintext else {
             startPlaintext()
@@ -394,6 +380,53 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         responseStream.assumeIsolated { $0.delegate = self }
     }
 
+    // MARK: - Task tree driver
+    
+    private func run() async {
+        await withDiscardingTaskGroup { group in
+            group.addTask { [deferredActions] in
+                for await action in deferredActions {
+                    await self.apply(action)
+                }
+            }
+            for await job in sessionJobs {
+                group.addTask { await self.runJob(job) }
+            }
+            group.cancelAll()
+        }
+    }
+
+    private func runJob(_ job: SessionJob) async {
+        switch job {
+        case .mintLeaf(let sni, let alpns, let tlsVersions):
+            await runLeafMint(sni: sni, alpns: alpns, tlsVersions: tlsVersions)
+        case .inboundPump(let inner):
+            await runInboundPump(inner: inner)
+        case .outboundPump(let inner, let outer):
+            await runOutboundPump(inner: inner, outer: outer)
+        case .bridgeInboundPump(let inner):
+            await runBridgeInboundPump(inner: inner)
+        case .h2UpstreamPump(let record):
+            await runH2UpstreamPump(record: record)
+        case .bridgeUpstreamPump(let streamID):
+            await runBridgeUpstreamPump(streamID: streamID)
+        case .deferredDial(let host, let port, let innerALPN):
+            await runDeferredDial(host: host, port: port, innerALPN: innerALPN)
+        case .outerHandshake(let connection, let host, let innerALPN):
+            await runOuterHandshake(over: connection, host: host, innerALPN: innerALPN)
+        case .firstUpstreamDial:
+            await runFirstUpstreamDial()
+        case .firstUpstreamHandshake(let host, let connection):
+            await runFirstUpstreamHandshake(host: host, connection: connection)
+        case .bridgeStreamDial(let streamID, let host, let port):
+            await runBridgeStreamDial(streamID: streamID, host: host, port: port)
+        case .bridgeStreamHandshake(let streamID, let host):
+            await runBridgeStreamHandshake(streamID: streamID, host: host)
+        case .awaitDrain(let pending, let completion):
+            await runAwaitDrain(pending: pending, completion: completion)
+        }
+    }
+
     private func startPlaintext() {
         let inner = PlaintextLeg(transport: innerTransport)
         if !pendingClientBytes.isEmpty {
@@ -401,7 +434,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             pendingClientBytes.removeAll(keepingCapacity: false)
         }
         innerRecord = inner
-        startInboundPump(inner: inner)
+        spawn(.inboundPump(inner: inner))
     }
 
     func feedClientBytes(_ data: Data) {
@@ -470,26 +503,29 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         pendingUpstreamBytes = Data()
         legSenders.removeAll()
         innerTransport.cancel()
+        sessionJobContinuation.finish()
         deferredActionContinuation.finish()
-        deferredActionsTask = nil
+        rootTask?.cancel()
+        rootTask = nil
         host?.mitmSessionDidTearDown(error: error)
     }
 
     // MARK: - Inner Handshake
 
     private func startInnerHandshake(sni: String, alpns: [String], tlsVersions: Set<UInt16>) {
+        guard leafCache != nil else { cancel(error: nil); return }
+        spawn(.mintLeaf(sni: sni, alpns: alpns, tlsVersions: tlsVersions))
+    }
+    
+    private func runLeafMint(sni: String, alpns: [String], tlsVersions: Set<UInt16>) async {
         guard let leafCache else { cancel(error: nil); return }
-        // Actor-isolated task: the leaf mint resumes on the actor (lwIP queue), so `torn` and the
-        // handshake state are plain isolated accesses.
-        Task {
-            do {
-                let leaf = try await leafCache.leaf(for: sni)
-                guard !torn else { return }
-                beginInnerHandshake(with: leaf, alpns: alpns, tlsVersions: tlsVersions)
-            } catch {
-                guard !torn else { return }
-                cancel(error: error)
-            }
+        do {
+            let leaf = try await leafCache.leaf(for: sni)
+            guard !torn else { return }
+            beginInnerHandshake(with: leaf, alpns: alpns, tlsVersions: tlsVersions)
+        } catch {
+            guard !torn else { return }
+            cancel(error: error)
         }
     }
     
@@ -522,7 +558,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         startInnerHandshake(sni: sni, alpns: alpns, tlsVersions: tlsVersions)
     }
 
-    // MARK: - Outer Handshake (deferred)
+    // MARK: - Outer Handshake
     
     private func startCleartextUpstream(over connection: ProxyConnection) {
         guard !torn, let inner = innerRecord else { connection.cancel(); return }
@@ -536,6 +572,11 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         host: String,
         innerALPN: String
     ) {
+        spawn(.outerHandshake(connection: connection, host: host, innerALPN: innerALPN))
+    }
+    
+    private func runOuterHandshake(over connection: ProxyConnection, host: String, innerALPN: String) async {
+        guard !torn else { connection.cancel(); return }
         let configuration = TLSConfiguration(
             serverName: host,
             alpn: [innerALPN],
@@ -548,43 +589,31 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         let disarm = armUpstreamHandshakeTimeout { [weak self] in
             self?.post(.failInnerLegWith502(reason: "upstream TLS handshake timed out"))
         }
-        Task {
-            do {
-                let record = try await client.connect(overTunnel: connection)
-                // Resumes on the actor (lwIP queue).
-                guard disarm() else { record.cancel(); connection.cancel(); return }
-                guard !torn, let inner = innerRecord else {
-                    // Handshake won the timeout race but the session was already torn down; cancel the
-                    // freshly-minted record too, not just the socket.
-                    record.cancel(); connection.cancel(); return
-                }
-                // We offered only http/1.1, so the peer must answer http/1.1 or no ALPN; anything
-                // else can't be shuttled h1↔h1.
-                guard record.negotiatedALPN.isEmpty || record.negotiatedALPN == "http/1.1" else {
-                    logger.warning("\(dstHost): unexpected upstream ALPN \"\(record.negotiatedALPN)\" for an http/1.1 leg; tearing down")
-                    cancel(error: nil)
-                    return
-                }
-                outerRecord = record
-                finishDialAndShuttle(inner: inner, outer: record)
-            } catch {
-                guard disarm() else { connection.cancel(); return }
-                guard !torn else { return }
-                // A cert-validation failure is a security signal: a 502 over the trusted inner leg
-                // would render as a padlocked error page and mask the origin's invalid cert. Tear
-                // down instead so the client surfaces a connection failure.
-                if Self.isCertVerifyFailure(error) {
-                    logger.warning("[MITM] \(dstHost): upstream certificate validation failed (\(AnywhereError.describe(error))); closing rather than masking as a 502")
-                    cancel(error: nil)
-                } else {
-                    failInnerLegWith502("upstream connect failed: \(AnywhereError.describe(error))")
-                }
+        do {
+            let record = try await client.connect(overTunnel: connection)
+            guard disarm() else { record.cancel(); connection.cancel(); return }
+            guard !torn, let inner = innerRecord else {
+                record.cancel(); connection.cancel(); return
+            }
+            guard record.negotiatedALPN.isEmpty || record.negotiatedALPN == "http/1.1" else {
+                logger.warning("\(dstHost): unexpected upstream ALPN \"\(record.negotiatedALPN)\" for an http/1.1 leg; tearing down")
+                cancel(error: nil)
+                return
+            }
+            outerRecord = record
+            finishDialAndShuttle(inner: inner, outer: record)
+        } catch {
+            guard disarm() else { connection.cancel(); return }
+            guard !torn else { return }
+            if Self.isCertVerifyFailure(error) {
+                logger.warning("[MITM] \(dstHost): upstream certificate validation failed (\(AnywhereError.describe(error))); closing rather than masking as a 502")
+                cancel(error: nil)
+            } else {
+                failInnerLegWith502("upstream connect failed: \(AnywhereError.describe(error))")
             }
         }
     }
-
-    /// True for an upstream TLS certificate-validation failure (vs a transport/timeout failure),
-    /// so the deferred-dial paths can reset instead of answering a trusted-looking 502.
+    
     private static func isCertVerifyFailure(_ error: Error) -> Bool {
         if case AnywhereError.tls(.certificateValidationFailed) = error { return true }
         return false
@@ -605,10 +634,10 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         if !buffered.isEmpty {
             sendChunkedCancellingOnError(buffered, via: outer)
         }
-        startOutboundPump(inner: inner, outer: outer)
+        spawn(.outboundPump(inner: inner, outer: outer))
         if inboundReadPaused {
             inboundReadPaused = false
-            startInboundPump(inner: inner)
+            spawn(.inboundPump(inner: inner))
         }
     }
     
@@ -646,88 +675,80 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         let pending = sender(for: record).submit {
             try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
         }
-        Task { [weak self] in
-            do { try await pending.value() }
-            catch { self?.post(.cancel(reason: error)) }
-        }
+        spawn(.awaitDrain(pending: pending, completion: .cancelOnError))
     }
-    
+
     private func sendChunkedThenCancel(_ data: Data, via record: any MITMByteLeg) {
         guard !torn else { return }
         let pending = sender(for: record).submit {
             try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
         }
-        Task { [weak self] in
+        spawn(.awaitDrain(pending: pending, completion: .thenCancel))
+    }
+    
+    private func runAwaitDrain(pending: SerialSender.Pending, completion: DrainCompletion) async {
+        switch completion {
+        case .cancelOnError:
+            do { try await pending.value() }
+            catch { post(.cancel(reason: error)) }
+        case .thenCancel:
             _ = try? await pending.value()
-            self?.post(.cancel(reason: nil))
+            post(.cancel(reason: nil))
+        case .bridgeUpstream(let streamID, let count):
+            var sendError: Error?
+            do { try await pending.value() } catch { sendError = error }
+            post(.bridgeUpstreamDrained(streamID: streamID, count: count, sendError: sendError))
         }
     }
     
-    private func startInboundPump(inner: any MITMByteLeg) {
-        Task {
+    private func runInboundPump(inner: any MITMByteLeg) async {
+        while true {
+            if torn { return }
             let data: Data?
-            let error: Error?
-            do { data = try await inner.receive(); error = nil }
-            catch let e { data = nil; error = e }
-            if let error {
+            do { data = try await inner.receive() }
+            catch {
                 guard !torn else { return }
                 cancel(error: error)
                 return
             }
-            guard let data, !data.isEmpty else {
-                return
-            }
+            guard let data, !data.isEmpty else { return }
+
             let transformed = await inbound.feed(data)
-            await routeInbound(inner: inner, transformed: transformed)
-        }
-    }
-    
-    private func routeInbound(inner: any MITMByteLeg, transformed: Data) async {
-        enum Route { case stop, recurse, sendUpstream(any MITMByteLeg) }
-        let route: Route
-        if torn {
-            route = .stop
-        } else {
+            if torn { return }
+
             let injected = inbound.drainPendingClientBytes()
             if !injected.isEmpty {
                 sendChunkedCancellingOnError(injected, via: inner)
             }
-            if transformed.isEmpty {
-                route = .recurse
-            } else if let outer = outerRecord {
-                if resolvedUpstreamMatchesDialed() {
-                    route = .sendUpstream(outer)
-                } else {
-                    if canReconnectOuterLeg() {
-                        reconnectOuterLeg(with: transformed, inner: inner)
-                    } else {
-                        logger.warning("\(dstHost): request resolved a different upstream while the leg was busy; tearing down so the client retries")
-                        cancel(error: nil)
-                    }
-                    route = .stop
-                }
-            } else {
+
+            if transformed.isEmpty { continue }
+
+            guard let outer = outerRecord else {
                 bufferUpstreamAndDial(transformed, inner: inner)
-                route = .stop
-            }
-        }
-        switch route {
-        case .stop:
-            return
-        case .recurse:
-            startInboundPump(inner: inner)
-        case .sendUpstream(let outer):
-            do {
-                try await sendChunked(transformed, via: outer)
-            } catch {
-                guard !torn else { return }
-                cancel(error: error)
                 return
             }
-            startInboundPump(inner: inner)
+
+            if resolvedUpstreamMatchesDialed() {
+                do {
+                    try await sendChunked(transformed, via: outer)
+                } catch {
+                    guard !torn else { return }
+                    cancel(error: error)
+                    return
+                }
+                continue
+            }
+
+            if canReconnectOuterLeg() {
+                reconnectOuterLeg(with: transformed, inner: inner)
+            } else {
+                logger.warning("\(dstHost): request resolved a different upstream while the leg was busy; tearing down so the client retries")
+                cancel(error: nil)
+            }
+            return
         }
     }
-    
+
     private func bufferUpstreamAndDial(_ transformed: Data, inner: any MITMByteLeg) {
         pendingUpstreamBytes.append(transformed)
         if pendingUpstreamBytes.count > Self.maxPendingUpstreamBytes {
@@ -752,34 +773,40 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         dialedPort = port
         let negotiatedInnerALPN = innerRecord?.negotiatedALPN ?? ""
         let innerALPN = negotiatedInnerALPN.isEmpty ? "http/1.1" : negotiatedInnerALPN
+        guard self.host != nil else {
+            failInnerLegWith502("upstream connect failed: session detached")
+            return
+        }
+        spawn(.deferredDial(host: host, port: port, innerALPN: innerALPN))
+        resumeOrPauseInboundPreDial(inner: inner)
+    }
+    
+    private func runDeferredDial(host: String, port: UInt16, innerALPN: String) async {
         guard let sessionHost = self.host else {
             failInnerLegWith502("upstream connect failed: session detached")
             return
         }
-        Task {
-            do {
-                let dial = try await sessionHost.mitmDialUpstream(host: host, port: port)
-                guard !torn else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
-                proxyClient = dial.proxyClient
-                outerConnection = dial.connection
-                if isPlaintext {
-                    startCleartextUpstream(over: dial.connection)
-                } else {
-                    startOuterHandshakeAfterDial(over: dial.connection, host: host, innerALPN: innerALPN)
-                }
-            } catch {
-                guard !torn else { return }
-                failInnerLegWith502("upstream connect failed: \(AnywhereError.describe(error))")
+        do {
+            let dial = try await sessionHost.mitmDialUpstream(host: host, port: port)
+            guard !torn else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
+            proxyClient = dial.proxyClient
+            outerConnection = dial.connection
+            if isPlaintext {
+                startCleartextUpstream(over: dial.connection)
+            } else {
+                startOuterHandshakeAfterDial(over: dial.connection, host: host, innerALPN: innerALPN)
             }
+        } catch {
+            guard !torn else { return }
+            failInnerLegWith502("upstream connect failed: \(AnywhereError.describe(error))")
         }
-        resumeOrPauseInboundPreDial(inner: inner)
     }
-    
+
     private func resumeOrPauseInboundPreDial(inner: any MITMByteLeg) {
         if pendingUpstreamBytes.count >= Self.maxPendingClientBytes {
             inboundReadPaused = true
         } else {
-            startInboundPump(inner: inner)
+            spawn(.inboundPump(inner: inner))
         }
     }
     
@@ -822,26 +849,16 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         inboundReadPaused = false
         bufferUpstreamAndDial(transformed, inner: inner)
     }
-
-    /// One-shot winner gate for the deferred-handshake race, shared by the deadline hop and the
-    /// disarm closure.
+    
     private final class HandshakeRaceGate: Sendable {
         private let settled = Atomic(false)
         func claim() -> Bool {
             settled.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged
         }
     }
-
-    /// Bounds a deferred upstream TLS handshake. The per-connection `handshakeTimer` is cancelled once
-    /// the session takes over the inner handshake, so the outer handshake would otherwise have only the
-    /// 300–600 s idle timer, letting a black-holing origin park the connection for minutes. The deadline
-    /// is a cancellable `Task`+`Task.sleep`; the returned `disarm` closure — called on lwipQueue by the
-    /// completion — returns `true` if the handshake won the race, `false` if the timeout already fired
-    /// (``HandshakeRaceGate/claim`` picks the single winner).
+    
     private func armUpstreamHandshakeTimeout(_ onTimeout: @escaping @Sendable () -> Void) -> () -> Bool {
         let gate = HandshakeRaceGate()
-        // No `self`: the gate picks the single winner and `onTimeout` hops onto the actor itself
-        // (and its handler re-guards `torn`), so the timer task carries no isolated state.
         let task = Task {
             try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
             guard !Task.isCancelled, gate.claim() else { return }
@@ -853,11 +870,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             return true
         }
     }
-
-    /// Answers the HTTP/1.1 client with a 502 over the established inner leg, then closes gracefully.
-    /// Used when the deferred upstream dial/handshake fails or the response stream rejects a malformed
-    /// / oversized upstream response, instead of a bare TCP reset that hides the cause. h1 inner only;
-    /// an h2 inner leg uses `failPendingBridgeRequests` / `failStream`.
+    
     private func failInnerLegWith502(_ reason: String) {
         guard !torn else { return }
         guard let inner = innerRecord else { cancel(error: nil); return }
@@ -871,8 +884,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         response.append(body)
         sendChunkedThenCancel(response, via: inner)
     }
-
-    /// 101/CONNECT-2xx: flips the request leg to passthrough and flushes its buffer. HTTP/1 only.
+    
     private func handleResponseUpgrade() {
         guard !torn else { return }
         let buffered = requestStream.assumeIsolated { $0.forcePassthrough() }
@@ -904,32 +916,21 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         guard stream.bridgeClientStreamID == nil else { return }
         post(.cancel(reason: nil))
     }
-
-    private func startOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) {
-        Task {
+    
+    private func runOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) async {
+        while true {
             let data: Data?
             let error: Error?
             do { data = try await outer.receive(); error = nil }
             catch let e { data = nil; error = e }
-            // Resumes on the actor. A swapped-out leg (host-change reconnect) is ignored so its EOF
-            // can't tear down the session or the replacement leg.
-            enum Step { case stop, eof, feed(Data) }
-            let step: Step
             if outerRecord !== outer {
-                step = .stop
-            } else if let error {
-                cancel(error: error)
-                step = .stop
-            } else if let data, !data.isEmpty {
-                step = .feed(data)
-            } else {
-                step = .eof
-            }
-            switch step {
-            case .stop:
                 return
-            case .eof:
-                // Upstream half-closed: an HTTP/1 close terminates the body, so flush buffered rewrites.
+            }
+            if let error {
+                cancel(error: error)
+                return
+            }
+            guard let data, !data.isEmpty else {
                 let flushed = await responseStream.finish()
                 guard !torn else { return }
                 if flushed.isEmpty {
@@ -937,21 +938,16 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 } else {
                     sendChunkedThenCancel(flushed, via: inner)
                 }
-            case .feed(let data):
-                let transformed = await outbound.feed(data)
-                if transformed.isEmpty {
-                    // Torn resumes the parked continuation via markTorn; recurse re-checks state.
-                    startOutboundPump(inner: inner, outer: outer)
-                    return
-                }
-                do {
-                    try await sendChunked(transformed, via: inner)
-                } catch {
-                    guard !torn else { return }
-                    cancel(error: error)
-                    return
-                }
-                startOutboundPump(inner: inner, outer: outer)
+                return
+            }
+            let transformed = await outbound.feed(data)
+            if transformed.isEmpty { continue }
+            do {
+                try await sendChunked(transformed, via: inner)
+            } catch {
+                guard !torn else { return }
+                cancel(error: error)
+                return
             }
         }
     }
@@ -960,11 +956,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
 // MARK: - TLSServerDelegate
 
 extension MITMSession: TLSServerDelegate {
-
-    // `TLSServer` is a nonisolated collaborator that invokes these synchronously from `feed(_:)`,
-    // which the session drives on the lwIP queue — so the conformance is `nonisolated` and enters
-    // the actor's isolation through `assumeIsolated`.
-
     nonisolated func tlsServer(_ server: TLSServer, didProduceOutput data: Data) {
         assumeIsolated { $0.emitToClient(data) }
     }
@@ -984,14 +975,11 @@ extension MITMSession: TLSServerDelegate {
     }
 
     private func completeInnerHandshake(record: TLSRecordConnection, trailer: Data) {
-        // The inner leg's byte transport is the lwIP-attached async-native `InnerTransport`.
         record.adoptTransport(innerTransport)
         record.prependToReceiveBuffer(trailer)
         innerRecord = record
         tlsServer = nil
-
-        // An h2 client decodes into neutral request IR via the decoupled client leg; the upstream leg
-        // (h2 or http/1.1) is bound after the first dial. An h1.1 client uses the byte-shuttle below.
+        
         if record.negotiatedALPN == "h2" {
             let client = MITMBridgeClientLeg(
                 host: dstHost,
@@ -999,15 +987,13 @@ extension MITMSession: TLSServerDelegate {
                 flowController: h2FlowController,
                 lwipBridge: lwipBridge
             )
-            // The leg shares this actor's lwIP executor, so enter its isolation synchronously to
-            // wire the delegate before it's published.
             client.assumeIsolated { $0.delegate = self }
             bridgeClient = client
-            startBridgeInboundPump(inner: record)
+            spawn(.bridgeInboundPump(inner: record))
             return
         }
 
-        startInboundPump(inner: record)
+        spawn(.inboundPump(inner: record))
     }
 
     nonisolated func tlsServer(_ server: TLSServer, didFail error: AnywhereError) {
@@ -1018,8 +1004,8 @@ extension MITMSession: TLSServerDelegate {
 // MARK: - h2 → http/1.1 bridge
 
 extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
-    private func startBridgeInboundPump(inner: TLSRecordConnection) {
-        Task {
+    private func runBridgeInboundPump(inner: TLSRecordConnection) async {
+        while true {
             let data: Data?
             let error: Error?
             do { data = try await inner.receive(); error = nil }
@@ -1031,7 +1017,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
                 return
             }
             await client.feed(data)
-            startBridgeInboundPump(inner: inner)
         }
     }
 
@@ -1098,8 +1083,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         case .h2:
             h2Upstream?.assumeIsolated { $0.sendRequestTrailers(streamID: streamID, trailers) }
         case .h1:
-            // h1 request trailers require chunked framing and are seldom honored upstream; end the body
-            // without them rather than risk a malformed chunked trailer section.
             logger.warning("\(dstHost): dropping h2 request trailers toward h1 upstream stream \(streamID)")
             appendH1RequestData(streamID: streamID, Data(), endStream: true)
         case .undetermined:
@@ -1123,8 +1106,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         assumeIsolated { $0.responseCompleteUpstream(streamID: streamID) }
     }
     private func responseCompleteUpstream(streamID: UInt32) {
-        // h1: close the per-stream upstream (close-after-response). h2: the multiplexed connection
-        // persists for other streams.
         if upstreamProtocol == .h1 { bridgeAbortStream(streamID) }
     }
 
@@ -1133,6 +1114,10 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     private func startFirstUpstreamDial() {
         guard !firstUpstreamDialStarted else { return }
         firstUpstreamDialStarted = true
+        spawn(.firstUpstreamDial)
+    }
+    
+    private func runFirstUpstreamDial() async {
         let firstHead = pendingRequestEvents.lazy.compactMap { event -> MITMRequestHead? in
             if case .head(let head, _, _) = event { return head }
             return nil
@@ -1141,24 +1126,18 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         let dialHost = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
         guard let host else { failPendingBridgeRequests(error: AnywhereError.transport(.notConnected)); return }
-        Task {
-            do {
-                let dial = try await host.mitmDialUpstream(host: dialHost, port: port)
-                guard !torn else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
-                sharedUpstreamProxyClient = dial.proxyClient
-                sharedUpstreamConnection = dial.connection
-                startFirstUpstreamHandshake(host: dialHost, connection: dial.connection)
-            } catch {
-                guard !torn else { return }
-                failPendingBridgeRequests(error: error)
-            }
+        do {
+            let dial = try await host.mitmDialUpstream(host: dialHost, port: port)
+            guard !torn else { dial.connection.cancel(); await dial.proxyClient?.cancel(); return }
+            sharedUpstreamProxyClient = dial.proxyClient
+            sharedUpstreamConnection = dial.connection
+            startFirstUpstreamHandshake(host: dialHost, connection: dial.connection)
+        } catch {
+            guard !torn else { return }
+            failPendingBridgeRequests(error: error)
         }
     }
-
-    /// First upstream dial/handshake failed (the protocol probe all pending streams share). Answer
-    /// every pending stream with a 502 and keep the h2 client connection up, resetting dial state so a
-    /// later request re-probes, rather than tear the whole multiplexed connection down for a possibly
-    /// transient failure.
+    
     private func failPendingBridgeRequests(error: Error) {
         guard !torn else { return }
         logger.warning("[MITM] \(dstHost): first upstream connect failed: \(AnywhereError.describe(error)); answering pending streams 502, keeping the connection")
@@ -1179,6 +1158,11 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     }
 
     private func startFirstUpstreamHandshake(host: String, connection: ProxyConnection) {
+        spawn(.firstUpstreamHandshake(host: host, connection: connection))
+    }
+    
+    private func runFirstUpstreamHandshake(host: String, connection: ProxyConnection) async {
+        guard !torn else { connection.cancel(); return }
         let configuration = TLSConfiguration(
             serverName: host,
             alpn: ["h2", "http/1.1"],
@@ -1191,30 +1175,24 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         let disarm = armUpstreamHandshakeTimeout { [weak self] in
             self?.post(.failPendingBridgeRequests(reason: AnywhereError.mitm(.upstreamHandshakeTimeout)))
         }
-        Task {
-            do {
-                let record = try await client.connect(overTunnel: connection)
-                guard disarm() else { record.cancel(); connection.cancel(); return }
-                guard !torn else { record.cancel(); connection.cancel(); return }
-                sharedUpstreamRecord = record
-                if record.negotiatedALPN == "h2" {
-                    bindH2Upstream(record: record)
-                } else {
-                    bindH1Upstream()
-                }
-            } catch {
-                guard disarm() else { connection.cancel(); return }
-                guard !torn else { return }
-                // A cert-validation failure is a security signal: a 502 over the trusted inner leg
-                // renders as a padlocked error page and masks the origin's invalid cert. Tear down
-                // so the client surfaces a connection failure; a transient failure still 502s and
-                // re-probes.
-                if Self.isCertVerifyFailure(error) {
-                    logger.warning("[MITM] \(dstHost): upstream certificate validation failed (\(AnywhereError.describe(error))); closing rather than masking as a 502")
-                    cancel(error: nil)
-                } else {
-                    failPendingBridgeRequests(error: error)
-                }
+        do {
+            let record = try await client.connect(overTunnel: connection)
+            guard disarm() else { record.cancel(); connection.cancel(); return }
+            guard !torn else { record.cancel(); connection.cancel(); return }
+            sharedUpstreamRecord = record
+            if record.negotiatedALPN == "h2" {
+                bindH2Upstream(record: record)
+            } else {
+                bindH1Upstream()
+            }
+        } catch {
+            guard disarm() else { connection.cancel(); return }
+            guard !torn else { return }
+            if Self.isCertVerifyFailure(error) {
+                logger.warning("[MITM] \(dstHost): upstream certificate validation failed (\(AnywhereError.describe(error))); closing rather than masking as a 502")
+                cancel(error: nil)
+            } else {
+                failPendingBridgeRequests(error: error)
             }
         }
     }
@@ -1245,21 +1223,19 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
                 }
             }
         }
-        startH2UpstreamPump(record: record)
+        spawn(.h2UpstreamPump(record: record))
     }
-
-    private func startH2UpstreamPump(record: TLSRecordConnection) {
-        Task {
+    
+    private func runH2UpstreamPump(record: TLSRecordConnection) async {
+        while true {
             let data: Data?
             let error: Error?
             do { data = try await record.receive(); error = nil }
             catch let e { data = nil; error = e }
-            // Resumes on the actor.
             guard !torn, let leg = h2Upstream else { return }
             if let error { cancel(error: error); return }
             guard let data, !data.isEmpty else { cancel(error: nil); return }
             await leg.feed(data)
-            startH2UpstreamPump(record: record)
         }
     }
     
@@ -1285,7 +1261,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     private func bindH1Upstream() {
         upstreamProtocol = .h1
         logger.info("\(dstHost): bridging h2 client to http/1.1 upstream")
-        // The shared connection is reused by the first stream in openH1Stream.
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
         for event in events {
@@ -1322,8 +1297,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         responseStream.assumeIsolated { $0.delegate = self }
         let bs = BridgeStream(clientStreamID: streamID, responseStream: responseStream, responseLog: responseLog)
         let irSink = BridgeResponseIRSink(streamID: streamID, client: bridgeClient) { [weak self] sid in
-            // RST the client stream now (fires on the lwIP queue = the actor's executor); free the
-            // dead h1 upstream after the current `transform` returns via the deferred-action channel.
             self?.assumeIsolated { me in me.bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: sid) } }
             self?.post(.abortBridgeStream(streamID: sid, acceptResponseAborted: false))
         }
@@ -1335,7 +1308,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         bridgeStreams[streamID] = bs
 
         if let record = sharedUpstreamRecord {
-            // Reuse the established probe connection for the first stream.
             sharedUpstreamRecord = nil
             bs.proxyClient = sharedUpstreamProxyClient; sharedUpstreamProxyClient = nil
             bs.connection = sharedUpstreamConnection; sharedUpstreamConnection = nil
@@ -1344,34 +1316,32 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             bs.handshakeDone = true
             let pending = bs.pendingToUpstream; bs.pendingToUpstream = Data()
             flushToBridgeUpstream(pending, streamID: streamID, record: record)
-            startBridgeUpstreamPump(streamID: streamID)
+            spawn(.bridgeUpstreamPump(streamID: streamID))
             return
         }
-
-        // Per-stream dial target from the head (`MITMRequestHead.resolvedUpstream`), captured at this
-        // request's own rewrite time, not the rewriter's shared last-write-wins field — a request
-        // buffered for a body script/rule dials after an async hop a concurrent stream could overwrite.
+        
         let resolved = head.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
+        guard self.host != nil else { bridgeAbortStream(streamID); return }
+        spawn(.bridgeStreamDial(streamID: streamID, host: host, port: port))
+    }
+    
+    private func runBridgeStreamDial(streamID: UInt32, host: String, port: UInt16) async {
         guard let sessionHost = self.host else { bridgeAbortStream(streamID); return }
-        Task {
-            do {
-                let dial = try await sessionHost.mitmDialUpstream(host: host, port: port)
-                guard !torn, let bs = bridgeStreams[streamID] else {
-                    dial.connection.cancel(); await dial.proxyClient?.cancel(); return
-                }
-                bs.proxyClient = dial.proxyClient
-                bs.connection = dial.connection
-                startBridgeUpstreamHandshake(streamID: streamID, host: host)
-            } catch {
-                guard !torn else { return }
-                // Inner leg is up; answer the stream with a 502 rather than a bare RST_STREAM that
-                // hides a transient upstream-connect failure.
-                logger.warning("\(dstHost): h1 upstream dial failed for stream \(streamID): \(AnywhereError.describe(error))")
-                bridgeAbortStream(streamID)
-                await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
+        do {
+            let dial = try await sessionHost.mitmDialUpstream(host: host, port: port)
+            guard !torn, let bs = bridgeStreams[streamID] else {
+                dial.connection.cancel(); await dial.proxyClient?.cancel(); return
             }
+            bs.proxyClient = dial.proxyClient
+            bs.connection = dial.connection
+            startBridgeUpstreamHandshake(streamID: streamID, host: host)
+        } catch {
+            guard !torn else { return }
+            logger.warning("\(dstHost): h1 upstream dial failed for stream \(streamID): \(AnywhereError.describe(error))")
+            bridgeAbortStream(streamID)
+            await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
         }
     }
 
@@ -1408,11 +1378,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         let pending = sender(for: record).submit {
             try await Self.drainChunked(data, over: record, chunkSize: Self.pumpChunkSize)
         }
-        Task { [weak self] in
-            var sendError: Error?
-            do { try await pending.value() } catch { sendError = error }
-            self?.post(.bridgeUpstreamDrained(streamID: streamID, count: count, sendError: sendError))
-        }
+        spawn(.awaitDrain(pending: pending, completion: .bridgeUpstream(streamID: streamID, count: count)))
     }
 
     private func noteBridgeUpstreamDrained(streamID: UInt32, count: Int, sendError: Error?) {
@@ -1432,22 +1398,24 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         }
         bs.responseStream.assumeIsolated { $0.markTorn() }
     }
-
-    /// Deferred abort of a bridge stream, hopped onto the actor from a stream hook. When
-    /// `acceptResponseAborted` is set it also notifies the client leg (response-fatal path).
+    
     private func abortBridgeStream(_ streamID: UInt32, acceptResponseAborted: Bool) {
         bridgeAbortStream(streamID)
         if acceptResponseAborted { bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) } }
     }
-
-    /// Per-stream upstream TLS handshake (offers only http/1.1 — the origin is known h1).
+    
     private func startBridgeUpstreamHandshake(streamID: UInt32, host: String) {
+        guard bridgeStreams[streamID]?.connection != nil else { return }
+        spawn(.bridgeStreamHandshake(streamID: streamID, host: host))
+    }
+    
+    private func runBridgeStreamHandshake(streamID: UInt32, host: String) async {
         guard let bs = bridgeStreams[streamID], let connection = bs.connection else { return }
         let configuration = TLSConfiguration(
             serverName: host,
             alpn: ["http/1.1"],
             minVersion: .tls12,
-            maxVersion: .tls13, // upstream TLS leg is independent of the client leg — don't cap it to the client's version
+            maxVersion: .tls13,
             fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
@@ -1455,51 +1423,42 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         let disarm = armUpstreamHandshakeTimeout { [weak self] in
             self?.post(.failBridgeStreamOnTimeout(streamID: streamID))
         }
-        Task {
-            do {
-                let record = try await client.connect(overTunnel: connection)
-                guard disarm() else { record.cancel(); connection.cancel(); return }
-                guard !torn, let bs = bridgeStreams[streamID] else {
-                    record.cancel(); connection.cancel(); return
-                }
-                bs.upstreamRecord = record
-                bs.handshakeDone = true
-                let pending = bs.pendingToUpstream
-                bs.pendingToUpstream = Data()
-                flushToBridgeUpstream(pending, streamID: streamID, record: record)
-                startBridgeUpstreamPump(streamID: streamID)
-            } catch {
-                guard disarm() else { connection.cancel(); return }
-                guard !torn else { return }
-                // A cert-validation failure is host-level (the origin's cert is invalid for every
-                // stream to it): a 502 over the trusted inner leg would mask it as a padlocked page,
-                // so tear the connection down. A transient TLS/transport failure still 502s this
-                // stream instead of a bare RST.
-                if Self.isCertVerifyFailure(error) {
-                    logger.warning("\(dstHost): bridge upstream certificate validation failed for stream \(streamID) (\(AnywhereError.describe(error))); closing rather than masking as a 502")
-                    cancel(error: nil)
-                } else {
-                    logger.warning("\(dstHost): bridge upstream TLS failed for stream \(streamID): \(AnywhereError.describe(error))")
-                    bridgeAbortStream(streamID)
-                    await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
-                }
+        do {
+            let record = try await client.connect(overTunnel: connection)
+            guard disarm() else { record.cancel(); connection.cancel(); return }
+            guard !torn, let bs = bridgeStreams[streamID] else {
+                record.cancel(); connection.cancel(); return
+            }
+            bs.upstreamRecord = record
+            bs.handshakeDone = true
+            let pending = bs.pendingToUpstream
+            bs.pendingToUpstream = Data()
+            flushToBridgeUpstream(pending, streamID: streamID, record: record)
+            spawn(.bridgeUpstreamPump(streamID: streamID))
+        } catch {
+            guard disarm() else { connection.cancel(); return }
+            guard !torn else { return }
+            if Self.isCertVerifyFailure(error) {
+                logger.warning("\(dstHost): bridge upstream certificate validation failed for stream \(streamID) (\(AnywhereError.describe(error))); closing rather than masking as a 502")
+                cancel(error: nil)
+            } else {
+                logger.warning("\(dstHost): bridge upstream TLS failed for stream \(streamID): \(AnywhereError.describe(error))")
+                bridgeAbortStream(streamID)
+                await bridgeClient?.failStream(streamID: streamID, status: 502, message: "Bad Gateway")
             }
         }
     }
-
-    /// Answers a bridge stream 502 after its per-stream upstream handshake timed out.
+    
     private func failBridgeStreamOnTimeout(_ streamID: UInt32) {
         guard !torn else { return }
         logger.warning("\(dstHost): bridge upstream TLS timed out for stream \(streamID); answering 502")
         bridgeAbortStream(streamID)
         bridgeClient?.assumeIsolated { $0.failStream(streamID: streamID, status: 502, message: "Bad Gateway") }
     }
-
-    /// Reads the upstream response, runs it through the per-stream response rewriter,
-    /// and hands the rewritten http/1.1 bytes to the client leg to re-encode as h2.
-    private func startBridgeUpstreamPump(streamID: UInt32) {
+    
+    private func runBridgeUpstreamPump(streamID: UInt32) async {
         guard let record = bridgeStreams[streamID]?.upstreamRecord else { return }
-        Task {
+        while true {
             let data: Data?
             let error: Error?
             do { data = try await record.receive(); error = nil }
@@ -1527,20 +1486,14 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             case .stop:
                 return
             case .eof(let responseStream):
-                // Upstream half-closed: a read-until-close body terminates here, so flush the buffered
-                // remainder first, then signal EOF (the IR end / reset was delivered via the sink).
                 _ = await responseStream.finish()
                 guard !torn else { return }
-                // A clean completion already closed the upstream (clientLegResponseComplete);
-                // otherwise drop the now-dead upstream rather than pin it until teardown.
                 if bridgeStreams[streamID] != nil { bridgeAbortStream(streamID) }
+                return
             case .transform(let responseStream, let data):
-                // The rewritten response is delivered as IR via the sink during `transform`; it may
-                // complete and close this stream's upstream.
                 _ = await responseStream.transform(data)
                 guard !torn else { return }
                 guard bridgeStreams[streamID] != nil else { return }
-                startBridgeUpstreamPump(streamID: streamID)
             }
         }
     }

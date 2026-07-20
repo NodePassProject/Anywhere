@@ -10,8 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptHTTP2")
 
-// MARK: - MITMScriptHTTP2Connection
-
 nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     // MARK: Phase
@@ -19,25 +17,19 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     enum Phase: Equatable {
         case idle
         case connecting
-        /// Client preface + SETTINGS sent, awaiting the server's SETTINGS.
         case prefaceSent
         case ready
-        /// GOAWAY received — existing streams finish, no new streams.
         case goingAway
         case closed
     }
 
     // MARK: Flow-control / SETTINGS profile
-
-    /// Advertised per-stream receive window; also our SETTINGS_INITIAL_WINDOW_SIZE.
-    private static let streamRecvWindow = 4 * 1024 * 1024
-    /// Advertised connection receive window; sized to the client's 16 MiB global in-flight budget.
-    private static let connectionRecvWindow = 16 * 1024 * 1024
+    
+    private static let streamReceiveWindow = 4 * 1024 * 1024
+    private static let connectionReceiveWindow = 16 * 1024 * 1024
     private static let maxFrameSize: UInt32 = 16_384
     private static let headerTableSize: UInt32 = 65_536
-    /// Bounds a single decoded header list and the accumulated CONTINUATION block.
     private static let maxHeaderListSize = 262_144
-    /// Keeps in-flight bodies bounded under the NE memory budget; beyond this the pool opens another connection.
     private static let ownMaxConcurrentStreams: UInt32 = 32
 
     private static let httpVersionDefaultWindow = 65_535
@@ -51,10 +43,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     let port: UInt16
     let insecure: Bool
 
-    // MARK: Serial state (behind `lock`)
-
-    /// Guards all mutable connection + per-stream send-window state. Never held across a call into
-    /// a stream, a transport send, or a continuation resume.
+    // MARK: Serial state
+    
     private struct State {
         var phase: Phase = .idle
 
@@ -63,8 +53,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         var connection: ProxyConnection?
 
         var streams: [UInt32: MITMScriptHTTP2Stream] = [:]
-        /// Per-stream *send* flow-control window (bytes we may still send on that stream). Presence
-        /// also tracks liveness — a removed/finished stream has no entry, so a build pass sees it gone.
         var sendWindows: [UInt32: Int] = [:]
         var nextStreamID: UInt32 = 1
         var maxConcurrentStreams: UInt32 = MITMScriptHTTP2Connection.ownMaxConcurrentStreams
@@ -74,48 +62,29 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         var peerInitialWindowSize = MITMScriptHTTP2Connection.httpVersionDefaultWindow
 
         var receiveBuffer = Data()
-        /// In-progress header block: the initiating HEADERS' flags + accumulated fragment (RFC 7540 §6.10).
         var pendingHeaders: (streamID: UInt32, flags: UInt8, block: Data)?
-
-        /// Send-side parks waiting on a WINDOW_UPDATE that re-opens flow control (or a stream/session end).
+        
         var flowGate = H2FlowGate()
 
         var negotiatedHTTP1 = false
-
-        /// The transport read loop. Strong self: the loop owns the connection while receiving;
-        /// `teardown` cancels it and the transport, ending the parked receive.
-        var readTask: Task<Void, Never>?
-
-        /// Bounds the pre-ready dial + TLS + SETTINGS phase (TLSClient has no built-in timeout).
-        /// Cancelled once `.ready` is reached and on teardown.
-        var setupDeadlineTask: Task<Void, Never>?
-
-        /// HPACK dynamic table for inbound HEADERS. Confined to the read-loop task (headers decode
-        /// serially there), but kept in `State` so the connection has no non-`Sendable` stored
-        /// property; the decode runs under the lock's synchronous, uncontended critical section.
+        
+        var rootTask: Task<Void, Never>?
+        
         var hpackDecoder = HPACKDecoder()
     }
     private let lock = Mutex(State())
-
-    /// Readiness latch coalescing every awaiter behind one handshake: the setup path finishes
-    /// `readySignal` when SETTINGS lands (throwing on goaway/close), and every awaiter observes that
-    /// one outcome via `readyTask.value` (broadcast, cached once resolved). Replaces the old
-    /// `[CheckedContinuation]` waiter array.
+    
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
-
-    /// Called once when the connection becomes permanently unusable, so the pool can evict it.
-    /// Immutable — installed at creation, before the connection is shared.
+    
     private let onClose: (@Sendable (MITMScriptHTTP2Connection) -> Void)?
-    /// Called once when the origin is discovered to be HTTP/1.1-only, so the pool can cache it.
-    /// Immutable — installed at creation.
+    
     private let onNegotiatedHTTP1: (@Sendable () -> Void)?
 
-    // MARK: Pool-visible snapshot (held in a Mutex, read off-lock by the pool)
+    // MARK: Pool-visible snapshot
 
     private struct PoolSnapshot {
         var state: Phase = .idle
-        /// `streams.count + reserved`, so a slot claimed by an in-flight `perform` isn't lost to `refreshPoolSnapshot`.
         var streamCount = 0
         var reserved = 0
         var maxConcurrent: UInt32 = MITMScriptHTTP2Connection.ownMaxConcurrentStreams
@@ -135,6 +104,40 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         let (readyStream, readySignal) = AsyncThrowingStream.makeStream(of: Never.self)
         self.readySignal = readySignal
         self.readyTask = Task { for try await _ in readyStream {} }
+        (self.jobs, self.jobContinuation) = AsyncStream.makeStream(of: ConnectionJob.self)
+    }
+
+    // MARK: - Task tree
+    
+    private enum ConnectionJob: Sendable {
+        case setup
+        case setupDeadline
+        case readLoop
+    }
+    private let jobs: AsyncStream<ConnectionJob>
+    private let jobContinuation: AsyncStream<ConnectionJob>.Continuation
+    
+    private let setupDonePoke = AsyncInbox<Void>(capacity: 1)
+
+    private func spawn(_ job: ConnectionJob) {
+        jobContinuation.yield(job)
+    }
+    
+    private func run() async {
+        await withDiscardingTaskGroup { group in
+            for await job in jobs {
+                group.addTask { await self.runJob(job) }
+            }
+            group.cancelAll()
+        }
+    }
+
+    private func runJob(_ job: ConnectionJob) async {
+        switch job {
+        case .setup: await runSetup()
+        case .setupDeadline: await runSetupDeadline()
+        case .readLoop: await runReadLoop()
+        }
     }
 
     // MARK: - Multiplexer
@@ -142,10 +145,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     var isClosed: Bool { poolSnapshot.withLock { $0.state == .closed } }
     var activeStreamCount: Int { poolSnapshot.withLock { $0.streamCount } }
     var poolIsGoingAway: Bool { poolSnapshot.withLock { $0.state == .goingAway } }
-
-    /// Atomically checks capacity and reserves a stream slot; accepts in-progress connections so a
-    /// burst of requests coalesces behind one handshake. The caller MUST follow up with `perform`,
-    /// which releases the reservation exactly once.
+    
     func tryReserveStream() -> Bool {
         poolSnapshot.withLock { snapshot in
             switch snapshot.state {
@@ -162,9 +162,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     private func releaseReservation() {
         poolSnapshot.withLock { if $0.reserved > 0 { $0.reserved -= 1 } }
     }
-
-    /// Republishes the pool-visible snapshot from the current state. Reads `lock` and writes
-    /// `poolSnapshot` sequentially (never nested) so the two mutexes can't deadlock.
+    
     private func refreshPoolSnapshot() {
         let (phase, count, maxConcurrent) = lock.withLock { ($0.phase, $0.streams.count, $0.maxConcurrentStreams) }
         poolSnapshot.withLock { snapshot in
@@ -175,9 +173,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     // MARK: - Request entry point
-
-    /// Runs one request/response on a new stream. A reservation must already have been made by the
-    /// pool (see `tryReserveStream`); this releases it exactly once.
+    
     func perform(
         request: URLRequest,
         hostHeader: String,
@@ -224,14 +220,12 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .go(let stream):
             stream.start()
         }
-        // The stream yields exactly one response (or finishes throwing); pull it.
         for try await response in responseStream { return response }
         throw AnywhereError.proxy(.http2, .connectionClosed(detail: "stream ended without a response"))
     }
 
     // MARK: - Setup
-
-    /// Coalesces awaiters behind one handshake; resolves at `.ready` or on fail/close.
+    
     private func ensureReady() async throws {
         enum Kick { case awaitReady; case begin; case fail(Error) }
         let kick: Kick = lock.withLock { state in
@@ -262,78 +256,61 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func beginSetup() {
-        armSetupDeadline()
-        Task {
-            do {
-                let dialed = try await OutboundConnector.dial(host: host, port: port)
-                let proceed = lock.withLock { state -> Bool in
-                    guard state.phase == .connecting else { return false }
-                    state.dialed = dialed
-                    return true
-                }
-                if proceed {
-                    startTLS(dialed: dialed)
-                } else {
-                    // Closed mid-dial: drop the orphaned transport instead of leaking the socket.
-                    dialed.connection.cancel()
-                    await dialed.proxyClient?.cancel()
-                }
-            } catch {
-                self.failSetup(error)
-            }
-        }
+        lock.withLock { if $0.rootTask == nil { $0.rootTask = Task { await self.run() } } }
+        spawn(.setupDeadline)
+        spawn(.setup)
     }
     
-    private func armSetupDeadline() {
-        let task = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
-            guard let self, !Task.isCancelled else { return }
-            let stillSettingUp = self.lock.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
-            guard stillSettingUp else { return }
-            self.failSetup(AnywhereError.proxy(.http2, .connectionClosed(detail: "handshake/SETTINGS timed out")))
+    private func runSetup() async {
+        let dialed: OutboundConnector.Dialed
+        do {
+            dialed = try await OutboundConnector.dial(host: host, port: port)
+        } catch {
+            failSetup(error)
+            return
         }
-        lock.withLock { $0.setupDeadlineTask = task }
-    }
-
-    private func startTLS(dialed: OutboundConnector.Dialed) {
+        let proceed = lock.withLock { state -> Bool in
+            guard state.phase == .connecting else { return false }
+            state.dialed = dialed
+            return true
+        }
+        guard proceed else {
+            dialed.connection.cancel()
+            await dialed.proxyClient?.cancel()
+            return
+        }
+        
         let configuration = TLSConfiguration(serverName: host, alpn: ["h2", "http/1.1"], insecureSkipVerify: insecure)
         let client = TLSClient(configuration: configuration)
         lock.withLock { $0.tlsClient = client }
-        // Strong self: the setup task owns the connection until the TLS handshake settles —
-        // bounded by the client (a teardown cancels it, failing `connect`).
-        Task {
-            do {
-                let tlsConnection = try await client.connect(overTunnel: dialed.connection)
-
-                enum TLSOutcome { case stale; case http1; case proceed }
-                let outcome: TLSOutcome = lock.withLock { state in
-                    guard state.phase == .connecting else { return .stale }
-                    guard tlsConnection.negotiatedALPN == "h2" else {
-                        // HTTP/1.1-only origin: cache it and fail waiters over to the HTTP/1.1 path —
-                        // one live connection can't serve N concurrent HTTP/1.1 exchanges.
-                        state.negotiatedHTTP1 = true
-                        return .http1
-                    }
-                    state.connection = TLSProxyConnection(tlsConnection: tlsConnection)
-                    return .proceed
-                }
-
-                switch outcome {
-                case .stale:
-                    break
-                case .http1:
-                    onNegotiatedHTTP1?()
-                    failSetup(AnywhereError.mitm(.needsHTTP1Fallback))
-                case .proceed:
-                    sendConnectionPreface()
-                }
-            } catch {
-                failSetup(error)
-            }
+        let tlsConnection: TLSRecordConnection
+        do {
+            tlsConnection = try await client.connect(overTunnel: dialed.connection)
+        } catch {
+            failSetup(error)
+            return
         }
-    }
-
-    private func sendConnectionPreface() {
+        enum TLSOutcome { case stale; case http1; case proceed }
+        let outcome: TLSOutcome = lock.withLock { state in
+            guard state.phase == .connecting else { return .stale }
+            guard tlsConnection.negotiatedALPN == "h2" else {
+                state.negotiatedHTTP1 = true
+                return .http1
+            }
+            state.connection = TLSProxyConnection(tlsConnection: tlsConnection)
+            return .proceed
+        }
+        switch outcome {
+        case .stale:
+            return
+        case .http1:
+            onNegotiatedHTTP1?()
+            failSetup(AnywhereError.mitm(.needsHTTP1Fallback))
+            return
+        case .proceed:
+            break
+        }
+        
         let transport: ProxyConnection? = lock.withLock { $0.connection }
         guard let transport else { failSetup(AnywhereError.proxy(.http2, .notReady)); return }
 
@@ -342,77 +319,73 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         data.append(NaiveHTTP2Framer.settingsFrame([
             (id: 0x1, value: Self.headerTableSize),
             (id: 0x2, value: 0),                                   // ENABLE_PUSH off
-            (id: 0x3, value: Self.ownMaxConcurrentStreams),        // server-initiated streams (moot with push off)
-            (id: 0x4, value: UInt32(Self.streamRecvWindow)),       // INITIAL_WINDOW_SIZE
+            (id: 0x3, value: Self.ownMaxConcurrentStreams),        // server-initiated streams
+            (id: 0x4, value: UInt32(Self.streamReceiveWindow)),    // INITIAL_WINDOW_SIZE
             (id: 0x5, value: Self.maxFrameSize),
             (id: 0x6, value: UInt32(Self.maxHeaderListSize)),
         ]).serialized)
-        let bump = UInt32(Self.connectionRecvWindow - Self.httpVersionDefaultWindow)
+        let bump = UInt32(Self.connectionReceiveWindow - Self.httpVersionDefaultWindow)
         data.append(NaiveHTTP2Framer.windowUpdateFrame(streamID: 0, increment: bump).serialized)
 
-        let payload = data
-        // Strong self: the preface task owns the connection until the send settles —
-        // bounded by the transport (a teardown cancels it, failing `send`).
-        Task {
-            let sendError: Error?
-            do { try await transport.send(payload); sendError = nil }
-            catch { sendError = error }
-
-            if let sendError { failSetup(sendError); return }
-
-            let started = lock.withLock { state -> Bool in
-                guard state.phase == .connecting else { return false }
-                state.phase = .prefaceSent
-                return true
-            }
-            guard started else { return }
-            refreshPoolSnapshot()
-            startReadLoop()
+        do {
+            try await transport.send(data)
+        } catch {
+            failSetup(error)
+            return
         }
+        let started = lock.withLock { state -> Bool in
+            guard state.phase == .connecting else { return false }
+            state.phase = .prefaceSent
+            return true
+        }
+        guard started else { return }
+        refreshPoolSnapshot()
+        spawn(.readLoop)
+    }
+    
+    private func runSetupDeadline() async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout)) }
+            group.addTask { _ = try? await self.setupDonePoke.next() }
+            _ = await group.next()
+            group.cancelAll()
+        }
+        let stillSettingUp = lock.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
+        guard stillSettingUp else { return }
+        failSetup(AnywhereError.proxy(.http2, .connectionClosed(detail: "handshake/SETTINGS timed out")))
     }
 
     // MARK: - Read loop
+    
+    private func runReadLoop() async {
+        while true {
+            let transport: ProxyConnection? = lock.withLock { $0.phase != .closed ? $0.connection : nil }
+            guard let transport else { return }
 
-    /// One persistent task that pulls transport bytes, appends to the receive buffer, and drains
-    /// every complete frame each pass (replacing the former per-read recursive `Task` + `queue.async`).
-    private func startReadLoop() {
-        // Strong self: the loop owns the connection while receiving; `teardown` cancels this
-        // task and the transport, which ends the parked receive so ARC reclaims the connection.
-        let task = Task {
-            while true {
-                let transport: ProxyConnection? = lock.withLock { $0.phase != .closed ? $0.connection : nil }
-                guard let transport else { return }
+            let data: Data?
+            do { data = try await transport.receive() }
+            catch { handleSessionError(error); return }
 
-                let data: Data?
-                do { data = try await transport.receive() }
-                catch { handleSessionError(error); return }
-
-                guard let data, !data.isEmpty else {
-                    handleSessionError(AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed by peer")))
-                    return
-                }
-
-                let overflow: Bool = lock.withLock { state in
-                    guard state.phase != .closed else { return false }
-                    state.receiveBuffer.append(data)
-                    return state.receiveBuffer.count > Self.maxReceiveBufferSize
-                }
-                if overflow {
-                    // The loop drains fully each pass, so this only trips if a single frame is absurd.
-                    handleSessionError(AnywhereError.proxy(.http2, .protocolViolation(detail: "receive buffer exceeded \(Self.maxReceiveBufferSize) bytes")))
-                    return
-                }
-
-                drainFrames()
-                if lock.withLock({ $0.phase == .closed }) { return }
+            guard let data, !data.isEmpty else {
+                handleSessionError(AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed by peer")))
+                return
             }
-        }
-        lock.withLock { $0.readTask = task }
-    }
 
-    /// Pops and routes each complete frame from the receive buffer. Runs on the read-loop task, so
-    /// frames are processed strictly one at a time; each `routeFrame` does its state work under
-    /// `lock` and performs stream/transport effects with the lock released.
+            let overflow: Bool = lock.withLock { state in
+                guard state.phase != .closed else { return false }
+                state.receiveBuffer.append(data)
+                return state.receiveBuffer.count > Self.maxReceiveBufferSize
+            }
+            if overflow {
+                handleSessionError(AnywhereError.proxy(.http2, .protocolViolation(detail: "receive buffer exceeded \(Self.maxReceiveBufferSize) bytes")))
+                return
+            }
+
+            drainFrames()
+            if lock.withLock({ $0.phase == .closed }) { return }
+        }
+    }
+    
     private func drainFrames() {
         while true {
             let frame: NaiveHTTP2Frame? = lock.withLock { state in
@@ -428,7 +401,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func routeFrame(_ frame: NaiveHTTP2Frame) {
-        // §6.10: an in-progress header block accepts only a CONTINUATION on the same stream.
         let pending: (streamID: UInt32, flags: UInt8, block: Data)? = lock.withLock { $0.pendingHeaders }
         if let pending {
             guard frame.type == .continuation, frame.streamID == pending.streamID else {
@@ -467,12 +439,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 stream.handleReset(errorCode: code)
             }
         case .continuation:
-            // CONTINUATION with no header block in progress is a connection error (§6.10).
             connectionError("unexpected CONTINUATION on stream \(frame.streamID)")
         }
     }
 
-    // MARK: - HEADERS (connection-scoped decode)
+    // MARK: - HEADERS
 
     private func beginHeaders(_ frame: NaiveHTTP2Frame) {
         guard let fragment = strippedHeaderBlockFragment(frame) else {
@@ -515,14 +486,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             completeHeaderBlock(streamID: streamID, flags: flags, block: block)
         }
     }
-
-    /// Decodes HPACK unconditionally, THEN routes the fields — never gate the decode on stream
-    /// existence, or a finished/reset stream's HEADERS would desync the shared dynamic table.
+    
     private func completeHeaderBlock(streamID: UInt32, flags: UInt8, block: Data) {
-        // The decoder is confined to this read-loop task; the lock (uncontended, synchronous) makes
-        // that confinement compiler-provable without a separate non-Sendable stored property.
         guard let decoded = lock.withLock({ $0.hpackDecoder.decodeHeaders(from: block) }) else {
-            // A failed decode leaves the dynamic table in an unknown state — connection-fatal.
             connectionError("HPACK decode failed")
             return
         }
@@ -530,9 +496,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         let stream: MITMScriptHTTP2Stream? = lock.withLock { $0.streams[streamID] }
         stream?.handleHeaders(fields: decoded.fields, endStream: endStream)
     }
-
-    /// Removes leading pad-length + trailing padding (PADDED) and the 5 priority bytes (PRIORITY)
-    /// so only the HPACK fragment reaches the decoder (RFC 7540 §6.2). Malformed framing → nil.
+    
     private func strippedHeaderBlockFragment(_ frame: NaiveHTTP2Frame) -> Data? {
         var bytes = frame.payload[...]
         if frame.hasFlag(NaiveHTTP2FrameFlags.padded) {
@@ -553,14 +517,12 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     private func handleData(_ frame: NaiveHTTP2Frame) {
         let endStream = frame.hasFlag(NaiveHTTP2FrameFlags.endStream)
         let body = Self.unpaddedDataPayload(frame)
-
-        // Credit the full payload (incl. padding) even for finished streams, or orphaned DATA
-        // leaks connection flow-control credit until the whole connection stalls.
+        
         let (windowUpdate, transport, stream): (NaiveHTTP2Frame?, ProxyConnection?, MITMScriptHTTP2Stream?) = lock.withLock { state in
             var update: NaiveHTTP2Frame?
             if frame.payload.count > 0 {
                 state.connectionRecvConsumed += frame.payload.count
-                if state.connectionRecvConsumed >= Self.connectionRecvWindow / 2 {
+                if state.connectionRecvConsumed >= Self.connectionReceiveWindow / 2 {
                     let increment = UInt32(state.connectionRecvConsumed)
                     state.connectionRecvConsumed = 0
                     update = NaiveHTTP2Framer.windowUpdateFrame(streamID: 0, increment: increment)
@@ -573,8 +535,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
         stream?.handleData(body, fullPayloadCount: frame.payload.count, endStream: endStream)
     }
-
-    /// Body payload with HTTP/2 DATA padding removed; flow control still counts the full payload.
+    
     private static func unpaddedDataPayload(_ frame: NaiveHTTP2Frame) -> Data {
         guard frame.hasFlag(NaiveHTTP2FrameFlags.padded) else { return frame.payload }
         guard let padLength = frame.payload.first else { return Data() }
@@ -605,8 +566,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             if state.phase == .prefaceSent {
                 state.phase = .ready
                 becameReady = true
-                state.setupDeadlineTask?.cancel()
-                state.setupDeadlineTask = nil
             }
             return state.connection
         }
@@ -614,7 +573,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         if let transport {
             sendFrame(NaiveHTTP2Framer.settingsAckFrame(), on: transport)
         }
-        if becameReady { readySignal.finish() }
+        if becameReady {
+            setupDonePoke.yield(())
+            readySignal.finish()
+        }
         refreshPoolSnapshot()
     }
 
@@ -630,7 +592,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             let previous = state.phase
             state.phase = .goingAway
             if let parsed {
-                // Streams above lastStreamID were never processed by the peer — fail them.
                 for (id, stream) in state.streams where id > parsed.lastStreamID {
                     state.streams.removeValue(forKey: id)
                     state.sendWindows.removeValue(forKey: id)
@@ -661,8 +622,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             } else if state.sendWindows[frame.streamID] != nil {
                 state.sendWindows[frame.streamID]! += Int(increment)
             }
-            // A re-opened window (connection- or stream-level) wakes parked sends; each re-checks its
-            // own min(connection, stream) window before building more frames.
             state.flowGate.wakeAll()
             return .ok
         }
@@ -673,16 +632,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             break
         }
     }
-
-    /// Called by a finishing stream so a send parked on this connection's flow window unblocks and
-    /// re-observes liveness/window.
+    
     func wakeFlowParks() {
         lock.withLock { $0.flowGate.wakeAll() }
     }
 
     // MARK: - Sending
-
-    /// The header block must fit one frame; we don't emit CONTINUATION on the send side.
+    
     func sendHeaders(streamID: UInt32, headerBlock: Data, endStream: Bool) async throws {
         guard headerBlock.count <= Int(Self.maxFrameSize) else {
             throw AnywhereError.mitm(.requestHeadersTooLarge)
@@ -691,8 +647,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         let transport = try currentTransport()
         try await transport.send(frame.serialized)
     }
-
-    /// One outcome of a flow-control-bounded frame-build pass, decided under `lock`.
+    
     private enum DataSendStep {
         case notReady
         case streamGone(UInt32)
@@ -700,10 +655,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case park
         case send(frame: Data, nextOffset: Int, isLast: Bool, transport: ProxyConnection)
     }
-
-    /// Sends `data` as DATA frames, respecting connection + stream send windows and MAX_FRAME_SIZE.
-    /// When the window is exhausted it parks on a continuation resumed by the next WINDOW_UPDATE
-    /// (or a stream/session end), instead of the old 50 ms poll.
+    
     func sendData(_ data: Data, on stream: MITMScriptHTTP2Stream, endStream: Bool) async throws {
         var offset = 0
         while true {
@@ -724,9 +676,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             }
         }
     }
-
-    /// Builds one DATA frame under the current flow window, debiting the connection- and stream-level
-    /// windows atomically under `lock`.
+    
     private func buildDataStep(_ data: Data, on stream: MITMScriptHTTP2Stream, offset: Int, endStream: Bool) -> DataSendStep {
         lock.withLock { state in
             guard state.phase == .ready || state.phase == .goingAway else { return .notReady }
@@ -754,9 +704,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             return .send(frame: frame.serialized, nextOffset: offset + chunkSize, isLast: isLast, transport: connection)
         }
     }
-
-    /// Suspends until a WINDOW_UPDATE re-opens the send window, or the stream/session ends. Re-checks
-    /// under `lock` before parking so a window re-open racing the caller isn't missed.
+    
     private func parkForFlow(stream: MITMScriptHTTP2Stream) async {
         await H2FlowGate.park {
             lock.withLock { state -> AsyncStream<Never>? in
@@ -767,15 +715,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             }
         }
     }
-
-    /// Fire-and-forget control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE, RST_STREAM).
+    
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
         let transport: ProxyConnection? = lock.withLock { $0.connection }
         guard let transport else { return }
         sendFrame(frame, on: transport)
     }
-
-    /// Fire-and-forget send of one already-built frame on a captured transport.
+    
     private func sendFrame(_ frame: NaiveHTTP2Frame, on transport: ProxyConnection) {
         let serialized = frame.serialized
         Task {
@@ -791,10 +737,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         return connection
     }
 
-    // MARK: - Stream teardown (called by streams)
-
-    /// Called by a stream as it finishes. Sends RST_STREAM(CANCEL) when the stream is abandoned
-    /// before END_STREAM (timeout, cap, cancel) so the peer reclaims its slot; never on a clean end.
+    // MARK: - Stream teardown
+    
     func removeStream(_ stream: MITMScriptHTTP2Stream, sendRST: Bool) {
         enum Outcome { case gone; case removed(rst: Bool, closeGoaway: Bool, transport: ProxyConnection?) }
         let outcome: Outcome = lock.withLock { state in
@@ -829,11 +773,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     private func failSetup(_ error: Error) {
         teardown(reason: error)
     }
-
-    /// Central close/teardown: flips to `.closed`, tears down the transport, and fails every waiter
-    /// and live stream. Idempotent.
+    
     private func teardown(reason: Error) {
-        typealias Teardown = (victims: [MITMScriptHTTP2Stream], readTask: Task<Void, Never>?)
+        typealias Teardown = (victims: [MITMScriptHTTP2Stream], rootTask: Task<Void, Never>?)
         let teardownState: Teardown? = lock.withLock { state in
             guard state.phase != .closed else { return nil }
             state.phase = .closed
@@ -842,26 +784,22 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             state.streams.removeAll()
             state.sendWindows.removeAll()
             state.pendingHeaders = nil
-            let read = state.readTask
-            state.readTask = nil
-            state.setupDeadlineTask?.cancel()
-            state.setupDeadlineTask = nil
-            return (victims, read)
+            let root = state.rootTask
+            state.rootTask = nil
+            return (victims, root)
         }
-        guard let (victims, readTask) = teardownState else { return }
-
-        // Cancel the read loop, then the transport it is parked on; its strong self dies with it.
-        readTask?.cancel()
+        guard let (victims, rootTask) = teardownState else { return }
+        
+        jobContinuation.finish()
+        setupDonePoke.yield(())
+        rootTask?.cancel()
         teardownTransport()
-        // A pre-ready teardown fails every awaiter; finishing after `.ready` is a harmless no-op.
         readySignal.finish(throwing: reason)
         refreshPoolSnapshot()
         for stream in victims { stream.failFromSession(reason) }
         onClose?(self)
     }
-
-    /// The TLS wrapper, TLS client, and dialed proxy transport are separate objects —
-    /// cancel all three or the pooled connection leaks a socket.
+    
     private func teardownTransport() {
         let (connection, tlsClient, dialed): (ProxyConnection?, TLSClient?, OutboundConnector.Dialed?) = lock.withLock { state in
             let captured = (state.connection, state.tlsClient, state.dialed)
@@ -873,7 +811,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         if let connection {
             connection.cancel()
         } else {
-            dialed?.connection.cancel()   // TLS never wrapped it (setup failed early)
+            dialed?.connection.cancel()
         }
         tlsClient?.cancel()
         dialed?.proxyClient?.cancel()

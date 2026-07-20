@@ -66,26 +66,19 @@ actor MITMScriptEngine {
     
     fileprivate final class Invocation {
         let scope: UUID?
-        /// False on ``applyFrame`` (head is already on the wire).
         let allowsHTTP: Bool
         var directive: Directive?
-
-        // Async buffered-script fields — nil/unused on the frame path.
+        
         let original: Message?
         var ctxValue: JSValue?
-        /// The async bridge back to the awaiting caller; resumed exactly once by ``deliver``.
         var continuation: CheckedContinuation<Outcome, Never>?
-        /// Held so JSC keeps the promise's reactions reachable while suspended.
         var resultPromise: JSValue?
         var inFlightFetches = 0
         var totalFetches = 0
         var delivered = false
-        /// Input-body bytes this invocation contributed to `mitmScriptSuspendedBodyBytes` while
-        /// suspended.
         var pinnedBodyBytes = 0
-
-        /// Idle watchdog; fires and reverts the invocation if the promise never settles.
-        var watchdog: Task<Void, Never>?
+        
+        var watchdogDisarm: AsyncInbox<Void>?
 
         init(scope: UUID?, original: Message, continuation: CheckedContinuation<Outcome, Never>) {
             self.scope = scope
@@ -116,6 +109,16 @@ actor MITMScriptEngine {
     
     private var liveInvocations: [ObjectIdentifier: Invocation] = [:]
     private var currentInvocation: Invocation?
+
+    // MARK: - Watchdog task tree
+    
+    private struct WatchdogJob: Sendable {
+        let id: ObjectIdentifier
+        let disarm: AsyncInbox<Void>
+    }
+    private let watchdogJobs: AsyncStream<WatchdogJob>
+    private nonisolated let watchdogJobContinuation: AsyncStream<WatchdogJob>.Continuation
+    private var watchdogRoot: Task<Void, Never>?
     
     nonisolated private func activeScope() -> UUID? {
         assumeIsolated { $0.currentInvocation?.scope }
@@ -142,7 +145,46 @@ actor MITMScriptEngine {
 
     init() {
         self.context = JSContext(virtualMachine: Self.sharedVM)
+        (self.watchdogJobs, self.watchdogJobContinuation) = AsyncStream.makeStream(of: WatchdogJob.self)
         configureContext(context)
+    }
+
+    // MARK: - Watchdog tree driver
+    
+    private func runWatchdogTree() async {
+        await withDiscardingTaskGroup { group in
+            for await job in watchdogJobs {
+                group.addTask { await self.runWatchdog(id: job.id, disarm: job.disarm) }
+            }
+            group.cancelAll()
+        }
+    }
+    
+    private func runWatchdog(id: ObjectIdentifier, disarm: AsyncInbox<Void>) async {
+        let timedOut = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                do { try await Task.sleep(for: .seconds(Self.invocationIdleTimeout)); return true }
+                catch { return false }   // cancelled with the tree
+            }
+            group.addTask {
+                _ = try? await disarm.next(); return false   // disarmed by deliver / re-arm
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        guard timedOut else { return }
+        guard let invocation = liveInvocations[id],
+              !invocation.delivered,
+              let original = invocation.original else { return }
+        logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
+        deliver(.modified(original), for: invocation)
+    }
+    
+    fileprivate func shutdown() {
+        watchdogJobContinuation.finish()
+        watchdogRoot?.cancel()
+        watchdogRoot = nil
     }
     
     nonisolated private func configureContext(_ context: JSContext) {
@@ -300,8 +342,8 @@ actor MITMScriptEngine {
     private func deliver(_ outcome: Outcome, for invocation: Invocation) {
         guard !invocation.delivered else { return }
         invocation.delivered = true
-        invocation.watchdog?.cancel()
-        invocation.watchdog = nil
+        invocation.watchdogDisarm?.finish()
+        invocation.watchdogDisarm = nil
         liveInvocations.removeValue(forKey: ObjectIdentifier(invocation))
         if invocation.pinnedBodyBytes > 0 {
             Self.addSuspendedBodyBytes(-invocation.pinnedBodyBytes)
@@ -315,22 +357,13 @@ actor MITMScriptEngine {
     }
     
     private func armWatchdog(for invocation: Invocation) {
-        invocation.watchdog?.cancel()
-        let timeout = Self.invocationIdleTimeout
-        let id = ObjectIdentifier(invocation)
-        invocation.watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(timeout))
-            guard !Task.isCancelled, let self else { return }
-            JSCConcurrencyBridge.shared.enqueue {
-                self.assumeIsolated { engine in
-                    guard let invocation = engine.liveInvocations[id],
-                          !invocation.delivered,
-                          let original = invocation.original else { return }
-                    logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
-                    engine.deliver(.modified(original), for: invocation)
-                }
-            }
+        if watchdogRoot == nil {
+            watchdogRoot = Task { await self.runWatchdogTree() }
         }
+        invocation.watchdogDisarm?.finish()
+        let disarm = AsyncInbox<Void>(capacity: 1)
+        invocation.watchdogDisarm = disarm
+        watchdogJobContinuation.yield(WatchdogJob(id: ObjectIdentifier(invocation), disarm: disarm))
     }
 
     private static func suspendedBodyBytes() -> Int {
@@ -1626,7 +1659,6 @@ actor MITMScriptEngine {
         mitmScriptGlobalFetchCount.wrappingAdd(1, ordering: .relaxed)
     }
     private static func releaseGlobalFetchSlot() {
-        // Clamped at zero, so a stray double release can't underflow.
         var current = mitmScriptGlobalFetchCount.load(ordering: .relaxed)
         while current > 0 {
             let (exchanged, original) = mitmScriptGlobalFetchCount.weakCompareExchange(
@@ -1640,7 +1672,7 @@ actor MITMScriptEngine {
         mitmScriptGlobalFetchCount.load(ordering: .relaxed)
     }
 
-    // MARK: - Body bridging (static so closures don't capture self)
+    // MARK: - Body bridging
 
     private static func makeUint8Array(in context: JSContext, from data: Data) -> JSValue {
         let count = data.count
@@ -2014,7 +2046,12 @@ extension MITMScriptEngine {
             return removed
         }
         guard !dropped.isEmpty else { return }
-        JSCConcurrencyBridge.shared.enqueue { withExtendedLifetime(dropped) {} }
+        JSCConcurrencyBridge.shared.enqueue {
+            for engine in dropped {
+                engine.assumeIsolated { $0.shutdown() }
+            }
+            withExtendedLifetime(dropped) {}
+        }
     }
     
     static func resetCachesOnReload(keepByScope: [UUID: Set<Int>]) {
