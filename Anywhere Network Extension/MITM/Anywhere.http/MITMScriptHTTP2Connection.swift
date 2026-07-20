@@ -113,6 +113,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case setup
         case setupDeadline
         case readLoop
+        case streamSend(MITMScriptHTTP2Stream)
+        case streamDeadline(MITMScriptHTTP2Stream)
+        case streamIdle(MITMScriptHTTP2Stream)
+        case controlSend(Data, transport: ProxyConnection)
     }
     private let jobs: AsyncStream<ConnectionJob>
     private let jobContinuation: AsyncStream<ConnectionJob>.Continuation
@@ -137,7 +141,17 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .setup: await runSetup()
         case .setupDeadline: await runSetupDeadline()
         case .readLoop: await runReadLoop()
+        case .streamSend(let stream): await stream.runSend()
+        case .streamDeadline(let stream): await stream.runDeadline()
+        case .streamIdle(let stream): await stream.runIdleLoop()
+        case .controlSend(let data, let transport): await runControlSend(data, on: transport)
         }
+    }
+    
+    private func startStreamJobs(for stream: MITMScriptHTTP2Stream) {
+        spawn(.streamDeadline(stream))
+        spawn(.streamIdle(stream))
+        spawn(.streamSend(stream))
     }
 
     // MARK: - Multiplexer
@@ -218,7 +232,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .rejected(let error):
             responseSignal.finish(throwing: error)
         case .go(let stream):
-            stream.start()
+            startStreamJobs(for: stream)
         }
         for try await response in responseStream { return response }
         throw AnywhereError.proxy(.http2, .connectionClosed(detail: "stream ended without a response"))
@@ -723,11 +737,12 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
     
     private func sendFrame(_ frame: NaiveHTTP2Frame, on transport: ProxyConnection) {
-        let serialized = frame.serialized
-        Task {
-            do { try await transport.send(serialized) }
-            catch { logger.debug("[MITMScriptHTTP2] control frame send failed: \(AnywhereError.describe(error))") }
-        }
+        spawn(.controlSend(frame.serialized, transport: transport))
+    }
+
+    private func runControlSend(_ data: Data, on transport: ProxyConnection) async {
+        do { try await transport.send(data) }
+        catch { logger.debug("[MITMScriptHTTP2] control frame send failed: \(AnywhereError.describe(error))") }
     }
 
     private func currentTransport() throws -> ProxyConnection {

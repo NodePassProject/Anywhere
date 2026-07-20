@@ -27,7 +27,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         lwipBridge.executor.asUnownedSerialExecutor()
     }
 
-    // MARK: - Inner Transport (async byte transport for the lwIP side)
+    // MARK: - Inner Transport
     
     final class InnerTransport: ByteTransport, Sendable {
         let lwipBridge: LWIPConcurrencyBridge
@@ -89,61 +89,43 @@ actor MITMSession: MITMHTTP1StreamDelegate {
 
     private let dstHost: String
     private let dstPort: UInt16
-    /// The lwIP concurrency boundary; every queue hop and continuation seam routes through it.
+    
     private let lwipBridge: LWIPConcurrencyBridge
 
     private let isPlaintext: Bool
-
-    /// nil for a plaintext session; cleartext presents no certificate.
+    
     private let leafCache: MITMLeafCertCache?
     private let policy: MITMRewritePolicy
-
-    /// Retained so it isn't deallocated mid-stream; nil for a direct connection.
+    
     private var proxyClient: ProxyClient?
-
-    /// Retained so teardown can cancel the dial before the outer handshake completes.
+    
     private var outerConnection: ProxyConnection?
-
-    /// Upstream-bound bytes buffered until the outer leg exists; capped by maxPendingClientBytes.
+    
     private var pendingUpstreamBytes = Data()
-
-    /// True while the dial is in flight; further upstream-bound bytes buffer instead of redialing.
+    
     private var dialing = false
-
-    /// True when the inbound pump paused under backpressure (pre-dial buffer at the high-water mark);
-    /// resumed once the outer leg exists and drains.
+    
     private var inboundReadPaused = false
-
-    /// Upstream the dial committed to; a later request resolving a different one is torn down rather than misrouted.
+    
     private var dialedHost: String?
     private var dialedPort: UInt16?
-
-    /// From the ClientHello; caps the inner (client-facing) leg's max TLS version.
+    
     private var clientSupportsTLS13 = false
-
-    /// Client bytes buffered until the inner TLSServer exists.
+    
     private var pendingClientBytes: Data
-
-    /// Pre-handshake buffer cap (256 KiB: tolerates large ClientHellos, bounds memory against a hostile
-    /// local app). Also the pre-dial inbound high-water mark: while dialing, the inner read pauses
-    /// (backpressure) when the upstream-bound buffer reaches it.
+    
     private static let maxPendingClientBytes: Int = 256 * 1024
-
-    /// Hard backstop on the pre-dial upstream buffer; sits above the 4 MiB body cap (one buffered-body
-    /// rewrite can deliver that much in one chunk). Backpressure keeps it near `maxPendingClientBytes`,
-    /// so tripping it means a pathological case.
+    
     private static let maxPendingUpstreamBytes: Int = 8 * 1024 * 1024
 
     private var tlsServer: TLSServer?
     private var tlsClient: TLSClient?
 
     private let innerTransport: InnerTransport
-
-    /// Post-handshake byte legs; decrypted/cleartext plaintext stays inside the session.
+    
     private var innerRecord: (any MITMByteLeg)?
     private var outerRecord: (any MITMByteLeg)?
-
-    /// HTTP/1.1 stream rewriters, one per direction.
+    
     private let requestStream: MITMHTTP1Stream
     private let responseStream: MITMHTTP1Stream
 
@@ -249,6 +231,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         case bridgeStreamDial(streamID: UInt32, host: String, port: UInt16)
         case bridgeStreamHandshake(streamID: UInt32, host: String)
         case awaitDrain(pending: SerialSender.Pending, completion: DrainCompletion)
+        case upstreamHandshakeTimeout(gate: HandshakeRaceGate, disarm: AsyncInbox<Void>, onTimeout: @Sendable () -> Void)
     }
     
     private enum DrainCompletion: Sendable {
@@ -424,6 +407,8 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             await runBridgeStreamHandshake(streamID: streamID, host: host)
         case .awaitDrain(let pending, let completion):
             await runAwaitDrain(pending: pending, completion: completion)
+        case .upstreamHandshakeTimeout(let gate, let disarm, let onTimeout):
+            await runUpstreamHandshakeTimeout(gate: gate, disarm: disarm, onTimeout: onTimeout)
         }
     }
 
@@ -859,16 +844,34 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     
     private func armUpstreamHandshakeTimeout(_ onTimeout: @escaping @Sendable () -> Void) -> () -> Bool {
         let gate = HandshakeRaceGate()
-        let task = Task {
-            try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout))
-            guard !Task.isCancelled, gate.claim() else { return }
-            onTimeout()
-        }
-        return { [gate, task] in
+        let disarmPoke = AsyncInbox<Void>(capacity: 1)
+        spawn(.upstreamHandshakeTimeout(gate: gate, disarm: disarmPoke, onTimeout: onTimeout))
+        return { [gate, disarmPoke] in
             guard gate.claim() else { return false }
-            task.cancel()
+            disarmPoke.yield(())
             return true
         }
+    }
+
+    private func runUpstreamHandshakeTimeout(
+        gate: HandshakeRaceGate,
+        disarm: AsyncInbox<Void>,
+        onTimeout: @Sendable () -> Void
+    ) async {
+        let timedOut = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                do { try await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout)); return true }
+                catch { return false }
+            }
+            group.addTask {
+                _ = try? await disarm.next(); return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        guard timedOut, gate.claim() else { return }
+        onTimeout()
     }
     
     private func failInnerLegWith502(_ reason: String) {
@@ -1167,7 +1170,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             serverName: host,
             alpn: ["h2", "http/1.1"],
             minVersion: .tls12,
-            maxVersion: .tls13, // upstream TLS leg is independent of the client leg — don't cap it to the client's version
+            maxVersion: .tls13,
             fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
@@ -1270,7 +1273,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             case .data(let streamID, let data, let endStream):
                 appendH1RequestData(streamID: streamID, data, endStream: endStream)
             case .trailers(let streamID, _):
-                // h1 can't carry request trailers; end the body without them.
                 appendH1RequestData(streamID: streamID, Data(), endStream: true)
             case .abort(let streamID):
                 bridgeAbortStream(streamID)
@@ -1463,7 +1465,6 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             let error: Error?
             do { data = try await record.receive(); error = nil }
             catch let e { data = nil; error = e }
-            // Resumes on the actor.
             enum Step { case stop, eof(MITMHTTP1Stream), transform(MITMHTTP1Stream, Data) }
             let step: Step
             if torn {
@@ -1472,7 +1473,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
                 if let error {
                     logger.report("\(dstHost): bridge upstream read error for stream \(streamID)", error: error)
                     await client.acceptResponseAborted(streamID: streamID)
-                    bridgeAbortStream(streamID) // a reset doesn't notify us; free the dead upstream
+                    bridgeAbortStream(streamID)
                     step = .stop
                 } else if let data, !data.isEmpty {
                     step = .transform(bs.responseStream, data)
