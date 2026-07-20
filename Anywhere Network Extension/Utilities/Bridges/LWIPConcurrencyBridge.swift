@@ -106,22 +106,6 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
         }
     }
 
-    /// Throwing counterpart of ``runParked``: `body` may resume the continuation by throwing.
-    func runParkedThrowing<T>(_ body: @escaping (CheckedContinuation<T, Error>) -> Void) async throws -> T {
-        let hop = QueueHopBody(body: body)
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-            queue.async { hop.body(continuation) }
-        }
-    }
-
-    /// Opens a parked continuation *without* a queue hop — for a caller already isolated to this
-    /// bridge's queue (e.g. an actor adopting its executor) that must suspend until a later
-    /// completion resumes it. `body` runs synchronously in the caller's context and hands off the
-    /// continuation; the continuation scaffolding still lives here in the bridge. Resumed once.
-    func parkThrowing<T>(_ body: (CheckedContinuation<T, Error>) -> Void) async throws -> T {
-        try await withCheckedThrowingContinuation(body)
-    }
-
     /// A repeating tick on the lwIP queue for driving `lwip_bridge_check_timeouts`; the raw
     /// `DispatchSourceTimer` lives in the bridge layer. `handler` and the returned timer's
     /// suspend/resume/cancel are all queue-confined.
@@ -179,8 +163,7 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
             }) else {
                 return nil
             }
-            connection.assumeIsolated { $0.start() }
-            return BridgeContext.passRetained(connection)
+            return LWIPConcurrencyBridge.adopt(connection)
         }
 
         // Recv: data (or a remote FIN when empty) on an established connection.
@@ -337,15 +320,34 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
 
     // MARK: - Per-PCB token teardown
     //
-    // A new pcb stores a *retained* `TCPConnection` as its `tcp_arg` (vended in the accept
-    // trampoline above). The recv/sent callbacks recover it unretained; the terminal
-    // `tcp_err` consumes it. ``discard(_:)`` balances it when Swift drives teardown itself
-    // (`tcp_close`/`tcp_abort`) and no `tcp_err` will fire.
+    // A new pcb stores a *retained* `TCPConnection` as its `tcp_arg`: ``adopt(_:)`` starts the
+    // connection's root task and vends that retained pointer in the accept trampoline above. The
+    // recv/sent callbacks recover it unretained; the terminal `tcp_err` consumes it
+    // (`BridgeContext.consume`). ``relinquish(_:pcb:abortive:)`` performs the Swift-driven pcb
+    // teardown (`tcp_close`/`tcp_abort`) *and* balances the retained token together, so the
+    // "pcb op ⇔ token release" pairing can never drift — the balance happens on exactly one of the
+    // two mutually exclusive paths (terminal `tcp_err` **or** ``relinquish``), never both.
 
-    /// Balances an accepted connection's retained reference when Swift drives teardown
-    /// (`tcp_close`/`tcp_abort`) and no terminal `tcp_err` will fire to consume it.
-    /// Runs on ``queue``.
-    func discard(_ connection: TCPConnection) {
+    /// Starts `connection`'s root task and hands the C side a **retained** pointer to it (stored as
+    /// the pcb's `tcp_arg`). "Start ⇔ retain" is atomic here so no callback can fire against a
+    /// connection whose root task hasn't launched. Runs on ``queue`` (the accept callback). Balanced
+    /// later by exactly one of ``relinquish(_:pcb:abortive:)`` (Swift-driven teardown) or the
+    /// `tcp_err` trampoline's `BridgeContext.consume`.
+    static func adopt(_ connection: TCPConnection) -> UnsafeMutableRawPointer {
+        connection.assumeIsolated { $0.start() }
+        return BridgeContext.passRetained(connection)
+    }
+
+    /// Swift-driven teardown: closes (FIN) or aborts (RST) the pcb and balances the ``adopt``
+    /// retained token in one step, because no terminal `tcp_err` will fire to consume it. **Never**
+    /// call this from the `tcp_err` path — there the pcb is already freed and the token is consumed
+    /// by the trampoline. Runs on ``queue``.
+    func relinquish(_ connection: TCPConnection, pcb: UnsafeMutableRawPointer, abortive: Bool) {
+        if abortive {
+            tcpAbort(pcb)
+        } else {
+            tcpClose(pcb)
+        }
         BridgeContext.release(connection)
     }
 
