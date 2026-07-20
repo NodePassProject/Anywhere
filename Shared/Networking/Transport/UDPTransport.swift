@@ -12,38 +12,34 @@ import Synchronization
 nonisolated final class UDPTransport: DatagramTransport, Sendable {
 
     // MARK: Constants
-
-    /// Wall-clock backstop for the whole dial.
+    
     private static let dialDeadline: Duration = .seconds(20)
 
     // MARK: State
-
-    /// All mutable state, `Mutex`-guarded so ``cancel()`` is safe from any thread.
+    
     private struct State {
         var connection: NetworkConnection<UDP>?
         var flowSlot: FlowSlot?
         var driverTask: Task<Void, Never>?
         var ready = false
         var cancelled = false
+        var established = false
+        var failure: AnywhereError?
         var lastDialState: String?
     }
-
-    /// State and one-shot signals shared with the driver task. Both signals are
-    /// element-less streams used as latches: the first `finish` wins, later finishes
-    /// are no-ops, and each has exactly one consumer.
+    
     private final class Guts: Sendable {
         let state = Mutex(State())
-        /// Consumed once by `connect()`: finished on ready, finished throwing on
-        /// failure/timeout/cancel.
         let dialOutcome: AsyncThrowingStream<Never, Error>
         let dialSignal: AsyncThrowingStream<Never, Error>.Continuation
-        /// Consumed once by the driver's hold-open: finished by `cancel()`, a
-        /// viability drop, or a failure.
+        let dialArmed: AsyncStream<Never>
+        let dialArmedSignal: AsyncStream<Never>.Continuation
         let teardown: AsyncStream<Never>
         let teardownSignal: AsyncStream<Never>.Continuation
 
         init() {
             (dialOutcome, dialSignal) = AsyncThrowingStream.makeStream(of: Never.self)
+            (dialArmed, dialArmedSignal) = AsyncStream.makeStream(of: Never.self)
             (teardown, teardownSignal) = AsyncStream.makeStream(of: Never.self)
         }
     }
@@ -52,7 +48,6 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
 
     private let host: String
     private let port: UInt16
-    /// "host:port" for diagnostics.
     let endpointDescription: String
 
     init(host: String, port: UInt16) {
@@ -62,12 +57,11 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     }
 
     deinit {
-        // Backstop for a transport dropped without an explicit cancel.
         cancel()
     }
 
     var isReady: Bool {
-        guts.state.withLock { $0.ready && !$0.cancelled }
+        guts.state.withLock { $0.ready && !$0.cancelled && $0.failure == nil }
     }
 
     // MARK: - Connect
@@ -81,11 +75,13 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         let slot = FlowSlot(.udp, context: "[UDP] \(endpointDescription)")
 
         let guts = self.guts
+        let endpointDescription = self.endpointDescription
         let started: Bool = guts.state.withLock { state in
             guard !state.cancelled else { return false }
             state.flowSlot = slot
             state.driverTask = Task {
-                await Self.runDriver(guts: guts, endpoint: endpoint, slot: slot)
+                await Self.runDriver(guts: guts, endpoint: endpoint,
+                                     endpointDescription: endpointDescription, slot: slot)
             }
             return true
         }
@@ -93,31 +89,21 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
             slot.release()
             throw AnywhereError.transport(.terminated)
         }
-        
-        try await withDialDeadline(Self.dialDeadline, onExpiry: {
+
+        try await withTaskCancellationHandler {
+            for try await _ in guts.dialOutcome {}
+        } onCancel: {
             self.cancel()
-        }, error: {
-            self.dialTimeoutError()
-        }) {
-            try await withTaskCancellationHandler {
-                for try await _ in guts.dialOutcome {}
-            } onCancel: {
-                self.cancel()
-            }
         }
         guard isReady else { throw AnywhereError.transport(.terminated) }
     }
     
-    private func dialTimeoutError() -> AnywhereError {
-        let lastState = guts.state.withLock { $0.lastDialState }
-        return .transport(.timedOut(.connect, endpoint: endpointDescription,
-                                    detail: lastState ?? "no state updates"))
-    }
-
-    /// Owns the connection scope for the whole session. Publishes the connection,
-    /// resolves the dial on `.ready`, then parks on `teardownPromise` until
-    /// cancel / viability loss / failure unwinds it.
-    private static func runDriver(guts: Guts, endpoint: NWEndpoint, slot: FlowSlot) async {
+    private static func runDriver(
+        guts: Guts,
+        endpoint: NWEndpoint,
+        endpointDescription: String,
+        slot: FlowSlot
+    ) async {
         do {
             try await withNetworkConnection(to: endpoint, using: { UDP() }) { conn in
                 let live = guts.state.withLock { state -> Bool in
@@ -131,12 +117,13 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
                     guts.state.withLock { $0.lastDialState = String(describing: update) }
                     switch update {
                     case .ready:
-                        guts.state.withLock { $0.ready = true }
-                        guts.dialSignal.finish()
+                        guts.state.withLock { $0.established = true }
                     case .failed(let error), .waiting(let error):
-                        // UDP drops viability before a receive would error; any
-                        // failure/waiting fails the transport.
-                        guts.dialSignal.finish(throwing: error.anywhereError(op: .connect))
+                        guts.state.withLock { state in
+                            if !state.established, state.failure == nil {
+                                state.failure = error.anywhereError(op: .connect)
+                            }
+                        }
                         guts.teardownSignal.finish()
                     default:
                         break  // .setup, .preparing, .cancelled
@@ -146,33 +133,46 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
                     if !viable { guts.teardownSignal.finish() }
                 }
 
-                // Covers the connection already being ready before the handler ran.
-                if case .ready = conn.state {
-                    guts.state.withLock { $0.ready = true }
-                    guts.dialSignal.finish()
+                guts.state.withLock { $0.ready = true }
+                guts.dialSignal.finish()
+                
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        await Self.runDialWatchdog(guts: guts, endpointDescription: endpointDescription)
+                    }
+                    for await _ in guts.teardown {}
+                    group.cancelAll()
                 }
-
-                // Hold the connection open until something asks for teardown; ends
-                // early if the driver task itself is cancelled.
-                for await _ in guts.teardown {}
             }
         } catch {
-            // No-op if the dial already resolved; covers a pre-ready scope failure.
             guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
         }
         slot.release()
         guts.state.withLock { $0.connection = nil }
+    }
+    
+    private static func runDialWatchdog(guts: Guts, endpointDescription: String) async {
+        for await _ in guts.dialArmed {}
+        do { try await Task.sleep(for: dialDeadline) } catch { return }
+        let expired: Bool = guts.state.withLock { state in
+            guard !state.established, !state.cancelled, state.failure == nil else { return false }
+            state.failure = .transport(.timedOut(.connect, endpoint: endpointDescription,
+                                                 detail: state.lastDialState ?? "no state updates"))
+            return true
+        }
+        if expired { guts.teardownSignal.finish() }
     }
 
     // MARK: - DatagramTransport
 
     func send(_ datagram: Data) async throws {
         let connection = try activeConnection()
+        guts.dialArmedSignal.finish()
         do {
             try await connection.send(datagram)
         } catch {
             guts.teardownSignal.finish()
-            throw AnywhereError.networkFailure(error, op: .send)
+            throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .send)
         }
     }
 
@@ -184,9 +184,8 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
                 message = try await connection.receive()
             } catch {
                 guts.teardownSignal.finish()
-                throw AnywhereError.networkFailure(error, op: .receive)
+                throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .receive)
             }
-            // Skip empty datagrams (keepalive artifacts).
             if !message.content.isEmpty { return message.content }
         }
     }
@@ -209,13 +208,17 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
     }
 
     // MARK: - Helpers
-
-    /// The live connection, or a throw if cancelled / not yet published.
+    
     private func activeConnection() throws -> NetworkConnection<UDP> {
         try guts.state.withLock { state in
+            if let failure = state.failure { throw failure }
             if state.cancelled { throw AnywhereError.transport(.terminated) }
             guard let connection = state.connection else { throw AnywhereError.transport(.notConnected) }
             return connection
         }
+    }
+    
+    private func latchedFailure() -> AnywhereError? {
+        guts.state.withLock { $0.failure }
     }
 }
