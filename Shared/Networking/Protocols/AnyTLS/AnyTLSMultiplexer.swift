@@ -17,10 +17,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
     private let inner: ProxyConnection
     private let outerTLSVersion: TLSVersion?
     private let passwordHash: Data
-
-    /// Fields guarded by `lock`.
+    
     private struct State {
-        /// Mutable so cmdUpdatePaddingScheme can swap it.
         var padding: AnyTLSPaddingScheme
 
         var streams: [UInt32: AnyTLSStream] = [:]
@@ -29,40 +27,26 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
         var packetCounter: UInt32 = 0
         var sendPadding: Bool = true
-
-        /// While true, writes accumulate in `outboundBuffer` so cmdSettings+cmdSYN+SocksAddr
-        /// land in one TLS record.
+        
         var buffering: Bool = true
         var outboundBuffer: Data = Data()
 
         var synDoneTask: Task<Void, Never>?
-
-        /// The inner-transport read loop. Strong self: the loop owns the multiplexer while
-        /// receiving; `close(error:)` cancels it and the inner transport, ending the parked
-        /// receive so ARC reclaims the multiplexer.
+        
         var readTask: Task<Void, Never>?
-
-        /// Buffer for partial inbound frames (TLS records don't align with AnyTLS frames).
-        var recvBuffer = Data()
+        
+        var receiveBuffer = Data()
 
         var closed: Bool = false
-
-        /// Set while an acquire has claimed this mux for serial reuse (before its stream opens).
         var reserved: Bool = false
-
-        /// Tail of the wire-send chain. Each send links after the previous one and runs only once
-        /// it finishes, so the padding-schedule packet order matches on-wire order without a lock —
-        /// the compute (`packetCounter`/padding) and the link happen together under ``lock``.
-        var sendTail: Task<Void, Error>?
     }
 
     private let lock: Mutex<State>
-
-    /// Pool-assigned sequence number, fixed at creation (log identity only).
+    
+    private let sendChain = SerialSender()
+    
     let seq: UInt64
-
-    /// Fires once from `close(error:)` so the pool can evict this multiplexer. Immutable —
-    /// installed at creation, before the multiplexer is shared.
+    
     private let onClose: (@Sendable (AnyTLSMultiplexer) -> Void)?
 
     // MARK: - Init
@@ -81,12 +65,9 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
     var isAlive: Bool { lock.withLock { !$0.closed } }
     var isClosed: Bool { lock.withLock { $0.closed } }
-    /// Counts an active reservation as a live stream so the pool's idle sweep never treats a
-    /// mux that's reserved-for-reuse (but between reserve and its first `openStream`) as idle.
+    
     var activeStreamCount: Int { lock.withLock { $0.streams.count + ($0.reserved ? 1 : 0) } }
-
-    /// Atomically claims a live, unreserved, stream-free multiplexer for serial reuse;
-    /// returns false otherwise. Released via ``releaseReservation()`` when the stream ends.
+    
     func tryReserveStream() -> Bool {
         lock.withLock { state in
             guard !state.closed, !state.reserved, state.streams.isEmpty else { return false }
@@ -100,10 +81,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
     }
 
     // MARK: - Lifecycle
-
-    /// packetCounter intentionally stays 0 here so the padding schedule aligns with the server.
+    
     func start() async {
-        // Snapshot; the scheme can't change before startReadLoop() arms inbound handling.
         let padding = lock.withLock { $0.padding }
         var prologue = Data()
         prologue.append(passwordHash)
@@ -120,18 +99,15 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             prologue.append(Data(repeating: 0, count: paddingLen))
         }
         logger.debug("[AnyTLSMultiplexer] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
-        // The prologue rides ahead of the framed writes (not through the padding scheduler);
-        // linked first on the send chain so it precedes every writeConnLocked flush.
         do {
-            let task = lock.withLock { chainSend(prologue, state: &$0) }
-            try await task.value
+            let pending = lock.withLock { chainSend(prologue, state: &$0) }
+            try await pending.value()
         } catch {
             logger.debug("[AnyTLSMultiplexer] prologue write failed: \(error.localizedDescription)")
             handleTransportFailure(error)
             return
         }
-
-        // cmdSettings — buffered until the first stream open flushes it.
+        
         let settings: [String: String] = [
             "v": "2",
             "client": AnyTLSProtocol.clientVersion,
@@ -143,8 +119,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
         startReadLoop()
     }
-
-    /// Must be called with `lock` held (inside a `withLock` on it).
+    
     private func armSynDoneTimerLocked(_ state: inout State) {
         state.synDoneTask?.cancel()
         state.synDoneTask = Task { [weak self] in
@@ -153,19 +128,14 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             self?.close(error: AnywhereError.proxy(.anyTLS, .openTimeout))
         }
     }
-
-    /// Must be called with `lock` held (inside a `withLock` on it).
+    
     private func cancelSynDoneTimerLocked(_ state: inout State) {
         state.synDoneTask?.cancel()
         state.synDoneTask = nil
     }
 
     // MARK: - Streams
-
-    /// Opens a new logical stream; the caller's first write (the destination address)
-    /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
-    /// `onEnd` fires exactly once when the stream ends (used by the pool to reclaim idle muxes);
-    /// installed at creation so the stream carries no mutable hook.
+    
     func openStream(onEnd: (@Sendable () -> Void)? = nil) async -> AnyTLSStream? {
         typealias Opened = (stream: AnyTLSStream, sid: UInt32, armWatchdog: Bool,
                             bufferedBytes: Int, peerVersion: UInt8)
@@ -176,11 +146,14 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             state.nextStreamID &+= 1
             if state.nextStreamID == 0 { state.nextStreamID = 1 }    // skip 0 (reserved for control)
             let sid = state.nextStreamID
-            let stream = AnyTLSStream(sid: sid, multiplexer: self, outerTLSVersion: outerTLSVersion,
-                                      onEnd: onEnd)
+            let stream = AnyTLSStream(
+                sid: sid,
+                multiplexer: self,
+                outerTLSVersion: outerTLSVersion,
+                onEnd: onEnd
+            )
             state.streams[sid] = stream
-
-            // v2 watchdog: close the multiplexer if no SYNACK within 3 s (cleared on cmdSYNACK).
+            
             let armWatchdog = sid >= 2 && state.peerVersion >= 2
             if armWatchdog {
                 armSynDoneTimerLocked(&state)
@@ -193,9 +166,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         }
 
         logger.debug("[AnyTLSMultiplexer] openStream sid=\(opened.sid) peerVersion=\(opened.peerVersion) watchdog=\(opened.armWatchdog) buffered=\(opened.bufferedBytes)B")
-
-        // Awaited so the SYN is enqueued (buffered on the first stream, sent on a reused mux)
-        // strictly before the caller's first cmdPSH.
+        
         let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: opened.sid, length: 0)
         try? await writeConnLocked(synFrame)
 
@@ -211,10 +182,8 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         guard let stream = removed else { return }
 
         let finFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdFIN, sid: sid, length: 0)
-        // Strong self: the short-lived send task owns the mux until the FIN settles.
         Task { try? await writeConnLocked(finFrame) }
-
-        // Surface a clean EOF locally so any waiting receive unblocks.
+        
         stream.deliverClose(error: nil)
     }
 
@@ -243,16 +212,12 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         let frame = AnyTLSProtocol.encodeFrame(cmd: cmd, sid: sid, payload: payload)
         try await writeConnLocked(frame)
     }
-
-    /// Padding-aware writer: buffers while `buffering`, otherwise slices output per the padding
-    /// schedule, topping up with cmdWaste. The compute (`packetCounter`/padding) and the send-chain
-    /// link happen together under ``lock``, so packet order matches on-wire order without a lock held
-    /// across the `await`.
+    
     private func writeConnLocked(_ bytes: Data) async throws {
         enum Action {
             case rejected
             case buffered
-            case send(Task<Void, Error>)
+            case send(SerialSender.Pending)
         }
 
         let action: Action = lock.withLock { (state: inout State) -> Action in
@@ -293,28 +258,16 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             throw AnywhereError.proxy(.anyTLS, .connectionClosed(detail: "AnyTLS multiplexer closed"))
         case .buffered:
             return
-        case .send(let task):
-            try await task.value
+        case .send(let pending):
+            try await pending.value()
         }
     }
-
-    /// Links one wire write after the current send tail and returns its task. The write runs only
-    /// once the previous one finishes, giving strict on-wire order with backpressure and error
-    /// propagation (via the returned task's `value`) and no lock held across the `await`.
-    /// Must be called with ``lock`` held.
-    private func chainSend(_ output: Data, state: inout State) -> Task<Void, Error> {
+    
+    private func chainSend(_ output: Data, state: inout State) -> SerialSender.Pending {
         let inner = self.inner
-        let previous = state.sendTail
-        let task = Task<Void, Error> {
-            _ = try? await previous?.value
-            try await inner.send(output)
-        }
-        state.sendTail = task
-        return task
+        return sendChain.submit { try await inner.send(output) }
     }
-
-    /// Slices `pending` into the padding schedule's record sizes, topping up short
-    /// chunks with cmdWaste frames.
+    
     private static func applyPaddingSchedule(pending: Data, schedule: [Int]) -> Data {
         if schedule.isEmpty { return pending }
         var output = Data(capacity: pending.count + 64)
@@ -329,7 +282,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
                 output.append(remaining.prefix(want))
                 remaining.removeFirst(want)
             } else if !remaining.isEmpty {
-                // Top up with a cmdWaste frame so the chunk hits exactly `want` bytes.
                 let payloadLeft = remaining.count
                 output.append(remaining)
                 remaining.removeAll(keepingCapacity: false)
@@ -361,8 +313,6 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
     private func startReadLoop() {
         logger.debug("[AnyTLSMultiplexer] recv loop started")
-        // Strong self: the loop owns the multiplexer while receiving; `close(error:)`
-        // cancels this task and the inner transport, which ends the parked receive.
         let task = Task {
             do {
                 while true {
@@ -393,14 +343,14 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
 
     private func handleInbound(_ data: Data) async {
         let dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = lock.withLock { state in
-            state.recvBuffer.appendCompacting(data)
+            state.receiveBuffer.appendCompacting(data)
             var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
-            while state.recvBuffer.count >= AnyTLSProtocol.headerSize {
-                guard let header = AnyTLSProtocol.decodeFrameHeader(state.recvBuffer) else { break }
+            while state.receiveBuffer.count >= AnyTLSProtocol.headerSize {
+                guard let header = AnyTLSProtocol.decodeFrameHeader(state.receiveBuffer) else { break }
                 let totalLen = AnyTLSProtocol.headerSize + Int(header.length)
-                if state.recvBuffer.count < totalLen { break }
-                let payload = state.recvBuffer.subdata(in: AnyTLSProtocol.headerSize..<totalLen)
-                state.recvBuffer.removeSubrange(0..<totalLen)
+                if state.receiveBuffer.count < totalLen { break }
+                let payload = state.receiveBuffer.subdata(in: AnyTLSProtocol.headerSize..<totalLen)
+                state.receiveBuffer.removeSubrange(0..<totalLen)
                 dispatched.append((header.cmd, header.sid, payload))
             }
             return dispatched
@@ -480,8 +430,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
     }
 
     // MARK: - Close
-
-    /// Idempotent; a non-nil error propagates to every live stream.
+    
     func close(error: Error? = nil) {
         typealias Teardown = (liveStreams: [AnyTLSStream], readTask: Task<Void, Never>?)
         let teardown: Teardown? = lock.withLock { (state: inout State) -> Teardown? in
@@ -503,14 +452,12 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
         for stream in liveStreams {
             stream.deliverClose(error: error)
         }
-        // Cancel the read loop, then the transport it is parked on; its strong self dies with it.
         readTask?.cancel()
         inner.cancel()
         onClose?(self)
     }
 
     deinit {
-        // Reclaim the SYN-done watchdog if the multiplexer was dropped without close().
         lock.withLock { $0.synDoneTask?.cancel() }
     }
 }

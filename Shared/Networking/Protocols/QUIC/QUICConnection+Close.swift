@@ -44,12 +44,10 @@ extension QUICConnection {
                 self.bridge.deleteConn(connectionOpaquePointer)
                 self.connectionOpaquePointer = nil
             }
-            self.transportReceiveTask?.cancel()
-            self.transportReceiveTask = nil
             self.transportSealContinuation?.finish()
             self.transportSealContinuation = nil
-            self.transportSealTask?.cancel()
-            self.transportSealTask = nil
+            self.rootTask?.cancel()
+            self.rootTask = nil
             self.transport?.cancel()
             self.closeCarrier()
             self.state = .closed

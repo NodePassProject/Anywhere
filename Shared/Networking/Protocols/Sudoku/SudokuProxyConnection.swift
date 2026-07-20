@@ -1265,8 +1265,7 @@ nonisolated final class SudokuHTTPMaskTransport: Sendable {
         var pushReady = false
         var stoppedPreparedMaintenance = false
         var earlyResponsePayload = Data()
-        var pullTask: Task<Void, Never>?
-        var pushTask: Task<Void, Never>?
+        var runTask: Task<Void, Never>?
         var generation: UInt64 = 0
         var nextWaiterID: UInt64 = 0
         var waiters: [(id: UInt64, cont: AsyncStream<Never>.Continuation)] = []
@@ -1298,15 +1297,13 @@ nonisolated final class SudokuHTTPMaskTransport: Sendable {
         let auth = try await Self.authorize(config: config, factory: factory, mode: mode, earlyRequestPayload: earlyRequest)
         self.paths = auth.paths
         state.withLock { $0.earlyResponsePayload = auth.earlyResponse }
-        // Strong self: the loops own the connection for their lifetime. `markClosed` cancels both
-        // tasks and nils `pullTask`/`pushTask`, breaking the state → task → self cycle so ARC
-        // reclaims once each loop returns — no `[weak self]` retain-cycle guard needed.
-        let pull = Task { await self.pullLoop() }
-        let push = Task { await self.pushLoop() }
-        state.withLock { s in
-            s.pullTask = pull
-            s.pushTask = push
+        let run = Task {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await self.pullLoop() }
+                group.addTask { await self.pushLoop() }
+            }
         }
+        state.withLock { $0.runTask = run }
     }
 
     // MARK: Async broadcast (replaces the single NSCondition)
@@ -1599,7 +1596,7 @@ nonisolated final class SudokuHTTPMaskTransport: Sendable {
 
     private func markClosed(fatal: Bool) {
         var stopPreparedMaintenance = false
-        var tasksToCancel: [Task<Void, Never>] = []
+        var taskToCancel: Task<Void, Never>?
         let conts = state.withLock { s -> [AsyncStream<Never>.Continuation] in
             s.fatal = s.fatal || fatal
             s.closed = true
@@ -1607,14 +1604,12 @@ nonisolated final class SudokuHTTPMaskTransport: Sendable {
                 s.stoppedPreparedMaintenance = true
                 stopPreparedMaintenance = true
             }
-            tasksToCancel = [s.pullTask, s.pushTask].compactMap { $0 }
-            s.pullTask = nil
-            s.pushTask = nil
+            taskToCancel = s.runTask
+            s.runTask = nil
             return drainWaitersLocked(&s)
         }
-        // Wake every waiter (send/receive/waitReady/the loops), then stop the loops.
         for cont in conts { cont.finish() }
-        for task in tasksToCancel { task.cancel() }
+        taskToCancel?.cancel()
         if stopPreparedMaintenance {
             factory.stopMaintainingPreparedConnection(
                 host: config.serverHost,

@@ -26,11 +26,12 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         var readyTask: Task<Void, Error>?
         var frameParser = VLESSVisionUDPFrameParser()
         var idleSince: ContinuousClock.Instant?
-        var sendTail: Task<Void, Error>?
         var runTask: Task<Void, Never>?
     }
 
     private let lock = Mutex(State())
+    
+    private let sendChain = SerialSender()
 
     private static let idleTimeout: TimeInterval = 16
     
@@ -51,9 +52,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     var isFull: Bool { lock.withLock { $0.closed || $0.isXUDP } }
 
     // MARK: - Lifecycle
-
-    /// Suspends the caller until the underlying proxy connection is ready, lazily dialing on first
-    /// use. Multiple callers coalesce onto the one memoized dial task and share its outcome.
+    
     private func ensureReady() async throws {
         let task: Task<Void, Error> = try lock.withLock { state in
             if state.closed { throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed")) }
@@ -67,9 +66,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         }
         try await task.value
     }
-
-    /// Dials the underlying proxy multiplexer once for all coalesced callers, publishing the
-    /// connection and starting the read loop on success. A failure closes the mux.
+    
     private func performConnect() async throws {
         let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
         let live = lock.withLock { state -> Bool in
@@ -224,23 +221,16 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     }
 
     // MARK: - Send
-
-    /// Links a framed write onto the send chain; a failed write tears the mux down.
+    
     func writeFrame(_ data: Data) async throws {
-        let task: Task<Void, Error> = try lock.withLock { state in
+        let pending: SerialSender.Pending = try lock.withLock { state in
             guard !state.closed, let connection = state.proxyConnection else {
                 throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed"))
             }
-            let previous = state.sendTail
-            let task = Task<Void, Error> {
-                _ = try? await previous?.value
-                try await connection.sendRaw(data)
-            }
-            state.sendTail = task
-            return task
+            return sendChain.submit { try await connection.sendRaw(data) }
         }
         do {
-            try await task.value
+            try await pending.value()
         } catch {
             close(error: error)
             throw error
@@ -272,15 +262,12 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
 
     private func handleInbound(_ data: Data) {
         enum Deliver { case data(Data); case close }
-        // Parse + resolve stream targets under the lock; deliver outside it so the
-        // per-stream channel writes never run while `lock` is held.
         let actions: [(stream: VLESSVisionUDPStream, deliver: Deliver)] = lock.withLock { state in
             let frames = state.frameParser.feed(data)
             var out: [(VLESSVisionUDPStream, Deliver)] = []
             for (metadata, payload) in frames {
                 switch metadata.status {
                 case .new:
-                    // Server-initiated streams — not expected for outbound mux, ignore
                     break
 
                 case .keep:
@@ -295,7 +282,6 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
                     }
 
                 case .keepAlive:
-                    // Ping from server — no action needed
                     break
                 }
             }

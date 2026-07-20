@@ -85,36 +85,24 @@ actor QUICConnection: NGTCP2BridgeHost {
     
     var carrier: QUICDatagramCarrier?
     
-    var transportReceiveTask: Task<Void, Never>?
+    var rootTask: Task<Void, Never>?
     
     var transportSealContinuation: AsyncStream<Data>.Continuation?
-    var transportSealTask: Task<Void, Never>?
 
     var localAddr = sockaddr_storage()
     var remoteAddr = sockaddr_storage()
     var addrLen: Int = MemoryLayout<sockaddr_in>.size
 
-    // MARK: Migration state (direct carrier only; all touched on `queue`)
+    // MARK: Migration state
 
     enum MigrationKind { case reactive, proactive }
-    /// Set while a path switch is in flight (awaiting ngtcp2 path validation).
     var migrationKind: MigrationKind?
-    /// Proactive-migration target, live alongside `carrier` until the new path
-    /// validates. `nil` for reactive (the dead carrier is retired at once).
     var migratingCarrier: QUICDatagramCarrier?
-    /// Distinct cosmetic local addr of the migration target path, so ngtcp2 sees a
-    /// path change and `writeToUDP` can route per path during proactive validation.
     var migratingLocalAddr = sockaddr_storage()
-    /// Monotonic source of distinct cosmetic local addrs across migrations.
     var migrationCounter: UInt8 = 0
-    /// Genuine migration failures (ngtcp2 rejected, or path didn't validate) since the
-    /// last success — a signal the server can't migrate. Benign aborts don't count.
     var migrationFailures = 0
     static let maxMigrationFailures = 3
-    /// True once a proactive migration called `initiate_migration` and ngtcp2 owns a
-    /// validation only `path_validation` can resolve. Gates eager aborts mid-probe.
     var proactiveValidating = false
-    /// Fires if a proactive target never becomes ready; bounds the in-flight state.
     var proactiveDeadlineTask: Task<Void, Never>?
     static let proactiveReadyTimeout: TimeInterval = 5
 
@@ -228,6 +216,10 @@ actor QUICConnection: NGTCP2BridgeHost {
         self.obfuscator = obfuscator
         self.transport = transport
         self.bridge = NGTCP2ConcurrencyBridge()
+    }
+
+    deinit {
+        rootTask?.cancel()
     }
 
     // MARK: Timer state

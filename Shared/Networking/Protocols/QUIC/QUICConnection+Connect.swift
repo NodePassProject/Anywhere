@@ -10,6 +10,10 @@ import Network
 import CryptoKit
 import Synchronization
 
+private struct WeakConnectionBox: Sendable {
+    weak var value: QUICConnection?
+}
+
 extension QUICConnection {
 
     // MARK: Connect
@@ -87,10 +91,7 @@ extension QUICConnection {
             configurePlaceholderAddrs()
             try initializeNgtcp2()
             state = .handshaking
-            if let obfuscator {
-                startTransportSealPump(transport: transport, obfuscator: obfuscator)
-            }
-            startTransportReceiveLoop(transport: transport, localAddr: localAddr)
+            startTransportIO(transport: transport)
             writeToUDP()
             rescheduleTimer()
         } catch {
@@ -100,50 +101,101 @@ extension QUICConnection {
         }
     }
     
-    func startTransportReceiveLoop(transport: QUICDatagramTransport, localAddr: sockaddr_storage) {
+    func startTransportIO(transport: QUICDatagramTransport) {
         let mailbox = QUICInboundMailbox()
-        let obfuscator = self.obfuscator
+        let localAddr = self.localAddr
         let bridge = self.bridge
-        transportReceiveTask = Task.detached { [transport] in
-            do {
-                while true {
-                    guard let data = try await transport.receiveDatagram() else {
-                        bridge.enqueue { self.assumeIsolated { $0.handleTransportClosed(nil) } }
-                        return
-                    }
-                    guard !data.isEmpty else { continue }
-                    var packet = data
-                    if let obfuscator {
-                        guard let opened = obfuscator.open(data) else { continue }
-                        packet = opened
-                    }
-                    if mailbox.push(packet) {
-                        bridge.enqueue { self.assumeIsolated { $0.drainTransportInbound(mailbox, localAddr: localAddr) } }
-                    }
+        let obfuscator = self.obfuscator
+
+        var sealStream: AsyncStream<Data>?
+        if obfuscator != nil {
+            let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
+            transportSealContinuation = continuation
+            sealStream = stream
+        }
+
+        let host = WeakConnectionBox(value: self)
+        rootTask = Task {
+            await Self.runTransportDriver(
+                host: host, bridge: bridge, transport: transport, obfuscator: obfuscator,
+                sealStream: sealStream, mailbox: mailbox, localAddr: localAddr
+            )
+        }
+    }
+    
+    @concurrent
+    private static func runTransportDriver(
+        host: WeakConnectionBox,
+        bridge: NGTCP2ConcurrencyBridge,
+        transport: QUICDatagramTransport,
+        obfuscator: QUICPacketObfuscator?,
+        sealStream: AsyncStream<Data>?,
+        mailbox: QUICInboundMailbox,
+        localAddr: sockaddr_storage
+    ) async {
+        await withDiscardingTaskGroup { group in
+            group.addTask {
+                await Self.runTransportReceiveLoop(
+                    host: host,
+                    bridge: bridge,
+                    transport: transport,
+                    obfuscator: obfuscator,
+                    mailbox: mailbox,
+                    localAddr: localAddr
+                )
+            }
+            if let sealStream, let obfuscator {
+                group.addTask {
+                    await Self.runTransportSealPump(transport: transport, stream: sealStream, obfuscator: obfuscator)
                 }
-            } catch {
-                bridge.enqueue { self.assumeIsolated { $0.handleTransportClosed(error) } }
             }
         }
     }
     
+    private static func runTransportReceiveLoop(
+        host: WeakConnectionBox,
+        bridge: NGTCP2ConcurrencyBridge,
+        transport: QUICDatagramTransport,
+        obfuscator: QUICPacketObfuscator?,
+        mailbox: QUICInboundMailbox,
+        localAddr: sockaddr_storage
+    ) async {
+        do {
+            while true {
+                guard let data = try await transport.receiveDatagram() else {
+                    bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(nil) } }
+                    return
+                }
+                guard !data.isEmpty else { continue }
+                var packet = data
+                if let obfuscator {
+                    guard let opened = obfuscator.open(data) else { continue }
+                    packet = opened
+                }
+                if mailbox.push(packet) {
+                    bridge.enqueue { host.value?.assumeIsolated { $0.drainTransportInbound(mailbox, localAddr: localAddr) } }
+                }
+            }
+        } catch {
+            bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(error) } }
+        }
+    }
+
     func drainTransportInbound(_ mailbox: QUICInboundMailbox, localAddr: sockaddr_storage) {
         for packet in mailbox.take() {
             handleReceivedPacket(packet, localAddr: localAddr)
         }
     }
     
-    func startTransportSealPump(transport: QUICDatagramTransport, obfuscator: QUICPacketObfuscator) {
-        let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
-        transportSealContinuation = continuation
-        transportSealTask = Task.detached { [transport] in
-            for await raw in stream {
-                let wireDatagrams = raw.withUnsafeBytes { obfuscator.seal($0) }
-                for wire in wireDatagrams { transport.sendDatagram(wire) }
-            }
+    private static func runTransportSealPump(
+        transport: QUICDatagramTransport, stream: AsyncStream<Data>, obfuscator: QUICPacketObfuscator
+    ) async {
+        for await raw in stream {
+            let wireDatagrams = raw.withUnsafeBytes { obfuscator.seal($0) }
+            for wire in wireDatagrams { transport.sendDatagram(wire) }
         }
     }
-    
+
     func handleTransportClosed(_ error: Error?) {
         let err = error ?? AnywhereError.quic(.closed(graceful: false))
         finishConnect(err)
