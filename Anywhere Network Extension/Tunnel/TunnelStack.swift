@@ -57,28 +57,25 @@ actor TunnelStack {
     let outputKick: AsyncStream<Void>
     private let outputKickContinuation: AsyncStream<Void>.Continuation
 
-    /// The single output-drain consumer: awaits ``outputKick`` and drains the buffer to utun off
-    /// the lwIP/UDP queues so producers never block on `writePackets`. Owned by the stack:
-    /// ``start(packetFlow:configuration:)`` spawns it, ``stop()`` cancels it. One consumer means
-    /// the drain stays serial without a queue.
-    var outputDrainTask: Task<Void, Never>?
-
-    /// The TUN read loop: awaits each inbound batch, partitions it, and feeds lwIP + the UDP plane.
-    /// A single task, so the next read waits on both sub-batches (utun paces us). Owned by the
-    /// stack; ``stop()`` cancels it.
-    var readTask: Task<Void, Never>?
-
     /// Ordered command channel to ``udpPlane`` for mux/reclaim. lwipQueue producers `yield` (which
     /// preserves order), and a single driver applies them to the actor in that order — so a
     /// restart's reclaim-then-set never races. `.bufferingOldest` (unbounded) keeps every command.
     let planeCommands: AsyncStream<UDPPlaneCommand>
     private let planeCommandContinuation: AsyncStream<UDPPlaneCommand>.Continuation
-    /// The single plane-command driver; owned by the stack, cancelled in ``stop()``.
-    var planeCommandTask: Task<Void, Never>?
 
-    /// Consumes the Darwin settings/routing/MITM notification stream; owned by the stack, cancelled
-    /// in ``stop()`` (which tears down the underlying `CFNotificationCenter` observers).
-    var settingsObserverTask: Task<Void, Never>?
+    /// The stack's task tree. Every stack-lifetime loop — output drain, TUN read, plane-command
+    /// driver, settings observer, UDP cleanup — plus on-demand jobs from ``nurseryJobs`` are
+    /// children of this task; nothing is cancelled by hand. ``stop()`` ends the tree by finishing
+    /// the nursery stream and awaiting the root.
+    var rootTask: Task<Void, Never>?
+
+    /// Jobs the duty cycle spawns into its group on demand (currently just deferred restarts).
+    /// ``stop()`` finishing this stream is the tree's shutdown signal.
+    enum NurseryJob {
+        case deferredRestart(configuration: ProxyConfiguration, revalidateMode: Bool, delay: TimeInterval, generation: Int)
+    }
+    let nurseryJobs: AsyncStream<NurseryJob>
+    nonisolated let nurseryJobContinuation: AsyncStream<NurseryJob>.Continuation
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
@@ -101,7 +98,7 @@ actor TunnelStack {
         /// releases fire on ``lwipQueue``. ``LWIPReleaseAction`` is the lwIP bridge's
         /// Sendable ctx+free bundle, so the buffer holds it directly.
         var releases: [LWIPReleaseAction] = []
-        /// True while ``outputDrainTask`` is draining; appenders only wake it when false.
+        /// True while the output-drain child is draining; appenders only wake it when false.
         var drainInFlight = false
     }
     let outputBuffer = Mutex(OutputBufferState())
@@ -143,7 +140,7 @@ actor TunnelStack {
     }
 
     /// True while the stack is live. An `Atomic` (not actor state) because the off-actor read
-    /// loop, drain loop, and periodic scheduler all gate on it.
+    /// loop, drain loop, and UDP-cleanup loop all gate on it.
     let _running = Atomic<Bool>(false)
     nonisolated var running: Bool { _running.load(ordering: .relaxed) }
 
@@ -156,13 +153,16 @@ actor TunnelStack {
     /// Timestamp of the last completed stack restart (used for throttling).
     var lastRestartTime: CFAbsoluteTime = 0
 
-    /// Pending deferred restart when throttled. Cancelled and replaced on each new request.
-    /// Fires its body on ``lwipQueue`` (hopped back on).
-    var deferredRestartTask: Task<Void, Never>?
+    /// Bumped whenever a restart request supersedes earlier deferred ones; a deferred-restart
+    /// nursery job only runs if its generation is still current, so "only the last request runs"
+    /// needs no task handle to cancel.
+    var deferredRestartGeneration = 0
+    /// True while a deferred restart is scheduled; dedupes trusted-network revalidation requests.
+    var deferredRestartScheduled = false
 
-    /// Recurring stack-lifetime tasks. Centralizes their lifecycle and reconciles them
-    /// on device wake.
-    nonisolated let scheduler = TunnelScheduler()
+    /// Wakes the UDP-cleanup loop on device wake so a reap that fell due while the clock was
+    /// frozen fires promptly instead of drifting.
+    nonisolated let udpCleanupPoke = AsyncInbox<Void>(capacity: 1)
 
     /// lwIP's periodic timeout tick (retransmit, persist, TIME_WAIT), vended by ``lwipBridge`` so
     /// the `DispatchSourceTimer` stays in the bridge layer. Self-suspends when lwIP's timeout list
@@ -346,6 +346,7 @@ actor TunnelStack {
         let (commandStream, commandContinuation) = AsyncStream.makeStream(of: UDPPlaneCommand.self)
         self.planeCommands = commandStream
         self.planeCommandContinuation = commandContinuation
+        (self.nurseryJobs, self.nurseryJobContinuation) = AsyncStream.makeStream(of: NurseryJob.self)
         let (reapplyStream, reapplyContinuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         self.reapplySettingsSignal = reapplyStream
         self.reapplySettingsContinuation = reapplyContinuation

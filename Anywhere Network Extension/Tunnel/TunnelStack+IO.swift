@@ -68,35 +68,56 @@ extension TunnelStack {
 
     // MARK: - Packet Reading
 
-    func startReadingPackets() {
-        guard let packetFlow else { return }
-        readTask = Task { [self, packetFlow, lwipBridge, udpPlane] in
-            while !Task.isCancelled {
-                let (packets, _) = await packetFlow.readPackets()
-
-                let reflector = self.reflector()
-                var lwipBatch: [Data] = []
-                var udpBatch: [Data] = []
-                
-                for packet in packets {
-                    if reflector.isActive, let reflected = reflector.reflect(packet) {
-                        self.enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
-                        continue
-                    }
-                    if UDPPacket.ipProtocol(of: packet)?.proto == UDPPacket.ipProtocolUDP {
-                        udpBatch.append(packet)
-                    } else {
-                        lwipBatch.append(packet)
-                    }
+    /// Duty-cycle child: feeds each inbound TUN batch to lwIP + the UDP plane. The raw
+    /// `readPackets()` await never resumes on cancellation, so the tree must not await it
+    /// directly — ``stop()`` would hang on a quiet utun. An unstructured producer (the same
+    /// border pattern as ``PathMonitorConcurrencyBridge``) owns that await, paced by a demand
+    /// token so utun still paces us: the next read starts only after the previous batch is
+    /// processed. Cancelling this child ends the batch stream at once; the orphaned producer dies
+    /// at its next resume, its late yield landing in a terminated stream, not a shut-down engine.
+    func runReadLoop(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
+        let demand = AsyncInbox<Void>(capacity: 1)
+        demand.yield(())
+        let batches = AsyncStream<[Data]> { continuation in
+            let producer = Task {
+                while (try? await demand.next()) != nil {
+                    let (packets, _) = await packetFlow.readPackets()
+                    continuation.yield(packets)
                 }
-                
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask { [lwipBatch] in
-                        await lwipBridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
-                    }
-                    group.addTask { [udpBatch] in await udpPlane!.feed(udpBatch) }
-                }
+                continuation.finish()
             }
+            continuation.onTermination = { _ in producer.cancel() }
+        }
+        for await packets in batches {
+            await processInboundBatch(packets, udpPlane: udpPlane)
+            demand.yield(())
+        }
+    }
+
+    /// Partitions one inbound batch on the actor and feeds both sub-batches; the next read waits
+    /// on both.
+    private func processInboundBatch(_ packets: [Data], udpPlane: UDPPlane) async {
+        let reflector = reflector()
+        var lwipBatch: [Data] = []
+        var udpBatch: [Data] = []
+
+        for packet in packets {
+            if reflector.isActive, let reflected = reflector.reflect(packet) {
+                enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
+                continue
+            }
+            if UDPPacket.ipProtocol(of: packet)?.proto == UDPPacket.ipProtocolUDP {
+                udpBatch.append(packet)
+            } else {
+                lwipBatch.append(packet)
+            }
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { [lwipBatch] in
+                await self.lwipBridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
+            }
+            group.addTask { [udpBatch] in await udpPlane.feed(udpBatch) }
         }
     }
     
@@ -123,17 +144,35 @@ extension TunnelStack {
         lwipTick?.resume()
     }
 
-    func scheduleUDPCleanup() {
-        scheduler.schedule(
-            label: "udp-cleanup",
-            every: TimeInterval(TunnelConstants.udpCleanupIntervalSec)
-        ) { [weak self] in
-            await self?.runScheduledUDPCleanup()
+    /// Duty-cycle child, replacing the former `TunnelScheduler`: reaps idle UDP flows every
+    /// ``TunnelConstants/udpCleanupIntervalSec``. ``TunnelStack/udpCleanupPoke`` (fed on device
+    /// wake) breaks the sleep so an interval that fell due while the clock was frozen fires
+    /// promptly instead of drifting; an early poke just re-sleeps the remainder.
+    nonisolated func runUDPCleanupLoop(udpPlane: UDPPlane) async {
+        let interval = TimeInterval(TunnelConstants.udpCleanupIntervalSec)
+        var lastRun = MonotonicClock.now
+        while !Task.isCancelled {
+            let remaining = interval - (MonotonicClock.now - lastRun)
+            if remaining > 0 {
+                await sleepOrWakePoke(seconds: remaining)
+                continue
+            }
+            if running {
+                await udpPlane.cleanup()
+            }
+            lastRun = MonotonicClock.now
         }
     }
-    
-    private func runScheduledUDPCleanup() async {
-        guard running else { return }
-        await udpPlane.cleanup()
+
+    /// Parks until `seconds` elapse or a device-wake poke arrives, whichever comes first.
+    private nonisolated func sleepOrWakePoke(seconds: TimeInterval) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+            }
+            group.addTask { _ = try? await self.udpCleanupPoke.next() }
+            _ = await group.next()
+            group.cancelAll()
+        }
     }
 }

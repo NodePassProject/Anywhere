@@ -27,68 +27,101 @@ extension TunnelStack {
         }
         self.packetFlow = packetFlow
         self.configuration = configuration
-        
-        let outputKick = self.outputKick
-        outputDrainTask = Task.detached { [self, outputKick, packetFlow] in
-            for await _ in outputKick {
-                await self.drainOutputLoop(packetFlow: packetFlow)
-            }
-        }
-        
-        let planeCommands = self.planeCommands
+
         let udpPlane = UDPPlane(stack: self)
         self.udpPlane = udpPlane
-        planeCommandTask = Task { [planeCommands, udpPlane] in
-            for await command in planeCommands {
-                await udpPlane.apply(command)
-            }
-        }
 
         _running.store(true, ordering: .relaxed)
-        
+
         var precompiledRouting: DomainRouter.CompiledRouting?
         if Self.effectiveProxyMode(settings: TunnelSettings.load(), network: networkContext) == .rule {
             precompiledRouting = await domainRouter.compileRoutingConfiguration()
         }
         configureRuntime(for: configuration, precompiledRouting: precompiledRouting)
-        
+
         lwipBridge.installCallbacks(host: self)
         lwipBridge.initEngine()
         startTimeoutTimer()
-        scheduleUDPCleanup()
-        startReadingPackets()
+        // Spawned last; the output kicks and plane commands raised while the runtime configured
+        // are buffered in their streams, so the tree loses nothing by starting late.
+        rootTask = Task { await self.run(packetFlow: packetFlow, udpPlane: udpPlane) }
         logger.debug("[TunnelStack] Started")
 
-        startObservingSettings()
         CertificatePolicy.startObserving()
     }
 
-    /// Tears the stack down. An actor method, so the teardown runs inline on the lwIP queue — the
-    /// former `runSyncOffQueue` (which would now deadlock, being on-queue) is gone.
-    func stop() async {
-        stopObservingSettings()
-        // Stop reading first so no new datagrams enter intake, and end the output-drain consumer.
-        readTask?.cancel()
-        readTask = nil
-        outputDrainTask?.cancel()
-        outputDrainTask = nil
+    // MARK: - Task tree
 
-        _running.store(false, ordering: .relaxed)
-        deferredRestartTask?.cancel()
-        deferredRestartTask = nil
+    /// The stack's task tree. The plane-command driver sits beside the duty cycle, not inside it:
+    /// shutdown must finish the command channel and let the driver drain the final `.reclaim`
+    /// (which closes the UDP flows) — cancelling it mid-drain would drop buffered commands.
+    private func run(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
+        await withDiscardingTaskGroup { group in
+            group.addTask { [planeCommands] in
+                for await command in planeCommands {
+                    await udpPlane.apply(command)
+                }
+            }
+            group.addTask {
+                await self.runDutyCycle(packetFlow: packetFlow, udpPlane: udpPlane)
+                await self.finishShutdown()
+            }
+        }
+    }
+
+    /// The full-duty children plus on-demand nursery jobs. ``stop()`` finishing ``nurseryJobs``
+    /// ends the job loop; the `cancelAll` then stops intake (read, drain, observer, cleanup, and
+    /// any pending deferred restart) and the group joins before ``finishShutdown()`` tears the
+    /// engine down — so nothing feeds a half-shut engine.
+    private func runDutyCycle(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
+        await withDiscardingTaskGroup { group in
+            // Output drain: awaits ``outputKick`` and drains the buffer to utun off the lwIP/UDP
+            // queues so producers never block on `writePackets`. One consumer keeps it serial.
+            group.addTask { [outputKick] in
+                for await _ in outputKick {
+                    await self.drainOutputLoop(packetFlow: packetFlow)
+                }
+            }
+            group.addTask { await self.runReadLoop(packetFlow: packetFlow, udpPlane: udpPlane) }
+            group.addTask { await self.runSettingsObserver() }
+            group.addTask { await self.runUDPCleanupLoop(udpPlane: udpPlane) }
+            for await job in self.nurseryJobs {
+                switch job {
+                case .deferredRestart(let configuration, let revalidateMode, let delay, let generation):
+                    group.addTask {
+                        await self.runDeferredRestart(configuration: configuration,
+                                                      revalidateMode: revalidateMode,
+                                                      delay: delay, generation: generation)
+                    }
+                }
+            }
+            group.cancelAll()
+        }
+    }
+
+    /// The ordered teardown, run on the actor once the duty cycle has ended.
+    private func finishShutdown() {
         shutdownInternal()  // submits the final `.reclaim` to the plane driver
         // After shutdown so the teardown's own callbacks (RSTs, errors) still reach the stack.
         lwipBridge.clearHost()
         OutboundConnector.setRoutingContext(nil)
         fakeIPPool.reset()
         configuration = nil
-
         // Finish the command channel so the driver drains its buffered commands (including the
-        // final reclaim that closes the UDP flows) and ends; await it so the UDP plane teardown
-        // completes before `stop()` returns. The await releases the lwIP queue while it runs.
+        // final reclaim that closes the UDP flows) and ends — the last child of the tree.
         finishPlaneCommands()
-        await planeCommandTask?.value
-        planeCommandTask = nil
+    }
+
+    /// Tears the stack down by ending its task tree: finishing ``nurseryJobs`` stops the duty
+    /// cycle (intake ends before the engine teardown), the tree runs ``finishShutdown()`` on the
+    /// actor, and the plane driver drains the final reclaim before the root completes — so the
+    /// UDP plane teardown is done when this returns. The await releases the lwIP queue while the
+    /// tree winds down.
+    func stop() async {
+        _running.store(false, ordering: .relaxed)
+        nurseryJobContinuation.finish()
+        await rootTask?.value
+        rootTask = nil
 
         AnywhereLogger.installLogSink(nil)
         // `packetFlow` is deliberately kept: the output-drain loop and the packet-read loop hold
@@ -105,7 +138,8 @@ extension TunnelStack {
     /// Invalidates outbound proxy state after device wake: the kernel tears
     /// down our outbound sockets across sleep, but in-process lwIP state survives.
     func handleWake() {
-        scheduler.reconcile()
+        // Wake catch-up: the cleanup loop fires promptly if its interval fell due while frozen.
+        udpCleanupPoke.yield(())
         guard running, let configuration else { return }
         logger.info("[VPN] Device wake")
         invalidateOutboundState(configuration: configuration)
@@ -189,7 +223,6 @@ extension TunnelStack {
         // `BridgeTimer.cancel` balances any outstanding suspend before tearing the source down.
         lwipTick?.cancel()
         lwipTick = nil
-        scheduler.cancelAll()
 
         outputBuffer.withLock { buffer in
             buffer.packets.removeAll(keepingCapacity: true)
@@ -217,22 +250,22 @@ extension TunnelStack {
     private func restartStack(configuration: ProxyConfiguration, revalidateMode: Bool = false) {
         // A trusted-network restart is redundant when one is already pending — that
         // restart re-derives the effective mode from the current egress when it runs.
-        if revalidateMode, deferredRestartTask != nil { return }
+        if revalidateMode, deferredRestartScheduled { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastRestartTime
 
         if elapsed < TunnelConstants.restartThrottleInterval {
-            deferredRestartTask?.cancel()
             let delay = TunnelConstants.restartThrottleInterval - elapsed
-            // Actor-isolated task: sleeps off the queue, then resumes on it to run the restart.
-            // Strong self: the sleep is cancellation-aware, so `stop()`'s cancel ends the task
-            // promptly and ARC releases the stack with it.
-            deferredRestartTask = Task {
-                try? await Task.sleep(for: .seconds(delay))
-                guard !Task.isCancelled else { return }
-                performDeferredRestart(configuration: configuration, revalidateMode: revalidateMode)
-            }
+            // A nursery job rather than a stored task: the fresh generation supersedes any earlier
+            // deferred request (only the last one runs), and the duty cycle's teardown cancels the
+            // job's sleep with the rest of the tree.
+            deferredRestartGeneration += 1
+            deferredRestartScheduled = true
+            nurseryJobContinuation.yield(.deferredRestart(
+                configuration: configuration, revalidateMode: revalidateMode,
+                delay: delay, generation: deferredRestartGeneration
+            ))
             logger.debug("[TunnelStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
             return
         }
@@ -240,9 +273,14 @@ extension TunnelStack {
         restartStackNow(configuration: configuration)
     }
 
-    /// The deferred restart body, run on the actor after the throttle delay.
-    private func performDeferredRestart(configuration: ProxyConfiguration, revalidateMode: Bool) {
-        deferredRestartTask = nil
+    /// The deferred-restart nursery job: sleeps off the throttle window, then restarts if still
+    /// the current request.
+    private func runDeferredRestart(configuration: ProxyConfiguration, revalidateMode: Bool,
+                                    delay: TimeInterval, generation: Int) async {
+        try? await Task.sleep(for: .seconds(delay))
+        guard !Task.isCancelled else { return }
+        guard generation == deferredRestartGeneration else { return }  // superseded
+        deferredRestartScheduled = false
         guard running else { return }
         // The egress (and effective mode) may have reverted within the throttle window;
         // skip the teardown when it already matches.
@@ -254,8 +292,9 @@ extension TunnelStack {
     /// continues; the FakeIP pool is preserved — routing is decided at connection time, so cached
     /// fake IPs stay valid.
     private func restartStackNow(configuration: ProxyConfiguration) {
-        deferredRestartTask?.cancel()
-        deferredRestartTask = nil
+        // An immediate restart supersedes any pending deferred one.
+        deferredRestartGeneration += 1
+        deferredRestartScheduled = false
         lastRestartTime = CFAbsoluteTimeGetCurrent()
 
         shutdownInternal()
@@ -265,42 +304,33 @@ extension TunnelStack {
         lwipBridge.installCallbacks(host: self)
         lwipBridge.initEngine()
         startTimeoutTimer()
-        scheduleUDPCleanup()
         logger.debug("[TunnelStack] Restarted")
     }
 
     // MARK: - Settings Observation
 
-    private func startObservingSettings() {
+    /// Duty-cycle child: applies Darwin settings/routing/MITM notifications on the actor. Ends on
+    /// cancellation — the stream's `onTermination` unregisters the CFNotificationCenter observers.
+    private func runSettingsObserver() async {
         // Names precomputed once for the switch; `DarwinNotificationConcurrencyBridge` yields the
         // posted name and keeps the CFNotificationCenter/`Unmanaged` glue inside the bridge.
         let settings = AWNotificationCenter.Notification.tunnelSettingsChanged as String
         let routing = AWNotificationCenter.Notification.routingChanged as String
         let mitm = AWNotificationCenter.Notification.mitmChanged as String
-        // Actor-isolated task: each posted name resumes on the lwIP queue and applies inline.
-        // Strong self: `stopObservingSettings()` cancels this task, ending the stream (whose
-        // `onTermination` unregisters the observers) and releasing the stack.
-        settingsObserverTask = Task {
-            for await name in DarwinNotificationConcurrencyBridge.names([
-                AWNotificationCenter.Notification.tunnelSettingsChanged,
-                AWNotificationCenter.Notification.routingChanged,
-                AWNotificationCenter.Notification.mitmChanged
-            ]) {
-                switch name {
-                case settings: handleSettingsChanged()
-                case routing: await handleRoutingChanged()
-                case mitm: handleMITMChanged()
-                default: break
-                }
+        for await name in DarwinNotificationConcurrencyBridge.names([
+            AWNotificationCenter.Notification.tunnelSettingsChanged,
+            AWNotificationCenter.Notification.routingChanged,
+            AWNotificationCenter.Notification.mitmChanged
+        ]) {
+            switch name {
+            case settings: handleSettingsChanged()
+            case routing: await handleRoutingChanged()
+            case mitm: handleMITMChanged()
+            default: break
             }
         }
     }
 
-    private func stopObservingSettings() {
-        settingsObserverTask?.cancel()
-        settingsObserverTask = nil
-    }
-    
     private func handleSettingsChanged() {
         guard running, let configuration else { return }
 

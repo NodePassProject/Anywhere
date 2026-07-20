@@ -14,31 +14,20 @@ import WidgetKit
 
 nonisolated private let logger = AnywhereLogger(category: "PacketTunnelProvider")
 
-/// `Sendable` comes from ``NetworkExtensionConcurrencyBridge``'s conformance on
-/// `NEPacketTunnelProvider` (the NE library border); the compiler requires the subclass to
-/// restate the inherited `@unchecked` marker, so the restatement below is mandatory syntax, not
-/// a new bypass. Everything stored here is a `let` of a `Sendable` type — the long-lived task
-/// handles sit behind a `Mutex` — so the claim holds by construction.
 nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private let tunnelStack = TunnelStack()
     private let statsRecorder = StatsRecorder()
 
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
-    private let pathMonitorTask = Mutex<Task<Void, Never>?>(nil)
-
-    /// Consumes the stack's tunnel-settings-reapply signal and drives `setTunnelNetworkSettings`
-    /// on the provider (routes/DNS change). Cancelled in `stopTunnel`.
-    private let reapplySettingsTask = Mutex<Task<Void, Never>?>(nil)
-
-    /// Edge-transition tracker for the path loop; single-task-confined, so a plain value type.
+    
+    private let rootTask = Mutex<Task<Void, Never>?>(nil)
+    
     private struct PathTransition {
         var lastStatus: Network.NWPath.Status?
         var outboundSuspended = false
 
         enum Edge { case restored, ready, waiting, unavailable, none }
-
-        /// Advances to `status`, returning the edge the provider must act on. Folds in the
-        /// dedupe/suspend bookkeeping the former lock-guarded block did.
+        
         mutating func advance(to status: Network.NWPath.Status) -> Edge {
             let previousStatus = lastStatus
             lastStatus = status
@@ -82,25 +71,17 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             throw wrapped
         }
 
-        // Drive `setTunnelNetworkSettings` whenever the stack signals a routes/DNS change.
-        let reapplySignal = tunnelStack.reapplySettingsSignal
-        reapplySettingsTask.withLock { task in
-            task?.cancel()
-            task = Task {
-                for await _ in reapplySignal {
-                    await self.reapplyTunnelSettings()
-                }
-            }
-        }
-
 #if os(iOS)
         ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
 
         await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
-        startMonitoringPath()
-        // Captures the stack (the resource actually polled), not the provider; `stopTunnel`'s
-        // `statsRecorder.stop()` releases the closure.
+        
+        rootTask.withLock { task in
+            guard task == nil else { return }
+            task = Task { await self.run() }
+        }
+        
         statsRecorder.start { [tunnelStack] in
             return StatsRecorder.RawValues(
                 byteCounts: tunnelStack.byteCounts,
@@ -148,9 +129,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
         ipv4Settings.excludedRoutes = excludedIPv4Routes
         settings.ipv4Settings = ipv4Settings
-
-        // Claiming IPv6 tunnel settings makes iOS show the VPN icon on cellular,
-        // so we drop IPv6 entirely (custom routes included) when hideVPNIcon is enabled.
+        
         let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
         if advertiseIPv6ToApps {
             let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelAddressIPv6], networkPrefixLengths: [64])
@@ -158,9 +137,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             ipv6Settings.excludedRoutes = excludedRoutes.ipv6
             settings.ipv6Settings = ipv6Settings
         }
-
-        // Plain DNS is intercepted by lwIP on UDP/53; an in-tunnel server address
-        // keeps queries reachable only through utun, so they cannot leak.
+        
         let plainDNSServers: [String]
         if advertiseIPv6ToApps {
             plainDNSServers = [tunnelAddressIPv4, TunnelConstants.tunnelAddressIPv6]
@@ -173,8 +150,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         return settings
     }
-
-    /// Parses user-configured route strings ("address" or "address/prefix").
+    
     private static func parseRoutes(_ strings: [String]) -> (ipv4: [NEIPv4Route], ipv6: [NEIPv6Route]) {
         var ipv4Routes: [NEIPv4Route] = []
         var ipv6Routes: [NEIPv6Route] = []
@@ -191,8 +167,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         return (ipv4: ipv4Routes, ipv6: ipv6Routes)
     }
-
-    /// Host bits beyond the prefix are zeroed.
+    
     private static func parseIPv4Route(_ string: String) -> NEIPv4Route? {
         let parts = string.split(separator: "/", maxSplits: 1)
         guard let addressPart = parts.first else { return nil }
@@ -209,8 +184,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         let network = UInt32(bigEndian: address.s_addr) & mask
         return NEIPv4Route(destinationAddress: dottedQuad(network), subnetMask: dottedQuad(mask))
     }
-
-    /// Host bits beyond the prefix are zeroed.
+    
     private static func parseIPv6Route(_ string: String) -> NEIPv6Route? {
         let parts = string.split(separator: "/", maxSplits: 1)
         guard let addressPart = parts.first else { return nil }
@@ -260,12 +234,15 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #endif
         
         statsRecorder.stop()
-        stopMonitoringPath()
-        reapplySettingsTask.withLock { task in
-            task?.cancel()
-            task = nil
+        
+        let task = rootTask.withLock { task -> Task<Void, Never>? in
+            defer { task = nil }
+            return task
         }
+        task?.cancel()
+        
         logTunnelStop(reason: reason)
+        
         await tunnelStack.stop()
     }
 
@@ -332,14 +309,16 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         Task { await tunnelStack.handleWake() }
     }
 
-    // MARK: - Path Monitoring
+    // MARK: - Provider task tree
 
-    private func startMonitoringPath() {
-        // Strong self: cancelling the task ends the stream (tearing the monitor down) and the
-        // loop, so ARC reclaims everything once `stopMonitoringPath` runs.
-        pathMonitorTask.withLock { task in
-            guard task == nil else { return }
-            task = Task {
+    private func run() async {
+        await withDiscardingTaskGroup { group in
+            group.addTask { [reapplySignal = tunnelStack.reapplySettingsSignal] in
+                for await _ in reapplySignal {
+                    await self.reapplyTunnelSettings()
+                }
+            }
+            group.addTask {
                 var transition = PathTransition()
                 for await path in self.pathMonitorBridge.paths() {
                     await self.handlePathUpdate(path, transition: &transition)
@@ -348,23 +327,14 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
     }
 
-    private func stopMonitoringPath() {
-        pathMonitorTask.withLock { task in
-            task?.cancel()
-            task = nil
-        }
-    }
-
-    /// Hands the egress identity (incl. Wi-Fi SSID on iOS) to the stack for the
-    /// trusted-network policy. `availableInterfaces.first` is the OS-preferred egress.
+    // MARK: - Path Monitoring
+    
     private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
         let isCellular = primaryType == .cellular
 #if os(iOS)
         if isWiFi {
-            // Requires the "Access WiFi Information" entitlement; otherwise `ssid`
-            // is nil and the network is treated as untrusted.
             let ssid = await pathMonitorBridge.currentWiFiSSID()
             await tunnelStack.updateNetworkContext(isWiFi: true, isCellular: false, ssid: ssid)
             return
@@ -372,11 +342,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #endif
         await tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
     }
-
-    /// Applies the trusted-network policy, releases upstream transports while the
-    /// path is down, and rebuilds them (flushing stale DNS) when it returns. Per-leg
-    /// recovery is left to the NW transports' viability handlers. Runs on the single
-    /// path-monitor task, so `transition` is its private, uncontended state.
+    
     private func handlePathUpdate(_ path: Network.NWPath, transition: inout PathTransition) async {
         let edge = transition.advance(to: path.status)
 
@@ -386,14 +352,11 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
             switch edge {
             case .restored:
-                // Up edge: rebuild the transports suspendOutbound released; flush stale DNS.
                 logger.info("[VPN] Network path restored: \(Self.pathSummary(path))")
                 await tunnelStack.resumeOutbound()
             case .ready:
                 logger.info("[VPN] Network path ready: \(Self.pathSummary(path))")
             default:
-                // satisfied→satisfied (e.g. an egress move): per-connection
-                // viability retires any stranded leg, so there's no global teardown.
                 break
             }
 
@@ -402,17 +365,14 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             }
 
         case .requiresConnection:
-            // Dedupe repeated callbacks in the same state; nothing to recover onto yet.
             guard edge == .waiting else { return }
             logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path))")
             reasserting = true
 
         case .unsatisfied:
-            // Idempotent on repeated unsatisfied callbacks.
             guard edge == .unavailable else { return }
             logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path))")
             reasserting = true
-            // Down edge: release dead upstream transports; rebuilt on the up edge.
             await tunnelStack.suspendOutbound()
 
         @unknown default:

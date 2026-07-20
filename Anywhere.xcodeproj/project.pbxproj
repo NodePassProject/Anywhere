@@ -106,6 +106,20 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		78170FEA300DEEC9003A8100 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Tunnel/NetworkExtensionConcurrencyBridge.swift,
+			);
+			target = CB1C10642F23B81500B74CD8 /* Anywhere */;
+		};
+		78170FEB300DEEC9003A8100 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere TV" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Tunnel/NetworkExtensionConcurrencyBridge.swift,
+			);
+			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
+		};
 		7870E4262FF88FDC006C0F14 /* Exceptions for "Shared" folder in "Anywhere Watch App" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -386,7 +400,6 @@
 				Utilities/Bridges/BridgeExecutor.swift,
 				Utilities/Bridges/DNSSyscallConcurrencyBridge.swift,
 				Utilities/Bridges/FoundationConcurrencyBridge.swift,
-				Utilities/Bridges/NetworkExtensionConcurrencyBridge.swift,
 				Utilities/Bridges/NGTCP2ConcurrencyBridge.swift,
 				"Utilities/Bridges/NGTCP2ConcurrencyBridge+Callbacks.swift",
 				"Utilities/Data+appendCompacting.swift",
@@ -468,6 +481,8 @@
 		CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				78170FEA300DEEC9003A8100 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere" target */,
+				78170FEB300DEEC9003A8100 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere TV" target */,
 				CB1C10832F23B82F00B74CD8 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere Network Extension" target */,
 			);
 			path = "Anywhere Network Extension";

@@ -265,23 +265,18 @@ actor UDPPlane {
         }
     }
 
-    // MARK: - Cleanup (periodic)
-
-    /// Reaps UDP flows past their idle deadline and sheds below the (possibly shrunken) cap under
-    /// kernel flow pressure. Driven by ``TunnelScheduler`` so it catches up promptly on device wake.
+    // MARK: - Cleanup
+    
     func cleanup() {
         let now = MonotonicClock.now
         for (key, flow) in flows where now > flow.idleDeadline {
             Task { await flow.close() }
             flows.removeValue(forKey: key)
         }
-        // Under kernel flow pressure, shed below the shrunken cap even with no inserts arriving —
-        // TCP alone can fill the budget, and eviction-on-insert never runs then.
         let cap = currentUDPFlowCap()
         if flows.count > cap {
             shedUDPFlows(count: flows.count - cap)
         }
-        // Re-arm the flow-cap warning so a later storm logs its own rising edge.
         if flowCapWarned && flows.count < cap {
             flowCapWarned = false
         }
