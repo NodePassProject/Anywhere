@@ -19,21 +19,21 @@ extension QUICConnection {
     nonisolated func openBidiStream() -> Int64? {
         assumeIsolated { me in
             guard me.state == .connected, let conn = me.connectionOpaquePointer else { return nil }
-            return me.bridge.openBidiStream(conn)
+            return me.openBidiStream(conn)
         }
     }
     
     nonisolated var availableBidiStreams: UInt64 {
         assumeIsolated { me in
             guard me.state == .connected, let conn = me.connectionOpaquePointer else { return 0 }
-            return me.bridge.streamsBidiLeft(conn)
+            return me.streamsBidiLeft(conn)
         }
     }
 
     nonisolated func openUniStream() -> Int64? {
         assumeIsolated { me in
             guard me.state == .connected, let conn = me.connectionOpaquePointer else { return nil }
-            return me.bridge.openUniStream(conn)
+            return me.openUniStream(conn)
         }
     }
     
@@ -50,7 +50,7 @@ extension QUICConnection {
 
     func extendStreamOffsetOnQueue(_ streamId: Int64, count: Int) {
         guard let connectionOpaquePointer else { return }
-        bridge.extendOffsets(connectionOpaquePointer, stream: streamId, count: count)
+        extendOffsets(connectionOpaquePointer, stream: streamId, count: count)
         if inReadPkt { return }
         scheduleFlush()
     }
@@ -70,7 +70,7 @@ extension QUICConnection {
         bridge.enqueue { [weak self] in
             self?.assumeIsolated { me in
                 guard let conn = me.connectionOpaquePointer else { return }
-                me.bridge.shutdownStream(conn, stream: streamId, appErrorCode: appErrorCode)
+                me.shutdownStream(conn, stream: streamId, appErrorCode: appErrorCode)
                 me.writeToUDP()
             }
         }
@@ -155,11 +155,11 @@ extension QUICConnection {
     nonisolated var maxDatagramPayloadSize: Int {
         assumeIsolated { me in
             guard let conn = me.connectionOpaquePointer else { return 0 }
-            guard let parameters = me.bridge.remoteTransportParams(conn) else { return 0 }
+            guard let parameters = me.remoteTransportParams(conn) else { return 0 }
             let maxFrame = Int(parameters.pointee.max_datagram_frame_size)
             guard maxFrame > 0 else { return 0 }
             let frameLimit = max(0, maxFrame - 3)
-            let pathBytes = me.bridge.pathMaxTxUDPPayload(conn)
+            let pathBytes = me.pathMaxTxUDPPayload(conn)
             let pathLimit = max(0, pathBytes - 44)
             return min(frameLimit, pathLimit)
         }
@@ -217,7 +217,7 @@ extension QUICConnection {
 
                 let nwrite = chunk.withStableBase { base in
                     txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                        bridge.writeStream(
+                        writeStream(
                             conn, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
                             dest: destination.baseAddress, destCapacity: destination.count,
                             dataLength: &pdatalen, flags: flags, stream: id,

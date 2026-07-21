@@ -15,7 +15,7 @@ extension QUICConnection {
     // MARK: Close
 
     nonisolated func close(error: Error? = nil) {
-        if bridge.connHeld && isOnQueue {
+        if connHeld && isOnQueue {
             bridge.enqueue { self.close(error: error) }
             return
         }
@@ -41,7 +41,7 @@ extension QUICConnection {
                 self.brutalCC = nil
             }
             if let connectionOpaquePointer = self.connectionOpaquePointer {
-                self.bridge.deleteConn(connectionOpaquePointer)
+                self.deleteConn(connectionOpaquePointer)
                 self.connectionOpaquePointer = nil
             }
             self.transportSealContinuation?.finish()

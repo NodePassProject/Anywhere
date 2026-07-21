@@ -55,8 +55,7 @@ actor TCPConnection: MITMSessionHost {
     private var mitmPlaintext = false
     private var mitmSNI: String?
     private var mitmSession: MITMSession?
-
-    /// True when `dstHost` is a DNS-resolved domain (fake-IP), false when it is a raw IP (real-IP).
+    
     private let hostIsResolvedDomain: Bool
 
     // MARK: SNI / HTTP Sniffing
@@ -109,15 +108,17 @@ actor TCPConnection: MITMSessionHost {
     private var pendingAdmissionCounted = true
 
     // MARK: Lifecycle
-
-    init(stack: TunnelStack,
-         pcb: LWIPPCBHandle, dstHost: String, dstPort: UInt16,
-         configuration: ProxyConfiguration, routeTarget: RouteTarget,
-         viaDefault: Bool,
-         ruleSetName: String? = nil,
-         sniffSNI: Bool = false,
-         hostIsResolvedDomain: Bool = false,
-         bridge: LWIPConcurrencyBridge) {
+    
+    init(
+        stack: TunnelStack,
+        pcb: LWIPPCBHandle, dstHost: String, dstPort: UInt16,
+        configuration: ProxyConfiguration, routeTarget: RouteTarget,
+        viaDefault: Bool,
+        ruleSetName: String? = nil,
+        sniffSNI: Bool = false,
+        hostIsResolvedDomain: Bool = false,
+        bridge: LWIPConcurrencyBridge
+    ) {
         FlowGauge.incrementPendingTCP()
         self.stack = stack
         self.pcb = pcb.raw
@@ -136,7 +137,12 @@ actor TCPConnection: MITMSessionHost {
         }
     }
     
-    func start() {
+    nonisolated func adopt() -> UnsafeMutableRawPointer {
+        assumeIsolated { $0.start() }
+        return BridgeContext.passRetained(self)
+    }
+
+    private func start() {
         rootTask = Task { await self.run() }
     }
     
@@ -176,7 +182,6 @@ actor TCPConnection: MITMSessionHost {
     private enum Establishment {
         case relay(ProxyConnection, TCPStreamConcurrencyBridge, seed: Data)
         case mitm
-        /// The connection closed / rejected / aborted during establishment; nothing more to run.
         case done
     }
     
@@ -205,8 +210,7 @@ actor TCPConnection: MITMSessionHost {
         failureReporter.report(
             operation: "Handshake",
             endpoint: endpointDescription,
-            error: AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: phase)),
-            context: DialDiagnostics.snapshot(bridge: bridge)
+            error: AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: phase))
         )
         abort()
     }
@@ -264,14 +268,13 @@ actor TCPConnection: MITMSessionHost {
             do {
                 signal = try await establishInbox.next()
             } catch {
-                return  // cancelled by the sniff deadline or teardown
+                return
             }
-            guard let signal else { return }  // inbox finished (teardown)
+            guard let signal else { return }
             if case .clientFIN = signal {
                 handleFINDuringSniff()
                 return
             }
-            // .data: loop and feed the new delta.
         }
     }
     
@@ -281,7 +284,6 @@ actor TCPConnection: MITMSessionHost {
 
         if sniffer != nil {
             guard !delta.isEmpty else { return }
-            // Optional-chain the stored `var` so `feed` (mutating) advances the sniffer's own state.
             guard let state = sniffer?.feed(delta) else { return }
             switch state {
             case .needMore:
@@ -289,14 +291,14 @@ actor TCPConnection: MITMSessionHost {
             case .found(let sni):
                 sniffer = nil
                 applySNI(sni)
-                return  // route committed (rule may have rejected → closed)
+                return
             case .notTLS:
                 sniffer = nil
                 if mitmCanInterceptPlaintext {
                     var http = HTTPRequestSniffer()
                     let httpState = http.feed(pendingData)
                     httpSniffer = http
-                    sniffFedOffset = pendingData.count  // the fresh http sniffer just consumed the whole buffer
+                    sniffFedOffset = pendingData.count
                     handleHTTPSniff(httpState)
                 }
                 return
@@ -422,7 +424,7 @@ actor TCPConnection: MITMSessionHost {
         } catch let dialError {
             error = dialError
         }
-        // Resumes on the actor.
+        
         guard !closed else { return .done }
 
         if let error {
@@ -475,7 +477,7 @@ actor TCPConnection: MITMSessionHost {
         } catch {
             result = .failure(error)
         }
-        // Resumes on the actor.
+        
         guard !closed else {
             if case .success(let connection) = result { connection.cancel() }
             return .done
@@ -503,10 +505,16 @@ actor TCPConnection: MITMSessionHost {
             return handleConnectFailure(error, bufferedClientData: initialData)
         }
     }
-
-    private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) -> Establishment {
-        failureReporter.report(operation: "Connect", endpoint: endpointDescription,
-                               error: error, context: DialDiagnostics.snapshot(bridge: bridge))
+    
+    private func handleConnectFailure(
+        _ error: Error,
+        bufferedClientData: Data?
+    ) -> Establishment {
+        failureReporter.report(
+            operation: "Connect",
+            endpoint: endpointDescription,
+            error: error
+        )
         guard case AnywhereError.dns(.resolutionFailed) = error else {
             abort()
             return .done
@@ -636,9 +644,9 @@ actor TCPConnection: MITMSessionHost {
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(part)
-            bridge.tcpRecved(pcb, part)
+            lwip_bridge_tcp_recved(pcb, part)
         }
-        bridge.tcpOutput(pcb)
+        lwip_bridge_tcp_output(pcb)
     }
 
     // MARK: - lwIP callbacks
@@ -661,8 +669,7 @@ actor TCPConnection: MITMSessionHost {
             stream.assumeIsolated { $0.deliverUpload(uploadChunk) }
             return
         }
-
-        // Still establishing: buffer (cap-checked) and wake the establishment flow.
+        
         guard appendPendingData(bytes: bytePtr, count: count) else { return }
         establishInbox.yield(.data)
     }
@@ -697,12 +704,9 @@ actor TCPConnection: MITMSessionHost {
 
         uplinkDone = true
         if let stream {
-            // Non-MITM: signal the app's FIN; the upload relay drains and returns. The connection
-            // full-closes once the download direction also ends (half-close removed).
             stream.assumeIsolated { $0.deliverUploadEOF() }
             if !downlinkDone { setIdleTimeout(TunnelConstants.downlinkOnlyTimeout) }
         } else if !downlinkDone {
-            // MITM / pre-relay: tighten the idle window while awaiting the downlink.
             setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
@@ -1096,15 +1100,24 @@ actor TCPConnection: MITMSessionHost {
         guard !closed else { return }
         closed = true
         stream?.assumeIsolated { $0.flushBestEffort() }
-        bridge.relinquish(self, pcb: pcb, abortive: false)
+        relinquishPCB(abortive: false)
         teardown(abortive: false)
     }
 
     func abort() {
         guard !closed else { return }
         closed = true
-        bridge.relinquish(self, pcb: pcb, abortive: true)
+        relinquishPCB(abortive: true)
         teardown(abortive: true)
+    }
+    
+    private func relinquishPCB(abortive: Bool) {
+        if abortive {
+            lwip_bridge_tcp_abort(pcb)
+        } else {
+            lwip_bridge_tcp_close(pcb)
+        }
+        BridgeContext.release(self)
     }
 
     private func rejectGracefully() {
@@ -1113,7 +1126,7 @@ actor TCPConnection: MITMSessionHost {
         while remaining > 0 {
             let chunk = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(chunk)
-            bridge.tcpRecved(pcb, chunk)
+            lwip_bridge_tcp_recved(pcb, chunk)
         }
         close()
     }
@@ -1123,8 +1136,24 @@ actor TCPConnection: MITMSessionHost {
         // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
         // length=2, level=2 (fatal), description=49 (access_denied)
         let alert: [UInt8] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31]
-        bridge.tcpWriteImmediate(pcb, Data(alert))
+        writeImmediate(Data(alert))
         rejectGracefully()
+    }
+    
+    private func writeImmediate(_ data: Data) {
+        guard !data.isEmpty else { return }
+        var written = 0
+        data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            while written < data.count {
+                let sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
+                guard sndbuf > 0 else { break }
+                let chunk = min(min(sndbuf, data.count - written), TunnelConstants.tcpMaxWriteSize)
+                guard lwip_bridge_tcp_write(pcb, base + written, UInt16(chunk)) == 0 else { break }
+                written += chunk
+            }
+        }
+        if written > 0 { lwip_bridge_tcp_output(pcb) }
     }
     
     private func teardown(abortive: Bool) {

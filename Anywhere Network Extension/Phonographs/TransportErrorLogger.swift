@@ -7,15 +7,10 @@
 
 import Foundation
 
-/// Shared error-reporting helper for TCP/UDP connections: terminal failures log
-/// exactly once via ConnectionFailureReporter, transient sends log at warning,
-/// and inner transport layers propagate errors instead of logging.
 nonisolated enum TransportErrorLogger {
 
     // MARK: - Formatting
-
-    /// Concise text for a log line that already names its operation. `AnywhereError`s
-    /// drop their subsystem tag; legacy enums get their baked-in prefix stripped.
+    
     static func conciseErrorDescription(_ error: Error) -> String {
         if let error = error as? AnywhereError { return error.conciseDescription }
         var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -51,9 +46,7 @@ nonisolated enum TransportErrorLogger {
             logger.debug("\(prefix) \(operation) error: \(endpoint): \(errorDescription)\(suffix)")
             return
         }
-
-        // Peer-initiated closes get distinct wording; the error's suggested level
-        // covers everything else (unmigrated error types default to .error).
+        
         switch (error as? AnywhereError)?.peerClose {
         case .cascade:
             logger.debug("\(prefix) \(operation) after peer close: \(endpoint): \(errorDescription)\(suffix)")
@@ -87,25 +80,8 @@ nonisolated enum TransportErrorLogger {
     }
 }
 
-// MARK: - DialDiagnostics
-
-/// Kernel-flow-ledger snapshots appended to TCP connect-failure logs.
-nonisolated enum DialDiagnostics {
-
-    /// E.g. `flows=312/384 pending=6 udp=96 lwip=205`. Must run on
-    /// lwipQueue (the PCB count is lwipQueue-confined). The active-pcb count is
-    /// read through the bridge's wrapper so the raw `lwip_bridge_*` C symbol
-    /// stays inside ``LWIPConcurrencyBridge``.
-    static func snapshot(bridge: LWIPConcurrencyBridge) -> String {
-        "flows=\(FlowGauge.live)/\(TunnelLimits.flowBudget) "
-            + "pending=\(FlowGauge.pendingTCP) udp=\(FlowGauge.liveUDP) "
-            + "lwip=\(bridge.activeTCPCount())"
-    }
-}
-
 // MARK: - ConnectionFailureReporter
 
-/// Emits exactly one terminal-failure line per connection; later reports no-op.
 nonisolated final class ConnectionFailureReporter {
     private let prefix: String
     private let logger: AnywhereLogger
@@ -129,9 +105,7 @@ nonisolated final class ConnectionFailureReporter {
             context: context()
         )
     }
-
-    /// Marks reported without logging, so a non-error close suppresses any
-    /// spurious error log later in teardown.
+    
     func markReported() {
         reported = true
     }

@@ -67,14 +67,7 @@ extension TunnelStack {
     }
 
     // MARK: - Packet Reading
-
-    /// Duty-cycle child: feeds each inbound TUN batch to lwIP + the UDP plane. The raw
-    /// `readPackets()` await never resumes on cancellation, so the tree must not await it
-    /// directly — ``stop()`` would hang on a quiet utun. An unstructured producer (the same
-    /// border pattern as ``PathMonitorConcurrencyBridge``) owns that await, paced by a demand
-    /// token so utun still paces us: the next read starts only after the previous batch is
-    /// processed. Cancelling this child ends the batch stream at once; the orphaned producer dies
-    /// at its next resume, its late yield landing in a terminated stream, not a shut-down engine.
+    
     func runReadLoop(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         let demand = AsyncInbox<Void>(capacity: 1)
         demand.yield(())
@@ -93,9 +86,7 @@ extension TunnelStack {
             demand.yield(())
         }
     }
-
-    /// Partitions one inbound batch on the actor and feeds both sub-batches; the next read waits
-    /// on both.
+    
     private func processInboundBatch(_ packets: [Data], udpPlane: UDPPlane) async {
         let reflector = reflector()
         var lwipBatch: [Data] = []
@@ -114,15 +105,20 @@ extension TunnelStack {
         }
 
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { [lwipBatch] in
-                await self.lwipBridge.run { self.assumeIsolated { $0.feedLwipBatch(lwipBatch) } }
-            }
+            group.addTask { [lwipBatch] in await self.feedLwipBatch(lwipBatch) }
             group.addTask { [udpBatch] in await udpPlane.feed(udpBatch) }
         }
     }
     
     func feedLwipBatch(_ packets: [Data]) {
-        lwipBridge.input(packets)
+        lwip_bridge_input_batch_begin()
+        for packet in packets {
+            packet.withUnsafeBytes { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                lwip_bridge_input(baseAddress, Int32(buffer.count))
+            }
+        }
+        lwip_bridge_input_batch_end()
         lwipTick?.resume()
     }
 
@@ -134,7 +130,7 @@ extension TunnelStack {
             leewayMs: TunnelConstants.lwipTimeoutLeewayMs
         ) { [weak self] in
             guard let self, self.running else { return }
-            if self.lwipBridge.serviceTimeouts() {
+            if lwip_bridge_check_timeouts() != 0 {
                 self.assumeIsolated { $0.lwipTick?.suspend() }
             }
         }
@@ -143,11 +139,7 @@ extension TunnelStack {
     func resumeLwipTickIfNeeded() {
         lwipTick?.resume()
     }
-
-    /// Duty-cycle child, replacing the former `TunnelScheduler`: reaps idle UDP flows every
-    /// ``TunnelConstants/udpCleanupIntervalSec``. ``TunnelStack/udpCleanupPoke`` (fed on device
-    /// wake) breaks the sleep so an interval that fell due while the clock was frozen fires
-    /// promptly instead of drifting; an early poke just re-sleeps the remainder.
+    
     nonisolated func runUDPCleanupLoop(udpPlane: UDPPlane) async {
         let interval = TimeInterval(TunnelConstants.udpCleanupIntervalSec)
         var lastRun = MonotonicClock.now
@@ -163,8 +155,7 @@ extension TunnelStack {
             lastRun = MonotonicClock.now
         }
     }
-
-    /// Parks until `seconds` elapse or a device-wake poke arrives, whichever comes first.
+    
     private nonisolated func sleepOrWakePoke(seconds: TimeInterval) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask {

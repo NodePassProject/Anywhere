@@ -12,8 +12,8 @@ import Synchronization
 
 extension QUICConnection {
 
-    // MARK: - NGTCP2BridgeHost
-    
+    // MARK: - ngtcp2 callback handlers
+
     nonisolated private static func isBenignCloseCode(_ code: UInt64) -> Bool {
         code == 0x00 || code == 0x100
     }

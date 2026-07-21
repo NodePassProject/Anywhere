@@ -10,8 +10,21 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Callbacks")
 
-/// Per-host SYN-reject flood tracker. Not `Sendable`: it is owned by ``TunnelStack`` as isolated
-/// state and touched only by the isolated SYN-filter callback (on the lwIP queue).
+// MARK: - C-Callback Crossing Types
+
+struct LWIPRawPointer: @unchecked Sendable { let raw: UnsafeRawPointer }
+
+struct LWIPPCBHandle: @unchecked Sendable { let raw: UnsafeMutableRawPointer }
+
+struct LWIPReleaseAction: @unchecked Sendable {
+    let ctx: UnsafeMutableRawPointer?
+    let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
+    
+    static let noop = LWIPReleaseAction(ctx: nil, fn: { _ in })
+    
+    func run() { fn(ctx) }
+}
+
 final class RejectFloodTracker {
     private let threshold: Int
     private let window: CFAbsoluteTime
@@ -22,9 +35,7 @@ final class RejectFloodTracker {
         self.threshold = threshold
         self.window = window
     }
-
-    /// Records a reject for `host` and returns `true` if the host has
-    /// crossed the flood threshold within the window.
+    
     func shouldDrop(host: String) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         let cutoff = now - window
@@ -41,10 +52,82 @@ final class RejectFloodTracker {
     }
 }
 
-extension TunnelStack: LWIPBridgeHost {
+extension TunnelStack {
 
-    /// lwIP has an IP packet to write back to the TUN. Batches it onto ``outputBuffer`` and
-    /// kicks a drain if idle; the release stays index-aligned and fires on ``lwipQueue``.
+    // MARK: - Callback Installation
+    
+    func installLwipCallbacks() {
+        lwip_bridge_set_host_ctx(BridgeContext.passUnretained(self))
+        
+        lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
+            guard let stack = TunnelStack.lwipHost(), let data, let release else { return }
+            let packet = Data(
+                bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
+                count: Int(len),
+                deallocator: .none
+            )
+            let releaseAction = LWIPReleaseAction(ctx: releaseCtx, fn: release)
+            stack.assumeIsolated {
+                $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, release: releaseAction)
+            }
+        }
+        
+        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, dstPort, isIPv6 in
+            guard let stack = TunnelStack.lwipHost(), let dstIP else {
+                return Int32(LWIP_BRIDGE_SYN_PASS)
+            }
+            let dstIPBox = LWIPRawPointer(raw: dstIP)
+            return stack.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0) }
+        }
+        
+        lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb in
+            guard let stack = TunnelStack.lwipHost(), let pcb, let dstIP else { return nil }
+            let pcbHandle = LWIPPCBHandle(raw: pcb)
+            let dstIPBox = LWIPRawPointer(raw: dstIP)
+            guard let connection = stack.assumeIsolated({
+                $0.lwipAccept(pcb: pcbHandle.raw, dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0)
+            }) else {
+                return nil
+            }
+            return connection.adopt()
+        }
+        
+        lwip_bridge_set_tcp_recv_fn { connection, data, len in
+            guard let connection else {
+                logger.debug("[LWIPBridge] tcp_recv: connection is nil")
+                return
+            }
+            let dataBox = data.map { LWIPRawPointer(raw: $0) }
+            BridgeContext.unretained(connection, as: TCPConnection.self).assumeIsolated { conn in
+                if let dataBox, len > 0 {
+                    conn.handleReceivedData(bytes: dataBox.raw, count: Int(len))
+                } else {
+                    conn.handleRemoteClose()
+                }
+            }
+        }
+        
+        lwip_bridge_set_tcp_sent_fn { connection, len in
+            guard let connection else { return }
+            BridgeContext.unretained(connection, as: TCPConnection.self).assumeIsolated { $0.handleSent(len: len) }
+        }
+        
+        lwip_bridge_set_tcp_err_fn { connection, err in
+            guard let connection else {
+                logger.debug("[LWIPBridge] tcp_err: connection is nil, err=\(err)")
+                return
+            }
+            BridgeContext.consume(connection, as: TCPConnection.self).assumeIsolated { $0.handleError(err: err) }
+        }
+    }
+    
+    private static func lwipHost() -> TunnelStack? {
+        guard let ctx = lwip_bridge_host_ctx() else { return nil }
+        return BridgeContext.unretained(ctx, as: TunnelStack.self)
+    }
+
+    // MARK: - Callbacks
+    
     func lwipDidOutput(_ packet: Data, isIPv6: Bool, release: LWIPReleaseAction) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
         let needsKick: Bool = outputBuffer.withLock { buffer in
@@ -59,14 +142,10 @@ extension TunnelStack: LWIPBridgeHost {
             kickOutputDrain()
         }
     }
-
-    /// Verdict for an incoming SYN: reject `.reject` destinations at SYN time — never
-    /// completing the 3WHS gives the client a clean ECONNREFUSED. SNI-based rejects (no
-    /// ClientHello yet) still land in ``TCPConnection``.
+    
     func lwipSynVerdict(dstIP: UnsafeRawPointer, dstPort: UInt16, isIPv6: Bool) -> Int32 {
         let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
-
-        // DROP if the host is flooding, RESET otherwise.
+        
         func reject(host: String, reason: String, ruleSetName: String?) -> Int32 {
             requestLog.record(protocol: .tcp, host: host, port: dstPort, routeTarget: .reject, ruleSetName: ruleSetName)
             if rejectFloodTracker.shouldDrop(host: host) {
@@ -83,31 +162,31 @@ extension TunnelStack: LWIPBridgeHost {
             let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
             return reject(host: decision.host, reason: reason, ruleSetName: ruleSetName)
         case .unreachable:
-            // Stale fake-IP pool entry — drop silently rather than RST.
             logger.debug("[TCP] SYN dropped (stale fake-IP): \(dstIPString):\(dstPort)")
             return Int32(LWIP_BRIDGE_SYN_DROP)
         case .route, .routeViaDefault:
-            // Raw-IP destinations admit against the lower watermark.
             return admitSYN(rawIP: !decision.hostIsResolvedDomain)
         }
     }
-
-    /// Builds the ``TCPConnection`` for a just-accepted pcb, or `nil` to abort it (RST).
-    /// `.reject` was already handled by the SYN filter.
-    func lwipAccept(pcb: UnsafeMutableRawPointer, dstIP: UnsafeRawPointer,
-                    dstPort: UInt16, isIPv6: Bool) -> TCPConnection? {
+    
+    func lwipAccept(
+        pcb: UnsafeMutableRawPointer,
+        dstIP: UnsafeRawPointer,
+        dstPort: UInt16,
+        isIPv6: Bool
+    ) -> TCPConnection? {
         guard let defaultConfiguration = configuration else {
             logger.debug("[TunnelStack] tcp_accept: guard failed")
             return nil
         }
-
-        let activeTCP = lwipBridge.activeTCPCount()
+        
+        let activeTCP = Int(lwip_bridge_active_tcp_count())
         if activeTCP > TunnelLimits.tcpMaxConnections {
             if !tcpConnectionCapWarned {
                 tcpConnectionCapWarned = true
                 logger.warning("[TCP] Connection table at capacity (\(TunnelLimits.tcpMaxConnections)); refusing new connections to bound memory")
             }
-            return nil  // bridge aborts newpcb (tcp_abort)
+            return nil
         } else if tcpConnectionCapWarned && activeTCP < TunnelLimits.tcpMaxConnections * 3 / 4 {
             tcpConnectionCapWarned = false
         }
@@ -116,9 +195,7 @@ extension TunnelStack: LWIPBridgeHost {
         let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
 
         var connectionConfiguration = defaultConfiguration
-        // Committed routing identity; drives the dial path and accounting.
         var routeTarget = defaultRouteTarget
-        // Rule set behind the committed route; nil while on the default.
         var ruleSetName: String? = nil
 
         switch decision.action {
@@ -131,12 +208,9 @@ extension TunnelStack: LWIPBridgeHost {
         case .routeViaDefault:
             break
         case .reject, .unreachable:
-            // Both were handled by the SYN filter; defensive return.
             return nil
         }
-
-        // `decision.host` is the dial destination; plaintext MITM trusts a
-        // DNS-resolved (fake-IP) host over the spoofable `Host` header.
+        
         let dstHost = decision.host
 
         requestLog.record(
@@ -147,12 +221,7 @@ extension TunnelStack: LWIPBridgeHost {
             viaDefault: decision.viaDefault,
             ruleSetName: ruleSetName
         )
-
-        // Sniff TLS ClientHello only on real-IP connections — fake-IP ones
-        // already know the domain, and an SNI disagreeing with the
-        // DNS-resolved name could miscategorize. MITM is the exception: it
-        // needs the buffered ClientHello, so force sniffing even for a
-        // known fake-IP domain.
+        
         var sniffSNI = !decision.hostIsResolvedDomain
         if mitmEnabled && mitmPolicy.matches(dstHost) {
             sniffSNI = true
@@ -174,30 +243,21 @@ extension TunnelStack: LWIPBridgeHost {
     }
 
     // MARK: - Flow Admission
-
-    /// Admits a TCP SYN against the kernel flow budget. Over budget the SYN
-    /// is dropped, not RST — the client backs off on kernel SYN
-    /// retransmission, where an RST invites an instant retry.
-    /// Raw-IP destinations are swarm-shaped (P2P/PCDN peers) and yield at the
-    /// lower pressure watermark so they can't starve domain-routed traffic.
-    /// Runs on ``lwipQueue``.
+    
     func admitSYN(rawIP: Bool) -> Int32 {
         let load = FlowGauge.admissionLoad
         let watermark = rawIP ? TunnelLimits.flowPressureWatermark : TunnelLimits.flowBudget
         if load < watermark {
-            // Clear the shed latch only once even raw-IP SYNs are admitted
-            // again, so alternating domain/raw-IP SYNs can't flap it.
             if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
                 flowShedWarned = false
-                logger.info("[TCP] flow budget recovered; admitting SYNs [\(DialDiagnostics.snapshot(bridge: lwipBridge))]")
+                logger.info("[TCP] flow budget recovered; admitting SYNs")
             }
             return Int32(LWIP_BRIDGE_SYN_PASS)
         }
         if !flowShedWarned {
             flowShedWarned = true
-            logger.warning("[TCP] dropping new SYNs: flow budget exhausted [\(DialDiagnostics.snapshot(bridge: lwipBridge))]")
+            logger.warning("[TCP] flow budget exhausted; dropping new SYNs")
         }
         return Int32(LWIP_BRIDGE_SYN_DROP)
     }
-
 }

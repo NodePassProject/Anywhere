@@ -22,20 +22,12 @@ actor TCPStreamConcurrencyBridge {
     var onFatalWrite: (@Sendable (AnywhereError) -> Void)?
 
     // MARK: Upload (app → upstream)
-    //
-    // Coalesces a synchronous burst of lwIP recv callbacks so the relay ships one large send;
-    // `tcp_recved` is deferred until the upstream accepts a chunk (the ack rides the next
-    // ``receiveUpload(acking:)``), so TCP_WND caps how far ahead the buffer runs.
 
     private var uploadBuffer = Data()
     private var uploadEOF = false
     private var uploadWaiter: CheckedContinuation<Void, Never>?
 
     // MARK: Download (upstream → app)
-    //
-    // `[0, pendingWriteOffset)` is already handed to lwIP; compaction is deferred until the dead
-    // prefix outgrows the live suffix. `sendDownload` parks on `creditWaiter` while the backlog
-    // is at/above the low-water mark, so the upstream peer is throttled to what the app drains.
 
     private var pendingWrite = Data()
     private var pendingWriteOffset = 0
@@ -44,15 +36,9 @@ actor TCPStreamConcurrencyBridge {
     private var downloadFinished = false
     private var finishWaiter: CheckedContinuation<Void, Never>?
     private var writeError: AnywhereError?
-
-    /// Producer-side mirror of the download backlog: `pendingWriteCount` plus bytes handed to
-    /// ``pushDownload(_:)`` whose hop hasn't landed yet. Credited at push/deliver time and
-    /// debited as bytes drain into lwIP, so the relay's fast-path check can never run ahead of
-    /// hops still queued. A hint only — real backpressure still parks on `creditWaiter`.
+    
     private let backlogBytesMirror = Atomic<Int>(0)
-
-    /// Latched on teardown and on a fatal `tcp_write` to force the relay onto the awaited
-    /// ``sendDownload(_:)`` path, whose checks end the relay loop by throwing.
+    
     private let downloadNeedsAwaitedSend = Atomic<Bool>(false)
 
     private var pendingWriteCount: Int { pendingWrite.count - pendingWriteOffset }
@@ -62,30 +48,25 @@ actor TCPStreamConcurrencyBridge {
         self.pcb = pcb.raw
     }
 
-    // MARK: - Intake (lwIP queue; entered via the owner's `assumeIsolated`)
-
-    /// New upload bytes from the local app (lwIP `tcp_recv`). Copies eagerly — `ptr` is valid
-    /// only for this call.
+    // MARK: - Intake
+    
     func deliverUpload(_ bytes: Data) {
         guard !terminated, !bytes.isEmpty else { return }
         uploadBuffer.append(bytes)
         resumeUploadWaiter()
     }
-
-    /// The app half-closed its send direction (lwIP `tcp_recv` with an empty pbuf).
+    
     func deliverUploadEOF() {
         guard !terminated else { return }
         uploadEOF = true
         resumeUploadWaiter()
     }
-
-    /// The client ACK freed lwIP send-buffer space (lwIP `tcp_sent`): drain more backlog.
+    
     func deliverSendCredit() {
         guard !terminated else { return }
         drainPendingWrite()
     }
-
-    /// Stops both relay loops (teardown/cancel). The owner still drives the pcb close/abort.
+    
     func terminate() {
         guard !terminated else { return }
         terminated = true
@@ -96,16 +77,13 @@ actor TCPStreamConcurrencyBridge {
     }
 
     // MARK: - Establishment / teardown helpers
-
-    /// Seeds bytes buffered during sniff/dial (the app's pre-connect payload) ahead of the relay.
+    
     func seedUpload(_ data: Data) {
         guard !terminated, !data.isEmpty else { return }
         uploadBuffer.append(data)
         resumeUploadWaiter()
     }
-
-    /// Best-effort flush of the download backlog before the owner closes the pcb, so drained
-    /// bytes precede the FIN. Fatal errors are ignored (the close supersedes them).
+    
     func flushBestEffort() {
         let live = pendingWriteCount
         guard live > 0 else { return }
@@ -113,10 +91,10 @@ actor TCPStreamConcurrencyBridge {
             guard let base = buffer.baseAddress else { return 0 }
             return max(feedLWIP(base + pendingWriteOffset, count: live, retryOnEmpty: true), 0)
         }
-        if written > 0 { bridge.tcpOutput(pcb) }
+        if written > 0 { lwip_bridge_tcp_output(pcb) }
     }
 
-    // MARK: - Upload async surface (single upload relay)
+    // MARK: - Upload async surface
     
     func receiveUpload(acking ackedByteCount: Int) async -> Data? {
         ackUpload(ackedByteCount)
@@ -140,44 +118,32 @@ actor TCPStreamConcurrencyBridge {
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(part)
-            bridge.tcpRecved(pcb, part)
+            lwip_bridge_tcp_recved(pcb, part)
         }
-        bridge.tcpOutput(pcb)
+        lwip_bridge_tcp_output(pcb)
     }
 
-    // MARK: - Download async surface (single download relay)
-
-    /// Fire-and-forget push (MITM inner-leg output): appends `data` and drains, with no
-    /// backpressure. Ordering is preserved by the single lwIP-queue caller.
+    // MARK: - Download async surface
+    
     func deliverDownload(_ data: Data) {
         guard !terminated, !data.isEmpty else { return }
         backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
         pendingWrite.append(data)
         drainPendingWrite()
     }
-
-    /// True when the download relay may hand its next chunk to ``pushDownload(_:)``: no
-    /// teardown/write-error latched and the backlog mirror below the low-water mark.
+    
     nonisolated var canPushDownload: Bool {
         !downloadNeedsAwaitedSend.load(ordering: .relaxed)
             && backlogBytesMirror.load(ordering: .relaxed) < TunnelConstants.drainLowWaterMark
     }
-
-    /// Fire-and-forget counterpart of ``sendDownload(_:)`` for the uncontended case: one hop
-    /// onto the lwIP queue and no suspension, so the relay loop goes straight back into its
-    /// upstream `receive()` instead of crossing the busiest queue twice per chunk. Ordering
-    /// against the awaited path holds because both funnel through the same serial queue. Valid
-    /// only while ``canPushDownload`` — at/over the low-water mark the relay must take the
-    /// awaited path so the upstream peer is throttled to what the app drains.
+    
     nonisolated func pushDownload(_ data: Data) {
         backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
         bridge.enqueue { [self] in
             assumeIsolated { $0.acceptPushedDownload(data) }
         }
     }
-
-    /// Lands a ``pushDownload(_:)`` hop. The mirror was credited at push time, so a drop here
-    /// (teardown won the race) must hand the credit back.
+    
     private func acceptPushedDownload(_ data: Data) {
         guard !terminated else {
             backlogBytesMirror.wrappingSubtract(data.count, ordering: .relaxed)
@@ -186,10 +152,7 @@ actor TCPStreamConcurrencyBridge {
         pendingWrite.append(data)
         drainPendingWrite()
     }
-
-    /// Hands `data` to lwIP for the local app, parking until the backlog drains below the
-    /// low-water mark so the upstream is throttled. Throws `AnywhereError.transport` on teardown
-    /// or a fatal `tcp_write`.
+    
     func sendDownload(_ data: Data) async throws {
         guard !terminated else { throw AnywhereError.transport(.terminated) }
         deliverDownload(data)
@@ -201,10 +164,7 @@ actor TCPStreamConcurrencyBridge {
         if let writeError { throw writeError }
         if terminated { throw AnywhereError.transport(.terminated) }
     }
-
-    /// The upstream EOF'd: wait until the download backlog has fully drained into lwIP so the
-    /// full close doesn't truncate the tail. No FIN is sent (half-close removed) — the owner
-    /// full-closes once both directions have ended.
+    
     func awaitDownloadDrained() async {
         guard !terminated, writeError == nil else { return }
         downloadFinishing = true
@@ -215,9 +175,7 @@ actor TCPStreamConcurrencyBridge {
             }
         }
     }
-
-    /// Drains `pendingWrite` into lwIP; on no progress (`ERR_MEM`/zero window) schedules a retry,
-    /// on a fatal error latches ``writeError``. Resumes the download relay once capacity opens.
+    
     private func drainPendingWrite() {
         guard !terminated, writeError == nil else { return }
 
@@ -228,7 +186,7 @@ actor TCPStreamConcurrencyBridge {
                 return feedLWIP(base + pendingWriteOffset, count: live, retryOnEmpty: true)
             }
             if written < 0 {
-                let error = AnywhereError.transport(.writeFailed(pending: live, sndbuf: bridge.tcpSendBuffer(pcb)))
+                let error = AnywhereError.transport(.writeFailed(pending: live, sndbuf: Int(lwip_bridge_tcp_sndbuf(pcb))))
                 writeError = error
                 downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
                 resumeCreditWaiter()
@@ -246,9 +204,8 @@ actor TCPStreamConcurrencyBridge {
                     pendingWrite.removeSubrange(0..<pendingWriteOffset)
                     pendingWriteOffset = 0
                 }
-                bridge.tcpOutput(pcb)
+                lwip_bridge_tcp_output(pcb)
             } else {
-                // Nothing drained (ERR_MEM / zero window): retry after a delay.
                 scheduleDrainRetry()
                 return
             }
@@ -274,22 +231,20 @@ actor TCPStreamConcurrencyBridge {
             await self?.drainPendingWrite()
         }
     }
-
-    /// Ports `TCPConnection.feedLWIP`: writes up to `count` bytes, returning bytes written,
-    /// `0` on no progress (`ERR_MEM`/zero window), or `-1` on a fatal error.
+    
     private func feedLWIP(_ base: UnsafeRawPointer, count: Int, retryOnEmpty: Bool) -> Int {
         var offset = 0
         while offset < count {
-            var sndbuf = bridge.tcpSendBuffer(pcb)
+            var sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
             if sndbuf <= 0 {
                 if retryOnEmpty {
-                    bridge.tcpOutput(pcb)
-                    sndbuf = bridge.tcpSendBuffer(pcb)
+                    lwip_bridge_tcp_output(pcb)
+                    sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
                 }
                 guard sndbuf > 0 else { break }
             }
             let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
-            let error = bridge.tcpWrite(pcb, base + offset, UInt16(chunkSize))
+            let error = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
             if error != 0 {
                 if error == -1 { break }  // ERR_MEM: transient
                 return -1                 // fatal

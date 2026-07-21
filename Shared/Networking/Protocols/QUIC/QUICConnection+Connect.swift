@@ -322,16 +322,16 @@ extension QUICConnection {
 
         tlsHandler = QUICTLSHandler(serverName: serverName, alpn: alpn)
 
-        var callbacks = bridge.makeCallbacks(datagramsEnabled: datagramsEnabled)
+        var callbacks = makeCallbacks(datagramsEnabled: datagramsEnabled)
 
-        var settings = bridge.defaultSettings()
+        var settings = defaultSettings()
         settings.initial_ts = currentTimestamp()
         settings.max_tx_udp_payload_size = (transport != nil) ? Self.chainedMaxUDPPayload : Self.maxUDPPayload
         settings.cc_algo = tuning.ngtcp2CCAlgo
         settings.max_stream_window = tuning.maxStreamWindow
         settings.max_window = tuning.maxWindow
         settings.handshake_timeout = tuning.handshakeTimeout
-        var parameters = bridge.defaultTransportParams()
+        var parameters = defaultTransportParams()
         parameters.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
         parameters.initial_max_streams_uni = tuning.initialMaxStreamsUni
         parameters.initial_max_data = tuning.initialMaxData
@@ -344,10 +344,10 @@ extension QUICConnection {
             parameters.max_datagram_frame_size = Self.maxDatagramFrameSize
         }
 
-        bridge.configureConnRef(&connRefStorage, host: self)
-        
+        configureConnRef(&connRefStorage)
+
         let usePMTUD = (transport == nil)
-        let (conn, rv) = bridge.createClientConn(
+        let (conn, rv) = createClientConn(
             dcid: &dcid, scid: &scid,
             localAddr: &localAddr, remoteAddr: &remoteAddr, addrLen: addrLen,
             version: UInt32(NGTCP2_PROTO_VER_V1),
@@ -360,16 +360,16 @@ extension QUICConnection {
         }
         self.connectionOpaquePointer = connectionOpaquePointer
         
-        bridge.setKeepAliveTimeout(connectionOpaquePointer, tuning.keepAliveTimeout)
+        setKeepAliveTimeout(connectionOpaquePointer, tuning.keepAliveTimeout)
 
-        bridge.setTLSNativeHandle(
+        setTLSNativeHandle(
             connectionOpaquePointer,
             UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256))
         )
-        
+
         if case .brutal(let initialBps) = tuning.cc {
             let brutal = BrutalCongestionControl(initialBps: initialBps)
-            if let ccKey = bridge.installBrutal(connectionOpaquePointer) {
+            if let ccKey = installBrutal(connectionOpaquePointer) {
                 BrutalCongestionControl.register(brutal, for: ccKey)
                 self.brutalCC = brutal
                 self.brutalCCKey = ccKey
@@ -392,7 +392,7 @@ extension QUICConnection {
                     me.brutalCCKey = nil
                     me.brutalCC = nil
                 }
-                me.bridge.uninstallBrutal(connectionOpaquePointer)
+                me.uninstallBrutal(connectionOpaquePointer)
             }
         }
     }

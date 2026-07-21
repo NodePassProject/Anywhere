@@ -24,7 +24,7 @@ nonisolated protocol QUICPacketObfuscator: AnyObject, Sendable {
 
 // MARK: - QUICConnection
 
-actor QUICConnection: NGTCP2BridgeHost {
+actor QUICConnection {
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
@@ -60,6 +60,21 @@ actor QUICConnection: NGTCP2BridgeHost {
     
     nonisolated func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T {
         try await bridge.run(body).get()
+    }
+
+    // MARK: Reentrancy
+    
+    private let _connHeld = Atomic<Bool>(false)
+    nonisolated var connHeld: Bool { _connHeld.load(ordering: .relaxed) }
+    
+    nonisolated func enterConnHeld() -> Bool {
+        let previous = _connHeld.load(ordering: .relaxed)
+        _connHeld.store(true, ordering: .relaxed)
+        return previous
+    }
+    
+    nonisolated func exitConnHeld(_ previous: Bool) {
+        _connHeld.store(previous, ordering: .relaxed)
     }
 
     var connectionOpaquePointer: OpaquePointer?

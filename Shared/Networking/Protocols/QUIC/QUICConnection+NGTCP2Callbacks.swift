@@ -1,5 +1,5 @@
 //
-//  NGTCP2ConcurrencyBridge+Callbacks.swift
+//  QUICConnection+NGTCP2Callbacks.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 7/18/26.
@@ -8,72 +8,23 @@
 import Foundation
 import Security
 
-// MARK: - Host protocol
+// MARK: - Path validation result
 
 nonisolated enum NGTCP2PathValidationResult { case success, failure, aborted }
 
-protocol NGTCP2BridgeHost: Actor {
-
-    /// The live `ngtcp2_conn` handle; read by `get_conn`. Isolated.
-    var connectionOpaquePointer: OpaquePointer? { get }
-
-    /// Fire-and-forget hop onto the bridge queue — used to defer a callback's effect past the
-    /// current ngtcp2 batch (handshake completion, path validation, stream credit).
-    nonisolated func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void)
-
-    /// Builds the ClientHello for the encoded local transport `params` (`client_initial`).
-    func buildClientHello(transportParams: Data) -> Data?
-
-    /// Feeds received CRYPTO `data` to TLS at `level`; returns ngtcp2's `err_t`.
-    func processCryptoData(_ data: Data, level: ngtcp2_encryption_level) -> Int32
-
-    /// Delivers received STREAM bytes — a zero-copy view valid only for this synchronous call.
-    func deliverStreamData(streamId: Int64, data: Data, fin: Bool)
-
-    /// Delivers a received DATAGRAM — a zero-copy view valid only for this synchronous call.
-    func deliverDatagram(_ data: Data)
-
-    /// The peer raised the cumulative local bidi-stream limit to `maxStreams`.
-    func deliverBidiCredit(maxStreams: UInt64)
-
-    /// A contiguous prefix of sent stream data was acked (`ackedOffset` = new acked end).
-    func releaseAckedStreamData(streamId: Int64, ackedOffset: UInt64)
-
-    /// Both directions of a stream terminated; `hasAppError` flags an application close code.
-    func handleStreamClose(streamId: Int64, appErrorCode: UInt64, hasAppError: Bool)
-
-    /// The peer sent RESET_STREAM with `appErrorCode`.
-    func handleStreamReset(streamId: Int64, appErrorCode: UInt64)
-
-    /// The TLS handshake completed.
-    func handleHandshakeCompleted()
-
-    /// A migration path finished — or was abandoned during — validation.
-    func handlePathValidation(result: NGTCP2PathValidationResult)
-}
-
 // MARK: - Host recovery + callback wiring
 
-nonisolated extension NGTCP2ConcurrencyBridge {
-
-    /// Stores an **unretained** back-reference to `host` in `connRef` and installs `get_conn`, which
-    /// ngtcp2's crypto layer follows to reach the live `ngtcp2_conn`. The host owns the conn and
-    /// outlives it (it drives `ngtcp2_conn_del`), so nothing here is balanced.
-    func configureConnRef(_ connRef: inout ngtcp2_crypto_conn_ref, host: any NGTCP2BridgeHost) {
-        connRef.user_data = BridgeContext.passUnretained(host as AnyObject)
+extension QUICConnection {
+    func configureConnRef(_ connRef: inout ngtcp2_crypto_conn_ref) {
+        connRef.user_data = BridgeContext.passUnretained(self)
         connRef.get_conn = { ref in
             guard let ref, let userData = ref.pointee.user_data,
-                  let host = NGTCP2ConcurrencyBridge.host(from: userData) else { return nil }
-            // ngtcp2 calls get_conn from inside its own calls on the executor; the pointer crosses
-            // out of `assumeIsolated` as a plain address (`UInt` is `Sendable`) — same thread.
+                  let host = QUICConnection.host(from: userData) else { return nil }
             let raw = host.assumeIsolated { $0.connectionOpaquePointer.map { UInt(bitPattern: $0) } ?? 0 }
             return OpaquePointer(bitPattern: raw)
         }
     }
-
-    /// Builds the `ngtcp2_callbacks` table: ngtcp2's crypto helpers for the TLS-plumbing slots, and
-    /// this file's trampolines for the ones that reach into the host. `recv_datagram` is wired only
-    /// when DATAGRAMs are enabled.
+    
     func makeCallbacks(datagramsEnabled: Bool) -> ngtcp2_callbacks {
         var callbacks = ngtcp2_callbacks()
         callbacks.client_initial = ngtcp2ClientInitialCB
@@ -101,20 +52,19 @@ nonisolated extension NGTCP2ConcurrencyBridge {
         }
         return callbacks
     }
-
-    /// Recovers the host behind a conn-ref / crypto-callback `user_data` pointer (unretained).
-    static func host(from userData: UnsafeMutableRawPointer) -> (any NGTCP2BridgeHost)? {
-        BridgeContext.unretained(userData, as: AnyObject.self) as? NGTCP2BridgeHost
+    
+    nonisolated static func host(from userData: UnsafeMutableRawPointer) -> QUICConnection? {
+        BridgeContext.unretained(userData, as: QUICConnection.self)
     }
 }
 
 // MARK: - Trampolines
 
-nonisolated private func hostFromUserData(_ userData: UnsafeMutableRawPointer?) -> (any NGTCP2BridgeHost)? {
+nonisolated private func hostFromUserData(_ userData: UnsafeMutableRawPointer?) -> QUICConnection? {
     guard let userData else { return nil }
     let ref = userData.assumingMemoryBound(to: ngtcp2_crypto_conn_ref.self)
     guard let p = ref.pointee.user_data else { return nil }
-    return NGTCP2ConcurrencyBridge.host(from: p)
+    return QUICConnection.host(from: p)
 }
 
 nonisolated private let ngtcp2StreamCloseFlagAppErrorCodeSet: UInt32 = 0x01
@@ -132,8 +82,6 @@ nonisolated private let ngtcp2ClientInitialCB: @convention(c) (
         return NGTCP2_ERR_CALLBACK_FAILURE
     }
     guard let host = hostFromUserData(userData) else { return NGTCP2_ERR_CALLBACK_FAILURE }
-    // `conn` is the freshly-minted handle (before the host stores it), so encode/submit ride it here
-    // at the C boundary; only the Sendable transport-params / ClientHello `Data` crosses isolation.
     var buffer = [UInt8](repeating: 0, count: 256)
     let length = ngtcp2_conn_encode_local_transport_params(conn, &buffer, buffer.count)
     guard length >= 0 else { return NGTCP2_ERR_CALLBACK_FAILURE }
@@ -167,13 +115,11 @@ nonisolated private let ngtcp2RecvStreamDataCB: @convention(c) (
     guard let host = hostFromUserData(userData) else { return 0 }
     let fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0
     if let data, datalen > 0 {
-        // Zero-copy view into ngtcp2's buffer; the handler must copy before returning.
         let view = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: data), count: datalen, deallocator: .none)
         host.assumeIsolated { $0.deliverStreamData(streamId: sid, data: view, fin: fin) }
     } else if fin {
         host.assumeIsolated { $0.deliverStreamData(streamId: sid, data: Data(), fin: true) }
     }
-    // FC window is extended only when the app consumes data (backpressure).
     return 0
 }
 
@@ -265,7 +211,6 @@ nonisolated private let ngtcp2PathValidationCB: @convention(c) (
     } else {
         result = .aborted
     }
-    // Deferred off the ngtcp2 batch so promotion/close can re-enter ngtcp2 safely.
     host.enqueue { host.assumeIsolated { $0.handlePathValidation(result: result) } }
     return 0
 }
@@ -274,7 +219,6 @@ nonisolated private let ngtcp2RecvDatagramCB: @convention(c) (
     OpaquePointer?, UInt32, UnsafePointer<UInt8>?, Int, UnsafeMutableRawPointer?
 ) -> Int32 = { _, _, data, datalen, userData in
     guard let data, datalen > 0, let host = hostFromUserData(userData) else { return 0 }
-    // Zero-copy view; the handler must not retain it past this synchronous call.
     let view = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: data), count: datalen, deallocator: .none)
     host.assumeIsolated { $0.deliverDatagram(view) }
     return 0

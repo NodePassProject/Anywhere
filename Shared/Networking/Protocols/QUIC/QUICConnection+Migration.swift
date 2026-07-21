@@ -74,10 +74,10 @@ extension QUICConnection {
 
         let newLocal = makeMigrationLocalAddr()
         let ts = currentTimestamp()
-        let prevBusy = bridge.enterConnHeld()
-        let rv = bridge.initiateImmediateMigration(conn, localAddr: newLocal, remoteAddr: remoteAddr,
-                                                   addrLen: addrLen, ts: ts)
-        bridge.exitConnHeld(prevBusy)
+        let prevBusy = enterConnHeld()
+        let rv = initiateImmediateMigration(conn, localAddr: newLocal, remoteAddr: remoteAddr,
+                                            addrLen: addrLen, ts: ts)
+        exitConnHeld(prevBusy)
         guard rv == 0 else {
             logger.warning("[QUIC] Reactive migration rejected (ngtcp2 \(rv)); reconnecting")
             newCarrier.assumeIsolated { $0.close() }
@@ -150,10 +150,10 @@ extension QUICConnection {
                     return
                 }
                 let ts = me.currentTimestamp()
-                let prevBusy = me.bridge.enterConnHeld()
-                let rv = me.bridge.initiateMigration(conn, localAddr: newLocal, remoteAddr: me.remoteAddr,
-                                                     addrLen: me.addrLen, ts: ts)
-                me.bridge.exitConnHeld(prevBusy)
+                let prevBusy = me.enterConnHeld()
+                let rv = me.initiateMigration(conn, localAddr: newLocal, remoteAddr: me.remoteAddr,
+                                              addrLen: me.addrLen, ts: ts)
+                me.exitConnHeld(prevBusy)
                 guard rv == 0 else {
                     logger.warning("[QUIC] Proactive migration rejected (ngtcp2 \(rv)); staying put")
                     me.abortProactiveMigration(countAsFailure: true)

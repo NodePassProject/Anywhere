@@ -65,19 +65,19 @@ extension QUICConnection {
         inReadPkt = true
         defer { inReadPkt = false }
         
-        let prevBusy = bridge.enterConnHeld()
+        let prevBusy = enterConnHeld()
         let rv: Int32 = packet.withUnsafeBytes { raw -> Int32 in
             guard let pointer = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
-            return bridge.readPacket(connectionOpaquePointer, localAddr: localAddr, remoteAddr: remoteAddr,
-                                     addrLen: addrLen, pktInfo: &pi, data: pointer, count: packet.count, ts: ts)
+            return readPacket(connectionOpaquePointer, localAddr: localAddr, remoteAddr: remoteAddr,
+                              addrLen: addrLen, pktInfo: &pi, data: pointer, count: packet.count, ts: ts)
         }
-        bridge.exitConnHeld(prevBusy)
+        exitConnHeld(prevBusy)
 
         if rv != 0 {
             let error: Error
             switch rv {
             case NGTCP2_ERR_DRAINING:
-                if let ccerr = bridge.closeError(connectionOpaquePointer), isBenignConnectionClose(ccerr.pointee) {
+                if let ccerr = closeError(connectionOpaquePointer), isBenignConnectionClose(ccerr.pointee) {
                     error = AnywhereError.quic(.closed(graceful: true))
                 } else {
                     error = AnywhereError.quic(.closed(graceful: false))
@@ -86,9 +86,9 @@ extension QUICConnection {
                 error = AnywhereError.quic(.closed(graceful: false))
             case NGTCP2_ERR_CALLBACK_FAILURE, NGTCP2_ERR_CRYPTO:
                 error = tlsHandler?.handshakeError
-                    ?? AnywhereError.quic(.handshakeFailed(detail: "ngtcp2 error: \(rv) (\(bridge.errorString(rv)))"))
+                    ?? AnywhereError.quic(.handshakeFailed(detail: "ngtcp2 error: \(rv) (\(errorString(rv)))"))
             default:
-                error = AnywhereError.quic(.connectionFailed(detail: "ngtcp2 read_pkt: \(rv) (\(bridge.errorString(rv)))"))
+                error = AnywhereError.quic(.connectionFailed(detail: "ngtcp2 read_pkt: \(rv) (\(errorString(rv)))"))
             }
             finishConnect(error)
             close(error: error)
@@ -100,8 +100,8 @@ extension QUICConnection {
     func writeToUDP() {
         guard let connectionOpaquePointer else { return }
 
-        let prevBusy = bridge.enterConnHeld()
-        defer { bridge.exitConnHeld(prevBusy) }
+        let prevBusy = enterConnHeld()
+        defer { exitConnHeld(prevBusy) }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
         
@@ -121,7 +121,7 @@ extension QUICConnection {
                     return 0
                 }
                 return txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                    bridge.writeDatagram(
+                    writeDatagram(
                         connectionOpaquePointer, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
                         dest: destination.baseAddress, destCapacity: destination.count,
                         accepted: &accepted, flags: flags, datagramId: 0,
@@ -170,14 +170,14 @@ extension QUICConnection {
         while true {
             var chosenLocal = sockaddr_storage()
             let nwrite = txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                bridge.writePacket(connectionOpaquePointer, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
-                                   dest: destination.baseAddress, destCapacity: destination.count, ts: ts)
+                writePacket(connectionOpaquePointer, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
+                            dest: destination.baseAddress, destCapacity: destination.count, ts: ts)
             }
             if nwrite <= 0 { break }
             sendTxBuf(length: Int(nwrite), to: carrierForOutPath(local: chosenLocal))
         }
-        
-        bridge.updatePacketTxTime(connectionOpaquePointer, ts: ts)
+
+        updatePacketTxTime(connectionOpaquePointer, ts: ts)
 
         rescheduleTimer()
 
@@ -189,7 +189,7 @@ extension QUICConnection {
 
     func rescheduleTimer() {
         guard let connectionOpaquePointer else { return }
-        var expiry = bridge.expiry(connectionOpaquePointer)
+        var expiry = self.expiry(connectionOpaquePointer)
         
         if !pendingDatagrams.isEmpty || streamSendQueues.contains(where: { $0.value.hasUnsent }) {
             expiry = min(expiry, currentTimestamp() &+ 2_000_000)
@@ -208,11 +208,11 @@ extension QUICConnection {
                     guard let connectionOpaquePointer = me.connectionOpaquePointer else { return }
                     me.lastScheduledExpiry = 0
                     let ts = me.currentTimestamp()
-                    let prevBusy = me.bridge.enterConnHeld()
-                    let rv = me.bridge.handleExpiry(connectionOpaquePointer, ts: ts)
-                    me.bridge.exitConnHeld(prevBusy)
+                    let prevBusy = me.enterConnHeld()
+                    let rv = me.handleExpiry(connectionOpaquePointer, ts: ts)
+                    me.exitConnHeld(prevBusy)
                     if rv != 0 {
-                        let error = AnywhereError.quic(.connectionFailed(detail: "expiry error: \(rv) (\(me.bridge.errorString(rv)))"))
+                        let error = AnywhereError.quic(.connectionFailed(detail: "expiry error: \(rv) (\(me.errorString(rv)))"))
                         me.finishConnect(error)
                         me.close(error: error)
                         return
