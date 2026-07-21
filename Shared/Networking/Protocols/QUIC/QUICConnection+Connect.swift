@@ -317,7 +317,6 @@ extension QUICConnection {
         settings.max_stream_window = tuning.maxStreamWindow
         settings.max_window = tuning.maxWindow
         settings.handshake_timeout = tuning.handshakeTimeout
-        settings.ack_thresh = 16
         var parameters = defaultTransportParams()
         parameters.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
         parameters.initial_max_streams_uni = tuning.initialMaxStreamsUni
