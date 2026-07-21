@@ -165,8 +165,12 @@ extension QUICConnection {
         }
     }
     
-    func appendStreamWrite(_ streamId: Int64, data: Data, fin: Bool,
-                           continuation: CheckedContinuation<Void, Error>?) {
+    func appendStreamWrite(
+        _ streamId: Int64,
+        data: Data,
+        fin: Bool,
+        continuation: CheckedContinuation<Void, Error>?
+    ) {
         if data.isEmpty && !fin {
             continuation?.resume()
             return
@@ -193,8 +197,8 @@ extension QUICConnection {
         writeToUDP()
     }
     
-    func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp) {
-        guard !streamSendQueues.isEmpty else { return }
+    func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp, budget: inout Int) {
+        guard budget > 0, !streamSendQueues.isEmpty else { return }
 
         var ids = streamSendQueues.filter { $0.value.hasUnsent }.keys.sorted()
         guard !ids.isEmpty else { return }
@@ -214,18 +218,25 @@ extension QUICConnection {
                 var chosenLocal = sockaddr_storage()
                 var flags = UInt32(NGTCP2_WRITE_STREAM_FLAG_MORE)
                 if chunk.fin { flags |= UInt32(NGTCP2_WRITE_STREAM_FLAG_FIN) }
-
+                
                 let nwrite = chunk.withStableBase { base in
                     txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                         writeStream(
-                            conn, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
-                            dest: destination.baseAddress, destCapacity: destination.count,
-                            dataLength: &pdatalen, flags: flags, stream: id,
-                            src: base.advanced(by: offsetInChunk), srcLen: regionLength, ts: ts
+                            conn,
+                            chosenLocalAddr: &chosenLocal,
+                            pktInfo: &pi,
+                            dest: destination.baseAddress,
+                            destCapacity: destination.count,
+                            dataLength: &pdatalen,
+                            flags: flags,
+                            stream: id,
+                            src: base.advanced(by: offsetInChunk),
+                            srcLen: regionLength,
+                            ts: ts
                         )
                     }
                 }
-
+                
                 if nwrite == 0 {
                     break outer
                 }
@@ -246,8 +257,10 @@ extension QUICConnection {
                         continue outer
                     }
                     if code == NGTCP2_ERR_STREAM_NOT_FOUND || code == NGTCP2_ERR_STREAM_SHUT_WR {
-                        failStreamSendQueue(streamId: id,
-                                            error: AnywhereError.quic(.closed(graceful: false)))
+                        failStreamSendQueue(
+                            streamId: id,
+                            error: AnywhereError.quic(.closed(graceful: false))
+                        )
                         continue outer
                     }
                     streamPumpCursor = id
@@ -256,21 +269,31 @@ extension QUICConnection {
 
                 if nwrite > 0 {
                     sendTxBuf(length: Int(nwrite), to: carrierForOutPath(local: chosenLocal))
+                    budget -= Int(nwrite)
                 }
 
                 let accepted = pdatalen > 0 ? Int(pdatalen) : 0
                 if accepted > 0 || regionLength == 0 {
-                    for continuation in queue.advance(accepted: accepted, regionLength: regionLength,
-                                                      finFlagged: chunk.fin) {
+                    for continuation in queue.advance(
+                        accepted: accepted,
+                        regionLength: regionLength,
+                        finFlagged: chunk.fin
+                    ) {
                         continuation.resume()
+                    }
+                    if budget <= 0 {
+                        streamPumpCursor = id
+                        return
                     }
                     continue
                 }
-                
+
                 streamPumpCursor = id
+                if budget <= 0 { return }
                 continue outer
             }
             streamPumpCursor = id
+            if budget <= 0 { return }
         }
     }
 

@@ -8,8 +8,17 @@
 import Foundation
 import Network
 import Darwin
+import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
+
+nonisolated final class SendBacklogGauge: Sendable {
+    private let count = Atomic<Int>(0)
+
+    func increment() { count.wrappingAdd(1, ordering: .relaxed) }
+    func decrement() { count.wrappingSubtract(1, ordering: .relaxed) }
+    var current: Int { count.load(ordering: .relaxed) }
+}
 
 actor QUICDatagramCarrier {
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -17,8 +26,12 @@ actor QUICDatagramCarrier {
     }
 
     private let bridge: NGTCP2ConcurrencyBridge
-    
+
     private let obfuscator: QUICPacketObfuscator?
+    
+    private let sendBacklog = SendBacklogGauge()
+
+    nonisolated var sendBacklogCount: Int { sendBacklog.current }
 
     private var driverTask: Task<Void, Never>?
     private var sendContinuation: AsyncStream<Data>.Continuation?
@@ -66,11 +79,11 @@ actor QUICDatagramCarrier {
 
         let (sendStream, sendCont) = AsyncStream.makeStream(of: Data.self)
         sendContinuation = sendCont
-        
+
         let carrier = WeakCarrier(value: self)
-        driverTask = Task { [bridge, obfuscator] in
+        driverTask = Task { [bridge, obfuscator, sendBacklog] in
             await Self.runDriver(endpoint: endpoint, sendStream: sendStream, bridge: bridge,
-                                 carrier: carrier, obfuscator: obfuscator)
+                                 carrier: carrier, obfuscator: obfuscator, sendBacklog: sendBacklog)
         }
     }
 
@@ -85,9 +98,10 @@ actor QUICDatagramCarrier {
     }
 
     // MARK: - Send
-    
+
     func send(_ datagram: Data) {
         guard !datagram.isEmpty, let sendContinuation else { return }
+        sendBacklog.increment()
         sendContinuation.yield(datagram)
     }
 
@@ -121,7 +135,8 @@ actor QUICDatagramCarrier {
         sendStream: AsyncStream<Data>,
         bridge: NGTCP2ConcurrencyBridge,
         carrier: WeakCarrier,
-        obfuscator: QUICPacketObfuscator?
+        obfuscator: QUICPacketObfuscator?,
+        sendBacklog: SendBacklogGauge
     ) async {
         do {
             try await withNetworkConnection(to: endpoint, using: { UDP() }) { connection in
@@ -154,9 +169,17 @@ actor QUICDatagramCarrier {
                 }
 
                 try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await Self.runSendLoop(connection, stream: sendStream, obfuscator: obfuscator) }
-                    group.addTask { try await Self.runReceiveLoop(connection, bridge: bridge, carrier: carrier,
-                                                                  obfuscator: obfuscator) }
+                    group.addTask { try await Self.runSendLoop(
+                        connection,
+                        stream: sendStream,
+                        obfuscator: obfuscator,
+                        sendBacklog: sendBacklog
+                    ) }
+                    group.addTask { try await Self.runReceiveLoop(
+                        connection,
+                        bridge: bridge,
+                        carrier: carrier,
+                        obfuscator: obfuscator) }
                     _ = try await group.next()
                     group.cancelAll()
                 }
@@ -169,17 +192,19 @@ actor QUICDatagramCarrier {
     
     private static func runSendLoop(
         _ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>,
-        obfuscator: QUICPacketObfuscator?
+        obfuscator: QUICPacketObfuscator?,
+        sendBacklog: SendBacklogGauge
     ) async throws {
         for await datagram in stream {
-            guard let obfuscator else {
+            if let obfuscator {
+                let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+                for wire in wireDatagrams {
+                    try? await connection.send(wire)
+                }
+            } else {
                 try? await connection.send(datagram)
-                continue
             }
-            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-            for wire in wireDatagrams {
-                try? await connection.send(wire)
-            }
+            sendBacklog.decrement()
         }
     }
     

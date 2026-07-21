@@ -15,10 +15,7 @@ nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 // MARK: - QUICPacketObfuscator
 
 nonisolated protocol QUICPacketObfuscator: AnyObject, Sendable {
-    /// Transforms one outgoing QUIC datagram into one or more wire datagrams.
     func seal(_ packet: UnsafeRawBufferPointer) -> [Data]
-
-    /// Transforms one received wire datagram into a complete QUIC datagram.
     func open(_ datagram: Data) -> Data?
 }
 
@@ -259,6 +256,8 @@ actor QUICConnection {
     static let maxUDPPayload = 1452
     static let chainedMaxUDPPayload = 1200
     
+    static let maxCarrierSendBacklog = 64
+    
     var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
     
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
@@ -287,7 +286,7 @@ actor QUICConnection {
     }
 
     // MARK: Timer state
-    
+
     var lastScheduledExpiry: UInt64 = 0
 
     // MARK: Utilities
@@ -302,8 +301,12 @@ actor QUICConnection {
         cid.datalen = length
         withUnsafeMutableBytes(of: &cid.data) { buffer in
             data.withUnsafeBytes { source in
-                buffer.copyMemory(from: UnsafeRawBufferPointer(
-                    start: source.baseAddress, count: min(length, buffer.count)))
+                buffer.copyMemory(
+                    from: UnsafeRawBufferPointer(
+                        start: source.baseAddress,
+                        count: min(length, buffer.count)
+                    )
+                )
             }
         }
     }

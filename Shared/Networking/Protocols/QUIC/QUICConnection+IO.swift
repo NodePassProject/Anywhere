@@ -62,7 +62,7 @@ extension QUICConnection {
 
         inReadPkt = true
         defer { inReadPkt = false }
-        
+
         let prevBusy = enterConnHeld()
         let rv: Int32 = packet.withUnsafeBytes { raw -> Int32 in
             guard let pointer = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
@@ -97,15 +97,22 @@ extension QUICConnection {
 
     func writeToUDP() {
         guard let connectionOpaquePointer else { return }
+        
+        if let carrier, carrier.sendBacklogCount >= Self.maxCarrierSendBacklog {
+            rescheduleTimer()
+            return
+        }
 
         let prevBusy = enterConnHeld()
         defer { exitConnHeld(prevBusy) }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
         
+        var txBudget = max(sendQuantum(connectionOpaquePointer), Self.maxUDPPayload)
+
         var settlements: [(DatagramBatchLatch?, Error?)] = []
 
-        while !pendingDatagrams.isEmpty {
+        while !pendingDatagrams.isEmpty, txBudget > 0 {
             var accepted: Int32 = 0
             let head = pendingDatagrams[0]
             let datagram = head.data
@@ -142,6 +149,7 @@ extension QUICConnection {
             }
             if nwrite > 0 {
                 sendTxBuf(length: Int(nwrite), to: outCarrier)
+                txBudget -= Int(nwrite)
             }
             if accepted != 0 {
                 let popped = pendingDatagrams.removeFirst()
@@ -163,9 +171,9 @@ extension QUICConnection {
             break
         }
 
-        pumpStreamQueues(connectionOpaquePointer, ts: ts)
+        pumpStreamQueues(connectionOpaquePointer, ts: ts, budget: &txBudget)
 
-        while true {
+        while txBudget > 0 {
             var chosenLocal = sockaddr_storage()
             let nwrite = txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                 writePacket(connectionOpaquePointer, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
@@ -173,6 +181,7 @@ extension QUICConnection {
             }
             if nwrite <= 0 { break }
             sendTxBuf(length: Int(nwrite), to: carrierForOutPath(local: chosenLocal))
+            txBudget -= Int(nwrite)
         }
 
         updatePacketTxTime(connectionOpaquePointer, ts: ts)
