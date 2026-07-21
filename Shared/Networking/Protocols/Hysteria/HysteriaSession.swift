@@ -10,8 +10,6 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "HysteriaSession")
 
-// MARK: - HysteriaSession
-
 nonisolated final class HysteriaSession: Sendable {
 
     enum State { case idle, connecting, authenticating, ready, closed }
@@ -40,32 +38,20 @@ nonisolated final class HysteriaSession: Sendable {
         var serverRxBytesPerSec: UInt64 = 0
     }
     private let lock = Mutex(Session())
-
-    /// Ceiling on `authBuffer` growth; ~3× the largest legitimate auth
-    /// response (one HEADERS frame plus padding ≤ `maxPaddingLength`), so
-    /// anything bigger is a misbehaving server — tear down rather than OOM.
+    
     private static let authBufferMaxBytes = 16 * 1024
-
-    /// Idle window before self-close; 60 s frees resources promptly yet
-    /// survives back-to-back UDP queries.
+    
     private static let idleCloseDelay: TimeInterval = 60
-
-    /// Readiness latch coalescing all `ensureReady()` awaiters behind one connect+auth. The
-    /// demux loop finishes `readySignal` at `.ready` (or throwing on teardown); every awaiter
-    /// gets that one outcome via `readyTask.value` (broadcast, cached once resolved).
+    
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
 
-    // MARK: Pool-visible state (read without taking `lock`)
-
-    /// Read and written only inside `_poolState.withLock`; a lock-free read
-    /// of a locked `Bool` write is a data race under Swift's memory model. Only ever
-    /// taken sequentially with `lock` (never nested), so the two can't deadlock.
+    // MARK: Pool-visible state
+    
     private struct PoolState {
         var isClosed = false
         var tcpCount = 0
         var udpCount = 0
-        /// Registry eviction hook, fired exactly once on close.
         var onClose: (@Sendable () -> Void)?
     }
     private let _poolState = Mutex(PoolState())
@@ -77,18 +63,15 @@ nonisolated final class HysteriaSession: Sendable {
     var hasActiveConnections: Bool {
         _poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
     }
-
-    /// Installs the registry's eviction hook; fired exactly once when the session closes.
+    
     func setOnClose(_ hook: @escaping @Sendable () -> Void) {
         _poolState.withLock { $0.onClose = hook }
     }
 
     // MARK: - Init
-
-    /// - Parameter transport: Optional UDP-relay transport for chained Hysteria; QUIC rides it instead of the direct UDP carrier.
+    
     init(configuration: HysteriaConfiguration, transport: QUICDatagramTransport? = nil) {
         self.configuration = configuration
-        // Obfuscation applies on both carriers, so build it regardless of `transport`.
         let obfuscator: QUICPacketObfuscator?
         switch configuration.obfuscation {
         case .salamander(let password):
@@ -116,29 +99,24 @@ nonisolated final class HysteriaSession: Sendable {
     // MARK: - Lifecycle
 
     func ensureReady() async throws {
-        // Kick off connect+auth exactly once; the latch resolves it.
         let begin: Bool = lock.withLock { session in
             guard session.state == .idle else { return false }
             session.state = .connecting
             return true
         }
         if begin { startConnection() }
-        // Resolves on `.ready` (success) or teardown (`.streamClosed` retryable / real error).
         try await readyTask.value
     }
 
     private func startConnection() {
         QUICCrypto.registerCallbacks()
-
-        // Fires on the ngtcp2 queue; routes into the locked teardown path.
+        
         quic.handlers.withLock { handlers in
             handlers.connectionClosed = { [weak self] error in
                 self?.failSession(error)
             }
         }
-
-        // Strong `self`: the connect task owns the session until auth kicks off, so it
-        // can't deallocate mid-handshake and leak the ngtcp2 state.
+        
         Task { [self] in
             do {
                 try await quic.connect()
@@ -157,30 +135,21 @@ nonisolated final class HysteriaSession: Sendable {
                     self?.handleDatagram(data)
                 }
             }
-
-            // Control-stream setup + auth open/write + authStreamID/state registration all run
-            // in one ngtcp2-queue turn, so the demux can't observe a half-registered auth stream.
+            
             let opened: Bool = await quic.run { self.openControlAndAuthOnQueue() }
             if !opened {
                 failSession(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Failed to open auth stream")))
             }
         }
     }
-
-    /// Runs on the ngtcp2 queue (opens/writes assert it). Opens the HTTP/3 control streams and the
-    /// auth bidi stream, registers the auth stream under `lock`, and writes the auth request.
-    /// Returns false when ngtcp2 has no stream credit for the auth stream.
+    
     private func openControlAndAuthOnQueue() -> Bool {
-        // RFC 9114 §6.2: a control stream with SETTINGS is mandatory;
-        // a strict HTTP/3 server would otherwise close the connection.
         if let sid = quic.openUniStream() {
             var payload = Data()
             payload.append(0x00) // stream type = control
             payload.append(Self.clientSettingsFrame())
             quic.writeStreamOnQueue(sid, data: payload)
         }
-        // QPACK encoder (0x02) / decoder (0x03) uni streams; dynamic table
-        // is 0, so they carry only the type byte.
         if let encoderStreamID = quic.openUniStream() {
             quic.writeStreamOnQueue(encoderStreamID, data: Data([0x02]))
         }
@@ -206,9 +175,7 @@ nonisolated final class HysteriaSession: Sendable {
         quic.writeStreamOnQueue(sid, data: frame)
         return true
     }
-
-    /// Parses one HTTP/3 frame off the front of `buffer`, or nil if incomplete.
-    /// The payload is a zero-copy slice of `buffer`.
+    
     private static func parseNextHTTP3Frame(_ buffer: Data) -> (type: UInt64, payload: Data, consumed: Int)? {
         guard let (frameType, typeLen) = HysteriaProtocol.decodeVarInt(from: buffer, offset: 0) else { return nil }
         guard let (payloadLen, lenBytes) = HysteriaProtocol.decodeVarInt(from: buffer, offset: typeLen) else { return nil }
@@ -219,8 +186,7 @@ nonisolated final class HysteriaSession: Sendable {
         let payload = buffer[(base + headerLen)..<(base + total)]
         return (frameType, payload, total)
     }
-
-    /// HTTP/3 SETTINGS frame with QPACK dynamic table disabled.
+    
     private static func clientSettingsFrame() -> Data {
         // id=0x01 (QPACK_MAX_TABLE_CAPACITY) val=0,
         // id=0x07 (QPACK_BLOCKED_STREAMS) val=0.
@@ -232,7 +198,7 @@ nonisolated final class HysteriaSession: Sendable {
         return frame
     }
 
-    // MARK: - Stream dispatch (delivered synchronously on the ngtcp2 queue)
+    // MARK: - Stream dispatch
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
         enum Route { case auth; case tcp(HysteriaConnection); case serverReject(first: Bool); case ignore }
@@ -250,10 +216,8 @@ nonisolated final class HysteriaSession: Sendable {
         case .auth:
             handleAuthStreamData(data, fin: fin)
         case .tcp(let connection):
-            // Hand the zero-copy bytes to the connection's Sendable inbox; it detaches + buffers them.
             connection.feedStreamData(data, fin: fin)
         case .serverReject(let first):
-            // Credit flow control so a misbehaving peer can't pin the connection window to zero.
             quic.extendStreamOffset(sid, count: data.count)
             if first {
                 quic.shutdownStream(sid, appErrorCode: HysteriaProtocol.closeErrCodeProtocolError)
@@ -262,8 +226,7 @@ nonisolated final class HysteriaSession: Sendable {
             break
         }
     }
-
-    /// One outcome of an auth-response parse pass, decided under `lock`.
+    
     private enum AuthOutcome {
         case needMore
         case fail(Error)
@@ -275,8 +238,7 @@ nonisolated final class HysteriaSession: Sendable {
         var creditStreamID: Int64 = -1
         let outcome: AuthOutcome = lock.withLock { session in
             creditStreamID = session.authStreamID
-
-            // Don't buffer post-auth bytes; they could trip the buffer cap.
+            
             guard !session.authHeadersReceived else { return .needMore }
 
             session.authBuffer.append(data)
@@ -287,8 +249,6 @@ nonisolated final class HysteriaSession: Sendable {
             }
 
             guard let (frameType, payload, consumed) = Self.parseNextHTTP3Frame(session.authBuffer) else {
-                // FIN before a parseable HEADERS frame — fail fast instead of
-                // waiting for the QUIC idle timeout.
                 if fin {
                     return .fail(AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth stream ended before HEADERS frame")))
                 }
@@ -316,35 +276,28 @@ nonisolated final class HysteriaSession: Sendable {
             session.udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
                 $0.lowercased() == "true"
             } ?? false
-
-            // The server's CC-RX only caps our send rate under Brutal; BBR paces itself.
+            
             var brutal: BrutalAction? = nil
             if configuration.congestionControl == .brutal {
                 let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
-                // "auto" asks the client to self-pace. ngtcp2 here lacks
-                // BBR-with-pacing, so uninstall Brutal and let native CUBIC drive.
-                // Any other value (including unparseable/missing) means 0 = no cap.
                 let serverRxAuto = ccRxValue.lowercased() == "auto"
                 session.serverRxBytesPerSec = serverRxAuto ? 0 : (UInt64(ccRxValue) ?? 0)
 
                 if serverRxAuto {
                     brutal = .uninstall
                 } else {
-                    // Brutal tx = min(server_rx, client_max_tx); 0 means no cap
-                    // on either side (client 0 leaves CUBIC driving).
                     let clientTxBps = configuration.uploadBytesPerSec
                     let effectiveTxBps: UInt64 = session.serverRxBytesPerSec == 0
                         ? clientTxBps
                         : min(session.serverRxBytesPerSec, clientTxBps)
-                    brutal = .setBandwidth(effectiveTxBps)
+                    brutal = effectiveTxBps == 0 ? .uninstall : .setBandwidth(effectiveTxBps)
                 }
             }
 
             session.state = .ready
             return .ready(brutal: brutal, authStreamID: session.authStreamID)
         }
-
-        // Credit flow control even for post-auth drain bytes.
+        
         quic.extendStreamOffset(creditStreamID, count: data.count)
 
         switch outcome {
@@ -367,8 +320,6 @@ nonisolated final class HysteriaSession: Sendable {
         enum Effect { case none; case failAuth(Error); case tcp(HysteriaConnection) }
         let effect: Effect = lock.withLock { session in
             if sid == session.authStreamID {
-                // Pre-ready: server aborted auth — fail fast. Post-ready: our
-                // own STOP_SENDING reflecting back — absorb silently.
                 if session.state != .ready {
                     return .failAuth(error ?? AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Auth stream closed before completion")))
                 }
@@ -391,21 +342,18 @@ nonisolated final class HysteriaSession: Sendable {
         }
     }
 
-    // MARK: - Datagram dispatch (UDP)
+    // MARK: - Datagram dispatch
 
     private func handleDatagram(_ data: Data) {
         guard let message = HysteriaProtocol.decodeUDPMessage(data) else { return }
         let connection = lock.withLock { $0.udpSessions[message.sessionID] }
-        // Unknown sessions drop silently; Hysteria has no UDP teardown handshake.
         connection?.feedDatagram(message)
     }
 
-    // MARK: - TCP stream API (called by HysteriaConnection)
+    // MARK: - TCP stream API
 
     func openTCPStream(for connection: HysteriaConnection) async throws -> Int64 {
         enum Result { case notReady; case openFailed; case ok(Int64) }
-        // Open the bidi stream and register it in one ngtcp2-queue turn so no demuxed byte
-        // can arrive for the stream before it's routed.
         let result: Result = await quic.run {
             guard self.lock.withLock({ $0.state == .ready }) else { return .notReady }
             guard let sid = self.quic.openBidiStream() else { return .openFailed }
@@ -423,8 +371,7 @@ nonisolated final class HysteriaSession: Sendable {
             return sid
         }
     }
-
-    /// Async stream write, over the QUIC ngtcp2-boundary continuation.
+    
     func writeStream(_ sid: Int64, data: Data) async throws {
         try await quic.writeStream(sid, data: data)
     }
@@ -445,7 +392,7 @@ nonisolated final class HysteriaSession: Sendable {
         }
     }
 
-    // MARK: - UDP session API (called by HysteriaUDPConnection)
+    // MARK: - UDP session API
 
     func registerUDPSession(_ conn: HysteriaUDPConnection) async throws -> UInt32 {
         let sid: UInt32 = try lock.withLock { session in
@@ -520,27 +467,29 @@ nonisolated final class HysteriaSession: Sendable {
         guard lock.withLock({ $0.state == .ready }) else { return }
         let liveCount = _poolState.withLock { $0.tcpCount + $0.udpCount }
         guard liveCount == 0 else { return }
-        performTeardown(readyError: AnywhereError.proxy(.hysteria, .streamClosed),
-                        connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed")))
+        performTeardown(
+            readyError: AnywhereError.proxy(.hysteria, .streamClosed),
+            connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed"))
+        )
     }
-
-    /// Async DATAGRAM batch write, over the QUIC ngtcp2-boundary continuation.
+    
     func writeDatagrams(_ datagrams: [Data]) async throws {
         try await quic.writeDatagrams(datagrams)
     }
-
-    /// Async reader for the path-MTU-bounded datagram payload size.
+    
     func currentMaxDatagramPayloadSize() async -> Int {
         await quic.currentMaxDatagramPayloadSize()
     }
 
     // MARK: - Close
-
+    
     func close() {
-        performTeardown(readyError: AnywhereError.proxy(.hysteria, .streamClosed),
-                        connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed")))
+        performTeardown(
+            readyError: AnywhereError.proxy(.hysteria, .streamClosed),
+            connectionError: AnywhereError.proxy(.hysteria, .connectionClosed(detail: "Session closed"))
+        )
     }
-
+    
     private func failSession(_ error: Error) {
         performTeardown(readyError: error, connectionError: error)
     }
