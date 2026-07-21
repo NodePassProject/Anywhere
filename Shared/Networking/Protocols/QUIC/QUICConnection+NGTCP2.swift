@@ -126,7 +126,7 @@ extension QUICConnection {
         ngtcp2_conn_get_ccerr(conn)
     }
 
-    /// Frees the `ngtcp2_conn`. The caller must ensure no batch still holds it (see
+    /// Frees the `ngtcp2_conn`. The caller must ensure no packet processing still holds it (see
     /// ``enterConnHeld()``).
     func deleteConn(_ conn: OpaquePointer) {
         ngtcp2_conn_del(conn)

@@ -102,7 +102,6 @@ extension QUICConnection {
     }
     
     func startTransportIO(transport: QUICDatagramTransport) {
-        let mailbox = QUICInboundMailbox()
         let localAddr = self.localAddr
         let bridge = self.bridge
         let obfuscator = self.obfuscator
@@ -118,11 +117,11 @@ extension QUICConnection {
         rootTask = Task {
             await Self.runTransportDriver(
                 host: host, bridge: bridge, transport: transport, obfuscator: obfuscator,
-                sealStream: sealStream, mailbox: mailbox, localAddr: localAddr
+                sealStream: sealStream, localAddr: localAddr
             )
         }
     }
-    
+
     @concurrent
     private static func runTransportDriver(
         host: WeakConnectionBox,
@@ -130,7 +129,6 @@ extension QUICConnection {
         transport: QUICDatagramTransport,
         obfuscator: QUICPacketObfuscator?,
         sealStream: AsyncStream<Data>?,
-        mailbox: QUICInboundMailbox,
         localAddr: sockaddr_storage
     ) async {
         await withDiscardingTaskGroup { group in
@@ -140,7 +138,6 @@ extension QUICConnection {
                     bridge: bridge,
                     transport: transport,
                     obfuscator: obfuscator,
-                    mailbox: mailbox,
                     localAddr: localAddr
                 )
             }
@@ -151,13 +148,12 @@ extension QUICConnection {
             }
         }
     }
-    
+
     private static func runTransportReceiveLoop(
         host: WeakConnectionBox,
         bridge: NGTCP2ConcurrencyBridge,
         transport: QUICDatagramTransport,
         obfuscator: QUICPacketObfuscator?,
-        mailbox: QUICInboundMailbox,
         localAddr: sockaddr_storage
     ) async {
         do {
@@ -172,21 +168,14 @@ extension QUICConnection {
                     guard let opened = obfuscator.open(data) else { continue }
                     packet = opened
                 }
-                if mailbox.push(packet) {
-                    bridge.enqueue { host.value?.assumeIsolated { $0.drainTransportInbound(mailbox, localAddr: localAddr) } }
-                }
+                let datagram = packet
+                bridge.enqueue { host.value?.assumeIsolated { $0.handleReceivedPacket(datagram, localAddr: localAddr) } }
             }
         } catch {
             bridge.enqueue { host.value?.assumeIsolated { $0.handleTransportClosed(error) } }
         }
     }
 
-    func drainTransportInbound(_ mailbox: QUICInboundMailbox, localAddr: sockaddr_storage) {
-        for packet in mailbox.take() {
-            handleReceivedPacket(packet, localAddr: localAddr)
-        }
-    }
-    
     private static func runTransportSealPump(
         transport: QUICDatagramTransport, stream: AsyncStream<Data>, obfuscator: QUICPacketObfuscator
     ) async {
@@ -229,10 +218,7 @@ extension QUICConnection {
         migratingCarrier?.assumeIsolated { $0.close() }
         clearMigrationState()
     }
-
-    /// Fills `remoteAddr` from an IP-literal `host` or `resolvedIPs` (resolved off-queue by
-    /// ``connect()`` — never resolve here: this runs on the serial bridge queue, where a
-    /// blocking lookup would stall every connection sharing it).
+    
     func populateRemoteAddr(resolvedIPs: [String]) {
         var addr4 = in_addr()
         if inet_pton(AF_INET, host, &addr4) == 1 {
@@ -331,6 +317,7 @@ extension QUICConnection {
         settings.max_stream_window = tuning.maxStreamWindow
         settings.max_window = tuning.maxWindow
         settings.handshake_timeout = tuning.handshakeTimeout
+        settings.ack_thresh = 16
         var parameters = defaultTransportParams()
         parameters.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
         parameters.initial_max_streams_uni = tuning.initialMaxStreamsUni

@@ -21,9 +21,7 @@ extension QUICConnection {
         carrier.assumeIsolated {
             $0.startReceiving(
                 onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
-                onError: onError,
-                onBatchBegin: { [weak self] in self?.assumeIsolated { $0.beginStreamDeliveryBatch() } },
-                onBatchEnd: { [weak self] in self?.assumeIsolated { $0.endStreamDeliveryBatch() } }
+                onError: onError
             )
         }
     }

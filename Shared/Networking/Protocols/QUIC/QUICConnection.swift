@@ -83,21 +83,7 @@ actor QUICConnection {
     var inReadPkt = false
 
     var flushScheduled = false
-    
-    struct PendingStreamDelivery {
-        var data = Data()
-        var fin = false
 
-        mutating func append(_ chunk: Data, fin sawFin: Bool) {
-            if !chunk.isEmpty { data.append(chunk) }
-            if sawFin { fin = true }
-        }
-    }
-    var pendingStreamDeliveries: [Int64: PendingStreamDelivery] = [:]
-    var pendingStreamDeliveryOrder: [Int64] = []
-    
-    var receiveBatchDepth = 0
-    
     var carrier: QUICDatagramCarrier?
     
     var rootTask: Task<Void, Never>?

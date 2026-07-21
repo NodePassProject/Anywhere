@@ -155,7 +155,6 @@ nonisolated private let ngtcp2BidiCreditCB: @convention(c) (
     OpaquePointer?, UInt64, UnsafeMutableRawPointer?
 ) -> Int32 = { _, maxStreams, userData in
     guard let host = hostFromUserData(userData) else { return 0 }
-    // Deferred past the current batch so handlers may safely open streams.
     host.enqueue { host.assumeIsolated { $0.deliverBidiCredit(maxStreams: maxStreams) } }
     return 0
 }
