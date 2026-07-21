@@ -11,10 +11,10 @@ actor AWNotificationCenter {
     // MARK: - Darwin Notification Names
 
     enum Notification {
-        static let tunnelSettingsChanged = "\(AWCore.Identifier.bundle).tunnelSettingsChanged" as CFString
-        static let routingChanged = "\(AWCore.Identifier.bundle).routingChanged" as CFString
-        static let certificatePolicyChanged = "\(AWCore.Identifier.bundle).certificatePolicyChanged" as CFString
-        static let mitmChanged = "\(AWCore.Identifier.bundle).mitmChanged" as CFString
+        nonisolated(unsafe) static let tunnelSettingsChanged = "\(AWCore.Identifier.bundle).tunnelSettingsChanged" as CFString
+        nonisolated(unsafe) static let routingChanged = "\(AWCore.Identifier.bundle).routingChanged" as CFString
+        nonisolated(unsafe) static let certificatePolicyChanged = "\(AWCore.Identifier.bundle).certificatePolicyChanged" as CFString
+        nonisolated(unsafe) static let mitmChanged = "\(AWCore.Identifier.bundle).mitmChanged" as CFString
     }
 
     // MARK: - Public API

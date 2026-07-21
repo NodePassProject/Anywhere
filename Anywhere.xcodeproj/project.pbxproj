@@ -401,8 +401,8 @@
 				Utilities/Bridges/BridgeContext.swift,
 				Utilities/Bridges/BridgeExecutor.swift,
 				Utilities/Bridges/DNSSyscallConcurrencyBridge.swift,
-				Utilities/Bridges/FoundationConcurrencyBridge.swift,
 				Utilities/Bridges/NGTCP2ConcurrencyBridge.swift,
+				Utilities/Bridges/SwiftRegexConcurrencyBridge.swift,
 				"Utilities/Data+appendCompacting.swift",
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
@@ -431,7 +431,7 @@
 				Models/QUICPolicy.swift,
 				Utilities/AnywhereError.swift,
 				Utilities/AnywhereLogger.swift,
-				Utilities/Bridges/FoundationConcurrencyBridge.swift,
+				Utilities/Bridges/SwiftRegexConcurrencyBridge.swift,
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};

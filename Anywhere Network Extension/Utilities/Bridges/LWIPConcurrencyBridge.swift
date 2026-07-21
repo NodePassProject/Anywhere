@@ -40,8 +40,11 @@ nonisolated final class LWIPConcurrencyBridge: @unchecked Sendable {
 
     // MARK: - Timers
     
-    func makeTick(intervalMs: Int, leewayMs: Int,
-                  handler: @escaping @Sendable () -> Void) -> BridgeTimer {
+    func makeTick(
+        intervalMs: Int,
+        leewayMs: Int,
+        handler: @escaping @Sendable () -> Void
+    ) -> BridgeTimer {
         executor.makeRepeatingTimer(intervalMs: intervalMs, leewayMs: leewayMs, handler: handler)
     }
 }

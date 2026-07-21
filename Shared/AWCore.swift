@@ -24,7 +24,7 @@ nonisolated final class AWCore {
         Bundle.main.bundleIdentifier == Identifier.bundle
     }
     
-    private static let userDefaults: UserDefaults = {
+    nonisolated(unsafe) private static let userDefaults: UserDefaults = {
         let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
         defaults.register(defaults: [
             UserDefaultsKey.blockWebRTC: true,

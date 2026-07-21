@@ -7,7 +7,7 @@
 
 import Foundation
 import CryptoKit
-import Security
+@preconcurrency import Security
 import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
