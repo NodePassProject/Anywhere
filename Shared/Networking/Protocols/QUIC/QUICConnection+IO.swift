@@ -167,6 +167,8 @@ extension QUICConnection {
             break
         }
 
+        pumpStreamQueues(connectionOpaquePointer, ts: ts)
+
         while true {
             var chosenLocal = sockaddr_storage()
             let nwrite = txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
@@ -180,7 +182,7 @@ extension QUICConnection {
         bridge.updatePacketTxTime(connectionOpaquePointer, ts: ts)
 
         rescheduleTimer()
-        
+
         for (latch, error) in settlements { latch?.settle(error) }
     }
 
@@ -189,7 +191,11 @@ extension QUICConnection {
 
     func rescheduleTimer() {
         guard let connectionOpaquePointer else { return }
-        let expiry = bridge.expiry(connectionOpaquePointer)
+        var expiry = bridge.expiry(connectionOpaquePointer)
+        
+        if !pendingDatagrams.isEmpty || streamSendQueues.contains(where: { $0.value.hasUnsent }) {
+            expiry = min(expiry, currentTimestamp() &+ 2_000_000)
+        }
 
         if expiry == lastScheduledExpiry && retransmitTimer != nil { return }
         lastScheduledExpiry = expiry

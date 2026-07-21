@@ -51,7 +51,6 @@ extension QUICConnection {
     func extendStreamOffsetOnQueue(_ streamId: Int64, count: Int) {
         guard let connectionOpaquePointer else { return }
         bridge.extendOffsets(connectionOpaquePointer, stream: streamId, count: count)
-        // Inside read_pkt the post-read scheduleFlush() covers it.
         if inReadPkt { return }
         scheduleFlush()
     }
@@ -63,7 +62,6 @@ extension QUICConnection {
             self?.assumeIsolated { me in
                 me.flushScheduled = false
                 me.writeToUDP()
-                me.flushPendingWrites()
             }
         }
     }
@@ -80,19 +78,18 @@ extension QUICConnection {
     
     nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard let conn = me.connectionOpaquePointer, me.state == .connected else {
+            guard me.connectionOpaquePointer != nil, me.state == .connected else {
                 continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
-            me.writeStreamImpl(conn: conn, streamId: streamId,
-                               data: data, fin: fin, continuation: continuation)
+            me.appendStreamWrite(streamId, data: data, fin: fin, continuation: continuation)
         }
     }
-    
+
     nonisolated func writeStreamOnQueue(_ streamId: Int64, data: Data, fin: Bool = false) {
         assumeIsolated { me in
-            guard let conn = me.connectionOpaquePointer, me.state == .connected else { return }
-            me.writeStreamImpl(conn: conn, streamId: streamId, data: data, fin: fin, continuation: nil)
+            guard me.connectionOpaquePointer != nil, me.state == .connected else { return }
+            me.appendStreamWrite(streamId, data: data, fin: fin, continuation: nil)
         }
     }
 
@@ -168,157 +165,127 @@ extension QUICConnection {
         }
     }
     
-    func writeStreamImpl(conn: OpaquePointer, streamId: Int64,
-                                  data: Data, fin: Bool,
-                                  continuation: CheckedContinuation<Void, Error>?) {
-        let sent = writeStreamSync(conn: conn, streamId: streamId,
-                                    data: data, fin: fin)
-
-        if sent >= data.count {
+    func appendStreamWrite(_ streamId: Int64, data: Data, fin: Bool,
+                           continuation: CheckedContinuation<Void, Error>?) {
+        if data.isEmpty && !fin {
             continuation?.resume()
-        } else {
-            let remaining = Data(data[sent...])
-            pendingWrites.append(PendingWrite(
-                streamId: streamId, data: remaining,
-                fin: fin, continuation: continuation
-            ))
-        }
-    }
-    
-    func writeStreamSync(conn: OpaquePointer, streamId: Int64,
-                                  data: Data, fin: Bool) -> Int {
-        let ts = currentTimestamp()
-        var offset = 0
-
-        guard !data.isEmpty else {
-            writeToUDP()
-            return 0
-        }
-        
-        let baseOffset = streamTxOffset[streamId] ?? 0
-        let inflight = InflightStreamBuffer(copying: data)
-
-        beginTxBatch()
-        defer { endTxBatch() }
-
-        while offset < data.count {
-            var pi = ngtcp2_pkt_info()
-            var pdatalen: ngtcp2_ssize = 0
-
-            let remaining = data.count - offset
-            let isLast = (offset + remaining >= data.count)
-            let flags: UInt32 = {
-                var f: UInt32 = 0
-                if fin && isLast { f |= UInt32(NGTCP2_WRITE_STREAM_FLAG_FIN) }
-                if !isLast { f |= UInt32(NGTCP2_WRITE_STREAM_FLAG_MORE) }
-                return f
-            }()
-
-            var chosenLocal = sockaddr_storage()
-            let nwrite = inflight.withStableBase { base in
-                txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                    bridge.writeStream(
-                        conn, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
-                        dest: destination.baseAddress, destCapacity: destination.count,
-                        dataLength: &pdatalen, flags: flags, stream: streamId,
-                        src: base.advanced(by: offset), srcLen: remaining, ts: ts
-                    )
-                }
-            }
-            let outCarrier = carrierForOutPath(local: chosenLocal)
-
-            if nwrite == 0 { break }
-
-            if nwrite < 0 {
-                let code = Int32(nwrite)
-                if code == NGTCP2_ERR_WRITE_MORE {
-                    if pdatalen > 0 { offset += Int(pdatalen) }
-                    continue
-                }
-                if code == NGTCP2_ERR_STREAM_DATA_BLOCKED {
-                    if pdatalen > 0 { offset += Int(pdatalen) }
-                    break
-                }
-                if code == NGTCP2_ERR_STREAM_NOT_FOUND || code == NGTCP2_ERR_STREAM_SHUT_WR {
-                    break
-                }
-                break
-            }
-
-            sendTxBuf(length: Int(nwrite), to: outCarrier)
-            if pdatalen > 0 { offset += Int(pdatalen) }
-            if pdatalen == 0 { break }
-        }
-        
-        if offset > 0 {
-            inflight.endOffset = baseOffset + UInt64(offset)
-            inflightStreamBuffers[streamId, default: []].append(inflight)
-            streamTxOffset[streamId] = inflight.endOffset
-        }
-
-        writeToUDP()
-        return offset
-    }
-    
-    func releaseAckedStreamData(streamId: Int64, ackedOffset: UInt64) {
-        guard var buffers = inflightStreamBuffers[streamId] else { return }
-        var drop = 0
-        while drop < buffers.count && buffers[drop].endOffset <= ackedOffset {
-            drop += 1
-        }
-        guard drop > 0 else { return }
-        buffers.removeFirst(drop)
-        inflightStreamBuffers[streamId] = buffers.isEmpty ? nil : buffers
-    }
-    
-    func releaseStreamSendState(streamId: Int64) {
-        inflightStreamBuffers[streamId] = nil
-        streamTxOffset[streamId] = nil
-    }
-    
-    func failPendingWrites(streamId: Int64, error: Error) {
-        guard !pendingWrites.isEmpty else { return }
-        var remaining: [PendingWrite] = []
-        remaining.reserveCapacity(pendingWrites.count)
-        var failed: [CheckedContinuation<Void, Error>?] = []
-        for pendingWrite in pendingWrites {
-            if pendingWrite.streamId == streamId {
-                failed.append(pendingWrite.continuation)
-            } else {
-                remaining.append(pendingWrite)
-            }
-        }
-        pendingWrites = remaining
-        for continuation in failed { continuation?.resume(throwing: error) }
-    }
-    
-    func flushPendingWrites() {
-        guard !pendingWrites.isEmpty, let connectionOpaquePointer else { return }
-        
-        let prevBusy = bridge.enterConnHeld()
-        defer { bridge.exitConnHeld(prevBusy) }
-        guard state == .connected else {
-            let writes = pendingWrites
-            pendingWrites.removeAll()
-            for pendingWrite in writes { pendingWrite.continuation?.resume(throwing: AnywhereError.quic(.closed(graceful: false))) }
             return
         }
-
-        var remaining: [PendingWrite] = []
-        for pendingWrite in pendingWrites {
-            let sent = writeStreamSync(conn: connectionOpaquePointer, streamId: pendingWrite.streamId,
-                                        data: pendingWrite.data, fin: pendingWrite.fin)
-            if sent >= pendingWrite.data.count {
-                pendingWrite.continuation?.resume()
-            } else {
-                remaining.append(PendingWrite(
-                    streamId: pendingWrite.streamId,
-                    data: Data(pendingWrite.data[sent...]),
-                    fin: pendingWrite.fin,
-                    continuation: pendingWrite.continuation
-                ))
-            }
+        let queue: StreamSendQueue
+        if let existing = streamSendQueues[streamId] {
+            queue = existing
+        } else {
+            queue = StreamSendQueue()
+            streamSendQueues[streamId] = queue
         }
-        pendingWrites = remaining
+        guard !queue.finQueued else {
+            continuation?.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
+            return
+        }
+        queue.append(
+            StreamSendChunk(
+                copying: data,
+                at: queue.endOffset,
+                fin: fin,
+                continuation: continuation
+            )
+        )
+        writeToUDP()
+    }
+    
+    func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp) {
+        guard !streamSendQueues.isEmpty else { return }
+
+        var ids = streamSendQueues.filter { $0.value.hasUnsent }.keys.sorted()
+        guard !ids.isEmpty else { return }
+        if let pivot = ids.firstIndex(where: { $0 > streamPumpCursor }), pivot > 0 {
+            ids = Array(ids[pivot...]) + Array(ids[..<pivot])
+        }
+
+        outer: for id in ids {
+            guard let queue = streamSendQueues[id] else { continue }
+            while queue.hasUnsent {
+                guard let chunk = queue.currentChunk() else { break }
+                let offsetInChunk = Int(queue.sentOffset - chunk.startOffset)
+                let regionLength = Int(chunk.endOffset - queue.sentOffset)
+
+                var pi = ngtcp2_pkt_info()
+                var pdatalen: ngtcp2_ssize = 0
+                var chosenLocal = sockaddr_storage()
+                var flags = UInt32(NGTCP2_WRITE_STREAM_FLAG_MORE)
+                if chunk.fin { flags |= UInt32(NGTCP2_WRITE_STREAM_FLAG_FIN) }
+
+                let nwrite = chunk.withStableBase { base in
+                    txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
+                        bridge.writeStream(
+                            conn, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
+                            dest: destination.baseAddress, destCapacity: destination.count,
+                            dataLength: &pdatalen, flags: flags, stream: id,
+                            src: base.advanced(by: offsetInChunk), srcLen: regionLength, ts: ts
+                        )
+                    }
+                }
+
+                if nwrite == 0 {
+                    break outer
+                }
+
+                if nwrite < 0, Int32(nwrite) != NGTCP2_ERR_WRITE_MORE {
+                    let code = Int32(nwrite)
+                    if code == NGTCP2_ERR_STREAM_DATA_BLOCKED {
+                        if pdatalen > 0 {
+                            for continuation in queue.advance(
+                                accepted: Int(pdatalen),
+                                regionLength: regionLength,
+                                finFlagged: chunk.fin
+                            ) {
+                                continuation.resume()
+                            }
+                        }
+                        streamPumpCursor = id
+                        continue outer
+                    }
+                    if code == NGTCP2_ERR_STREAM_NOT_FOUND || code == NGTCP2_ERR_STREAM_SHUT_WR {
+                        failStreamSendQueue(streamId: id,
+                                            error: AnywhereError.quic(.closed(graceful: false)))
+                        continue outer
+                    }
+                    streamPumpCursor = id
+                    continue outer
+                }
+
+                if nwrite > 0 {
+                    sendTxBuf(length: Int(nwrite), to: carrierForOutPath(local: chosenLocal))
+                }
+
+                let accepted = pdatalen > 0 ? Int(pdatalen) : 0
+                if accepted > 0 || regionLength == 0 {
+                    for continuation in queue.advance(accepted: accepted, regionLength: regionLength,
+                                                      finFlagged: chunk.fin) {
+                        continuation.resume()
+                    }
+                    continue
+                }
+                
+                streamPumpCursor = id
+                continue outer
+            }
+            streamPumpCursor = id
+        }
+    }
+
+    func releaseAckedStreamData(streamId: Int64, ackedOffset: UInt64) {
+        streamSendQueues[streamId]?.trimAcked(upTo: ackedOffset)
+    }
+
+    func releaseStreamSendState(streamId: Int64) {
+        streamSendQueues[streamId] = nil
+    }
+
+    func failStreamSendQueue(streamId: Int64, error: Error) {
+        guard let queue = streamSendQueues[streamId] else { return }
+        for continuation in queue.fail() {
+            continuation.resume(throwing: error)
+        }
     }
 }

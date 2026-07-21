@@ -51,15 +51,16 @@ extension QUICConnection {
             self.transport?.cancel()
             self.closeCarrier()
             self.state = .closed
-            let writes = self.pendingWrites
-            self.pendingWrites.removeAll()
+            var failedWriters: [CheckedContinuation<Void, Error>] = []
+            for queue in self.streamSendQueues.values {
+                failedWriters.append(contentsOf: queue.fail())
+            }
+            self.streamSendQueues.removeAll()
             let datagrams = self.pendingDatagrams
             self.pendingDatagrams.removeAll()
-            self.inflightStreamBuffers.removeAll()
-            self.streamTxOffset.removeAll()
             let closeError = error ?? AnywhereError.quic(.closed(graceful: false))
             self.finishConnect(closeError)
-            for pendingWrite in writes { pendingWrite.continuation?.resume(throwing: closeError) }
+            for continuation in failedWriters { continuation.resume(throwing: closeError) }
             for d in datagrams { d.latch?.settle(closeError) }
             let closedHandler = self.handlers.withLock { current in
                 let closed = current.connectionClosed

@@ -376,7 +376,7 @@ extension QUICConnection {
             }
         }
     }
-    
+
     nonisolated func setBrutalBandwidth(_ bps: UInt64) {
         bridge.enqueue { [weak self] in
             self?.assumeIsolated { $0.brutalCC?.setTargetBandwidth(bps) }

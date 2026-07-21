@@ -130,34 +130,101 @@ actor QUICConnection: NGTCP2BridgeHost {
     let datagramsEnabled: Bool
     static let maxDatagramFrameSize: UInt64 = 65535
     
-    var pendingWrites: [PendingWrite] = []
-
-    struct PendingWrite {
-        let streamId: Int64
-        var data: Data
-        let fin: Bool
-        let continuation: CheckedContinuation<Void, Error>?
-    }
+    var streamSendQueues: [Int64: StreamSendQueue] = [:]
+    var streamPumpCursor: Int64 = -1
     
-    var inflightStreamBuffers: [Int64: [InflightStreamBuffer]] = [:]
-    
-    var streamTxOffset: [Int64: UInt64] = [:]
-
-    /// Stable heap copy of stream bytes handed to ngtcp2.
-    final class InflightStreamBuffer {
+    final class StreamSendChunk {
         let storage: UnsafeMutableBufferPointer<UInt8>
-        var endOffset: UInt64 = 0
+        let startOffset: UInt64
+        let endOffset: UInt64
+        let fin: Bool
+        var continuation: CheckedContinuation<Void, Error>?
 
-        init(copying data: Data) {
-            let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: data.count)
+        init(copying data: Data, at offset: UInt64, fin: Bool,
+             continuation: CheckedContinuation<Void, Error>?) {
+            let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: max(1, data.count))
             _ = data.copyBytes(to: buffer)
             storage = buffer
+            startOffset = offset
+            endOffset = offset + UInt64(data.count)
+            self.fin = fin
+            self.continuation = continuation
         }
 
+        var isBareFin: Bool { startOffset == endOffset }
+
         deinit { storage.deallocate() }
-        
+
         func withStableBase<R>(_ body: (UnsafeMutablePointer<UInt8>) -> R) -> R {
             body(storage.baseAddress!)
+        }
+    }
+    
+    final class StreamSendQueue {
+        var chunks: [StreamSendChunk] = []
+        var sentOffset: UInt64 = 0
+        var endOffset: UInt64 = 0
+        var finQueued = false
+        var finSent = false
+
+        var hasUnsent: Bool { sentOffset < endOffset || (finQueued && !finSent) }
+        var unsentBytes: Int { Int(endOffset - sentOffset) }
+        var bufferedBytes: Int { chunks.reduce(0) { $0 + Int($1.endOffset - $1.startOffset) } }
+
+        func append(_ chunk: StreamSendChunk) {
+            chunks.append(chunk)
+            endOffset = chunk.endOffset
+            if chunk.fin { finQueued = true }
+        }
+        
+        func currentChunk() -> StreamSendChunk? {
+            for chunk in chunks {
+                if chunk.endOffset > sentOffset { return chunk }
+                if chunk.fin, chunk.isBareFin, !finSent, chunk.endOffset == sentOffset {
+                    return chunk
+                }
+            }
+            return nil
+        }
+        
+        func advance(accepted: Int, regionLength: Int, finFlagged: Bool) -> [CheckedContinuation<Void, Error>] {
+            sentOffset &+= UInt64(accepted)
+            if finFlagged && accepted == regionLength { finSent = true }
+            var resumed: [CheckedContinuation<Void, Error>] = []
+            for chunk in chunks {
+                if chunk.endOffset > sentOffset { break }
+                guard let continuation = chunk.continuation, !chunk.fin || finSent else { continue }
+                chunk.continuation = nil
+                resumed.append(continuation)
+            }
+            return resumed
+        }
+        
+        func trimAcked(upTo ackedOffset: UInt64) {
+            var drop = 0
+            while drop < chunks.count {
+                let chunk = chunks[drop]
+                guard chunk.endOffset <= ackedOffset, chunk.continuation == nil,
+                      !chunk.fin || finSent else { break }
+                drop += 1
+            }
+            if drop > 0 { chunks.removeFirst(drop) }
+        }
+        
+        func fail() -> [CheckedContinuation<Void, Error>] {
+            var failed: [CheckedContinuation<Void, Error>] = []
+            for chunk in chunks {
+                if let continuation = chunk.continuation {
+                    chunk.continuation = nil
+                    failed.append(continuation)
+                }
+            }
+            while let last = chunks.last, last.startOffset >= sentOffset {
+                chunks.removeLast()
+            }
+            endOffset = sentOffset
+            finQueued = finSent
+            return failed
         }
     }
     
