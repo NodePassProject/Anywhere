@@ -15,8 +15,7 @@ nonisolated private let logger = AnywhereLogger(category: "RealityClient")
 actor RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any ByteTransport)?
-
-    // Handshake state, cleared after the handshake completes.
+    
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var authKey: Data?
     private var storedClientHello: Data?
@@ -33,56 +32,72 @@ actor RealityClient {
     }
 
     // MARK: - Public API
-
-    /// Connects to a Reality server and performs the TLS handshake async-natively over the
-    /// transport's async surface. The ClientHello rides the connect as initial data.
+    
     func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
-        do {
-            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-            guard let privateKey = ephemeralPrivateKey else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
-            }
-
-            let clientHello = try buildRealityClientHello(privateKey: privateKey)
-            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-            let transport = TCPTransport(host: host, port: port)
-            self.connection = transport
-            do {
-                try await transport.connect(initialData: clientHello)
-            } catch {
-                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
-            }
-
-            return try await receiveServerResponse()
-        } catch {
-            releaseOnFailure()
-            throw error
+        try await withHandshakeDeadline {
+            try await self.performConnect(host: host, port: port)
         }
     }
 
-    /// Connects over an existing proxy tunnel (proxy chaining) and performs the Reality handshake.
-    func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+    private func performConnect(host: String, port: UInt16) async throws -> TLSRecordConnection {
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        guard let privateKey = ephemeralPrivateKey else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
+        }
+
+        let clientHello = try buildRealityClientHello(privateKey: privateKey)
+        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+        let transport = TCPTransport(host: host, port: port)
+        self.connection = transport
         do {
-            ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-            guard let privateKey = ephemeralPrivateKey else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
-            }
-            self.connection = TunneledTransport(tunnel: tunnel)
+            try await transport.connect(initialData: clientHello)
+        } catch {
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: error.localizedDescription))
+        }
 
-            let clientHello = try buildRealityClientHello(privateKey: privateKey)
-            storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+        return try await receiveServerResponse()
+    }
+    
+    func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        try await withHandshakeDeadline {
+            try await self.performConnect(overTunnel: tunnel)
+        }
+    }
 
-            guard let connection = self.connection else {
-                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
-            }
-            do {
-                try await connection.send(clientHello)
-            } catch {
-                throw AnywhereError.tls(.handshakeFailed(detail: error.localizedDescription))
-            }
+    private func performConnect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        guard let privateKey = ephemeralPrivateKey else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "No ephemeral key"))
+        }
+        self.connection = TunneledTransport(tunnel: tunnel)
 
-            return try await receiveServerResponse()
+        let clientHello = try buildRealityClientHello(privateKey: privateKey)
+        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+        guard let connection = self.connection else {
+            throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
+        }
+        do {
+            try await connection.send(clientHello)
+        } catch {
+            throw AnywhereError.tls(.handshakeFailed(detail: error.localizedDescription))
+        }
+
+        return try await receiveServerResponse()
+    }
+    
+    private static let handshakeDeadline: Duration = .seconds(30)
+
+    private func withHandshakeDeadline(
+        _ handshake: @escaping @Sendable () async throws -> TLSRecordConnection
+    ) async throws -> TLSRecordConnection {
+        do {
+            return try await withDialDeadline(Self.handshakeDeadline, onExpiry: {
+                Task { await self.cancel() }
+            }, error: {
+                AnywhereError.tls(.handshakeFailed(detail: "Reality handshake timed out"))
+            }, operation: handshake)
         } catch {
             releaseOnFailure()
             throw error
@@ -177,9 +192,7 @@ actor RealityClient {
     }
 
     // MARK: - Server Response Processing
-
-    /// Buffers the server's TLS response until a full 5-byte record header is available
-    /// (partial chunks are plausible through proxy chains).
+    
     private func receiveServerResponse(buffer: Data = Data()) async throws -> TLSRecordConnection {
         var buffer = buffer
         while buffer.count < 5 {
@@ -283,8 +296,7 @@ actor RealityClient {
 
         return offset > 0
     }
-
-    /// Returns the ServerHello message without its TLS record header.
+    
     private func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {
@@ -318,9 +330,7 @@ actor RealityClient {
                 offset += recordLen
                 continue
             }
-
-            // Reject helloRetryRequest, require the server to echo our legacy session ID,
-            // and require compression == 0.
+            
             let randomOffset = offset + 1 + 3 + 2
             guard randomOffset + 32 <= data.count else { return nil }
             if data.subdata(in: randomOffset..<(randomOffset + 32)) == TLSRandom.helloRetryRequest {
@@ -390,9 +400,7 @@ actor RealityClient {
     }
 
     // MARK: - Encrypted Handshake Processing
-
-    /// Consumes encrypted TLS handshake records until Server Finished, then derives
-    /// application keys and sends Client Finished.
+    
     private func consumeRemainingHandshake(
         buffer initialBuffer: Data,
         startOffset initialOffset: Int = 0
@@ -401,147 +409,146 @@ actor RealityClient {
         var startOffset = initialOffset
 
         while true {
-        guard let keys = tls13State.handshakeKeys, let keyDerivation = tls13State.keyDerivation else {
-            throw AnywhereError.tls(.handshakeFailed(detail: "Missing handshake keys"))
-        }
-
-        var offset = startOffset
-        var fullTranscript = tls13State.handshakeTranscript ?? Data()
-        var foundServerFinished = false
-
-        while offset + 5 <= buffer.count {
-            let contentType = buffer[offset]
-            let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
-
-            guard offset + 5 + recordLen <= buffer.count else { break }
-
-            if contentType == TLSContentType.changeCipherSpec || contentType == TLSContentType.handshake {
-                offset += 5 + recordLen
-                continue
-            } else if contentType == TLSContentType.applicationData {
-                let recordHeader = buffer.subdata(in: offset..<(offset + 5))
-                let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
-
-                do {
-                    let seqNum = tls13State.serverHandshakeSeqNum
-                    let decrypted = try TLSRecordCrypto.decryptRecord(
-                        ciphertext: ciphertext,
-                        key: SymmetricKey(data: keys.serverKey),
-                        iv: keys.serverIV,
-                        seqNum: seqNum,
-                        recordHeader: recordHeader,
-                        cipherSuite: keyDerivation.cipherSuite
-                    )
-                    tls13State.serverHandshakeSeqNum += 1
-
-                    var hsOffset = 0
-                    while hsOffset + 4 <= decrypted.count {
-                        let hsType = decrypted[hsOffset]
-                        let hsLen = Int(decrypted[hsOffset + 1]) << 16 | Int(decrypted[hsOffset + 2]) << 8 | Int(decrypted[hsOffset + 3])
-
-                        guard hsOffset + 4 + hsLen <= decrypted.count else { break }
-
-                        let hsMessage = decrypted.subdata(in: hsOffset..<(hsOffset + 4 + hsLen))
-                        let hsBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
-
-                        switch hsType {
-                        case TLSHandshakeType.certificate:
-                            fullTranscript.append(hsMessage)
-                            serverCertVerified = verifyRealityCertificate(certBody: hsBody)
-
-                        case TLSHandshakeType.compressedCertificate:
-                            fullTranscript.append(hsMessage)
-                            if let decompressed = decompressCertificate(hsBody) {
-                                serverCertVerified = verifyRealityCertificate(certBody: decompressed)
-                            } else {
-                                logger.warning("[Reality] Failed to decompress CompressedCertificate")
+            guard let keys = tls13State.handshakeKeys, let keyDerivation = tls13State.keyDerivation else {
+                throw AnywhereError.tls(.handshakeFailed(detail: "Missing handshake keys"))
+            }
+            
+            var offset = startOffset
+            var fullTranscript = tls13State.handshakeTranscript ?? Data()
+            var foundServerFinished = false
+            
+            while offset + 5 <= buffer.count {
+                let contentType = buffer[offset]
+                let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
+                
+                guard offset + 5 + recordLen <= buffer.count else { break }
+                
+                if contentType == TLSContentType.changeCipherSpec || contentType == TLSContentType.handshake {
+                    offset += 5 + recordLen
+                    continue
+                } else if contentType == TLSContentType.applicationData {
+                    let recordHeader = buffer.subdata(in: offset..<(offset + 5))
+                    let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
+                    
+                    do {
+                        let seqNum = tls13State.serverHandshakeSeqNum
+                        let decrypted = try TLSRecordCrypto.decryptRecord(
+                            ciphertext: ciphertext,
+                            key: SymmetricKey(data: keys.serverKey),
+                            iv: keys.serverIV,
+                            seqNum: seqNum,
+                            recordHeader: recordHeader,
+                            cipherSuite: keyDerivation.cipherSuite
+                        )
+                        tls13State.serverHandshakeSeqNum += 1
+                        
+                        var hsOffset = 0
+                        while hsOffset + 4 <= decrypted.count {
+                            let hsType = decrypted[hsOffset]
+                            let hsLen = Int(decrypted[hsOffset + 1]) << 16 | Int(decrypted[hsOffset + 2]) << 8 | Int(decrypted[hsOffset + 3])
+                            
+                            guard hsOffset + 4 + hsLen <= decrypted.count else { break }
+                            
+                            let hsMessage = decrypted.subdata(in: hsOffset..<(hsOffset + 4 + hsLen))
+                            let hsBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
+                            
+                            switch hsType {
+                            case TLSHandshakeType.certificate:
+                                fullTranscript.append(hsMessage)
+                                serverCertVerified = verifyRealityCertificate(certBody: hsBody)
+                                
+                            case TLSHandshakeType.compressedCertificate:
+                                fullTranscript.append(hsMessage)
+                                if let decompressed = decompressCertificate(hsBody) {
+                                    serverCertVerified = verifyRealityCertificate(certBody: decompressed)
+                                } else {
+                                    logger.warning("[Reality] Failed to decompress CompressedCertificate")
+                                }
+                                
+                            case TLSHandshakeType.finished:
+                                let expectedVerifyData = keyDerivation.serverFinishedPayload(
+                                    serverTrafficSecret: keys.serverTrafficSecret,
+                                    transcript: fullTranscript
+                                )
+                                guard hsBody.count == expectedVerifyData.count,
+                                      Self.constantTimeEqual(hsBody, expectedVerifyData) else {
+                                    throw AnywhereError.tls(.handshakeFailed(detail: "Server Finished verification failed"))
+                                }
+                                fullTranscript.append(hsMessage)
+                                foundServerFinished = true
+                                
+                            default:
+                                fullTranscript.append(hsMessage)
                             }
-
-                        case TLSHandshakeType.finished:
-                            let expectedVerifyData = keyDerivation.serverFinishedPayload(
-                                serverTrafficSecret: keys.serverTrafficSecret,
-                                transcript: fullTranscript
-                            )
-                            guard hsBody.count == expectedVerifyData.count,
-                                  Self.constantTimeEqual(hsBody, expectedVerifyData) else {
-                                throw AnywhereError.tls(.handshakeFailed(detail: "Server Finished verification failed"))
-                            }
-                            fullTranscript.append(hsMessage)
-                            foundServerFinished = true
-
-                        default:
-                            fullTranscript.append(hsMessage)
+                            
+                            hsOffset += 4 + hsLen
                         }
-
-                        hsOffset += 4 + hsLen
+                    } catch let error as AnywhereError {
+                        if case .tls(.handshakeFailed) = error { throw error }
+                        throw AnywhereError.tls(.handshakeFailed(detail: "Record decryption failed"))
+                    } catch {
+                        throw AnywhereError.tls(.handshakeFailed(detail: "Record decryption failed"))
                     }
-                } catch let error as AnywhereError {
-                    if case .tls(.handshakeFailed) = error { throw error }
-                    throw AnywhereError.tls(.handshakeFailed(detail: "Record decryption failed"))
+                }
+                
+                offset += 5 + recordLen
+                
+                if foundServerFinished { break }
+            }
+            
+            let processedOffset = offset
+            tls13State.handshakeTranscript = fullTranscript
+            
+            if foundServerFinished {
+                guard serverCertVerified else {
+                    throw AnywhereError.tls(.reality(.authenticationFailed))
+                }
+                
+                tls13State.applicationKeys = keyDerivation.deriveApplicationKeys(handshakeSecret: tls13State.handshakeSecret!, fullTranscript: fullTranscript)
+                
+                do {
+                    try await sendClientFinished()
                 } catch {
-                    throw AnywhereError.tls(.handshakeFailed(detail: "Record decryption failed"))
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Failed to send Client Finished"))
+                }
+                
+                guard let appKeys = self.tls13State.applicationKeys else {
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Application keys not available"))
+                }
+                
+                let realityConnection = TLSRecordConnection(
+                    clientKey: appKeys.clientKey,
+                    clientIV: appKeys.clientIV,
+                    serverKey: appKeys.serverKey,
+                    serverIV: appKeys.serverIV,
+                    cipherSuite: self.tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+                    clientAppSecret: appKeys.clientTrafficSecret,
+                    serverAppSecret: appKeys.serverTrafficSecret
+                )
+                realityConnection.adoptTransport(self.connection)
+                self.connection = nil
+                
+                let remaining = buffer.subdata(in: processedOffset..<buffer.count)
+                if !remaining.isEmpty {
+                    realityConnection.prependToReceiveBuffer(remaining)
+                }
+                
+                self.clearHandshakeState()
+                return realityConnection
+            } else {
+                guard let connection else {
+                    throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
+                }
+                switch try await connection.receive() {
+                case .bytes(let moreData):
+                    buffer.append(moreData)
+                    startOffset = processedOffset
+                    continue
+                case .end:
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before Server Finished"))
                 }
             }
-
-            offset += 5 + recordLen
-
-            // Post-Finished records (e.g. NewSessionTicket) use application keys.
-            if foundServerFinished { break }
         }
-
-        let processedOffset = offset
-        tls13State.handshakeTranscript = fullTranscript
-
-        if foundServerFinished {
-            guard serverCertVerified else {
-                throw AnywhereError.tls(.reality(.authenticationFailed))
-            }
-
-            tls13State.applicationKeys = keyDerivation.deriveApplicationKeys(handshakeSecret: tls13State.handshakeSecret!, fullTranscript: fullTranscript)
-
-            do {
-                try await sendClientFinished()
-            } catch {
-                throw AnywhereError.tls(.handshakeFailed(detail: "Failed to send Client Finished"))
-            }
-
-            guard let appKeys = self.tls13State.applicationKeys else {
-                throw AnywhereError.tls(.handshakeFailed(detail: "Application keys not available"))
-            }
-
-            let realityConnection = TLSRecordConnection(
-                clientKey: appKeys.clientKey,
-                clientIV: appKeys.clientIV,
-                serverKey: appKeys.serverKey,
-                serverIV: appKeys.serverIV,
-                cipherSuite: self.tls13State.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256,
-                clientAppSecret: appKeys.clientTrafficSecret,
-                serverAppSecret: appKeys.serverTrafficSecret
-            )
-            realityConnection.adoptTransport(self.connection)
-            self.connection = nil
-
-            let remaining = buffer.subdata(in: processedOffset..<buffer.count)
-            if !remaining.isEmpty {
-                realityConnection.prependToReceiveBuffer(remaining)
-            }
-
-            self.clearHandshakeState()
-            return realityConnection
-        } else {
-            guard let connection else {
-                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
-            }
-            switch try await connection.receive() {
-            case .bytes(let moreData):
-                buffer.append(moreData)
-                startOffset = processedOffset
-                continue
-            case .end:
-                throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before Server Finished"))
-            }
-        }
-        } // while true
     }
 
     // MARK: - Client Finished
@@ -699,7 +706,7 @@ actor RealityClient {
         return length
     }
 
-    // MARK: - CompressedCertificate (RFC 8879)
+    // MARK: - CompressedCertificate
 
     private func decompressCertificate(_ body: Data) -> Data? {
         guard body.count >= 8 else { return nil }
@@ -783,5 +790,4 @@ actor RealityClient {
         )
         return derivedKey.withUnsafeBytes { Data($0) }
     }
-
 }

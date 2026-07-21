@@ -111,9 +111,9 @@ nonisolated final class XHTTPConnection: Sendable {
         var h3Multiplexer: HTTP3Multiplexer?
         /// Pooled shared-H2 multiplexer (xmux); when set, streams ride a shared connection.
         var sharedH2: XHTTPH2Multiplexer?
-
-        // Upload transport, established at setup (packet-up and stream-up).
+        
         var uploadTransport: (any ByteTransport)?
+        var uploadDrainTask: Task<Void, Never>?
 
         var nextSeq: Int64 = 0
         var chunkedDecoder = ChunkedTransferDecoder()
@@ -488,11 +488,18 @@ nonisolated final class XHTTPConnection: Sendable {
             state.xmuxLease = nil
             let upload = state.uploadTransport
             state.uploadTransport = nil
-            // Sends parked on H2 flow control wake here; each re-enters its send, sees the closed
-            // stream, and completes with `.connectionClosed` rather than hanging forever.
+            state.uploadDrainTask?.cancel()
+            state.uploadDrainTask = nil
             state.h2FlowGate.wakeAll()
-            return (h3DownloadStream, h3UploadStream, h3Session,
-                    sharedH2DownloadStream, sharedH2UploadStream, lease, upload)
+            return (
+                h3DownloadStream,
+                h3UploadStream,
+                h3Session,
+                sharedH2DownloadStream,
+                sharedH2UploadStream,
+                lease,
+                upload
+            )
         }
 
         download.cancel()
@@ -502,7 +509,6 @@ nonisolated final class XHTTPConnection: Sendable {
         teardown.sharedH2Download?.close()
         teardown.sharedH2Upload?.close()
         if let lease = teardown.lease {
-            // Pooled transport: keep it open for other/future sessions; just release our slot.
             lease.release()
         } else {
             teardown.h3Session?.close()
@@ -511,11 +517,7 @@ nonisolated final class XHTTPConnection: Sendable {
     }
 
     // MARK: - Packet-Up
-
-    /// Sends one packet-up payload as its own POST, serialized on `packetUpChain` and
-    /// rate-limited to at most one POST per `scMinPostsIntervalMs`. The async send surface is
-    /// single-writer, so payloads already arrive one at a time — the callback path's coalescing
-    /// queue is unnecessary. HTTP/1.1 re-splits an oversized payload into back-to-back POSTs.
+    
     private func sendPacketUp(_ data: Data) async throws {
         try await packetUpChain.run { [self] in
             let closed = state.withLock { state in
@@ -536,8 +538,7 @@ nonisolated final class XHTTPConnection: Sendable {
             }
         }
     }
-
-    /// Waits out the remainder of `scMinPostsIntervalMs` since the last POST, then stamps the clock.
+    
     private func rateLimitPacketUp() async throws {
         let delayMs = configuration.scMinPostsIntervalMs
         if delayMs > 0 {
@@ -557,28 +558,20 @@ nonisolated final class XHTTPConnection: Sendable {
 
 // MARK: - XMUX Connection Pooling
 
-/// A poolable underlying XHTTP transport that multiple XHTTP sessions can share
-/// (a multiplexing H2 connection or an H3/QUIC session).
 nonisolated protocol XHTTPXMUXMultiplexerPoolable: AnyObject, Sendable {
-    /// True once the connection can no longer carry new sessions.
     var isPoolClosed: Bool { get }
-    /// Tears down the underlying connection once the pool retires it with no active leases.
     func poolClose()
 }
 
 nonisolated final class XHTTPXMUXMultiplexerLease: Sendable {
     let connection: XHTTPXMUXMultiplexerPoolable
-    /// Weak back-reference to the owning manager, boxed so this set-once value stays a `let` and the
-    /// lease is honestly `Sendable` — a weak load is atomic, and the manager is itself `Sendable`.
+    
     private struct WeakManager: Sendable { weak var value: XHTTPXMUXMultiplexerManager? }
     private let managerBox: WeakManager
     private var manager: XHTTPXMUXMultiplexerManager? { managerBox.value }
-    /// Identity of the pooled connection's manager entry. `connection` above keeps the connection
-    /// itself alive for this session's lifetime; this id only routes `noteRequest`/`release` back to
-    /// the manager's entry.
+    
     private let clientID: UInt64
-    /// One-shot release latch. A lone flag, so it is an `Atomic` compare-exchange rather than a
-    /// `Mutex` guarding no compound state (matching `HandshakeRaceGate`).
+    
     private let released = Atomic(false)
 
     init(connection: XHTTPXMUXMultiplexerPoolable, manager: XHTTPXMUXMultiplexerManager, clientID: UInt64) {
@@ -586,55 +579,38 @@ nonisolated final class XHTTPXMUXMultiplexerLease: Sendable {
         self.managerBox = WeakManager(value: manager)
         self.clientID = clientID
     }
-
-    /// Decrements the connection's remaining-request budget (`hMaxRequestTimes`).
+    
     func noteRequest() {
         manager?.noteRequest(clientID)
     }
-
-    /// Releases this session's concurrency slot. Idempotent.
+    
     func release() {
-        // Atomic take-once: the caller that flips false→true releases the slot; every later call no-ops.
         guard released.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged else { return }
         manager?.releaseSlot(clientID)
     }
 }
 
-/// Intentionally not a ``MultiplexerPool`` subclass: XMUX reuse follows Xray's per-connection
-/// retirement policy (`cMaxReuseTimes` / `hMaxRequestTimes` / `hMaxReusableSecs`, see
-/// ``ClientEntry/isRetired(now:)``) rather than the base's idle-age sweep. Every pooled connection's
-/// mutable state lives inside this manager's `pool` mutex, keyed by a `UInt64` id the lease carries —
-/// there is no shared mutable client object, so no `@unchecked` is needed.
 nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     private let config: XHTTPXMUXMultiplexerConfiguration
-    /// `maxConcurrency` range rolled once at creation, fixed for the manager's lifetime.
+    
     private let concurrency: Int
-    /// `maxConnections` resolved once at creation.
+    
     private let connections: Int
-    /// Destination-bound dial: resolves to a fresh poolable connection, or nil on failure.
+    
     private let newConnection: @Sendable () async -> XHTTPXMUXMultiplexerPoolable?
 
     private enum Phase { case dialing, ready, failed }
-
-    /// One pooled connection's state; a value type owned entirely by ``pool``.
+    
     private struct ClientEntry {
         var phase: Phase = .dialing
         var connection: XHTTPXMUXMultiplexerPoolable?
-        /// Concurrent sessions currently leased on this connection.
         var openUsage = 0
-        /// Remaining session assignments (`cMaxReuseTimes - 1`); -1 = unlimited.
         var leftUsage: Int
-        /// Remaining HTTP requests (`hMaxRequestTimes`); `Int.max` = unlimited.
         var leftRequests: Int
-        /// Wall-clock retirement time (`hMaxReusableSecs`); nil = never.
         let unreusableAt: CFAbsoluteTime?
-        /// The in-flight dial, created by the leader under the pool lock; every joiner awaits its value.
         var dialTask: Task<XHTTPXMUXMultiplexerPoolable?, Never>?
-
-        /// Retired when failed, closed, out of reuses/requests, or past its lifetime.
+        
         func isRetired(now: CFAbsoluteTime) -> Bool {
-            // Never retire mid-dial: pruning a dialing entry would strand its joiners, whose
-            // completions only fire when the dial resolves.
             if phase == .dialing { return false }
             if phase == .failed { return true }
             if connection?.isPoolClosed == true { return true }
@@ -649,8 +625,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         var nextID: UInt64 = 0
     }
     private let pool = Mutex(PoolState())
-
-    /// Strong back-reference is safe: the registry is a process-lifetime singleton.
+    
     private let registry: XHTTPXMUXMultiplexerRegistry?
     fileprivate let registryKey: String?
 
@@ -667,15 +642,11 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         self.registry = registry
         self.registryKey = registryKey
     }
-
-    /// Acquires a slot, reusing a pooled connection or dialing a new one per policy.
-    /// Resolves to nil if a freshly-dialed connection fails.
+    
     func acquire() async -> XHTTPXMUXMultiplexerLease? {
         let now = CFAbsoluteTimeGetCurrent()
-        // Prune retired entries; tear down those with no active sessions left.
         var retiredIdle: [XHTTPXMUXMultiplexerPoolable] = []
         pool.withLock { pool in
-            // Collect first: mutating `entries` while iterating it would trap.
             let retiredIDs = pool.entries.compactMap { $0.value.isRetired(now: now) ? $0.key : nil }
             for id in retiredIDs {
                 if pool.entries[id]!.openUsage == 0, let connection = pool.entries[id]!.connection {
@@ -685,9 +656,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
             }
         }
         for connection in retiredIdle { connection.poolClose() }
-
-        // Decide under the lock: reuse a ready connection, join a still-dialing one, fail,
-        // or lead a fresh dial. Any dial/await happens after the lock is released.
+        
         enum Decision {
             case ready(XHTTPXMUXMultiplexerPoolable, UInt64)
             case failed
@@ -701,14 +670,12 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
                 case .ready:
                     return .ready(pool.entries[id]!.connection!, id)
                 case .dialing:
-                    // Share this still-dialing connection once its dial resolves.
                     return .dialOrJoin(id)
                 case .failed:
                     return .failed
                 }
             }
-
-            // Policy requires a new pooled connection.
+            
             let reuseRand = config.cMaxReuseTimes.random()
             let leftUsage = reuseRand > 0 ? reuseRand - 1 : -1
             let reqRand = config.hMaxRequestTimes.random()
@@ -720,7 +687,6 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
             pool.nextID &+= 1
             var entry = ClientEntry(leftUsage: leftUsage, leftRequests: leftRequests, unreusableAt: unreusableAt)
             entry.openUsage = 1
-            // Create the memoized dial under the lock so a joiner deciding to join always finds it set.
             entry.dialTask = Task { [weak self] in await self?.performDial(for: id) ?? nil }
             pool.entries[id] = entry
             return .dialOrJoin(id)
@@ -732,17 +698,12 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         case .failed:
             return nil
         case .dialOrJoin(let id):
-            // Leader and joiners both await the entry's memoized dial task (the leader created it
-            // under the lock in the decision above, so a joiner always finds it set).
             let task = pool.withLock { $0.entries[id]?.dialTask }
             guard let connection = await task?.value else { return nil }
             return makeLease(connection, id)
         }
     }
-
-    /// The memoized dial body: dials a new pooled connection, resolves the entry's state, and
-    /// evicts an empty pool on failure. Its result is shared by the leader and every joiner via
-    /// `entry.dialTask.value`.
+    
     private func performDial(for id: UInt64) async -> XHTTPXMUXMultiplexerPoolable? {
         let connection = await newConnection()
         var drained = false
@@ -755,12 +716,10 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
                 drained = pool.entries.isEmpty
             }
         }
-        // A failed first dial leaves an empty pool; evict the manager shell.
         if drained { registry?.evictIfEmpty(self) }
         return connection
     }
-
-    /// Selects a reusable pooled connection id (lock held); nil ⇒ dial a new connection.
+    
     private func selectReusable(in entries: [UInt64: ClientEntry]) -> UInt64? {
         if entries.isEmpty { return nil }
         if connections > 0 && entries.count < connections { return nil }
@@ -777,7 +736,6 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         let drained: Bool = pool.withLock { pool in
             guard pool.entries[clientID] != nil else { return pool.entries.isEmpty }
             if pool.entries[clientID]!.openUsage > 0 { pool.entries[clientID]!.openUsage -= 1 }
-            // A retired connection with no remaining sessions is dropped and torn down.
             if pool.entries[clientID]!.openUsage == 0,
                pool.entries[clientID]!.isRetired(now: CFAbsoluteTimeGetCurrent()) {
                 shouldClose = pool.entries[clientID]!.connection
@@ -786,7 +744,6 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
             return pool.entries.isEmpty
         }
         shouldClose?.poolClose()
-        // Last session for this destination ended; ask the registry to drop the shell.
         if drained { registry?.evictIfEmpty(self) }
     }
 
@@ -801,8 +758,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     fileprivate func hasNoClients() -> Bool {
         pool.withLock { $0.entries.isEmpty }
     }
-
-    /// Closes every pooled connection and empties the pool (called by the registry's `reclaim()`).
+    
     func closeAll() {
         let pooledConnections: [XHTTPXMUXMultiplexerPoolable] = pool.withLock { pool in
             let pooled = pool.entries.values.compactMap { $0.connection }
@@ -816,16 +772,14 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
 nonisolated final class XHTTPXMUXMultiplexerRegistry: Sendable {
     nonisolated static let shared = XHTTPXMUXMultiplexerRegistry()
     private let managers = Mutex<[String: XHTTPXMUXMultiplexerManager]>([:])
+    
     private init() {}
-
-    /// The factory is destination-bound and must not capture per-session/per-flow state.
+    
     func manager(
         key: String,
         config: XHTTPXMUXMultiplexerConfiguration,
         makeFactory: () -> (@Sendable () async -> XHTTPXMUXMultiplexerPoolable?)
     ) -> XHTTPXMUXMultiplexerManager {
-        // Built before taking the lock so the caller's factory closure never runs under it;
-        // discarded unused when a manager already exists for this key.
         let factory = makeFactory()
         return managers.withLock { managers in
             if let existing = managers[key] { return existing }
@@ -836,13 +790,11 @@ nonisolated final class XHTTPXMUXMultiplexerRegistry: Sendable {
             return manager
         }
     }
-
-    /// Drops `manager` once its pool has fully drained, so an idle destination doesn't
-    /// retain a manager shell (config + factory closure + key) for the process lifetime.
+    
     fileprivate func evictIfEmpty(_ manager: XHTTPXMUXMultiplexerManager) {
         guard let key = manager.registryKey else { return }
         managers.withLock { managers in
-            guard managers[key] === manager else { return }   // already replaced/removed
+            guard managers[key] === manager else { return }
             if manager.hasNoClients() {
                 managers.removeValue(forKey: key)
             }
@@ -851,8 +803,6 @@ nonisolated final class XHTTPXMUXMultiplexerRegistry: Sendable {
 }
 
 nonisolated extension XHTTPXMUXMultiplexerRegistry: TransportPool {
-    /// Drops every pooled connection so XHTTP doesn't reuse a socket the kernel killed
-    /// during sleep/path-change.
     func reclaim() {
         let allManagers: [XHTTPXMUXMultiplexerManager] = managers.withLock { managers in
             let all = Array(managers.values)
@@ -863,23 +813,13 @@ nonisolated extension XHTTPXMUXMultiplexerRegistry: TransportPool {
     }
 }
 
-/// An HTTP/3 session can carry many XHTTP sessions as independent QUIC streams.
 extension HTTP3Multiplexer: XHTTPXMUXMultiplexerPoolable {
     nonisolated var isPoolClosed: Bool { isClosed }
     nonisolated func poolClose() { close() }
 }
 
-// MARK: - Shared Multiplexing HTTP/2 Connection (xmux)
-//
-// Carries many XHTTP sessions as independent H2 streams over one socket. Gated behind
-// xmux config; without xmux, sessions use the 1:1 H2 path (XHTTPConnection+H2*.swift).
+// MARK: - Shared Multiplexing HTTP/2 Connection
 
-/// A thin handle to one muxed stream: it carries only the stream id and a reference to the owning
-/// multiplexer, and forwards every operation to a multiplexer method that locks, mutates the
-/// stream's `StreamState`, and returns. All per-stream state lives in the multiplexer's `State`
-/// (keyed by `streamId`), so mutation only ever happens under the multiplexer's lock. The strong
-/// `multiplexer` ref is safe: the multiplexer never holds the handle (its `State.streams` stores
-/// value `StreamState`s, not handles), so there's no retain cycle.
 nonisolated final class XHTTPH2Stream: Sendable {
     let streamId: UInt32
     private let multiplexer: XHTTPH2Multiplexer
@@ -900,37 +840,24 @@ nonisolated final class XHTTPH2Stream: Sendable {
     func receive() async throws -> Data? {
         try await multiplexer.receive(streamId: streamId)
     }
-
-    /// Discards any further inbound data on this stream (an upload leg's response).
+    
     func drainResponse() { multiplexer.drain(streamId: streamId) }
 
     func close() { multiplexer.removeStream(streamId) }
 }
 
-/// One always-on read loop demuxes frames to per-stream buffers. State under the `state` mutex.
 nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendable {
     private let transport: any ByteTransport
-    /// Demuxes the shared socket into H2 frames; one always-on read loop drives it.
     private let frameReader: H2FrameReader
-
-    /// Per-stream state, held as a value in `State.streams` keyed by stream id, so every mutation
-    /// happens under the multiplexer's lock. A method reads it out, mutates the copy, and writes it
-    /// back (or removes the entry on teardown).
+    
     nonisolated struct StreamState {
         var receiveBuffer = Data()
         var ended = false
         var failure: Error?
-        /// Single-flight receive gate: ``XHTTPH2Multiplexer/receive(streamId:)`` enrolls a one-shot
-        /// waiter here when there's nothing to hand back; any data/EOF/error path finishes it (under
-        /// the connection lock) so the receiver re-checks. Replaces a stored `CheckedContinuation`.
         var receiveWaiter: AsyncStream<Void>.Continuation?
-        /// When true, inbound data is discarded (an upload leg's response).
         var draining = false
         var receiveConsumed = 0
         var sendWindow: Int
-        /// Set once this side sends END_STREAM. A stream is dropped from `streams` only when both
-        /// sides are done (or the peer resets it); until then the entry is kept so a still-open
-        /// sender sees a live window even after the receive side ends (mirrors the 1:1 H2 path).
         var sendEnded = false
     }
 
@@ -938,26 +865,22 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         var streams: [UInt32: StreamState] = [:]
         var nextStreamId: UInt32 = 1
         var closedFlag = false
-        /// Holds dial objects (TLS/Reality client) alive for the connection's lifetime.
+        var pumpTask: Task<Void, Never>?
         var retained: [any Sendable] = []
-
-        // Peer flow-control windows (for our sends).
+        
         var peerConnWindow = 65535
         var peerInitialWindow = 65535
         var maxFrameSize = 16384
         var flowGate = H2FlowGate()
-
-        // Local receive-window accounting (replenished as sessions consume data).
+        
         var connReceiveConsumed = 0
     }
 
     private let state = Mutex(State())
-    private static let localStreamWindow = 4_194_304          // 4 MB
-    private static let localConnWindow: UInt32 = 1_073_741_824 // 1 GB
-    private static let maxReadBuffer = 8_388_608               // 8 MB
-
-    /// Control frames to write outside the state lock (window updates). Receive hand-off now
-    /// happens in `receive` itself via the per-stream gate, so there's no deliver closure.
+    private static let localStreamWindow = 4_194_304
+    private static let localConnWindow: UInt32 = 1_073_741_824
+    private static let maxReadBuffer = 8_388_608
+    
     private struct PumpEffect {
         var frames: [Data] = []
     }
@@ -1027,7 +950,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     // MARK: Read loop
 
     private func startPump() {
-        Task { [weak self] in
+        let task = Task { [weak self] in
             while true {
                 guard let self else { return }
                 let f: H2Framing.Frame
@@ -1046,10 +969,14 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                 if self.state.withLock({ $0.closedFlag }) { return }
             }
         }
+        let stored: Bool = state.withLock { state in
+            guard !state.closedFlag else { return false }
+            state.pumpTask = task
+            return true
+        }
+        if !stored { task.cancel() }
     }
-
-    /// Returns a description for a non-200 response `:status` (HPACK static-indexed error codes),
-    /// or nil for 200 / an encoding we don't decode.
+    
     private static func h2StatusError(_ block: Data) -> String? {
         guard let first = block.first else { return nil }
         switch first {
@@ -1085,8 +1012,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
             break
         }
     }
-
-    /// Runs an effect's control-frame writes, then resumes any waiting receive.
+    
     private func apply(_ effect: PumpEffect) async {
         for frame in effect.frames { try? await transport.send(frame) }
     }
@@ -1095,7 +1021,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         let endStream = flags & XHTTPConnection.h2FlagEndStream != 0
         return state.withLock { state in
             guard var stream = state.streams[streamId] else {
-                // Unknown/closed stream: still replenish the connection window so peers keep flowing.
                 state.connReceiveConsumed += payload.count
                 guard let windowUpdateFrame = connWindowUpdateLocked(&state) else { return nil }
                 return PumpEffect(frames: [windowUpdateFrame])
@@ -1105,8 +1030,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                 stream.receiveConsumed += payload.count
                 let updates = windowUpdatesLocked(streamId, &stream, &state)
                 if endStream {
-                    // Response finished: drop it once our send side is also done, else keep the
-                    // entry so a still-open upload can keep sending on a live window.
                     if stream.sendEnded { state.streams.removeValue(forKey: streamId) }
                     else { stream.ended = true; state.streams[streamId] = stream }
                 } else {
@@ -1123,8 +1046,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     }
 
     private func handleHeaders(streamId: UInt32, flags: UInt8, payload: Data) -> PumpEffect? {
-        // A non-200 response means the request was rejected (e.g. a 400 on a detached download GET
-        // whose session the server can't pair). Surface it as an explicit error.
         if let statusError = Self.h2StatusError(payload) {
             return state.withLock { state in
                 guard var stream = state.streams[streamId] else { return nil }
@@ -1136,7 +1057,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                 return nil
             }
         }
-        // Body arrives as DATA; only a HEADERS carrying END_STREAM closes the stream.
         guard flags & XHTTPConnection.h2FlagEndStream != 0 else { return nil }
         return handleEnd(streamId: streamId)
     }
@@ -1145,8 +1065,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         state.withLock { state in
             guard var stream = state.streams[streamId] else { return nil }
             if stream.draining {
-                // Response finished. Drop it once our send side is also done or the peer reset the
-                // stream; otherwise keep it so a still-open upload can keep sending.
                 if reset || stream.sendEnded { state.streams.removeValue(forKey: streamId) }
                 else { stream.ended = true; state.streams[streamId] = stream }
                 return nil
@@ -1175,10 +1093,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
             state.flowGate.wakeAll()
         }
     }
-
-    /// Lock held. Wakes a parked ``receive(streamId:)`` so it re-evaluates the stream's
-    /// buffer/EOF/error state (and replenishes the receive window on consume). The window-update
-    /// frames and the actual hand-off now live in `receive`, so this just finishes the gate.
+    
     private func wakeReceiverLocked(_ stream: inout StreamState) {
         stream.receiveWaiter?.finish()
         stream.receiveWaiter = nil
@@ -1198,7 +1113,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     }
 
     func sendData(streamId: UInt32, data: Data, offset: Int, endStream: Bool) async throws {
-        // Pure half-close (no more payload): emit a bare END_STREAM DATA frame.
         if offset >= data.count {
             guard endStream else { return }
             let f: Data? = state.withLock { state in
@@ -1220,7 +1134,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         while currentOffset < data.count {
             let step: BuildStep = state.withLock { state in
                 if state.closedFlag { return .closed }
-                // A removed stream (ended/reset/torn down) is treated as closed for the sender.
                 guard var stream = state.streams[streamId] else { return .closed }
                 let window = min(state.peerConnWindow, stream.sendWindow)
                 guard window > 0 else { return .park }
@@ -1255,14 +1168,11 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
             }
         }
     }
-
-    /// Suspends until a WINDOW_UPDATE re-opens this stream's send window (or the connection closes).
-    /// Re-checks under the lock before parking so a window re-open racing the caller isn't missed.
+    
     private func parkForFlow(streamId: UInt32) async {
         await H2FlowGate.park {
             state.withLock { state -> AsyncStream<Never>? in
                 if state.closedFlag { return nil }
-                // A removed stream re-loops in `sendData` and completes with `.connectionClosed`.
                 guard let stream = state.streams[streamId] else { return nil }
                 if min(state.peerConnWindow, stream.sendWindow) > 0 { return nil }
                 return state.flowGate.enroll()
@@ -1274,14 +1184,11 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
         enum Outcome { case data(Data, frames: [Data]), eof, error(Error), wait(AsyncStream<Void>) }
         while true {
             let outcome: Outcome = state.withLock { state in
-                // A stream removed after a prior EOF (or by `close`) is simply done.
                 guard var stream = state.streams[streamId] else { return .eof }
                 if let failure = stream.failure {
                     return .error(failure)
                 }
                 if !stream.receiveBuffer.isEmpty {
-                    // Consume-time flow control: replenish the receive window only as the session
-                    // drains the buffer, so a slow reader backpressures the peer.
                     let data = stream.receiveBuffer
                     stream.receiveBuffer = Data()
                     state.connReceiveConsumed += data.count
@@ -1291,7 +1198,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                     return .data(data, frames: updates)
                 }
                 if stream.ended {
-                    // Keep a still-open sender's entry (live window); a fully-done stream is dropped.
                     if stream.sendEnded { state.streams.removeValue(forKey: streamId) }
                     return .eof
                 }
@@ -1305,7 +1211,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
             }
             switch outcome {
             case .data(let data, let frames):
-                // WINDOW_UPDATEs are fire-and-forget (order vs. the pump is immaterial).
                 if !frames.isEmpty {
                     let transport = self.transport
                     Task { for frame in frames { try? await transport.send(frame) } }
@@ -1317,7 +1222,6 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                 throw error
             case .wait(let waitStream):
                 for await _ in waitStream { break }
-                // A finished gate (data/close) loops to re-check; a cancelled task must not spin.
                 try Task.checkCancellation()
             }
         }
@@ -1358,18 +1262,13 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     }
 
     func cancel() { failAll(AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))) }
-
-    /// Tears down all muxed streams. A nil error delivers a graceful EOF to each pending
-    /// receive (e.g. a clean transport FIN of the shared H2 connection); a non-nil error
-    /// surfaces as a failure.
+    
     private func failAll(_ error: Error?) {
-        let didClose: Bool = state.withLock { state in
-            if state.closedFlag { return false }
+        let (didClose, pumpTask): (Bool, Task<Void, Never>?) = state.withLock { state in
+            if state.closedFlag { return (false, nil) }
             state.closedFlag = true
-            // Stamp each stream so a parked receive re-check surfaces the right terminal result:
-            // a non-nil error as a failure, a nil error (clean FIN) as graceful EOF. The stamped
-            // entries stay in `streams` (the value structs now carry the terminal state) so a woken
-            // receive still observes it; each self-removes on its EOF, failed ones on teardown.
+            let pumpTask = state.pumpTask
+            state.pumpTask = nil
             for (id, var stream) in state.streams {
                 if let error {
                     if stream.failure == nil { stream.failure = error }
@@ -1379,12 +1278,11 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                 wakeReceiverLocked(&stream)
                 state.streams[id] = stream
             }
-            // Sends parked on flow control wake here; each re-enters `sendData`, sees the closed
-            // connection, and throws `.connectionClosed` rather than hanging forever.
             state.flowGate.wakeAll()
-            return true
+            return (true, pumpTask)
         }
         guard didClose else { return }
+        pumpTask?.cancel()
         frameReader.reset()
         transport.cancel()
     }
@@ -1413,24 +1311,23 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
             index += 6
         }
     }
-
-    /// Conn-level WINDOW_UPDATE once >= 50% of the advertised window is consumed. Lock held.
+    
     private func connWindowUpdateLocked(_ state: inout State) -> Data? {
         guard state.connReceiveConsumed >= Int(Self.localConnWindow) / 2 else { return nil }
         let inc = UInt32(state.connReceiveConsumed)
         state.connReceiveConsumed = 0
         return frame(type: XHTTPConnection.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: uint32Data(inc))
     }
-
-    /// Conn + stream WINDOW_UPDATEs as thresholds are crossed. Lock held; the caller writes the
-    /// mutated `stream` back into `state.streams`.
+    
     private func windowUpdatesLocked(_ streamId: UInt32, _ stream: inout StreamState, _ state: inout State) -> [Data] {
         var out: [Data] = []
         if let c = connWindowUpdateLocked(&state) { out.append(c) }
         if stream.receiveConsumed >= Self.localStreamWindow / 2, !stream.ended {
             let inc = UInt32(stream.receiveConsumed)
             stream.receiveConsumed = 0
-            out.append(frame(type: XHTTPConnection.h2FrameWindowUpdate, flags: 0, streamId: streamId, payload: uint32Data(inc)))
+            out.append(
+                frame(type: XHTTPConnection.h2FrameWindowUpdate, flags: 0, streamId: streamId, payload: uint32Data(inc))
+            )
         }
         return out
     }
@@ -1440,13 +1337,7 @@ nonisolated final class XHTTPH2Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     private func uint32Data(_ v: UInt32) -> Data { H2Framing.uint32Data(v) }
 }
 
-// MARK: - Pooled HTTP/1.1 Upload Connection (xmux)
-//
-// Pools the packet-up *upload* POST socket across sessions (the download GET stays fresh).
-// HTTP/1.1 can't multiplex, so a connection carries one session at a time and is reused only
-// when verifiably clean — every POST's response fully read. Anything it can't frame (chunked,
-// length-less, unexpected) marks it unreusable, so the worst case is a fresh dial, never a
-// mis-framed response.
+// MARK: - Pooled HTTP/1.1 Upload Connection
 
 nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendable {
     private let transport: any ByteTransport
@@ -1454,54 +1345,47 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     nonisolated private enum ParseState { case headers; case body(Int) }
 
     nonisolated private struct State {
-        var outstanding = 0       // POSTs written minus responses fully parsed
-        var dirty = false         // unparseable/unexpected response → never reuse
+        var outstanding = 0
+        var dirty = false
         var closed = false
         var retained: [any Sendable] = []
         var parseState: ParseState = .headers
         var parseBuffer = Data()
-        /// Lease for the current session; refreshed on each pool acquire.
         var lease: XHTTPXMUXMultiplexerLease?
+        var drainTask: Task<Void, Never>?
     }
 
     private let state = Mutex(State())
-
-    /// Lease for the current session; read-only snapshot. Installed via ``adoptLease(_:)`` on each
-    /// pool acquire and cleared inline under the lock on pool release.
+    
     var lease: XHTTPXMUXMultiplexerLease? { state.withLock { $0.lease } }
-
-    /// Records the pool lease backing this session. Called once per acquire by the coordinator.
     func adoptLease(_ lease: XHTTPXMUXMultiplexerLease) { state.withLock { $0.lease = lease } }
 
     init(transport: any ByteTransport) {
         self.transport = transport
         startDrain()
     }
-
-    /// Keeps a dial-time object (TLS/Reality client) alive for the connection's lifetime.
+    
     func retain(_ object: any Sendable) { state.withLock { $0.retained.append(object) } }
 
     var isPoolClosed: Bool { state.withLock { $0.closed || $0.dirty } }
 
     func poolClose() {
-        let alreadyClosed: Bool = state.withLock { state in
-            if state.closed { return true }
+        let (alreadyClosed, drainTask): (Bool, Task<Void, Never>?) = state.withLock { state in
+            if state.closed { return (true, nil) }
             state.closed = true
-            return false
+            let drainTask = state.drainTask
+            state.drainTask = nil
+            return (false, drainTask)
         }
         if alreadyClosed { return }
+        drainTask?.cancel()
         transport.cancel()
     }
-
-    /// Transport handed to the XHTTP session: each write is one POST; the session needn't read
-    /// (this connection drains internally); cancel returns the connection to the pool.
+    
     var sessionTransport: any ByteTransport {
         SessionTransport(multiplexer: self)
     }
-
-    /// One POST per send, no reads, pool-return on cancel — the H1-pool multiplexer's
-    /// per-session byte surface. Holds its owner strongly; the multiplexer never retains the
-    /// transport, so there's no cycle, and the pool keeps the multiplexer alive for reuse.
+    
     private final class SessionTransport: ByteTransport, Sendable {
         private let multiplexer: XHTTPH1Multiplexer
 
@@ -1523,7 +1407,6 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
 
     private func releaseToPool() {
         let lease: XHTTPXMUXMultiplexerLease? = state.withLock { state in
-            // Only a fully-drained, well-framed connection may be reused.
             if state.dirty || state.outstanding != 0 || !state.parseBuffer.isEmpty { state.dirty = true }
             let lease = state.lease
             state.lease = nil
@@ -1535,7 +1418,7 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
     // MARK: Internal drain + response parser
 
     private func startDrain() {
-        Task { [weak self] in
+        let task = Task { [weak self] in
             while true {
                 guard let self else { return }
                 let chunk: TransportChunk
@@ -1555,10 +1438,14 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                 if self.state.withLock({ $0.closed }) { return }
             }
         }
+        let stored: Bool = state.withLock { state in
+            guard !state.closed else { return false }
+            state.drainTask = task
+            return true
+        }
+        if !stored { task.cancel() }
     }
-
-    /// Counts completed responses (Content-Length framed). Anything it can't frame marks the
-    /// connection unreusable rather than risk mis-framing a reused socket.
+    
     private func consume(_ data: Data) {
         state.withLock { state in
             if state.dirty || state.closed { return }
@@ -1577,7 +1464,6 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
                         state.dirty = true; return
                     }
                     guard let length = Self.contentLength(in: header) else {
-                        // No Content-Length and not chunked → connection-delimited → can't reuse.
                         state.dirty = true; return
                     }
                     if length == 0 { completeResponseLocked(&state) } else { state.parseState = .body(length) }
@@ -1593,11 +1479,10 @@ nonisolated final class XHTTPH1Multiplexer: XHTTPXMUXMultiplexerPoolable, Sendab
             }
         }
     }
-
-    /// Lock held.
+    
     private func completeResponseLocked(_ state: inout State) {
         state.parseState = .headers
-        if state.outstanding <= 0 { state.dirty = true; return } // unexpected/extra response
+        if state.outstanding <= 0 { state.dirty = true; return }
         state.outstanding -= 1
     }
 

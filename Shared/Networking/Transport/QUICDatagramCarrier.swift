@@ -8,17 +8,8 @@
 import Foundation
 import Network
 import Darwin
-import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "QUICDatagramCarrier")
-
-nonisolated final class SendBacklogGauge: Sendable {
-    private let count = Atomic<Int>(0)
-
-    func increment() { count.wrappingAdd(1, ordering: .relaxed) }
-    func decrement() { count.wrappingSubtract(1, ordering: .relaxed) }
-    var current: Int { count.load(ordering: .relaxed) }
-}
 
 actor QUICDatagramCarrier {
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -28,13 +19,10 @@ actor QUICDatagramCarrier {
     private let bridge: NGTCP2ConcurrencyBridge
 
     private let obfuscator: QUICPacketObfuscator?
-    
-    private let sendBacklog = SendBacklogGauge()
-
-    nonisolated var sendBacklogCount: Int { sendBacklog.current }
 
     private var driverTask: Task<Void, Never>?
-    private var sendContinuation: AsyncStream<Data>.Continuation?
+    
+    private var udpConnection: NetworkConnection<UDP>?
 
     private var packetHandler: (@Sendable (Data) -> Void)?
     private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
@@ -77,13 +65,46 @@ actor QUICDatagramCarrier {
         FlowGauge.incrementUDP()
         flowCounted = true
 
-        let (sendStream, sendCont) = AsyncStream.makeStream(of: Data.self)
-        sendContinuation = sendCont
-
+        let connection = NetworkConnection(to: endpoint) { UDP() }
+        let bridge = bridge
         let carrier = WeakCarrier(value: self)
-        driverTask = Task { [bridge, obfuscator, sendBacklog] in
-            await Self.runDriver(endpoint: endpoint, sendStream: sendStream, bridge: bridge,
-                                 carrier: carrier, obfuscator: obfuscator, sendBacklog: sendBacklog)
+
+        connection.onStateUpdate { connection, state in
+            switch state {
+            case .ready:
+                let interfaceType = connection.currentPath?.availableInterfaces.first?.type
+                bridge.enqueue { carrier.value?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
+            case .failed(let error):
+                let code = AnywhereError.errnoCode(from: error)
+                bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
+            case .waiting(let error):
+                let code = AnywhereError.errnoCode(from: error)
+                bridge.enqueue { carrier.value?.assumeIsolated { $0.handleWaiting(code) } }
+            default:
+                break
+            }
+        }
+        connection.onViabilityUpdate { _, viable in
+            guard !viable else { return }
+            bridge.enqueue { carrier.value?.assumeIsolated { $0.handleViabilityLost() } }
+        }
+        connection.onBetterPathUpdate { _, better in
+            guard better else { return }
+            bridge.enqueue { carrier.value?.assumeIsolated { $0.handleBetterPath() } }
+        }
+        connection.onPathUpdate { _, path in
+            let interfaceType = path.availableInterfaces.first?.type
+            bridge.enqueue { carrier.value?.assumeIsolated { $0.cachedInterfaceType = interfaceType } }
+        }
+
+        udpConnection = connection
+        driverTask = Task { [bridge, obfuscator] in
+            await Self.runDriver(
+                connection: connection,
+                bridge: bridge,
+                carrier: carrier,
+                obfuscator: obfuscator
+            )
         }
     }
 
@@ -98,11 +119,28 @@ actor QUICDatagramCarrier {
     }
 
     // MARK: - Send
-
+    
     func send(_ datagram: Data) {
-        guard !datagram.isEmpty, let sendContinuation else { return }
-        sendBacklog.increment()
-        sendContinuation.yield(datagram)
+        guard !datagram.isEmpty, let udpConnection else { return }
+        Task { [obfuscator] in
+            await Self.transmit(datagram, over: udpConnection, obfuscator: obfuscator)
+        }
+    }
+
+    @concurrent
+    private static func transmit(
+        _ datagram: Data,
+        over connection: NetworkConnection<UDP>,
+        obfuscator: QUICPacketObfuscator?
+    ) async {
+        if let obfuscator {
+            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+            for wire in wireDatagrams {
+                try? await connection.send(wire)
+            }
+        } else {
+            try? await connection.send(datagram)
+        }
     }
 
     // MARK: - Close
@@ -111,8 +149,7 @@ actor QUICDatagramCarrier {
         guard !closed else { return }
         closed = true
         releaseFlowCount()
-        sendContinuation?.finish()
-        sendContinuation = nil
+        udpConnection = nil
         driverTask?.cancel()
         driverTask = nil
         packetHandler = nil
@@ -131,83 +168,27 @@ actor QUICDatagramCarrier {
     
     @concurrent
     private static func runDriver(
-        endpoint: NWEndpoint,
-        sendStream: AsyncStream<Data>,
+        connection: NetworkConnection<UDP>,
         bridge: NGTCP2ConcurrencyBridge,
         carrier: WeakCarrier,
-        obfuscator: QUICPacketObfuscator?,
-        sendBacklog: SendBacklogGauge
+        obfuscator: QUICPacketObfuscator?
     ) async {
         do {
-            try await withNetworkConnection(to: endpoint, using: { UDP() }) { connection in
-                connection.onStateUpdate { connection, state in
-                    switch state {
-                    case .ready:
-                        let interfaceType = connection.currentPath?.availableInterfaces.first?.type
-                        bridge.enqueue { carrier.value?.assumeIsolated { $0.handleReady(interfaceType: interfaceType) } }
-                    case .failed(let error):
-                        let code = AnywhereError.errnoCode(from: error)
-                        bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
-                    case .waiting(let error):
-                        let code = AnywhereError.errnoCode(from: error)
-                        bridge.enqueue { carrier.value?.assumeIsolated { $0.handleWaiting(code) } }
-                    default:
-                        break  // .setup, .preparing, .cancelled
-                    }
-                }
-                connection.onViabilityUpdate { _, viable in
-                    guard !viable else { return }
-                    bridge.enqueue { carrier.value?.assumeIsolated { $0.handleViabilityLost() } }
-                }
-                connection.onBetterPathUpdate { _, better in
-                    guard better else { return }
-                    bridge.enqueue { carrier.value?.assumeIsolated { $0.handleBetterPath() } }
-                }
-                connection.onPathUpdate { _, path in
-                    let interfaceType = path.availableInterfaces.first?.type
-                    bridge.enqueue { carrier.value?.assumeIsolated { $0.cachedInterfaceType = interfaceType } }
-                }
-
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await Self.runSendLoop(
-                        connection,
-                        stream: sendStream,
-                        obfuscator: obfuscator,
-                        sendBacklog: sendBacklog
-                    ) }
-                    group.addTask { try await Self.runReceiveLoop(
-                        connection,
-                        bridge: bridge,
-                        carrier: carrier,
-                        obfuscator: obfuscator) }
-                    _ = try await group.next()
-                    group.cancelAll()
-                }
-            }
+            try await Self.runReceiveLoop(
+                connection,
+                bridge: bridge,
+                carrier: carrier,
+                obfuscator: obfuscator
+            )
         } catch {
-            // Connection ended (cancelled or failed).
+            
         }
-        bridge.enqueue { carrier.value?.assumeIsolated { $0.releaseFlowCount() } }
+        bridge.enqueue { carrier.value?.assumeIsolated {
+            $0.udpConnection = nil
+            $0.releaseFlowCount()
+        } }
     }
-    
-    private static func runSendLoop(
-        _ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>,
-        obfuscator: QUICPacketObfuscator?,
-        sendBacklog: SendBacklogGauge
-    ) async throws {
-        for await datagram in stream {
-            if let obfuscator {
-                let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-                for wire in wireDatagrams {
-                    try? await connection.send(wire)
-                }
-            } else {
-                try? await connection.send(datagram)
-            }
-            sendBacklog.decrement()
-        }
-    }
-    
+
     private static func runReceiveLoop(
         _ connection: NetworkConnection<UDP>,
         bridge: NGTCP2ConcurrencyBridge,

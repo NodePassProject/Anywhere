@@ -255,9 +255,7 @@ actor QUICConnection {
 
     static let maxUDPPayload = 1452
     static let chainedMaxUDPPayload = 1200
-    
-    static let maxCarrierSendBacklog = 64
-    
+
     var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
     
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]

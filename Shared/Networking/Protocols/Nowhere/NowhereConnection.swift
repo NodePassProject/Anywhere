@@ -25,31 +25,20 @@ actor NowhereConnection {
     private let flowHeader: NowhereProtocol.FlowHeader
     private let initialData: Data?
     private weak var attempt: NowhereFlowOpenAttempt?
-
-    /// Readiness mirror, so the nonisolated `isConnected`/send-guard read it without hopping.
+    
     private nonisolated let _isReady = Atomic<Bool>(false)
-    /// Assigned once in `open()`, read from the send/cancel paths.
     private nonisolated let _streamID = Atomic<Int64>(-1)
-
-    /// Inbound stream bytes from the demux. The producer (`yield`/`finish`) is `Sendable` and driven
-    /// on the ngtcp2 queue via `feedStreamData`; a single consumer pulls via `open()` (flow result)
-    /// then `receiveRaw()` (data), never concurrently.
+    
     private let rawInbox = AsyncInbox<Data>()
-    /// Post-result bytes left over from `open()`'s handshake, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
     
     private var uncreditedBytes = 0
     private var creditedBytes = 0
     private static let creditFlushThreshold = 256 << 10
-
-    /// Chunks drained from `rawInbox` in one batch but not yet handed downstream. Consumed before
-    /// the inbox so stream order holds; bounds each `nextChunk` return to `maxChunkBytes`.
+    
     private var backlogChunks: [Data] = []
-    /// Cap on a single coalesced chunk, so a consumer catching up after lwIP backpressure
-    /// forwards a bounded buffer per call instead of everything that queued while it was parked.
     private static let maxChunkBytes = 512 << 10
-
-    /// Guards `teardown()` so the stream is shut down and released exactly once.
+    
     private var closed = false
 
     init(
@@ -74,7 +63,7 @@ actor NowhereConnection {
         set { _streamID.store(newValue, ordering: .relaxed) }
     }
 
-    // MARK: - Open (called by ProxyClient after the session is ready)
+    // MARK: - Open
 
     func open() async throws {
         do {
@@ -91,14 +80,11 @@ actor NowhereConnection {
             streamID = sid
 
             if flowHeader.role == .open {
-                // OPEN has no RESULT: ready once the request is on the wire (a write failure threw above;
-                // a later reset surfaces on the first `receiveRaw`).
                 pendingData = Data()
                 _isReady.store(true, ordering: .relaxed)
                 return
             }
-
-            // Non-open: read inbound bytes until the one-byte setup result parses.
+            
             var buffer = Data()
             while true {
                 guard let chunk = try await nextChunk() else {
@@ -125,16 +111,13 @@ actor NowhereConnection {
         }
     }
 
-    // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
-
-    /// New inbound bytes / FIN from the session's demux loop. `data` is a zero-copy view into
-    /// ngtcp2's buffer — detach with `Data(...)` before buffering it.
+    // MARK: - Demux feed
+    
     nonisolated func feedStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty { rawInbox.yield(Data(data)) }
         if fin { rawInbox.finish() }
     }
-
-    /// QUIC stream termination (RESET_STREAM or stream_close). Idempotent.
+    
     nonisolated func handleStreamTermination(error: Error?) {
         if let error { rawInbox.finish(throwing: error) } else { rawInbox.finish() }
     }
@@ -173,16 +156,11 @@ actor NowhereConnection {
             return nil
         }
         if !chunk.isEmpty {
-            // Credit flow control only now the app has taken the bytes (batched).
             credit(chunk.count)
         }
         return chunk
     }
-
-    /// Single-consumer pull over `rawInbox` (see `HysteriaConnection.nextChunk`). Drains everything
-    /// buffered per wake-up, so a consumer that fell behind the demux catches up in one hop —
-    /// but hands downstream at most `maxChunkBytes` per call, parking the rest in `backlogChunks`,
-    /// so one call never materializes an unbounded buffer.
+    
     private func nextChunk() async throws -> Data? {
         if !backlogChunks.isEmpty { return takeBacklog() }
         guard let batch = try await rawInbox.nextBatch() else { return nil }
@@ -241,7 +219,6 @@ actor NowhereConnection {
 }
 
 nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTerminationObservable {
-
     private let inner: NowhereTCPConnection
     private let udpState = Mutex(UDPFramingState())
     private struct TerminationState {
@@ -298,7 +275,6 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         do {
             frame = try NowhereProtocol.encodeUDPStreamPacket(data)
         } catch AnywhereError.proxy(.nowhere, .packetTooLarge) {
-            // UDP is lossy by contract. Drop only this packet; keep the flow alive.
             return
         }
         try await inner.sendRaw(frame)
@@ -309,8 +285,7 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
         case fail(Error)
         case needMore
     }
-
-    /// Pops the next length-only UoT packet; call inside `udpState.withLock`.
+    
     private func nextPacketStep(_ state: inout UDPFramingState) -> PacketStep {
         let available = state.buffer.count - state.bufferOffset
         guard available >= 2 else { return .needMore }
@@ -329,7 +304,6 @@ nonisolated final class NowhereTCPUDPConnection: ProxyConnection, NowhereTermina
     }
 
     func receiveRaw() async throws -> Data? {
-        // Pull typed UoT frames from `inner` on demand (backpressure via the app's read rate).
         while true {
             let step = udpState.withLock { nextPacketStep(&$0) }
             switch step {
@@ -380,22 +354,18 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     private let configuration: NowhereConfiguration
     private let connectHost: String
     private let tunnel: ProxyConnection?
-
-    /// Guards this connection's flow-open state machine.
+    
     private struct State {
         var phase: Phase = .idle
         var tlsClient: TLSClient?
         var inner: TLSProxyConnection?
-        /// One-shot open signal: finished when the flow reaches `.prepared`/`.ready`, finished
-        /// throwing on failure. The async-native bridge over the TLS-carrier setup state machine —
-        /// `activate`/`connectAndSend` await it, the callback-driven resolution sites finish it.
         var openSignal: AsyncThrowingStream<Never, Error>.Continuation?
         var receiveBuffer = Data()
-        /// Residual receive park (single continuation).
         var pendingReceive: AsyncThrowingStream<Data, Error>.Continuation?
         var terminalError: Error?
         var preparedCloseHandler: (@Sendable () -> Void)?
         var transportReadInFlight = false
+        var transportReadTask: Task<Void, Never>?
         var transportReadClosed = false
         var transportWriteClosed = false
         var flowResultKind: NowhereProtocol.FlowKind?
@@ -454,10 +424,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     private var hasTerminationHandler: Bool {
         termination.withLock { !$0.terminated && $0.handler != nil }
     }
-
-    /// Only the asymmetric UoT OPEN half has no application receive loop. Its
-    /// peer must send no DATA, so one bounded frame probe can monitor liveness
-    /// without prefetching valid downlink traffic into an unbounded buffer.
+    
     private func shouldProbeUOTUplink(_ state: State) -> Bool {
         state.flowResultKind == .udp && state.flowRole == .open && hasTerminationHandler
     }
@@ -726,7 +693,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             return true
         }
         guard shouldRead else { return }
-        Task {
+        let task = Task {
             do {
                 let data = try await connection.receiveRaw()
                 handleTransportRead(connection: connection, data: data, error: nil)
@@ -734,6 +701,12 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
                 handleTransportRead(connection: connection, data: nil, error: error)
             }
         }
+        let stored: Bool = state.withLock { state in
+            guard state.phase != .closed else { return false }
+            state.transportReadTask = task
+            return true
+        }
+        if !stored { task.cancel() }
     }
 
     private func handleTransportRead(
@@ -758,13 +731,11 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
                 return false
             }
             state.transportReadInFlight = false
+            state.transportReadTask = nil
             if terminal {
                 shouldNotifyTermination = true
                 notificationError = error
                 if state.phase == .requesting {
-                    // A prepared connection can receive F2+FIN before the request
-                    // write callback. Preserve both the buffered result and EOF;
-                    // the callback transitions to waitingResult and resolves F2.
                     state.transportReadClosed = true
                     state.terminalError = error
                 } else if error == nil, state.phase == .ready {
@@ -853,19 +824,13 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         case reject(NowhereProtocol.FlowRejectCode)
         case invalid
     }
-
-    /// The split UoT uplink is write-only after setup. EOF is a clean half-close;
-    /// any reverse application byte is a protocol violation.
+    
     private func bufferedUOTTermination(_ state: State) -> (terminated: Bool, error: Error?) {
         guard state.flowResultKind == .udp, state.flowRole == .open else { return (false, nil) }
         guard !state.receiveBuffer.isEmpty else { return (false, nil) }
         return (true, AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Unexpected reverse UoT payload")))
     }
-
-    /// A prepared connection can already have a transport read in flight when
-    /// activation writes its request. If READY wins that race, it is buffered
-    /// while state is `.requesting`; consume it immediately after switching to
-    /// `.waitingResult` instead of waiting for another network read.
+    
     private func processBufferedFlowResult(
         on connection: TLSProxyConnection,
         fallbackError: Error? = nil
@@ -923,9 +888,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             deliverPendingReceive()
         }
     }
-
-    /// Must be called while `state` is held. It consumes only the setup prefix,
-    /// preserving any coalesced first payload in `receiveBuffer`.
+    
     private func takeFlowResult(_ state: inout State) -> FlowResultStep {
         guard let flowResultKind = state.flowResultKind else { return .invalid }
         let step = Self.bufferedTLSFlowResultStep(
@@ -1001,11 +964,7 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
         }
         try await connection.sendRaw(data)
     }
-
-    /// Delivers the one-shot receive outcome to a parked `receiveRaw`: a chunk (yield + finish), a
-    /// clean EOF (finish → the caller's pull returns nil), or an error (finish throwing). The read
-    /// stays demand-driven — `armTransportRead` only reads while a `pendingReceive` is parked — so
-    /// the transport's own window is the backpressure; the setup/read machinery is unchanged.
+    
     private static func fulfill(
         _ continuation: AsyncThrowingStream<Data, Error>.Continuation?,
         data: Data?,
@@ -1023,8 +982,6 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 
     func receiveRaw() async throws -> Data? {
-        // Park a one-shot inbox in `pendingReceive`; the read machinery yields exactly one chunk (or
-        // EOF/error) into it. `for try await` pulls that single value, and is cancellation-aware.
         let (inbox, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
         var result: (Data?, Error?)?
         var staleReceive: AsyncThrowingStream<Data, Error>.Continuation?
@@ -1068,6 +1025,8 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
             state.openSignal = nil
             state.pendingReceive = nil
             state.preparedCloseHandler = nil
+            state.transportReadTask?.cancel()
+            state.transportReadTask = nil
             return result
         }
         resources.0?.cancel()
@@ -1079,7 +1038,6 @@ nonisolated final class NowhereTCPConnection: ProxyConnection, NowhereTerminatio
     }
 }
 
-/// Presents one logical proxy flow while retaining independent carrier halves.
 nonisolated final class NowhereDirectionalConnection: ProxyConnection {
     private let uplink: ProxyConnection
     private let downlink: ProxyConnection
@@ -1115,7 +1073,7 @@ nonisolated final class NowhereDirectionalConnection: ProxyConnection {
     var outerTLSVersion: TLSVersion? { uplink.outerTLSVersion ?? downlink.outerTLSVersion }
     var deliversDatagrams: Bool { uplink.deliversDatagrams || downlink.deliversDatagrams }
 
-    // MARK: - ProxyConnection overrides (directional routing; hardFail on any error)
+    // MARK: - ProxyConnection overrides
 
     func send(_ data: Data) async throws {
         do { try await uplink.send(data) }

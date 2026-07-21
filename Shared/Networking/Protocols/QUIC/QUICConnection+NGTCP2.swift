@@ -138,10 +138,6 @@ extension QUICConnection {
     func updatePacketTxTime(_ conn: OpaquePointer, ts: ngtcp2_tstamp) {
         ngtcp2_conn_update_pkt_tx_time(conn, ts)
     }
-    
-    func sendQuantum(_ conn: OpaquePointer) -> Int {
-        ngtcp2_conn_get_send_quantum2(conn)
-    }
 
     // MARK: - Migration
     

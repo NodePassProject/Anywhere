@@ -18,11 +18,8 @@ actor ShadowsocksUDPSession {
     // MARK: - Mode
 
     enum Mode {
-        /// Legacy SS: per-packet salt + AEAD(address || payload); no session state.
         case legacy(cipher: ShadowsocksCipher, masterKey: Data)
-        /// SS 2022 AES variant: AES-ECB 16-byte packet header + per-session AEAD body; multi-PSK via identity headers.
         case ss2022AES(cipher: ShadowsocksCipher, pskList: [Data])
-        /// SS 2022 ChaCha variant: XChaCha20-Poly1305 with 24-byte random nonce; single PSK only.
         case ss2022ChaCha(psk: Data)
     }
 
@@ -33,13 +30,8 @@ actor ShadowsocksUDPSession {
     private final class Registration {
         let token: Token
         let port: UInt16
-        /// Reply hosts matching this flow: destination host, owner hints, and hosts learned via port-only fallback.
         var responseHosts: Set<String>
-        /// True once a reply source is pinned; port-only fallback prefers unpinned flows.
         var hasLearnedSource: Bool
-        /// Producer side of the inbound-datagram stream for this flow; finished-throwing on
-        /// transport error / session teardown, finished (clean EOF) on unregister so the flow's
-        /// reader unwinds cleanly. The flow owns the consuming iteration.
         let inbox: AsyncThrowingStream<Data, Error>.Continuation
 
         init(token: Token, port: UInt16, responseHosts: Set<String>,
@@ -61,7 +53,7 @@ actor ShadowsocksUDPSession {
         case idle
         case connecting
         case ready
-        case failed(Error)  // terminal — notified all flows, refuses new sends
+        case failed(Error)
         case cancelled
     }
 
@@ -71,13 +63,10 @@ actor ShadowsocksUDPSession {
     private let serverHost: String
     private let serverPort: UInt16
 
-    // MARK: - Mutable state (actor-isolated)
-
-    /// The async-native datagram transport; `connect()` is awaited in `performConnect`.
+    // MARK: - Mutable state
+    
     private let asyncTransport: UDPTransport
-
-    /// Readiness mirror: `true` while idle/connecting/ready, `false` once failed/cancelled.
-    /// Lets the owning stack poll `isUsable` without hopping onto the actor.
+    
     private let _isUsable = Atomic<Bool>(true)
     private var _state: State = .idle
     private var state: State {
@@ -90,27 +79,23 @@ actor ShadowsocksUDPSession {
             }
         }
     }
-
-    /// Memoized transport dial: `register` (first flow) and `ensureReadyForSend` (first send)
-    /// coalesce onto this one task and share its outcome, so there is no waiter array.
+    
     private var readyTask: Task<Void, Error>?
+    
+    private var receiveTask: Task<Void, Never>?
 
     private var nextToken: Token = 0
     private var registrations: [Token: Registration] = [:]
     private var tokensByResponse: [ResponseKey: [Token]] = [:]
     private var tokensByPort: [UInt16: [Token]] = [:]
-
-    // SS 2022 session state — sessionwide, not per-flow.
+    
     private var sessionID: UInt64 = 0
     private var packetIDCounter: UInt64 = 0
-    /// Outbound AEAD key for the AES variant, derived once from sessionID + user PSK.
     private var outboundCipherKey: Data?
-
-    /// Last seen server sessionID + derived inbound key; re-derived only when the server rotates.
+    
     private var remoteSessionID: UInt64 = 0
     private var remoteCipherKey: Data?
-
-    /// First 16 BLAKE3 bytes of each `pskList[i]` for i >= 1, for multi-PSK identity headers.
+    
     private let pskHashes: [Data]
 
     // MARK: - Init
@@ -159,32 +144,32 @@ actor ShadowsocksUDPSession {
     }
 
     // MARK: - Public API
-
-    /// Nonisolated readiness poll for the owning stack (no actor hop). Mirrors `state`.
+    
     nonisolated var isUsable: Bool {
         _isUsable.load(ordering: .relaxed)
     }
-
-    /// Registers interest in UDP replies matching `(dstHost, dstPort)` or any hint.
-    /// Servers typically reply with the resolved IP, so pass known IPs as hints for
-    /// exact demultiplexing; otherwise delivery falls back to port-only. Returns the
-    /// flow's token and its inbound datagram channel (drained by the caller).
-    func register(dstHost: String,
-                  dstPort: UInt16,
-                  responseHostHints: [String] = []) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
+    
+    func register(
+        dstHost: String,
+        dstPort: UInt16,
+        responseHostHints: [String] = []
+    ) -> (token: Token, stream: AsyncThrowingStream<Data, Error>) {
         nextToken += 1
         let token = nextToken
 
         var hosts: Set<String> = [dstHost]
         for hint in responseHostHints { hosts.insert(hint) }
-
-        // Pre-supplied hints count as a pinned source; `dstHost` alone does not.
+        
         let pinned = hosts.count > 1
-
+        
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: Data.self)
-        let registration = Registration(token: token, port: dstPort,
-                               responseHosts: hosts,
-                               hasLearnedSource: pinned, inbox: continuation)
+        let registration = Registration(
+            token: token,
+            port: dstPort,
+            responseHosts: hosts,
+            hasLearnedSource: pinned,
+            inbox: continuation
+        )
         registrations[token] = registration
         for host in hosts {
             tokensByResponse[ResponseKey(host: host, port: dstPort), default: []].append(token)
@@ -208,44 +193,34 @@ actor ShadowsocksUDPSession {
             registration.hasLearnedSource = true
         }
     }
-
-    /// Idempotent; no-ops if the token is unknown.
+    
     func unregister(token: Token) {
         guard let registration = registrations.removeValue(forKey: token) else { return }
         for host in registration.responseHosts {
             removeToken(token, from: &tokensByResponse, key: ResponseKey(host: host, port: registration.port))
         }
         removeToken(token, from: &tokensByPort, key: registration.port)
-        // EOF the flow's reader so its receive loop unwinds without surfacing an error.
         registration.inbox.finish()
     }
-
-    /// Awaits transport readiness (parking if still dialing), then encrypts and sends.
-    /// PacketID allocation happens synchronously before the wire `await`, so IDs stay unique.
-    func send(token: Token,
-              dstHost: String,
-              dstPort: UInt16,
-              payload: Data) async throws {
+    
+    func send(
+        token: Token,
+        dstHost: String,
+        dstPort: UInt16,
+        payload: Data
+    ) async throws {
         guard registrations[token] != nil else {
             throw AnywhereError.proxy(.shadowsocks, .protocolViolation(detail: "invalid address header"))
         }
         try await ensureReadyForSend()
-        // Synchronous, actor-isolated: allocate packetID + encrypt before releasing the actor.
-        let encrypted = try encryptPacket(payload: payload,
-                                          dstHost: dstHost,
-                                          dstPort: dstPort)
-        // UDP datagrams are independent — the actor is free to service other sends across
-        // this await; each already holds its own unique packetID.
+        let encrypted = try encryptPacket(payload: payload, dstHost: dstHost, dstPort: dstPort)
         try await asyncTransport.send(encrypted)
     }
 
     deinit {
         asyncTransport.cancel()
     }
-
-    /// Nonisolated so a synchronous purge can cancel without `await`. Flips the readiness
-    /// mirror and tears the socket down immediately; the actor-isolated teardown (notifying
-    /// flows, clearing maps) is scheduled after.
+    
     nonisolated func cancel() {
         _isUsable.store(false, ordering: .relaxed)
         asyncTransport.cancel()
@@ -256,19 +231,17 @@ actor ShadowsocksUDPSession {
         if case .cancelled = state { return }
         state = .cancelled
         notifyAllFlows(error: AnywhereError.transport(.terminated))
-        // Cancel the in-flight dial so a coalesced `ensureReadyForSend` caller unblocks; the
-        // transport was already cancelled in `cancel()`, so its `connect()` throws.
         readyTask?.cancel()
         readyTask = nil
+        receiveTask?.cancel()
+        receiveTask = nil
         registrations.removeAll()
         tokensByResponse.removeAll()
         tokensByPort.removeAll()
     }
 
     // MARK: - Connect
-
-    /// Suspends the caller until the transport is ready; kicks off the dial on first use. All
-    /// callers share the memoized dial task and its outcome.
+    
     private func ensureReadyForSend() async throws {
         switch state {
         case .ready:
@@ -278,15 +251,11 @@ actor ShadowsocksUDPSession {
         case .cancelled:
             throw AnywhereError.transport(.terminated)
         case .idle, .connecting:
-            // No suspension between the switch and here, so a live dial task always exists for
-            // these states.
             guard let task = startConnectIfNeeded() else { return }
             try await task.value
         }
     }
-
-    /// Ensures the transport dial is in flight and returns its memoized task; idempotent. Returns
-    /// `nil` (starting nothing) once the session is ready or terminal.
+    
     @discardableResult
     private func startConnectIfNeeded() -> Task<Void, Error>? {
         switch state {
@@ -302,9 +271,7 @@ actor ShadowsocksUDPSession {
             return task
         }
     }
-
-    /// Dials the transport once for all coalesced callers, arming the receive loop on success or
-    /// failing the session. Its result flows to every awaiter of the memoized `readyTask`.
+    
     private func performConnect() async throws {
         if case .idle = state { state = .connecting }
         do {
@@ -332,12 +299,10 @@ actor ShadowsocksUDPSession {
         asyncTransport.cancel()
         notifyAllFlows(error: error)
     }
-
-    /// Drives the datagram downlink into the actor. The loop is unstored: it never retains
-    /// the session and dies when `asyncTransport.cancel()` errors its pending receive.
+    
     private func startReceiveLoop() {
         let asyncTransport = self.asyncTransport
-        Task { [weak self] in
+        receiveTask = Task { [weak self] in
             do {
                 while true {
                     let datagram = try await asyncTransport.receive()
@@ -348,8 +313,7 @@ actor ShadowsocksUDPSession {
             }
         }
     }
-
-    /// Fails every registered flow's inbox (transport error / teardown).
+    
     private func notifyAllFlows(error: Error) {
         for registration in registrations.values {
             registration.inbox.finish(throwing: error)
@@ -364,7 +328,6 @@ actor ShadowsocksUDPSession {
         do {
             decoded = try decryptPacket(data)
         } catch {
-            // Drop corrupt/stale datagrams; don't tear down the session on one bad packet.
             logger.debug("[SS-UDP] Decrypt error: \(error.localizedDescription)")
             return
         }
@@ -376,14 +339,11 @@ actor ShadowsocksUDPSession {
             registration.inbox.yield(decoded.payload)
             return
         }
-
-        // Port-only fallback: multiple flows may share a port; prefer one that
-        // hasn't pinned a reply source (a pinned flow would have matched exactly).
+        
         if let tokens = tokensByPort[decoded.port] {
             let target = firstRegistration(in: tokens, where: { !$0.hasLearnedSource })
                 ?? firstRegistration(in: tokens)
             if let target {
-                // Pin this reply address so future packets from the same peer route exactly.
                 if !target.responseHosts.contains(decoded.host) {
                     target.responseHosts.insert(decoded.host)
                     tokensByResponse[key, default: []].append(target.token)
@@ -425,20 +385,20 @@ actor ShadowsocksUDPSession {
             return try ShadowsocksUDPCrypto.encrypt(cipher: cipher, masterKey: masterKey, payload: packet)
 
         case .ss2022AES(let cipher, let pskList):
-            return try encryptSS2022AES(payload: payload, dstHost: dstHost, dstPort: dstPort,
-                                        cipher: cipher, pskList: pskList)
+            return try encryptSS2022AES(payload: payload, dstHost: dstHost, dstPort: dstPort, cipher: cipher, pskList: pskList)
 
         case .ss2022ChaCha(let psk):
-            return try encryptSS2022ChaCha(payload: payload, dstHost: dstHost,
-                                           dstPort: dstPort, psk: psk)
+            return try encryptSS2022ChaCha(payload: payload, dstHost: dstHost, dstPort: dstPort, psk: psk)
         }
     }
-
-    private func encryptSS2022AES(payload: Data,
-                                  dstHost: String,
-                                  dstPort: UInt16,
-                                  cipher: ShadowsocksCipher,
-                                  pskList: [Data]) throws -> Data {
+    
+    private func encryptSS2022AES(
+        payload: Data,
+        dstHost: String,
+        dstPort: UInt16,
+        cipher: ShadowsocksCipher,
+        pskList: [Data]
+    ) throws -> Data {
         guard let sessionKey = outboundCipherKey else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
 
         // 16-byte packet header: sessionID(8) + packetID(8), both big-endian.
@@ -493,10 +453,12 @@ actor ShadowsocksUDPSession {
         return packet
     }
 
-    private func encryptSS2022ChaCha(payload: Data,
-                                     dstHost: String,
-                                     dstPort: UInt16,
-                                     psk: Data) throws -> Data {
+    private func encryptSS2022ChaCha(
+        payload: Data,
+        dstHost: String,
+        dstPort: UInt16,
+        psk: Data
+    ) throws -> Data {
         // 24-byte random nonce prepended as cleartext.
         var nonceBytes = [UInt8](repeating: 0, count: 24)
         _ = SecRandomCopyBytes(kSecRandomDefault, 24, &nonceBytes)
@@ -578,16 +540,13 @@ actor ShadowsocksUDPSession {
             let ciphertext = Data(data.suffix(from: data.startIndex + 24))
             let body = try XChaCha20Poly1305.open(key: psk, nonce: nonce, ciphertext: ciphertext)
 
-            // Body: sessionID(8) + packetID(8) + standard server body. No sliding-window
-            // validation — the AEAD tag + timestamp already gate acceptance.
+            // Body: sessionID(8) + packetID(8) + standard server body.
             guard body.count >= 16 else { throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed)) }
             let innerBody = Data(body.suffix(from: body.startIndex + 16))
             return try parseServerUDPBody(innerBody)
         }
     }
-
-    /// Parses a decrypted SS 2022 server UDP body:
-    /// `type(1) + timestamp(8) + clientSessionID(8) + paddingLen(2) + padding + socksaddr + payload`
+    
     private func parseServerUDPBody(_ body: Data) throws -> (host: String, port: UInt16, payload: Data) {
         guard body.count >= 1 + 8 + 8 + 2 else {
             throw AnywhereError.proxy(.shadowsocks, .cipher(.decryptionFailed))

@@ -197,8 +197,8 @@ extension QUICConnection {
         writeToUDP()
     }
     
-    func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp, budget: inout Int) {
-        guard budget > 0, !streamSendQueues.isEmpty else { return }
+    func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp) {
+        guard !streamSendQueues.isEmpty else { return }
 
         var ids = streamSendQueues.filter { $0.value.hasUnsent }.keys.sorted()
         guard !ids.isEmpty else { return }
@@ -269,7 +269,6 @@ extension QUICConnection {
 
                 if nwrite > 0 {
                     sendTxBuf(length: Int(nwrite), to: carrierForOutPath(local: chosenLocal))
-                    budget -= Int(nwrite)
                 }
 
                 let accepted = pdatalen > 0 ? Int(pdatalen) : 0
@@ -281,19 +280,13 @@ extension QUICConnection {
                     ) {
                         continuation.resume()
                     }
-                    if budget <= 0 {
-                        streamPumpCursor = id
-                        return
-                    }
                     continue
                 }
 
                 streamPumpCursor = id
-                if budget <= 0 { return }
                 continue outer
             }
             streamPumpCursor = id
-            if budget <= 0 { return }
         }
     }
 

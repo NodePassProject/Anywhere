@@ -12,42 +12,22 @@ import Synchronization
 nonisolated final class TCPTransport: ByteTransport, Sendable {
 
     // MARK: Constants
-    
+
     private static let connectTimeout: UInt32 = 16
-    private static let dialDeadline: Duration = .seconds(20)
     private static let maxReceiveLength = 65535
 
     // MARK: State
-    
+
     private struct State {
         var connection: NetworkConnection<TCP>?
         var flowSlot: FlowSlot?
-        var driverTask: Task<Void, Never>?
         var ready = false
         var cancelled = false
-        var established = false
         var failure: AnywhereError?
-        var lastDialState: String?
         var eofLatched = false
     }
-    
-    private final class Guts: Sendable {
-        let state = Mutex(State())
-        let dialOutcome: AsyncThrowingStream<Never, Error>
-        let dialSignal: AsyncThrowingStream<Never, Error>.Continuation
-        let dialArmed: AsyncStream<Never>
-        let dialArmedSignal: AsyncStream<Never>.Continuation
-        let teardown: AsyncStream<Never>
-        let teardownSignal: AsyncStream<Never>.Continuation
 
-        init() {
-            (dialOutcome, dialSignal) = AsyncThrowingStream.makeStream(of: Never.self)
-            (dialArmed, dialArmedSignal) = AsyncStream.makeStream(of: Never.self)
-            (teardown, teardownSignal) = AsyncStream.makeStream(of: Never.self)
-        }
-    }
-
-    private let guts = Guts()
+    private let state = Mutex(State())
 
     private let host: String
     private let port: UInt16
@@ -64,7 +44,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
     }
 
     var isReady: Bool {
-        guts.state.withLock { $0.ready && !$0.cancelled && $0.failure == nil }
+        state.withLock { $0.ready && !$0.cancelled && $0.failure == nil }
     }
 
     // MARK: - Connect
@@ -77,194 +57,125 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(.tcp, context: "[TCP] \(endpointDescription)")
 
-        let guts = self.guts
-        let endpointDescription = self.endpointDescription
-        let started: Bool = guts.state.withLock { state in
+        let connection = NetworkConnection(to: endpoint) { Self.makeProtocolStack() }
+        installStateHandlers(connection)
+
+        let live: Bool = state.withLock { state in
             guard !state.cancelled else { return false }
             state.flowSlot = slot
-            state.driverTask = Task {
-                await Self.runDriver(guts: guts, endpoint: endpoint, initialData: initialData,
-                                     endpointDescription: endpointDescription, slot: slot)
-            }
+            state.connection = connection
             return true
         }
-        guard started else {
+        guard live else {
             slot.release()
             throw AnywhereError.transport(.terminated)
         }
 
-        try await withTaskCancellationHandler {
-            for try await _ in guts.dialOutcome {}
-        } onCancel: {
-            self.cancel()
-        }
-        guard isReady else { throw AnywhereError.transport(.terminated) }
-    }
-    
-    private static func runDriver(
-        guts: Guts,
-        endpoint: NWEndpoint,
-        initialData: Data?,
-        endpointDescription: String,
-        slot: FlowSlot
-    ) async {
-        let hasInitialData = initialData?.isEmpty == false
-        do {
-            try await withNetworkConnection(to: endpoint, using: { Self.makeProtocolStack() }) { connection in
-                let live = guts.state.withLock { state -> Bool in
-                    guard !state.cancelled else { return false }
-                    state.connection = connection
-                    return true
-                }
-                guard live else { throw CancellationError() }
-
-                connection.onStateUpdate { _, update in
-                    guts.state.withLock { $0.lastDialState = String(describing: update) }
-                    switch update {
-                    case .ready:
-                        guts.state.withLock { $0.established = true }
-                    case .failed(let error), .waiting(let error):
-                        guts.state.withLock { state in
-                            if !state.established, state.failure == nil {
-                                state.failure = error.anywhereError(op: .connect)
-                            }
-                        }
-                        guts.teardownSignal.finish()
-                    default:
-                        break  // .setup, .preparing, .cancelled
-                    }
-                }
-                .onViabilityUpdate { _, viable in
-                    if !viable { guts.teardownSignal.finish() }
-                }
-
-                if !hasInitialData {
-                    guts.state.withLock { $0.ready = true }
-                    guts.dialSignal.finish()
-                }
-                
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask {
-                        await Self.runDialWatchdog(guts: guts, endpointDescription: endpointDescription)
-                    }
-                    if let initialData, hasInitialData {
-                        guts.dialArmedSignal.finish()
-                        group.addTask {
-                            do {
-                                try await connection.send(initialData, endOfStream: false)
-                                guts.state.withLock { $0.ready = true }
-                                guts.dialSignal.finish()
-                            } catch {
-                                let failure = guts.state.withLock { $0.failure }
-                                guts.dialSignal.finish(throwing: failure ?? AnywhereError.networkFailure(error, op: .connect))
-                                guts.teardownSignal.finish()
-                            }
-                        }
-                    }
-                    for await _ in guts.teardown {}
-                    group.cancelAll()
-                }
+        if let initialData, !initialData.isEmpty {
+            do {
+                try await connection.send(initialData, endOfStream: false)
+            } catch {
+                cancel()
+                throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .connect)
             }
-        } catch {
-            guts.dialSignal.finish(throwing: AnywhereError.networkFailure(error, op: .connect))
         }
-        slot.release()
-        guts.state.withLock { $0.connection = nil }
+        state.withLock { $0.ready = true }
     }
-    
-    private static func runDialWatchdog(guts: Guts, endpointDescription: String) async {
-        for await _ in guts.dialArmed {}
-        do { try await Task.sleep(for: dialDeadline) } catch { return }
-        let expired: Bool = guts.state.withLock { state in
-            guard !state.established, !state.cancelled, state.failure == nil else { return false }
-            state.failure = .transport(.timedOut(.connect, endpoint: endpointDescription,
-                                                 detail: state.lastDialState ?? "no state updates"))
-            return true
+
+    private func installStateHandlers(_ connection: NetworkConnection<TCP>) {
+        connection.onStateUpdate { [weak self] _, update in
+            switch update {
+            case .failed(let error), .waiting(let error):
+                self?.latchFailure(error.anywhereError(op: .connect))
+            default:
+                break  // .setup, .preparing, .ready, .cancelled
+            }
         }
-        if expired { guts.teardownSignal.finish() }
+        .onViabilityUpdate { [weak self] _, viable in
+            guard !viable else { return }
+            self?.latchFailure(.transport(.terminated))
+        }
+    }
+
+    private func latchFailure(_ error: AnywhereError) {
+        state.withLock { state in
+            guard state.failure == nil, !state.cancelled else { return }
+            state.failure = error
+        }
     }
 
     // MARK: - ByteTransport
 
     func send(_ data: Data) async throws {
         let connection = try activeConnection()
-        guts.dialArmedSignal.finish()
         do {
             try await connection.send(data, endOfStream: false)
         } catch {
-            guts.teardownSignal.finish()
             throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .send)
         }
     }
 
     func finishSend() async throws {
         let connection = try activeConnection()
-        guts.dialArmedSignal.finish()
         do {
             try await connection.send(Data(), endOfStream: true)
         } catch {
-            guts.teardownSignal.finish()
             throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .send)
         }
     }
 
     func receive() async throws -> TransportChunk {
         while true {
-            if guts.state.withLock({ $0.eofLatched }) { return .end }
+            if state.withLock({ $0.eofLatched }) { return .end }
             let connection = try activeConnection()
 
             let message: (content: Data, metadata: TCP.Metadata)
             do {
                 message = try await connection.receive(atLeast: 1, atMost: Self.maxReceiveLength)
             } catch {
-                guts.teardownSignal.finish()
                 throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .receive)
             }
 
             let endOfStream = message.metadata.endOfStream
             if !message.content.isEmpty {
-                if endOfStream { guts.state.withLock { $0.eofLatched = true } }
+                if endOfStream { state.withLock { $0.eofLatched = true } }
                 return .bytes(message.content)
             }
             if endOfStream {
-                guts.state.withLock { $0.eofLatched = true }
+                state.withLock { $0.eofLatched = true }
                 return .end
             }
         }
     }
-
-    func cancel() {
-        tearDown(dialError: AnywhereError.transport(.terminated))
-    }
     
-    private func tearDown(dialError: Error) {
-        let task: Task<Void, Never>? = guts.state.withLock { state in
-            guard !state.cancelled else { return nil }
+    func cancel() {
+        let slot: FlowSlot? = state.withLock { state in
+            if state.failure == nil { state.failure = .transport(.terminated) }
             state.cancelled = true
-            let task = state.driverTask
-            state.driverTask = nil
-            return task
+            state.ready = false
+            let slot = state.flowSlot
+            state.connection = nil
+            state.flowSlot = nil
+            return slot
         }
-        guts.dialSignal.finish(throwing: dialError)
-        guts.teardownSignal.finish()
-        task?.cancel()
+        slot?.release()
     }
 
     // MARK: - Helpers
-    
+
     private func activeConnection() throws -> NetworkConnection<TCP> {
-        try guts.state.withLock { state in
+        try state.withLock { state in
             if let failure = state.failure { throw failure }
             if state.cancelled { throw AnywhereError.transport(.terminated) }
             guard let connection = state.connection else { throw AnywhereError.transport(.notConnected) }
             return connection
         }
     }
-    
+
     private func latchedFailure() -> AnywhereError? {
-        guts.state.withLock { $0.failure }
+        state.withLock { $0.failure }
     }
-    
+
     private static func makeProtocolStack() -> TCP {
         TCP()
             .noDelay(true)

@@ -74,11 +74,10 @@ extension XHTTPConnection {
     }
 
     // MARK: Upload Response Drain
-
-    /// Discards POST responses in a loop; otherwise they fill the TCP receive buffer and stall the server.
+    
     func startUploadResponseDrain() {
         guard let upload = state.withLock({ $0.uploadTransport }) else { return }
-        Task { [weak self] in
+        let task = Task { [weak self] in
             while true {
                 guard let self, self.state.withLock({ $0._isConnected }) else { return }
                 let chunk: TransportChunk
@@ -88,9 +87,14 @@ extension XHTTPConnection {
                     return
                 }
                 if case .end = chunk { return }
-                // .bytes → discard and keep draining.
             }
         }
+        let stored: Bool = state.withLock { state in
+            guard state.uploadTransport != nil else { return false }
+            state.uploadDrainTask = task
+            return true
+        }
+        if !stored { task.cancel() }
     }
 
     // MARK: stream-up Setup
@@ -131,7 +135,7 @@ extension XHTTPConnection {
         }
     }
 
-    // MARK: Detached leg Setup (up/download detach)
+    // MARK: Detached leg Setup
 
     func performDownloadOnlyHTTP11Setup() async throws {
         let request = buildDownloadGETRequest()
@@ -145,9 +149,7 @@ extension XHTTPConnection {
         }
         try await receiveResponseHeaders()
     }
-
-    /// Its own transport *is* the upload connection, so `uploadTransport` aliases it with a no-op
-    /// cancel — the download transport's own cancel already tears it down, avoiding a double cancel.
+    
     func performUploadOnlyHTTP11Setup() async throws {
         let upload = NonCancelingByteTransport(download)
         state.withLock { $0.uploadTransport = upload }
@@ -257,9 +259,7 @@ extension XHTTPConnection {
         }
         try await upload.send(ChunkedTransferEncoder.encode(data))
     }
-
-    /// Sends the packet-up payload as one POST, re-splitting an oversized payload into
-    /// back-to-back POSTs (each with its own seq). Called on the `packetUpChain` serializer.
+    
     func sendPacketUpHTTP11(data: Data) async throws {
         guard let upload = state.withLock({ $0.uploadTransport }) else {
             throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Upload connection not established"))
