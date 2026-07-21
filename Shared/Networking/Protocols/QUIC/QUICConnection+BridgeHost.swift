@@ -42,11 +42,11 @@ extension QUICConnection {
         }
         handlers.withLock { $0.streamData }?(streamId, data, fin)
     }
-    
+
     func beginStreamDeliveryBatch() {
         receiveBatchDepth += 1
     }
-    
+
     func endStreamDeliveryBatch() {
         receiveBatchDepth -= 1
         if receiveBatchDepth <= 0 {
@@ -67,7 +67,7 @@ extension QUICConnection {
             handler(streamId, pending.data, pending.fin)
         }
     }
-    
+
     private func flushStreamDelivery(streamId: Int64) {
         guard let pending = pendingStreamDeliveries.removeValue(forKey: streamId) else { return }
         pendingStreamDeliveryOrder.removeAll { $0 == streamId }

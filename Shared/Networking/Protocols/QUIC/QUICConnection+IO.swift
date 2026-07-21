@@ -102,8 +102,6 @@ extension QUICConnection {
 
         let prevBusy = bridge.enterConnHeld()
         defer { bridge.exitConnHeld(prevBusy) }
-        beginTxBatch()
-        defer { endTxBatch() }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
         

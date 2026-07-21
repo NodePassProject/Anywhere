@@ -260,10 +260,6 @@ actor QUICConnection: NGTCP2BridgeHost {
     
     var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
     
-    var txBatch: [Data] = []
-    var txBatchCarrier: QUICDatagramCarrier?
-    var txBatchDepth = 0
-    
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
     // MARK: Init

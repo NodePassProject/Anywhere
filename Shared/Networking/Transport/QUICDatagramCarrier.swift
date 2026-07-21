@@ -63,7 +63,7 @@ actor QUICDatagramCarrier {
     private let inbound = QUICInboundMailbox()
     
     private var driverTask: Task<Void, Never>?
-    private var sendContinuation: AsyncStream<[Data]>.Continuation?
+    private var sendContinuation: AsyncStream<Data>.Continuation?
 
     private var packetHandler: (@Sendable (Data) -> Void)?
     private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
@@ -108,7 +108,7 @@ actor QUICDatagramCarrier {
         FlowGauge.incrementUDP()
         flowCounted = true
 
-        let (sendStream, sendCont) = AsyncStream.makeStream(of: [Data].self)
+        let (sendStream, sendCont) = AsyncStream.makeStream(of: Data.self)
         sendContinuation = sendCont
         
         let carrier = WeakCarrier(value: self)
@@ -136,12 +136,7 @@ actor QUICDatagramCarrier {
     
     func send(_ datagram: Data) {
         guard !datagram.isEmpty, let sendContinuation else { return }
-        sendContinuation.yield([datagram])
-    }
-    
-    func send(batch: [Data]) {
-        guard !batch.isEmpty, let sendContinuation else { return }
-        sendContinuation.yield(batch)
+        sendContinuation.yield(datagram)
     }
 
     // MARK: - Close
@@ -173,7 +168,7 @@ actor QUICDatagramCarrier {
     @concurrent
     private static func runDriver(
         endpoint: NWEndpoint,
-        sendStream: AsyncStream<[Data]>,
+        sendStream: AsyncStream<Data>,
         bridge: NGTCP2ConcurrencyBridge,
         carrier: WeakCarrier,
         obfuscator: QUICPacketObfuscator?,
@@ -224,19 +219,17 @@ actor QUICDatagramCarrier {
     }
     
     private static func runSendLoop(
-        _ connection: NetworkConnection<UDP>, stream: AsyncStream<[Data]>,
+        _ connection: NetworkConnection<UDP>, stream: AsyncStream<Data>,
         obfuscator: QUICPacketObfuscator?
     ) async throws {
-        for await batch in stream {
-            for datagram in batch {
-                guard let obfuscator else {
-                    try? await connection.send(datagram)
-                    continue
-                }
-                let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
-                for wire in wireDatagrams {
-                    try? await connection.send(wire)
-                }
+        for await datagram in stream {
+            guard let obfuscator else {
+                try? await connection.send(datagram)
+                continue
+            }
+            let wireDatagrams = datagram.withUnsafeBytes { obfuscator.seal($0) }
+            for wire in wireDatagrams {
+                try? await connection.send(wire)
             }
         }
     }
