@@ -56,17 +56,24 @@ nonisolated final class NowhereSession: Sendable {
 
     private let quic: QUICConnection
     private let configuration: NowhereConfiguration
-
-    /// Session + demux state, guarded by `lock`. Never held across a call into a consumer
-    /// connection, a QUIC write, or a continuation resume; effects are computed under the
-    /// lock and performed after it is released.
+    
+    private struct StreamOpenWaiter {
+        let id: UInt64
+        let registerUnderLock: @Sendable (inout Session, Int64) -> Void
+        let continuation: CheckedContinuation<Int64, Error>
+    }
+    
     private struct Session {
         var state: State = .idle
         var closed = false
         var authFrame: Data?
         var firstStreamID: Int64?
         var bootstrapSubmitted = false
-        var postAuthCreditObserved = false
+
+        var streamOpenWaiters: [StreamOpenWaiter] = []
+        var streamOpenWaiterSeq: UInt64 = 0
+        
+        var cancelledStreamOpenWaiters: Set<UInt64> = []
 
         var tcpStreams: [Int64: NowhereConnection] = [:]
         var tcpDeliveredBytes: [Int64: Int] = [:]
@@ -154,8 +161,8 @@ nonisolated final class NowhereSession: Sendable {
             }
             handlers.bidiCredit = { [weak self] _ in
                 guard let self else { return }
-                self.lock.withLock { $0.postAuthCreditObserved = true }
                 self.finishAuthenticationIfReady()
+                self.drainStreamOpenWaiters()
             }
             handlers.datagram = { [weak self] data in
                 self?.handleDatagram(data)
@@ -190,17 +197,16 @@ nonisolated final class NowhereSession: Sendable {
             }
         }
     }
-
+    
     private func finishAuthenticationIfReady() {
         let proceed: Bool = lock.withLock { session in
             guard session.state == .authenticating,
                   session.bootstrapSubmitted,
-                  session.postAuthCreditObserved else { return false }
+                  quic.availableBidiStreams > 0 else { return false }
             session.state = .ready
             return true
         }
         guard proceed else { return }
-        quic.handlers.withLock { $0.bidiCredit = nil }
         authSignal.finish()
         updateIdleCloseTimer()
     }
@@ -406,11 +412,7 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     // MARK: - Stream open
-
-    /// Opens a business stream, running AUTH bootstrap on the first flow. `registerUnderLock`
-    /// records the stream in the session state (run in the same ngtcp2-queue turn as the open,
-    /// so no demuxed byte can beat the registration); `afterRegister` runs the off-lock
-    /// bookkeeping (pool counters, idle timer) before the request write.
+    
     private func openStream(
         request: Data,
         fin: Bool,
@@ -446,7 +448,7 @@ nonisolated final class NowhereSession: Sendable {
                 earlyDataAttempt?.markEarlyDataWriteStarted()
                 try await quic.writeStream(sid, data: payload, fin: fin)
                 lock.withLock { $0.bootstrapSubmitted = true }
-                finishAuthenticationIfReady()
+                await quic.run { self.finishAuthenticationIfReady() }
                 return sid
             } catch {
                 failSession(error)
@@ -462,29 +464,97 @@ nonisolated final class NowhereSession: Sendable {
         // Honor cancellation before spending a stream ID (the write below also surfaces it).
         try Task.checkCancellation()
 
-        enum Opened { case failed; case ok(Int64) }
-        let opened: Opened = await quic.run { () -> Opened in
-            guard let sid = self.quic.openBidiStream() else { return .failed }
-            self.lock.withLock { session in registerUnderLock(&session, sid) }
-            return .ok(sid)
+        let sid = try await openBidiStreamWhenCreditAvailable(registerUnderLock: registerUnderLock)
+        afterRegister(sid)
+        do {
+            earlyDataAttempt?.markEarlyDataWriteStarted()
+            try await quic.writeStream(sid, data: request, fin: fin)
+            return sid
+        } catch {
+            quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
+            releaseTCPStream(sid, credited: 0)
+            throw error
         }
-        switch opened {
-        case .failed:
-            let error = AnywhereError.proxy(.nowhere, .connectionClosed(detail: "Failed to open QUIC stream"))
-            failSession(error)
-            throw AnywhereError.proxy(.nowhere, .streamClosed)
-        case .ok(let sid):
-            afterRegister(sid)
-            do {
-                earlyDataAttempt?.markEarlyDataWriteStarted()
-                try await quic.writeStream(sid, data: request, fin: fin)
-                return sid
-            } catch {
-                quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
-                releaseTCPStream(sid, credited: 0)
-                throw error
+    }
+    
+    private func openBidiStreamWhenCreditAvailable(
+        registerUnderLock: @escaping @Sendable (inout Session, Int64) -> Void
+    ) async throws -> Int64 {
+        let waiterID: UInt64 = lock.withLock { session in
+            defer { session.streamOpenWaiterSeq &+= 1 }
+            return session.streamOpenWaiterSeq
+        }
+        defer { lock.withLock { _ = $0.cancelledStreamOpenWaiters.remove(waiterID) } }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                quic.enqueue {
+                    self.openOrParkOnQueue(
+                        waiterID: waiterID,
+                        registerUnderLock: registerUnderLock,
+                        continuation: continuation
+                    )
+                }
             }
+        } onCancel: {
+            self.cancelStreamOpenWaiter(waiterID)
         }
+    }
+    
+    private func openOrParkOnQueue(
+        waiterID: UInt64,
+        registerUnderLock: @escaping @Sendable (inout Session, Int64) -> Void,
+        continuation: CheckedContinuation<Int64, Error>
+    ) {
+        enum Outcome { case opened(Int64); case failed(Error); case parked }
+        let outcome: Outcome = lock.withLock { session in
+            if session.cancelledStreamOpenWaiters.remove(waiterID) != nil {
+                return .failed(CancellationError())
+            }
+            guard !session.closed, session.state == .ready else {
+                return .failed(AnywhereError.proxy(.nowhere, .streamClosed))
+            }
+            if session.streamOpenWaiters.isEmpty, let sid = quic.openBidiStream() {
+                registerUnderLock(&session, sid)
+                return .opened(sid)
+            }
+            session.streamOpenWaiters.append(StreamOpenWaiter(
+                id: waiterID,
+                registerUnderLock: registerUnderLock,
+                continuation: continuation
+            ))
+            return .parked
+        }
+        switch outcome {
+        case .opened(let sid): continuation.resume(returning: sid)
+        case .failed(let error): continuation.resume(throwing: error)
+        case .parked: break
+        }
+    }
+    
+    private func drainStreamOpenWaiters() {
+        let drained: [(CheckedContinuation<Int64, Error>, Int64)] = lock.withLock { session in
+            guard !session.closed, session.state == .ready else { return [] }
+            var resumed: [(CheckedContinuation<Int64, Error>, Int64)] = []
+            while !session.streamOpenWaiters.isEmpty {
+                guard let sid = quic.openBidiStream() else { break }
+                let waiter = session.streamOpenWaiters.removeFirst()
+                waiter.registerUnderLock(&session, sid)
+                resumed.append((waiter.continuation, sid))
+            }
+            return resumed
+        }
+        for (continuation, sid) in drained { continuation.resume(returning: sid) }
+    }
+
+    private func cancelStreamOpenWaiter(_ waiterID: UInt64) {
+        let continuation: CheckedContinuation<Int64, Error>? = lock.withLock { session in
+            if let index = session.streamOpenWaiters.firstIndex(where: { $0.id == waiterID }) {
+                return session.streamOpenWaiters.remove(at: index).continuation
+            }
+            session.cancelledStreamOpenWaiters.insert(waiterID)
+            return nil
+        }
+        continuation?.resume(throwing: CancellationError())
     }
 
     func openTCPStream(
@@ -655,6 +725,7 @@ nonisolated final class NowhereSession: Sendable {
         struct Teardown {
             var tcp: [NowhereConnection]
             var udp: [NowhereUDPConnection]
+            var openWaiters: [StreamOpenWaiter]
             var idleSweepTask: Task<Void, Never>?
             var reassemblyExpiryTask: Task<Void, Never>?
         }
@@ -665,6 +736,7 @@ nonisolated final class NowhereSession: Sendable {
             let snapshot = Teardown(
                 tcp: Array(session.tcpStreams.values),
                 udp: session.udpRoutes.values.map(\.connection),
+                openWaiters: session.streamOpenWaiters,
                 idleSweepTask: session.idleSweepTask,
                 reassemblyExpiryTask: session.reassemblyExpiryTask
             )
@@ -676,6 +748,7 @@ nonisolated final class NowhereSession: Sendable {
             session.udpRoutes.removeAll()
             session.reassembly.removeAll()
             session.udpControlStreams.removeAll()
+            session.streamOpenWaiters.removeAll()
             return snapshot
         }
         guard let teardown else { return }
@@ -694,6 +767,9 @@ nonisolated final class NowhereSession: Sendable {
         }
         transportSignal.finish(throwing: readyError)
         authSignal.finish(throwing: readyError)
+        for waiter in teardown.openWaiters {
+            waiter.continuation.resume(throwing: readyError)
+        }
 
         if handleClean {
             for connection in teardown.tcp { connection.handleSessionClose() }
