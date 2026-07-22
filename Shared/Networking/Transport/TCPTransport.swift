@@ -56,9 +56,8 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(.tcp, context: "[TCP] \(endpointDescription)")
-
+        
         let connection = NetworkConnection(to: endpoint) { Self.makeProtocolStack() }
-        installStateHandlers(connection)
 
         let live: Bool = state.withLock { state in
             guard !state.cancelled else { return false }
@@ -80,28 +79,6 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
             }
         }
         state.withLock { $0.ready = true }
-    }
-
-    private func installStateHandlers(_ connection: NetworkConnection<TCP>) {
-        connection.onStateUpdate { [weak self] _, update in
-            switch update {
-            case .failed(let error), .waiting(let error):
-                self?.latchFailure(error.anywhereError(op: .connect))
-            default:
-                break  // .setup, .preparing, .ready, .cancelled
-            }
-        }
-        .onViabilityUpdate { [weak self] _, viable in
-            guard !viable else { return }
-            self?.latchFailure(.transport(.terminated))
-        }
-    }
-
-    private func latchFailure(_ error: AnywhereError) {
-        state.withLock { state in
-            guard state.failure == nil, !state.cancelled else { return }
-            state.failure = error
-        }
     }
 
     // MARK: - ByteTransport

@@ -50,9 +50,8 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(.udp, context: "[UDP] \(endpointDescription)")
-
+        
         let connection = NetworkConnection(to: endpoint) { UDP() }
-        installStateHandlers(connection)
 
         let live: Bool = state.withLock { state in
             guard !state.cancelled else { return false }
@@ -64,28 +63,6 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         guard live else {
             slot.release()
             throw AnywhereError.transport(.terminated)
-        }
-    }
-
-    private func installStateHandlers(_ connection: NetworkConnection<UDP>) {
-        connection.onStateUpdate { [weak self] _, update in
-            switch update {
-            case .failed(let error), .waiting(let error):
-                self?.latchFailure(error.anywhereError(op: .connect))
-            default:
-                break
-            }
-        }
-        .onViabilityUpdate { [weak self] _, viable in
-            guard !viable else { return }
-            self?.latchFailure(.transport(.terminated))
-        }
-    }
-
-    private func latchFailure(_ error: AnywhereError) {
-        state.withLock { state in
-            guard state.failure == nil, !state.cancelled else { return }
-            state.failure = error
         }
     }
 
