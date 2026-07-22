@@ -749,7 +749,7 @@ actor TCPConnection: MITMSessionHost {
         idleTimeoutValue = initialIdleTimeout
         markActivity()
         idleActive = true
-        pokeIdle()
+        idlePoke.yield(())
     }
 
     private nonisolated func markActivity() {
@@ -770,11 +770,6 @@ actor TCPConnection: MITMSessionHost {
             close()
             return
         }
-        pokeIdle()
-    }
-
-    private func pokeIdle() {
-        idlePoke.yield(())
     }
 
     private enum IdleAction { case stop, waitActivation, sleep(TimeInterval), fire }
@@ -806,21 +801,10 @@ actor TCPConnection: MITMSessionHost {
             case .waitActivation:
                 if (try? await idlePoke.next()) == nil { return }
             case .sleep(let seconds):
-                await sleepOrPoke(seconds: seconds)
+                try? await Task.sleep(for: .seconds(seconds))
             case .fire:
                 if await idleFireAndReport() { return }
             }
-        }
-    }
-    
-    private nonisolated func sleepOrPoke(seconds: TimeInterval) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                do { try await Task.sleep(for: .seconds(seconds)) } catch { }
-            }
-            group.addTask { _ = try? await self.idlePoke.next() }
-            _ = await group.next()
-            group.cancelAll()
         }
     }
 

@@ -160,10 +160,6 @@ actor TunnelStack {
     /// True while a deferred restart is scheduled; dedupes trusted-network revalidation requests.
     var deferredRestartScheduled = false
 
-    /// Wakes the UDP-cleanup loop on device wake so a reap that fell due while the clock was
-    /// frozen fires promptly instead of drifting.
-    nonisolated let udpCleanupPoke = AsyncInbox<Void>(capacity: 1)
-
     /// lwIP's periodic timeout tick (retransmit, persist, TIME_WAIT), vended by ``lwipBridge`` so
     /// the `DispatchSourceTimer` stays in the bridge layer. Self-suspends when lwIP's timeout list
     /// drains and re-arms on fresh input; ``BridgeTimer`` keeps the suspend count balanced. Owned

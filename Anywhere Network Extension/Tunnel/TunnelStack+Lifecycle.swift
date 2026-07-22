@@ -114,7 +114,6 @@ extension TunnelStack {
     }
     
     func handleWake() {
-        udpCleanupPoke.yield(())
         guard running, let configuration else { return }
         logger.info("[VPN] Device wake")
         invalidateOutboundState(configuration: configuration)

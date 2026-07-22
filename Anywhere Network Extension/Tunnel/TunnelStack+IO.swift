@@ -146,24 +146,13 @@ extension TunnelStack {
         while !Task.isCancelled {
             let remaining = interval - (MonotonicClock.now - lastRun)
             if remaining > 0 {
-                await sleepOrWakePoke(seconds: remaining)
+                try? await Task.sleep(for: .seconds(remaining))
                 continue
             }
             if running {
                 await udpPlane.cleanup()
             }
             lastRun = MonotonicClock.now
-        }
-    }
-    
-    private nonisolated func sleepOrWakePoke(seconds: TimeInterval) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try? await Task.sleep(for: .seconds(seconds))
-            }
-            group.addTask { _ = try? await self.udpCleanupPoke.next() }
-            _ = await group.next()
-            group.cancelAll()
         }
     }
 }

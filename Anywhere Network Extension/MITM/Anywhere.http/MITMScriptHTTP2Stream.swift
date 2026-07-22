@@ -46,7 +46,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     // MARK: Timer pokes
     
     private let finishPoke = AsyncInbox<Void>(capacity: 1)
-    private let idleActivity = AsyncInbox<Void>(capacity: 1)
+    private let idleFinishPoke = AsyncInbox<Void>(capacity: 1)
 
     // MARK: Init
 
@@ -79,10 +79,10 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
                 do { try await Task.sleep(for: .seconds(self.resourceTimeout)); return true }
-                catch { return false }   // cancelled with the tree
+                catch { return false }
             }
             group.addTask {
-                _ = try? await self.finishPoke.next(); return false   // stream completed
+                _ = try? await self.finishPoke.next(); return false
             }
             let first = await group.next() ?? false
             group.cancelAll()
@@ -97,36 +97,28 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         guard interval > 0 else { return }
         while true {
             let generation = lock.withLock { $0.idleGeneration }
-            enum Wake { case expired, activity, done }
-            let wake = await withTaskGroup(of: Wake.self) { group in
+            let finished = await withTaskGroup(of: Bool.self) { group in
                 group.addTask {
-                    do { try await Task.sleep(for: .seconds(interval)); return .expired }
-                    catch { return .done }
+                    do { try await Task.sleep(for: .seconds(interval)); return false }
+                    catch { return true }
                 }
                 group.addTask {
-                    ((try? await self.idleActivity.next()) ?? nil) != nil ? .activity : .done
+                    _ = try? await self.idleFinishPoke.next(); return true
                 }
-                let first = await group.next() ?? .done
+                let first = await group.next() ?? true
                 group.cancelAll()
                 return first
             }
-            switch wake {
-            case .activity:
-                continue
-            case .done:
-                return
-            case .expired:
-                let expired = lock.withLock { !$0.finished && $0.idleGeneration == generation }
-                guard expired else { continue }
-                fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s")))
-                return
-            }
+            if finished { return }
+            let expired = lock.withLock { !$0.finished && $0.idleGeneration == generation }
+            guard expired else { continue }
+            fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s")))
+            return
         }
     }
     
     private func rearmIdleTimer() {
         lock.withLock { $0.idleGeneration += 1 }
-        idleActivity.yield(())
     }
 
     // MARK: - Request
@@ -328,7 +320,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         guard let captured else { return }
         
         finishPoke.finish()
-        idleActivity.finish()
+        idleFinishPoke.finish()
         MITMScriptHTTPClient.releaseInFlight(captured.reservedBytes)
         if removeFromConnection {
             connection?.removeStream(self, sendRST: sendRST && !captured.endStreamReceived)
