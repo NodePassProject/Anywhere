@@ -19,38 +19,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     private let statsRecorder = StatsRecorder()
 
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
-    
-    private let rootTask = Mutex<Task<Void, Never>?>(nil)
-    
-    private struct PathTransition {
-        var lastStatus: Network.NWPath.Status?
-        var outboundSuspended = false
 
-        enum Edge { case restored, ready, waiting, unavailable, none }
-        
-        mutating func advance(to status: Network.NWPath.Status) -> Edge {
-            let previousStatus = lastStatus
-            lastStatus = status
-            switch status {
-            case .satisfied:
-                if outboundSuspended {
-                    outboundSuspended = false
-                    return .restored
-                } else if previousStatus == nil {
-                    return .ready
-                }
-                return .none
-            case .requiresConnection:
-                return previousStatus != .requiresConnection ? .waiting : .none
-            case .unsatisfied:
-                guard !outboundSuspended else { return .none }
-                outboundSuspended = true
-                return .unavailable
-            @unknown default:
-                return .none
-            }
-        }
-    }
+    private let rootTask = Mutex<Task<Void, Never>?>(nil)
 
     // MARK: - Tunnel Lifecycle
     
@@ -319,16 +289,16 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
                 }
             }
             group.addTask {
-                var transition = PathTransition()
                 for await path in self.pathMonitorBridge.paths() {
-                    await self.handlePathUpdate(path, transition: &transition)
+                    guard path.status == .satisfied else { continue }
+                    await self.resolveAndUpdateNetworkContext(path)
                 }
             }
         }
     }
 
     // MARK: - Path Monitoring
-    
+
     private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
@@ -341,43 +311,6 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
 #endif
         await tunnelStack.updateNetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: nil)
-    }
-    
-    private func handlePathUpdate(_ path: Network.NWPath, transition: inout PathTransition) async {
-        let edge = transition.advance(to: path.status)
-
-        switch path.status {
-        case .satisfied:
-            await resolveAndUpdateNetworkContext(path)
-
-            switch edge {
-            case .restored:
-                logger.info("[VPN] Network path restored: \(Self.pathSummary(path))")
-                await tunnelStack.resumeOutbound()
-            case .ready:
-                logger.info("[VPN] Network path ready: \(Self.pathSummary(path))")
-            default:
-                break
-            }
-
-            if reasserting {
-                reasserting = false
-            }
-
-        case .requiresConnection:
-            guard edge == .waiting else { return }
-            logger.warning("[VPN] Network path waiting for attachment\(Self.unsatisfiedSuffix(path))")
-            reasserting = true
-
-        case .unsatisfied:
-            guard edge == .unavailable else { return }
-            logger.warning("[VPN] Network path unavailable\(Self.unsatisfiedSuffix(path))")
-            reasserting = true
-            await tunnelStack.suspendOutbound()
-
-        @unknown default:
-            logger.warning("[VPN] Network path changed unexpectedly")
-        }
     }
 
     private func logTunnelStop(reason: NEProviderStopReason) {
@@ -453,46 +386,4 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             logger.error(message)
         }
     }
-
-    private static func pathSummary(_ path: Network.NWPath) -> String {
-        let interfaceTypes: [String] = [
-            (NWInterface.InterfaceType.wifi, "Wi-Fi"),
-            (.wiredEthernet, "Ethernet"),
-            (.cellular, "cellular"),
-            (.loopback, "loopback"),
-            (.other, "other")
-        ]
-        .compactMap { path.usesInterfaceType($0.0) ? $0.1 : nil }
-
-        var parts = [interfaceTypes.isEmpty ? "no interface" : interfaceTypes.joined(separator: "+")]
-        switch (path.supportsIPv4, path.supportsIPv6) {
-        case (true, true): parts.append("IPv4/IPv6")
-        case (true, false): parts.append("IPv4")
-        case (false, true): parts.append("IPv6")
-        case (false, false): break
-        }
-        if path.isExpensive { parts.append("expensive") }
-        if path.isConstrained { parts.append("constrained") }
-        return parts.joined(separator: ", ")
-    }
-
-    private static func unsatisfiedSuffix(_ path: Network.NWPath) -> String {
-        let reason: String?
-        switch path.unsatisfiedReason {
-        case .notAvailable:
-            reason = nil
-        case .cellularDenied:
-            reason = "cellular denied"
-        case .wifiDenied:
-            reason = "Wi-Fi denied"
-        case .localNetworkDenied:
-            reason = "local network denied"
-        case .vpnInactive:
-            reason = "required VPN inactive"
-        @unknown default:
-            reason = "unspecified reason"
-        }
-        return reason.map { " (\($0))" } ?? ""
-    }
-
 }
