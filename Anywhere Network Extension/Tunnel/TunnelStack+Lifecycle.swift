@@ -31,7 +31,7 @@ extension TunnelStack {
         let udpPlane = UDPPlane(stack: self)
         self.udpPlane = udpPlane
 
-        _running.store(true, ordering: .relaxed)
+        running.store(true, ordering: .relaxed)
 
         var precompiledRouting: DomainRouter.CompiledRouting?
         if Self.effectiveProxyMode(settings: TunnelSettings.load(), network: networkContext) == .rule {
@@ -80,9 +80,12 @@ extension TunnelStack {
                 switch job {
                 case .deferredRestart(let configuration, let revalidateMode, let delay, let generation):
                     group.addTask {
-                        await self.runDeferredRestart(configuration: configuration,
-                                                      revalidateMode: revalidateMode,
-                                                      delay: delay, generation: generation)
+                        await self.runDeferredRestart(
+                            configuration: configuration,
+                            revalidateMode: revalidateMode,
+                            delay: delay,
+                            generation: generation
+                        )
                     }
                 }
             }
@@ -100,11 +103,10 @@ extension TunnelStack {
     }
     
     func stop() async {
-        _running.store(false, ordering: .relaxed)
+        running.store(false, ordering: .relaxed)
         nurseryJobContinuation.finish()
         await rootTask?.value
         rootTask = nil
-
         AnywhereLogger.installLogSink(nil)
     }
     
@@ -114,28 +116,21 @@ extension TunnelStack {
     }
     
     func handleWake() {
-        guard running, let configuration else { return }
+        guard running.load(ordering: .relaxed), let configuration else { return }
         logger.info("[VPN] Device wake")
         invalidateOutboundState(configuration: configuration)
     }
     
     func suspendOutbound() {
-        guard running else { return }
+        guard running.load(ordering: .relaxed) else { return }
         logger.info("[VPN] Path offline/sleep")
 
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: false)
     }
     
-    func resumeOutbound() {
-        guard running, configuration != nil else { return }
-        logger.info("[VPN] Path restored")
-        DNSResolver.shared.flush()
-        reclaimInstanceTransports(rebuildMultiplexerPool: true)
-    }
-    
     func updateNetworkContext(isWiFi: Bool, isCellular: Bool, ssid: String?) {
-        guard running, let configuration else { return }
+        guard running.load(ordering: .relaxed), let configuration else { return }
 
         let context = NetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: ssid)
         guard context != networkContext else { return }
@@ -148,10 +143,7 @@ extension TunnelStack {
     }
     
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
-        DNSResolver.shared.flush()
-        
         closeAllActiveTCP()
-
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: true)
     }
@@ -195,9 +187,9 @@ extension TunnelStack {
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: false)
 
-        _isTearingDown.store(true, ordering: .relaxed)
+        isTearingDown.store(true, ordering: .relaxed)
         lwip_bridge_shutdown()
-        _isTearingDown.store(false, ordering: .relaxed)
+        isTearingDown.store(false, ordering: .relaxed)
         logger.debug("[TunnelStack] Shutdown complete")
     }
     
@@ -232,7 +224,7 @@ extension TunnelStack {
         guard !Task.isCancelled else { return }
         guard generation == deferredRestartGeneration else { return }
         deferredRestartScheduled = false
-        guard running else { return }
+        guard running.load(ordering: .relaxed) else { return }
         if revalidateMode, computeEffectiveProxyMode() == proxyMode { return }
         restartStackNow(configuration: configuration)
     }
@@ -273,7 +265,7 @@ extension TunnelStack {
     }
 
     private func handleSettingsChanged() {
-        guard running, let configuration else { return }
+        guard running.load(ordering: .relaxed), let configuration else { return }
 
         let old = settings
         let new = TunnelSettings.load()
@@ -322,14 +314,14 @@ extension TunnelStack {
     }
     
     private func handleRoutingChanged() async {
-        guard running else { return }
+        guard running.load(ordering: .relaxed) else { return }
         guard proxyMode == .rule else { return }
         logger.info("[VPN] Routing changed")
         domainRouter.install(await domainRouter.compileRoutingConfiguration())
     }
     
     private func handleMITMChanged() {
-        guard running else { return }
+        guard running.load(ordering: .relaxed) else { return }
         logger.info("[VPN] MITM settings changed")
         loadMITMSetting()
         publishUDPConfig()

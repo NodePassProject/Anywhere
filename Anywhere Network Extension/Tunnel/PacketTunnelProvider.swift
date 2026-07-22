@@ -54,7 +54,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         
         statsRecorder.start { [tunnelStack] in
             return StatsRecorder.RawValues(
-                byteCounts: tunnelStack.byteCounts,
+                byteCounts: tunnelStack.byteCounts.withLock { $0 },
                 tcpConnectionCount: FlowGauge.liveTCP,
                 udpConnectionCount: FlowGauge.liveUDP,
                 memoryBytes: Self.memoryFootprint()

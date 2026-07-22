@@ -129,7 +129,7 @@ extension TunnelStack {
             intervalMs: TunnelConstants.lwipTimeoutIntervalMs,
             leewayMs: TunnelConstants.lwipTimeoutLeewayMs
         ) { [weak self] in
-            guard let self, self.running else { return }
+            guard let self, self.running.load(ordering: .relaxed) else { return }
             if lwip_bridge_check_timeouts() != 0 {
                 self.assumeIsolated { $0.lwipTick?.suspend() }
             }
@@ -149,7 +149,7 @@ extension TunnelStack {
                 try? await Task.sleep(for: .seconds(remaining))
                 continue
             }
-            if running {
+            if self.running.load(ordering: .relaxed) {
                 await udpPlane.cleanup()
             }
             lastRun = MonotonicClock.now

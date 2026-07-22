@@ -717,7 +717,7 @@ actor TCPConnection: MITMSessionHost {
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
-        } else if err == -13, stack?.isTearingDown == true {
+        } else if err == -13, stack?.isTearingDown.load(ordering: .relaxed) == true {
             // ERR_ABRT during deliberate teardown; otherwise it's an lwIP pressure abort and warns below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
         } else {
