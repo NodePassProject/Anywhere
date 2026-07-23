@@ -82,12 +82,15 @@ They are expected to be undefined in the C objects — that is normal.
   which resolves to our hand-written `config.h`.
 - `HEADER_SEARCH_PATHS = $(SRCROOT)/Shared/Networking/QUIC/ngtcp2` → makes both `<ngtcp2/ngtcp2.h>`
   and `<config.h>` resolve.
-- Project uses **file-system-synchronized groups**. All `.c` here are members of the
-  **Anywhere** and **Anywhere TV** targets, and are *excluded* from the **Network Extension**
-  target via a `membershipExceptions` list in `project.pbxproj`.
-- **When upstream adds or removes a file**, the synchronized group picks it up automatically,
-  BUT you must add/remove it from the Network-Extension `membershipExceptions` list so it stays
-  excluded there. (Between 1.22.90 → 1.23.0 there were no added/removed files.)
+- Project uses **file-system-synchronized groups**. `Shared/` is a synchronized group of the
+  **Anywhere** and **Anywhere TV** targets, so every `.c` here joins those two automatically.
+  The **Network Extension** target does *not* synchronize `Shared/`; it picks files up one by
+  one through a `membershipExceptions` list in `project.pbxproj` — despite the name, that list
+  *adds* membership rather than removing it.
+- **When upstream adds or removes a file**, the synchronized group picks it up automatically for
+  Anywhere / Anywhere TV, BUT you must add/remove it in the Network-Extension
+  `membershipExceptions` list or the NE link will fail on the missing symbols.
+  (Between 1.22.90 → 1.23.0 there were no added/removed files.)
 
 `config.h` currently provides: `HAVE_ARPA_INET_H`, `HAVE_NETINET_IN_H`, `HAVE_UNISTD_H`,
 `HAVE_MEMSET_S`, `HAVE_DECL_BE64TOH=0`, `HAVE_DECL_BSWAP_64=0`; everything else
