@@ -197,6 +197,7 @@ actor TCPConnection: MITMSessionHost {
                 if let established = next {
                     return established
                 }
+                guard establishing, !closed else { continue }
                 handshakeTimedOutDuringEstablishment()
                 return .done
             }
@@ -1152,6 +1153,7 @@ actor TCPConnection: MITMSessionHost {
         establishInbox.finish()
 
         idleActive = false
+        idlePoke.finish()
 
         let connection = proxyConnection
         let client = proxyClient
