@@ -156,8 +156,14 @@ nonisolated final class KeywordAutomatonBuilder {
             }
             edgeStarts.append(Int32(edgeBytes.count))
         }
-
+        
+        for node in queue {
+            node.failure = nil
+            node.dictSuffix = nil
+            node.children.removeAll()
+        }
         buildRoot = nil
+        
         return KeywordAutomaton(
             failure: ContiguousArray(nFailure),
             dictSuffix: ContiguousArray(nDictSuffix),
