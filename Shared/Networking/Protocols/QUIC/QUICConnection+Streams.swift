@@ -54,7 +54,7 @@ extension QUICConnection {
         if inReadPkt { return }
         scheduleFlush()
     }
-    
+
     func scheduleFlush() {
         if flushScheduled { return }
         flushScheduled = true
@@ -199,6 +199,7 @@ extension QUICConnection {
     
     func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp) {
         guard !streamSendQueues.isEmpty else { return }
+        guard streamSendQueues.contains(where: { $0.value.hasUnsent }) else { return }
 
         var ids = streamSendQueues.filter { $0.value.hasUnsent }.keys.sorted()
         guard !ids.isEmpty else { return }
