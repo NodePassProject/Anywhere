@@ -23,6 +23,8 @@ actor QUICDatagramCarrier {
     private var driverTask: Task<Void, Never>?
     
     private var udpConnection: NetworkConnection<UDP>?
+    
+    private static let receiveConcurrency = 4
 
     private var packetHandler: (@Sendable (Data) -> Void)?
     private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
@@ -188,7 +190,7 @@ actor QUICDatagramCarrier {
             $0.releaseFlowCount()
         } }
     }
-
+    
     private static func runReceiveLoop(
         _ connection: NetworkConnection<UDP>,
         bridge: NGTCP2ConcurrencyBridge,
@@ -196,21 +198,43 @@ actor QUICDatagramCarrier {
         obfuscator: QUICPacketObfuscator?
     ) async throws {
         do {
-            while true {
-                let message = try await connection.receive()
-                var packet = message.content
-                guard !packet.isEmpty else { continue }
-                if let obfuscator {
-                    guard let opened = obfuscator.open(packet) else { continue }
-                    packet = opened
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<receiveConcurrency {
+                    group.addTask {
+                        try await Self.drainReceives(
+                            connection,
+                            bridge: bridge,
+                            carrier: carrier,
+                            obfuscator: obfuscator
+                        )
+                    }
                 }
-                let datagram = packet
-                bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverPacket(datagram) } }
+                try await group.next()
             }
         } catch {
             let code = AnywhereError.errnoCode(from: error)
             bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverError(code) } }
             throw error
+        }
+    }
+
+    @concurrent
+    private static func drainReceives(
+        _ connection: NetworkConnection<UDP>,
+        bridge: NGTCP2ConcurrencyBridge,
+        carrier: WeakCarrier,
+        obfuscator: QUICPacketObfuscator?
+    ) async throws {
+        while true {
+            let message = try await connection.receive()
+            var packet = message.content
+            guard !packet.isEmpty else { continue }
+            if let obfuscator {
+                guard let opened = obfuscator.open(packet) else { continue }
+                packet = opened
+            }
+            let datagram = packet
+            bridge.enqueue { carrier.value?.assumeIsolated { $0.deliverPacket(datagram) } }
         }
     }
 
