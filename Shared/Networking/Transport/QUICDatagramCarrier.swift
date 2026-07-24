@@ -24,7 +24,7 @@ actor QUICDatagramCarrier {
     
     private var udpConnection: NetworkConnection<UDP>?
     
-    private static let receiveConcurrency = 4
+    private static let receiveConcurrency = 16
 
     private var packetHandler: (@Sendable (Data) -> Void)?
     private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
