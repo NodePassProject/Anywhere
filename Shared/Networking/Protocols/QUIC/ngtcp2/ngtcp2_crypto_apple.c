@@ -79,6 +79,7 @@ typedef struct {
   ngtcp2_apple_cipher_type type;
   uint8_t key[32];
   size_t keylen;
+  CCCryptorRef cryptor;
 } ngtcp2_apple_hp_ctx;
 
 /* --- Swift CryptoKit callback function pointers ---
@@ -316,6 +317,21 @@ int ngtcp2_crypto_cipher_ctx_encrypt_init(ngtcp2_crypto_cipher_ctx *cipher_ctx,
   }
   memcpy(ctx->key, key, ctx->keylen);
 
+  ctx->cryptor = NULL;
+  switch (ctx->type) {
+  case NGTCP2_APPLE_CIPHER_AES_128:
+  case NGTCP2_APPLE_CIPHER_AES_256:
+    if (CCCryptorCreateWithMode(kCCEncrypt, kCCModeECB, kCCAlgorithmAES,
+                                ccNoPadding, NULL, ctx->key, ctx->keylen, NULL,
+                                0, 0, 0, &ctx->cryptor) != kCCSuccess) {
+      free(ctx);
+      return -1;
+    }
+    break;
+  case NGTCP2_APPLE_CIPHER_CHACHA20:
+    break;
+  }
+
   cipher_ctx->native_handle = ctx;
   return 0;
 }
@@ -324,7 +340,12 @@ void ngtcp2_crypto_cipher_ctx_free(ngtcp2_crypto_cipher_ctx *cipher_ctx) {
   if (!cipher_ctx->native_handle) {
     return;
   }
-  free(cipher_ctx->native_handle);
+  ngtcp2_apple_hp_ctx *ctx =
+      (ngtcp2_apple_hp_ctx *)cipher_ctx->native_handle;
+  if (ctx->cryptor) {
+    CCCryptorRelease(ctx->cryptor);
+  }
+  free(ctx);
 }
 
 /* --- Encrypt/Decrypt via Swift CryptoKit callbacks --- */
@@ -434,12 +455,15 @@ int ngtcp2_crypto_hp_mask(uint8_t *dest, const ngtcp2_crypto_cipher *hp,
   switch (ctx->type) {
   case NGTCP2_APPLE_CIPHER_AES_128:
   case NGTCP2_APPLE_CIPHER_AES_256: {
-    /* AES-ECB encrypt single 16-byte block */
+    uint8_t block[16];
     size_t outlen = 0;
-    CCCryptorStatus status =
-        CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionECBMode, ctx->key,
-                ctx->keylen, NULL, sample, 16, dest, 16, &outlen);
-    return status == kCCSuccess ? 0 : -1;
+    CCCryptorStatus status = CCCryptorUpdate(
+        ctx->cryptor, sample, sizeof(block), block, sizeof(block), &outlen);
+    if (status != kCCSuccess || outlen != sizeof(block)) {
+      return -1;
+    }
+    memcpy(dest, block, NGTCP2_HP_MASKLEN);
+    return 0;
   }
   case NGTCP2_APPLE_CIPHER_CHACHA20:
     /* RFC 9001 §5.4.4: counter = sample[0..3] (little endian), nonce =
