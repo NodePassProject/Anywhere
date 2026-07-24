@@ -82,8 +82,8 @@ extension TunnelStack {
             continuation.onTermination = { _ in producer.cancel() }
         }
         for await packets in batches {
-            await processInboundBatch(packets, udpPlane: udpPlane)
             demand.yield(())
+            await processInboundBatch(packets, udpPlane: udpPlane)
         }
     }
     
