@@ -83,9 +83,7 @@ nonisolated enum BlobMerge {
             .compactMap { try? decoder.decode(MITMSnapshot.self, from: $0.data) }
 
         var byId: [MITMRuleSet.ID: MITMRuleSet] = [:]
-        var enabled = false
         for snapshot in snapshots {
-            enabled = snapshot.enabled   // oldest → newest, so the newest snapshot wins the master toggle
             for set in snapshot.ruleSets {
                 // Sticky delete, same as mergeArray: a tombstoned set isn't revived by a live copy.
                 if let existing = byId[set.id], existing.deletedAt != nil, set.deletedAt == nil {
@@ -104,7 +102,7 @@ nonisolated enum BlobMerge {
             }
         }
 
-        let merged = MITMSnapshot(enabled: enabled, ruleSets: order.compactMap { byId[$0] })
+        let merged = MITMSnapshot(ruleSets: order.compactMap { byId[$0] })
         return encode(merged) ?? newest(rows)
     }
 

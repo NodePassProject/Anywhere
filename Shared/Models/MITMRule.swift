@@ -599,34 +599,29 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
 }
 
 nonisolated struct MITMSnapshot: Codable, Equatable {
-    var enabled: Bool
     var ruleSets: [MITMRuleSet]
 
-    static let empty = MITMSnapshot(enabled: false, ruleSets: [])
+    static let empty = MITMSnapshot(ruleSets: [])
 
     /// Rule sets minus soft-deleted tombstones — the set the data path should actually apply.
     var liveRuleSets: [MITMRuleSet] { ruleSets.filter { $0.deletedAt == nil } }
 
-    init(enabled: Bool, ruleSets: [MITMRuleSet]) {
-        self.enabled = enabled
+    init(ruleSets: [MITMRuleSet]) {
         self.ruleSets = ruleSets
     }
 
     private enum CodingKeys: String, CodingKey {
-        case enabled
         case ruleSets
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         // A single corrupt rule set shouldn't take down the whole snapshot.
         self.ruleSets = try c.decodeSkippingInvalid([MITMRuleSet].self, forKey: .ruleSets)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(enabled, forKey: .enabled)
         try c.encode(ruleSets, forKey: .ruleSets)
     }
     
@@ -638,11 +633,30 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
         if let data, let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
             return snapshot
         }
-        if let data = UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?.data(forKey: legacyMITMDefaultsKey),
+        if let data = legacyDefaultsBlob(),
            let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
             return snapshot
         }
         return .empty
+    }
+
+    /// Reads the master toggle out of a blob written by a build that still stored it there.
+    /// Migration only — see `MITMRuleSetStore.init`; the toggle is never written back.
+    nonisolated static func legacyEnabled(in data: Data?) -> Bool {
+        struct LegacyToggle: Decodable { var enabled: Bool? }
+        let decoder = JSONDecoder()
+        for candidate in [data, legacyDefaultsBlob()] {
+            guard let candidate,
+                  let legacy = try? decoder.decode(LegacyToggle.self, from: candidate),
+                  let enabled = legacy.enabled
+            else { continue }
+            return enabled
+        }
+        return false
+    }
+
+    private static func legacyDefaultsBlob() -> Data? {
+        UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?.data(forKey: legacyMITMDefaultsKey)
     }
 
     private static let legacyMITMDefaultsKey = "mitmData"
@@ -662,7 +676,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     }
     
     func exportBinaryToAppGroup() {
-        let data = MITMBinaryWriter.encode(enabled: enabled, ruleSets: liveRuleSets)
+        let data = MITMBinaryWriter.encode(enabled: AWCore.getMITMEnabled(), ruleSets: liveRuleSets)
         if data != AWCore.getMITMData() {
             AWCore.setMITMData(data)
         }

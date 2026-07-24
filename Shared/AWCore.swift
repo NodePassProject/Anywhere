@@ -58,6 +58,7 @@ nonisolated final class AWCore {
         static let identifier = "identifier"
         static let lastConfigurationData = "lastConfigurationData"
         static let latencyResults = "latencyResults"
+        static let mitmEnabled = "mitmEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
         static let proxyMode = "proxyMode"
@@ -443,5 +444,19 @@ nonisolated final class AWCore {
         } catch {
             logger.report(AnywhereError.store(.saveFailed(.mitmPayload, underlying: error)))
         }
+    }
+    
+    static func getMITMEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.mitmEnabled)
+    }
+
+    static func setMITMEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.mitmEnabled)
+    }
+
+    /// False until the toggle has been written locally at least once — the cue for the
+    /// one-time migration off the synced blob (see `MITMRuleSetStore.init`).
+    static func hasMITMEnabled() -> Bool {
+        userDefaults.object(forKey: UserDefaultsKey.mitmEnabled) != nil
     }
 }

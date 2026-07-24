@@ -13,11 +13,13 @@ import SwiftUI
 @Observable
 final class MITMRuleSetStore {
     static let shared = MITMRuleSetStore()
-
+    
     var enabled: Bool {
         didSet {
             guard enabled != oldValue else { return }
-            save()
+            AWCore.setMITMEnabled(enabled)
+            MITMSnapshot(ruleSets: ruleSets).exportBinaryToAppGroup()
+            AWNotificationCenter.notifyMITMChanged()
         }
     }
 
@@ -30,13 +32,18 @@ final class MITMRuleSetStore {
         let data = JSONBlobStore.shared.load(.mitm)
         loadedBlob = data
         let snapshot = MITMSnapshot.decode(from: data)
-        self.enabled = snapshot.enabled
+        // One-time migration: older builds kept the master toggle inside the synced blob.
+        // Seed the device-local default from it so upgrading doesn't silently turn MITM off.
+        if !AWCore.hasMITMEnabled() {
+            AWCore.setMITMEnabled(MITMSnapshot.legacyEnabled(in: data))
+        }
+        self.enabled = AWCore.getMITMEnabled()
         let split = Tombstone.split(snapshot.ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
         // Ensure the NE-facing binary exists on first launch and post-migration,
         // before any edit. Diff-guarded, so a no-op when already current.
-        MITMSnapshot(enabled: snapshot.enabled, ruleSets: split.live).exportBinaryToAppGroup()
+        MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
     }
     
     func reload() async {
@@ -52,10 +59,7 @@ final class MITMRuleSetStore {
         let split = Tombstone.split(outcome.snapshot.ruleSets)
         ruleSets = split.live
         tombstones = split.tombstones
-        enabled = outcome.snapshot.enabled
-        // Refresh the NE-facing binary so a cloud-synced change is picked up on
-        // the next extension (re)start.
-        MITMSnapshot(enabled: outcome.snapshot.enabled, ruleSets: split.live).exportBinaryToAppGroup()
+        MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
     }
 
     // MARK: - Rule set CRUD
@@ -227,7 +231,7 @@ final class MITMRuleSetStore {
     }
 
     private func save() {
-        MITMSnapshot(enabled: enabled, ruleSets: ruleSets + tombstones).save()
+        MITMSnapshot(ruleSets: ruleSets + tombstones).save()
     }
 }
 
