@@ -10,22 +10,12 @@ import Foundation
 extension TunnelStack {
 
     // MARK: - DNS Interception (Fake-IP)
-    //
-    // UDP/53 is intercepted only for ``interceptedDNSServers``. The interception
-    // itself (A/AAAA fake-IP answers, non-A/AAAA upstream forwarding, NODATA) runs
-    // on ``UDPPlane``; this file holds only the static destination table it consults.
 
     enum DNSDestination {
-        /// Tunnel peer address — no real upstream behind it; non-A/AAAA query
-        /// types are forwarded via the proxy.
         case anywhereResolver
-        /// A public resolver some apps hardcode; non-A/AAAA query types fall
-        /// through and get proxied to the real server.
         case publicResolver
     }
-
-    /// Destinations whose UDP/53 traffic we intercept; any other destination
-    /// is proxied as an ordinary UDP flow.
+    
     static let interceptedDNSServers: [String: DNSDestination] = [
         TunnelConstants.tunnelAddressIPv4: .anywhereResolver,
         TunnelConstants.tunnelAddressIPv6: .anywhereResolver,
@@ -34,8 +24,29 @@ extension TunnelStack {
         "2001:4860:4860::8888": .publicResolver,
         "2001:4860:4860::8844": .publicResolver,
     ]
-
-    static func dnsDestination(for dstIP: String) -> DNSDestination? {
-        interceptedDNSServers[dstIP]
+    
+    static func interceptExemptDNSServers() -> Set<String> {
+        let upstreams = [
+            AWCore.getSubscriptionDNSUpstream(),
+            AWCore.getIPRuleDNSUpstream(),
+            AWCore.getFallbackDNSUpstream()
+        ]
+        var addresses: Set<String> = []
+        for case .plain(let host, _) in upstreams
+        where interceptedDNSServers[host] == .publicResolver {
+            addresses.insert(host)
+        }
+        return addresses
+    }
+    
+    static func dnsDestination(for dstIP: String, exempting exempt: Set<String>) -> DNSDestination? {
+        switch interceptedDNSServers[dstIP] {
+        case .anywhereResolver:
+            return .anywhereResolver
+        case .publicResolver:
+            return exempt.contains(dstIP) ? nil : .publicResolver
+        case nil:
+            return nil
+        }
     }
 }

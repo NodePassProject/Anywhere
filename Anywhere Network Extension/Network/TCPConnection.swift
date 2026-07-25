@@ -36,6 +36,8 @@ actor TCPConnection: MITMSessionHost {
 
     private var routeTarget: RouteTarget
     private var ruleSetName: String?
+    
+    private var ruleMatched: Bool
 
     private var bypass: Bool {
         if case .direct = routeTarget { return true }
@@ -128,6 +130,7 @@ actor TCPConnection: MITMSessionHost {
         self.bridge = bridge
         self.routeTarget = routeTarget
         self.acceptedViaDefault = viaDefault
+        self.ruleMatched = !viaDefault
         self.ruleSetName = ruleSetName
         self.hostIsResolvedDomain = hostIsResolvedDomain
         (self.nurseryJobs, self.nurseryJobContinuation) = AsyncStream.makeStream(of: NurseryJob.self)
@@ -219,7 +222,43 @@ actor TCPConnection: MITMSessionHost {
     private func establishAndDial() async -> Establishment {
         await runSniffPhase()
         guard !closed else { return .done }
+        await applyIPRuleMatch()
+        guard !closed else { return .done }
         return await beginConnecting()
+    }
+    
+    private func applyIPRuleMatch() async {
+        guard hostIsResolvedDomain, !ruleMatched, !closed,
+              let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed),
+              let ip = await RuleResolver.shared.resolveIPv4(for: dstHost),
+              !closed, let match = stack.domainRouter.matchIP(ip)
+        else { return }
+
+        let router = stack.domainRouter
+        switch match.action {
+        case .direct:
+            ruleMatched = true
+            ruleSetName = match.ruleSetName
+            routeTarget = .direct
+            stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .direct, ruleSetName: match.ruleSetName)
+        case .reject:
+            ruleMatched = true
+            ruleSetName = match.ruleSetName
+            routeTarget = .reject
+            stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
+            logger.debug("[TCP] Rejected by IP rule: \(dstHost) → \(ip):\(dstPort)")
+            rejectGracefully()
+        case .proxy(let id):
+            guard let resolved = router.resolveConfiguration(action: match.action) else {
+                logger.report("[TCP] IP-rule route", error: AnywhereError.routing(.configurationMissing(host: dstHost)))
+                return
+            }
+            ruleMatched = true
+            ruleSetName = match.ruleSetName
+            routeTarget = .proxy(id)
+            configuration = resolved
+            stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .proxy(id), ruleSetName: match.ruleSetName)
+        }
     }
 
     private var isSniffing: Bool {
@@ -358,6 +397,8 @@ actor TCPConnection: MITMSessionHost {
         guard let match = router.matchDomain(sni) else {
             return
         }
+
+        ruleMatched = true
 
         switch match.action {
         case .direct:

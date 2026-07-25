@@ -25,33 +25,6 @@ struct LWIPReleaseAction: @unchecked Sendable {
     func run() { fn(ctx) }
 }
 
-final class RejectFloodTracker {
-    private let threshold: Int
-    private let window: CFAbsoluteTime
-    private var timestamps: [String: [CFAbsoluteTime]] = [:]
-    private var lastSweep: CFAbsoluteTime = 0
-
-    init(threshold: Int = 50, window: CFAbsoluteTime = 30) {
-        self.threshold = threshold
-        self.window = window
-    }
-    
-    func shouldDrop(host: String) -> Bool {
-        let now = CFAbsoluteTimeGetCurrent()
-        let cutoff = now - window
-        // Reap stale hosts at most once per window so the key set stays bounded.
-        if now - lastSweep > window {
-            timestamps = timestamps.filter { _, ts in ts.contains { $0 >= cutoff } }
-            lastSweep = now
-        }
-        var times = timestamps[host, default: []]
-        times.removeAll { $0 < cutoff }
-        times.append(now)
-        timestamps[host] = times
-        return times.count > threshold
-    }
-}
-
 extension TunnelStack {
 
     // MARK: - Callback Installation
@@ -72,12 +45,12 @@ extension TunnelStack {
             }
         }
         
-        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, dstPort, isIPv6 in
+        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, _, isIPv6 in
             guard let stack = TunnelStack.lwipHost(), let dstIP else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
             }
             let dstIPBox = LWIPRawPointer(raw: dstIP)
-            return stack.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0) }
+            return stack.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIPBox.raw, isIPv6: isIPv6 != 0) }
         }
         
         lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb in
@@ -143,30 +116,25 @@ extension TunnelStack {
         }
     }
     
-    func lwipSynVerdict(dstIP: UnsafeRawPointer, dstPort: UInt16, isIPv6: Bool) -> Int32 {
-        let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
-        
-        func reject(host: String, reason: String, ruleSetName: String?) -> Int32 {
-            requestLog.record(protocol: .tcp, host: host, port: dstPort, routeTarget: .reject, ruleSetName: ruleSetName)
-            if rejectFloodTracker.shouldDrop(host: host) {
-                logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
-                return Int32(LWIP_BRIDGE_SYN_DROP)
+    func lwipSynVerdict(dstIP: UnsafeRawPointer, isIPv6: Bool) -> Int32 {
+        let load = FlowGauge.admissionLoad
+        let watermark = FakeIPPool.isFakeIP(bytes: dstIP, isIPv6: isIPv6)
+            ? TunnelLimits.flowBudget
+            : TunnelLimits.flowPressureWatermark
+
+        guard load >= watermark else {
+            if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
+                flowShedWarned = false
+                logger.info("[TCP] flow budget recovered; admitting SYNs")
             }
-            logger.debug("[TCP] SYN rejected by \(reason): \(host):\(dstPort)")
-            return Int32(LWIP_BRIDGE_SYN_RESET)
+            return Int32(LWIP_BRIDGE_SYN_PASS)
         }
 
-        let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
-        switch decision.action {
-        case .reject(let ruleSetName):
-            let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
-            return reject(host: decision.host, reason: reason, ruleSetName: ruleSetName)
-        case .unreachable:
-            logger.debug("[TCP] SYN dropped (stale fake-IP): \(dstIPString):\(dstPort)")
-            return Int32(LWIP_BRIDGE_SYN_DROP)
-        case .route, .routeViaDefault:
-            return admitSYN(rawIP: !decision.hostIsResolvedDomain)
+        if !flowShedWarned {
+            flowShedWarned = true
+            logger.warning("[TCP] flow budget exhausted; dropping new SYNs")
         }
+        return Int32(LWIP_BRIDGE_SYN_DROP)
     }
     
     func lwipAccept(
@@ -207,10 +175,22 @@ extension TunnelStack {
             }
         case .routeViaDefault:
             break
-        case .reject, .unreachable:
+        case .reject(let matchedRuleSet):
+            requestLog.record(
+                protocol: .tcp,
+                host: decision.host,
+                port: dstPort,
+                routeTarget: .reject,
+                ruleSetName: matchedRuleSet
+            )
+            let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
+            logger.debug("[TCP] Rejected by \(reason): \(decision.host):\(dstPort)")
+            return nil
+        case .unreachable:
+            logger.debug("[TCP] Aborted (stale fake-IP): \(dstIPString):\(dstPort)")
             return nil
         }
-        
+
         let dstHost = decision.host
 
         requestLog.record(
@@ -240,24 +220,5 @@ extension TunnelStack {
             hostIsResolvedDomain: decision.hostIsResolvedDomain,
             bridge: lwipBridge
         )
-    }
-
-    // MARK: - Flow Admission
-    
-    func admitSYN(rawIP: Bool) -> Int32 {
-        let load = FlowGauge.admissionLoad
-        let watermark = rawIP ? TunnelLimits.flowPressureWatermark : TunnelLimits.flowBudget
-        if load < watermark {
-            if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
-                flowShedWarned = false
-                logger.info("[TCP] flow budget recovered; admitting SYNs")
-            }
-            return Int32(LWIP_BRIDGE_SYN_PASS)
-        }
-        if !flowShedWarned {
-            flowShedWarned = true
-            logger.warning("[TCP] flow budget exhausted; dropping new SYNs")
-        }
-        return Int32(LWIP_BRIDGE_SYN_DROP)
     }
 }

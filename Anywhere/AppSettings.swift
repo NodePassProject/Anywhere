@@ -42,6 +42,27 @@ final class AppSettings {
     var disconnectedBackgroundEndData: Data? {
         didSet { AWCore.setThemeColorData(.disconnectedBackgroundEnd, disconnectedBackgroundEndData) }
     }
+    
+    var subscriptionDNSMode: DNSMode {
+        didSet {
+            AWCore.setSubscriptionDNSMode(subscriptionDNSMode)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var subscriptionDNSPlainServer: String {
+        didSet {
+            AWCore.setSubscriptionDNSPlainServer(subscriptionDNSPlainServer)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var subscriptionDNSDoHURL: String {
+        didSet {
+            AWCore.setSubscriptionDNSDoHURL(subscriptionDNSDoHURL)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
 
     var remnawaveHWIDEnabled: Bool {
         didSet { AWCore.setRemnawaveHWIDEnabled(remnawaveHWIDEnabled) }
@@ -161,6 +182,34 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
+    
+    var ipRuleDNSMode: DNSMode {
+        didSet {
+            AWCore.setIPRuleDNSMode(ipRuleDNSMode)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var ipRuleDNSPlainServer: String {
+        didSet {
+            AWCore.setIPRuleDNSPlainServer(ipRuleDNSPlainServer)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var ipRuleDNSDoHURL: String {
+        didSet {
+            AWCore.setIPRuleDNSDoHURL(ipRuleDNSDoHURL)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var fallbackDNSServer: String {
+        didSet {
+            AWCore.setFallbackDNSServer(fallbackDNSServer)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
 
     // MARK: - Persist + certificate policy
 
@@ -217,13 +266,20 @@ final class AppSettings {
         disconnectedBackgroundStartData = AWCore.getThemeColorData(.disconnectedBackgroundStart)
         disconnectedBackgroundEndData = AWCore.getThemeColorData(.disconnectedBackgroundEnd)
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
+        subscriptionDNSMode = AWCore.getSubscriptionDNSMode()
+        subscriptionDNSPlainServer = AWCore.getSubscriptionDNSPlainServer()
+        subscriptionDNSDoHURL = AWCore.getSubscriptionDNSDoHURL()
 
         advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
         alwaysTrustCellular = AWCore.getAlwaysTrustCellular()
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
+        fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
+        ipRuleDNSMode = AWCore.getIPRuleDNSMode()
+        ipRuleDNSPlainServer = AWCore.getIPRuleDNSPlainServer()
+        ipRuleDNSDoHURL = AWCore.getIPRuleDNSDoHURL()
         preventDNSLeak = AWCore.getPreventDNSLeak()
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()

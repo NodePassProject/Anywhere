@@ -38,4 +38,5 @@ nonisolated enum TunnelLimits {
     static let udpMaxFlowsUnderPressure = 96
     /// Max UDP flows shed per eviction pass; bounds teardown churn.
     static let udpShedBatchLimit = 32
+    static let udpMaxPendingResolutions = 64
 }

@@ -51,6 +51,7 @@ nonisolated enum TunnelConstants {
     // MARK: - UDP Settings
 
     static let udpMaxBufferSize = 256 * 1024
+    static let udpPendingResolutionMaxBytes = 32 * 1024
     /// Idle timeout for unreplied UDP flows; mirrors Linux conntrack's `nf_conntrack_udp_timeout` (30s) so probe storms are reaped fast.
     static let udpIdleTimeoutUnreplied: TimeInterval = 30
     /// Idle timeout for established UDP flows; matches Linux conntrack's `nf_conntrack_udp_timeout_stream` (120s).
@@ -105,13 +106,4 @@ nonisolated enum TunnelConstants {
     static let fakeIPPoolBaseIPv4: UInt32 = 0xC612_0000
     /// Usable offsets in the fake-IP pool; bounds the backing maps in a long-running tunnel.
     static let fakeIPPoolSize = 16_384
-
-    // MARK: - DNS
-
-    /// Public upstream resolvers for queries Anywhere cannot answer locally; must be reachable public IPs.
-    static func fallbackDNSServers(includeIPv6: Bool) -> [String] {
-        includeIPv6
-            ? ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
-            : ["1.1.1.1", "1.0.0.1"]
-    }
 }

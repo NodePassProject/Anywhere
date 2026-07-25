@@ -15,10 +15,6 @@ nonisolated final class DNSResolver: Sendable {
 
     static let defaultTTL: TimeInterval = 120
 
-    /// How long past TTL a stale answer is still served before cleanup drops it.
-    static let staleServeWindow: TimeInterval = defaultTTL
-
-    /// Backstop cap; TTL-based cleanup normally bounds the cache.
     static let maxEntries = 1024
 
     static let echMinTTL: TimeInterval = 60
@@ -26,33 +22,21 @@ nonisolated final class DNSResolver: Sendable {
     static let echNegativeTTL: TimeInterval = 30
     static let echQueryTimeout: TimeInterval = 5
 
-    private struct CacheEntry {
+    private struct CacheEntry: ExpiringEntry {
         let ips: [String]
         let expiry: CFAbsoluteTime
     }
 
-    private struct ECHCacheEntry {
-        /// nil = negative cache: the host publishes no usable ECH record.
+    private struct ECHCacheEntry: ExpiringEntry {
         let config: Data?
         let expiry: CFAbsoluteTime
     }
-
+    
     private struct State {
         var cache: [String: CacheEntry] = [:]
-
-        /// ECHConfigList bytes discovered from DNS HTTPS records, keyed by
-        /// lowercased host.
+        var inFlight: [String: Task<[String], Never>] = [:]
         var echCache: [String: ECHCacheEntry] = [:]
-
-        /// Coalesces concurrent ECH lookups for the same host (single-flight): the
-        /// first caller queries DNS, later callers await its shared task.
         var echInFlight: [String: Task<Data?, Never>] = [:]
-
-        /// Hosts with a background refresh in flight; coalesces duplicate lookups.
-        var inFlightRefreshes: Set<String> = []
-
-        /// Epoch bumped by `flush`; a background refresh only commits if the epoch
-        /// it captured is still current.
         var generation: UInt64 = 0
     }
 
@@ -63,61 +47,58 @@ nonisolated final class DNSResolver: Sendable {
     private init() {}
 
     // MARK: - Public API
-
-    /// Async counterpart of ``resolveAll(_:forceFresh:)``: the potentially blocking
-    /// lookup runs on the resolver's worker queue and resumes the caller with the result.
+    
     func resolveAll(_ host: String, forceFresh: Bool = false) async -> [String] {
-        await Self.blockingBridge.run {
-            self.resolveAll(host, forceFresh: forceFresh)
-        }
-    }
-
-    /// Async counterpart of ``resolveHost(_:forceFresh:)``.
-    func resolveHost(_ host: String, forceFresh: Bool = false) async -> String? {
-        await resolveAll(host, forceFresh: forceFresh).first
-    }
-
-    /// Async counterpart of ``prewarm(_:forceFresh:)``.
-    func prewarm(_ host: String, forceFresh: Bool = false) async {
-        _ = await resolveAll(host, forceFresh: forceFresh)
-    }
-
-    // MARK: - Public API (synchronous — blocking-tolerant callers only)
-
-    /// Resolves a hostname to IP strings. A fresh hit returns immediately; a
-    /// stale hit returns the old IPs and refreshes in the background unless
-    /// `forceFresh` forces a synchronous lookup. Returns empty on failure.
-    func resolveAll(_ host: String, forceFresh: Bool = false) -> [String] {
         let bare = Self.stripBrackets(host)
 
         if Self.isIPAddress(bare) { return [bare] }
 
         let key = Self.cacheKey(for: bare)
 
-        let entry: CacheEntry? = state.withLock { $0.cache[key] }
-        let cached = entry?.ips
-        let expired = entry.map { $0.expiry <= CFAbsoluteTimeGetCurrent() } ?? false
-
-        if let cached, !expired { return cached }
-
-        if let cached, expired, !forceFresh {
-            scheduleBackgroundRefresh(key: key, host: bare)
-            return cached
+        enum Role {
+            case cacheHit([String])
+            case join(Task<[String], Never>)
         }
 
-        let ips = Self.resolveViaGetaddrinfo(bare)
+        let (role, cached): (Role, [String]?) = state.withLock { state in
+            let entry = state.cache[key]
+            let cached = entry?.ips
+            let expired = entry.map { $0.expiry <= CFAbsoluteTimeGetCurrent() } ?? false
+
+            if let cached, !expired, !forceFresh { return (.cacheHit(cached), cached) }
+            if let existing = state.inFlight[key] { return (.join(existing), cached) }
+
+            let scheduledGeneration = state.generation
+            let task = Task<[String], Never> { [self] in
+                await lookup(key: key, host: bare, scheduledGeneration: scheduledGeneration)
+            }
+            state.inFlight[key] = task
+            return (.join(task), cached)
+        }
+
+        let ips: [String]
+        switch role {
+        case .cacheHit(let hit): return hit
+        case .join(let task): ips = await task.value
+        }
+
         guard !ips.isEmpty else {
             if let cached { return cached }
             logger.warning("[DNS] Resolution failed for \(bare)")
             return []
         }
 
-        state.withLock { Self.store(&$0, key: key, ips: ips) }
-
         return ips
     }
 
-    /// Returns cached IPs without triggering resolution; `nil` when absent.
+    func resolveHost(_ host: String, forceFresh: Bool = false) async -> String? {
+        await resolveAll(host, forceFresh: forceFresh).first
+    }
+
+    func prewarm(_ host: String, forceFresh: Bool = false) async {
+        _ = await resolveAll(host, forceFresh: forceFresh)
+    }
+    
     func cachedIPs(for host: String) -> [String]? {
         let bare = Self.stripBrackets(host)
         if Self.isIPAddress(bare) { return [bare] }
@@ -125,27 +106,9 @@ nonisolated final class DNSResolver: Sendable {
         return state.withLock { $0.cache[key]?.ips }
     }
 
-    /// Convenience: returns a single resolved IP (first result), or `nil` on failure.
-    func resolveHost(_ host: String, forceFresh: Bool = false) -> String? {
-        resolveAll(host, forceFresh: forceFresh).first
-    }
-
-    /// Pre-resolves and caches a hostname so subsequent lookups are instant.
-    func prewarm(_ host: String, forceFresh: Bool = false) {
-        _ = resolveAll(host, forceFresh: forceFresh)
-    }
-
-    /// Drops every cached entry; call on physical network path change, where
-    /// cached IPs may be wrong (split-horizon DNS, GeoDNS). Bumping the
-    /// generation voids in-flight refreshes; clearing `inFlightRefreshes` is
-    /// required because voided commits bail without self-removing.
     func flush() {
         let count: Int = state.withLock { state in
             state.generation &+= 1
-            state.inFlightRefreshes.removeAll(keepingCapacity: true)
-            // ECH configs can be split-horizon / GeoDNS specific too; drop them
-            // so the next connection rediscovers against the new path. The
-            // generation bump above also voids an in-flight lookup's commit.
             state.echCache.removeAll(keepingCapacity: true)
             let count = state.cache.count
             state.cache.removeAll(keepingCapacity: true)
@@ -156,65 +119,35 @@ nonisolated final class DNSResolver: Sendable {
     }
 
     // MARK: - Internal
-
-    /// Fires a background refresh unless one is already in flight; the
-    /// generation guard keeps a pre-flush lookup from committing.
-    private func scheduleBackgroundRefresh(key: String, host: String) {
-        let (shouldFire, scheduledGeneration): (Bool, UInt64) = state.withLock { state in
-            if state.inFlightRefreshes.contains(key) { return (false, state.generation) }
-            state.inFlightRefreshes.insert(key)
-            return (true, state.generation)
+    
+    private func lookup(key: String, host: String, scheduledGeneration: UInt64) async -> [String] {
+        let resolved = await Self.blockingBridge.run { Self.resolveViaGetaddrinfo(host) }
+        state.withLock { state in
+            state.inFlight.removeValue(forKey: key)
+            guard scheduledGeneration == state.generation, !resolved.isEmpty else { return }
+            Self.store(&state, key: key, ips: resolved)
         }
-        guard shouldFire else { return }
-        Task { [self] in
-            let ips = await Self.blockingBridge.run { Self.resolveViaGetaddrinfo(host) }
-            state.withLock { state in
-                // Flushed mid-lookup; flush already cleared this key, so leave the set be.
-                guard scheduledGeneration == state.generation else { return }
-                if !ips.isEmpty {
-                    Self.store(&state, key: key, ips: ips)
-                }
-                state.inFlightRefreshes.remove(key)
-            }
-        }
+        return resolved
     }
 
-    /// Inserts or refreshes `key`, then sweeps aged-out entries.
     private static func store(_ state: inout State, key: String, ips: [String]) {
         let now = CFAbsoluteTimeGetCurrent()
         state.cache[key] = CacheEntry(ips: ips, expiry: now + Self.defaultTTL)
-        compact(&state, now: now)
+        compact(&state.cache, now: now)
     }
-
-    /// Drops entries past the stale-serve window, then trims to `maxEntries`.
-    private static func compact(_ state: inout State, now: CFAbsoluteTime) {
-        let cutoff = now - Self.staleServeWindow
-        if state.cache.contains(where: { $0.value.expiry <= cutoff }) {
-            state.cache = state.cache.filter { $0.value.expiry > cutoff }
+    
+    private static func compact<Entry: ExpiringEntry>(_ cache: inout [String: Entry], now: CFAbsoluteTime) {
+        if cache.contains(where: { $0.value.expiry <= now }) {
+            cache = cache.filter { $0.value.expiry > now }
         }
 
-        while state.cache.count > Self.maxEntries {
-            guard let coldest = state.cache.min(by: { $0.value.expiry < $1.value.expiry })?.key
+        while cache.count > Self.maxEntries {
+            guard let coldest = cache.min(by: { $0.value.expiry < $1.value.expiry })?.key
             else { break }
-            state.cache.removeValue(forKey: coldest)
+            cache.removeValue(forKey: coldest)
         }
     }
 
-    /// Drops expired ECH entries (not served stale), then trims to `maxEntries`.
-    private static func compactECH(_ state: inout State, now: CFAbsoluteTime) {
-        if state.echCache.contains(where: { $0.value.expiry <= now }) {
-            state.echCache = state.echCache.filter { $0.value.expiry > now }
-        }
-
-        while state.echCache.count > Self.maxEntries {
-            guard let coldest = state.echCache.min(by: { $0.value.expiry < $1.value.expiry })?.key
-            else { break }
-            state.echCache.removeValue(forKey: coldest)
-        }
-    }
-
-    /// Lowercased cache key that avoids allocating for the common all-lowercase
-    /// ASCII case; bytes >= 0x80 may be subject to Unicode case-folding.
     private static func cacheKey(for host: String) -> String {
         for byte in host.utf8
         where (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z")) || byte >= 0x80 {
@@ -271,7 +204,7 @@ nonisolated final class DNSResolver: Sendable {
         return ipv4 + ipv6
     }
 
-    // MARK: - ECH (HTTPS record) resolution
+    // MARK: - ECH resolution
     
     func resolveECHConfigList(for host: String) async -> Data? {
         let bare = Self.stripBrackets(host)
@@ -306,8 +239,6 @@ nonisolated final class DNSResolver: Sendable {
     }
     
     private func lookupECH(bare: String, key: String, scheduledGeneration: UInt64) async -> Data? {
-        // The DNSService fd/poll machinery lives in the bridge; this side only supplies the
-        // SVCB "ech" SvcParam parser and caches the outcome.
         let result = await Self.blockingBridge.queryFirstRecord(
             host: bare,
             rrtype: kHTTPSRecordType,
@@ -317,9 +248,6 @@ nonisolated final class DNSResolver: Sendable {
 
         return state.withLock { state in
             state.echInFlight[key] = nil
-            // A flush mid-lookup bumps the generation: this result may be bound
-            // to the pre-change network path, so discard it and let callers fail
-            // closed and rediscover rather than sealing against a stale ECH key.
             guard scheduledGeneration == state.generation else { return nil }
             let ttl: TimeInterval = result
                 .map { min(max(TimeInterval($0.ttl), Self.echMinTTL), Self.echMaxTTL) }
@@ -327,21 +255,18 @@ nonisolated final class DNSResolver: Sendable {
             let insertedAt = CFAbsoluteTimeGetCurrent()
             state.echCache[key] = ECHCacheEntry(config: result?.payload,
                                                 expiry: insertedAt + ttl)
-            Self.compactECH(&state, now: insertedAt)
+            Self.compact(&state.echCache, now: insertedAt)
             return result?.payload
         }
     }
 }
 
-/// DNS RR type for HTTPS records (RFC 9460). Used as a literal to avoid a hard
-/// dependency on `kDNSServiceType_HTTPS`, which is missing from older SDKs.
+private nonisolated protocol ExpiringEntry {
+    var expiry: CFAbsoluteTime { get }
+}
+
 private nonisolated let kHTTPSRecordType: UInt16 = 65
 
-/// Extracts the `ech` SvcParam (SvcParamKey 5) from an HTTPS/SVCB record's RDATA
-/// (RFC 9460): `SvcPriority(2) ++ TargetName ++ SvcParams`, where each SvcParam
-/// is `key(2) ++ length(2) ++ value`. Returns the ECHConfigList bytes, or nil
-/// when absent. TargetName is uncompressed per spec; AliasMode (priority 0,
-/// no params) yields nil. Passed to the DNS bridge as the record-payload parser.
 private nonisolated func echParseSVCBECH(_ rdata: Data) -> Data? {
     return rdata.withUnsafeBytes { raw -> Data? in
         let bytes = raw.bindMemory(to: UInt8.self)

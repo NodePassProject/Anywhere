@@ -283,11 +283,18 @@ extension TunnelStack {
         }
         if new.preventDNSLeak != old.preventDNSLeak {
             logger.info("[VPN] Prevent DNS Leak changed: \(old.preventDNSLeak) -> \(new.preventDNSLeak)")
-            connectionRouter.setPreventDNSLeak(new.preventDNSLeak)
+            connectionRouter.preventDNSLeak.store(new.preventDNSLeak, ordering: .relaxed)
         }
         if new.reflectionEnabled != old.reflectionEnabled || new.reflectionAddresses != old.reflectionAddresses {
             logger.info("[VPN] Reflection changed: enabled=\(new.reflectionEnabled), addresses=\(new.reflectionAddresses)")
             publishReflector()
+        }
+        if new.ipRuleDNSUpstream != old.ipRuleDNSUpstream {
+            logger.info("[VPN] IP-rule DNS changed")
+            RuleResolver.shared.setUpstream(new.ipRuleDNSUpstream)
+        }
+        if new.interceptExemptDNSServers != old.interceptExemptDNSServers {
+            logger.info("[VPN] DNS interception exemptions changed: \(new.interceptExemptDNSServers.sorted())")
         }
         publishUDPConfig()
         

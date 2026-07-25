@@ -150,6 +150,7 @@ actor TunnelStack {
         let quicPolicy: QUICPolicy
         let blockWebRTC: Bool
         let mitmEnabled: Bool
+        let interceptExemptDNSServers: Set<String>
         let advertiseIPv6ToApps: Bool
     }
     private let _udpConfig = Mutex(UDPConfig(
@@ -160,6 +161,7 @@ actor TunnelStack {
         quicPolicy: .blocked,
         blockWebRTC: true,
         mitmEnabled: false,
+        interceptExemptDNSServers: [],
         advertiseIPv6ToApps: false
     ))
     
@@ -178,6 +180,7 @@ actor TunnelStack {
             quicPolicy: settings.quicPolicy,
             blockWebRTC: settings.blockWebRTC,
             mitmEnabled: mitmEnabled,
+            interceptExemptDNSServers: settings.interceptExemptDNSServers,
             advertiseIPv6ToApps: settings.advertiseIPv6ToApps
         )
         _udpConfig.withLock { $0 = snapshot }
@@ -217,7 +220,6 @@ actor TunnelStack {
     
     var tcpConnectionCapWarned = false
     var flowShedWarned = false
-    let rejectFloodTracker = RejectFloodTracker()
     
     nonisolated let domainRouter: DomainRouter
     
@@ -271,8 +273,9 @@ actor TunnelStack {
         precompiledRouting: DomainRouter.CompiledRouting? = nil
     ) {
         settings = TunnelSettings.load()
-        connectionRouter.setPreventDNSLeak(settings.preventDNSLeak)
+        connectionRouter.preventDNSLeak.store(settings.preventDNSLeak, ordering: .relaxed)
         proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
+        RuleResolver.shared.setUpstream(settings.ipRuleDNSUpstream)
         
         if proxyMode == .direct {
             defaultRouteTarget = .direct

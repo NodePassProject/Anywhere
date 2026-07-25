@@ -29,10 +29,15 @@ nonisolated final class AWCore {
         defaults.register(defaults: [
             UserDefaultsKey.blockWebRTC: true,
             UserDefaultsKey.bypassCountryCode: "",
+            UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.identifier: UUID().uuidString,
+            UserDefaultsKey.ipRuleDNSDoHURL: DNSUpstream.defaultDoHURL,
+            UserDefaultsKey.ipRuleDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
             UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
             UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
+            UserDefaultsKey.subscriptionDNSDoHURL: DNSUpstream.defaultDoHURL,
+            UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.trustedCertificateSHA256s: [],
             UserDefaultsKey.trustedSSIDs: [],
         ])
@@ -52,10 +57,14 @@ nonisolated final class AWCore {
         static let bypassCountryCode = "bypassCountryCode"
         static let chainLatencyResults = "chainLatencyResults"
         static let experimentalEnabled = "experimentalEnabled"
+        static let fallbackDNSServer = "fallbackDNSServer"
         static let hideVPNIcon = "hideVPNIcon"
         static let homeColorScheme = "homeColorScheme"
         static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
+        static let ipRuleDNSDoHURL = "ipRuleDNSDoHURL"
+        static let ipRuleDNSMode = "ipRuleDNSMode"
+        static let ipRuleDNSPlainServer = "ipRuleDNSPlainServer"
         static let lastConfigurationData = "lastConfigurationData"
         static let latencyResults = "latencyResults"
         static let mitmEnabled = "mitmEnabled"
@@ -69,6 +78,9 @@ nonisolated final class AWCore {
         static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedChainId = "selectedChainId"
         static let selectedConfigurationId = "selectedConfigurationId"
+        static let subscriptionDNSDoHURL = "subscriptionDNSDoHURL"
+        static let subscriptionDNSMode = "subscriptionDNSMode"
+        static let subscriptionDNSPlainServer = "subscriptionDNSPlainServer"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
         static let tunnelExcludedRoutes = "tunnelExcludedRoutes"
@@ -342,6 +354,82 @@ nonisolated final class AWCore {
 
     static func setPreventDNSLeak(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
+    }
+
+    static func getSubscriptionDNSMode() -> DNSMode {
+        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
+    }
+
+    static func setSubscriptionDNSMode(_ value: DNSMode) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.subscriptionDNSMode)
+    }
+
+    static func getSubscriptionDNSPlainServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSPlainServer)!
+    }
+
+    static func setSubscriptionDNSPlainServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSPlainServer)
+    }
+
+    static func getSubscriptionDNSDoHURL() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.subscriptionDNSDoHURL)!
+    }
+
+    static func setSubscriptionDNSDoHURL(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.subscriptionDNSDoHURL)
+    }
+
+    static func getIPRuleDNSMode() -> DNSMode {
+        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
+    }
+
+    static func setIPRuleDNSMode(_ value: DNSMode) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.ipRuleDNSMode)
+    }
+
+    static func getIPRuleDNSPlainServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSPlainServer)!
+    }
+
+    static func setIPRuleDNSPlainServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSPlainServer)
+    }
+
+    static func getIPRuleDNSDoHURL() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.ipRuleDNSDoHURL)!
+    }
+
+    static func setIPRuleDNSDoHURL(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSDoHURL)
+    }
+
+    static func getFallbackDNSServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.fallbackDNSServer)!
+    }
+    
+    static func setFallbackDNSServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.fallbackDNSServer)
+    }
+    
+    static func getSubscriptionDNSUpstream() -> DNSUpstream {
+        DNSUpstream(
+            mode: getSubscriptionDNSMode(),
+            plainServer: getSubscriptionDNSPlainServer(),
+            dohURL: getSubscriptionDNSDoHURL()
+        )
+    }
+    
+    static func getIPRuleDNSUpstream() -> DNSUpstream {
+        DNSUpstream(
+            mode: getIPRuleDNSMode(),
+            plainServer: getIPRuleDNSPlainServer(),
+            dohURL: getIPRuleDNSDoHURL()
+        )
+    }
+    
+    static func getFallbackDNSUpstream() -> DNSUpstream {
+        DNSUpstream.parsePlain(getFallbackDNSServer()) ?? .defaultPlain
     }
 
     static func getAdvertiseIPv6ToApps() -> Bool {

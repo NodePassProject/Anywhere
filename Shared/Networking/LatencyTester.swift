@@ -15,9 +15,7 @@ nonisolated enum LatencyTester {
 
     private static let latencyHost = "captive.apple.com"
     private static let latencyPort: UInt16 = 80
-
-    /// Only the receive is timed, so the result is the network RTT through the
-    /// full proxy chain; DNS is excluded via pre-warming.
+    
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
         // Keep probe timings out of the live dial/handshake gauges.
         ConnectionMetrics.shared.suspendRecording()
@@ -54,11 +52,7 @@ nonisolated enum LatencyTester {
     }
 
     // MARK: - Private
-
-    /// Re-resolves each hop with NE-process `getaddrinfo` and discards any
-    /// main-app `resolvedIP`: while the tunnel is up, main-app DNS returns lwIP
-    /// fake IPs (198.18.0.0/15) unroutable from the NE's kernel-bypassed sockets.
-    /// Async so the blocking lookups run on the resolver's worker, not this task's thread.
+    
     private static func resolvedConfiguration(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
         var resolvedChain: [ProxyConfiguration]?
         if let chain = configuration.chain {
@@ -82,11 +76,10 @@ nonisolated enum LatencyTester {
     }
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
-        // forceFresh: tests must measure against a fresh address, never a stale one.
-        await DNSResolver.shared.prewarm(configuration.serverAddress, forceFresh: true)
+        await DNSResolver.shared.prewarm(configuration.serverAddress)
         if let chain = configuration.chain {
             for proxy in chain {
-                await DNSResolver.shared.prewarm(proxy.serverAddress, forceFresh: true)
+                await DNSResolver.shared.prewarm(proxy.serverAddress)
             }
         }
 
@@ -116,9 +109,6 @@ nonisolated enum LatencyTester {
 
                 return Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
             } onCancel: {
-                // Abortive teardown unblocks whichever async op is in flight. Safe against
-                // the graceful `await client.cancel()` below: teardown drains the owned
-                // resources atomically, so the loser sees an empty set and no-ops.
                 client.cancel()
             }
             await client.cancel()
@@ -128,8 +118,7 @@ nonisolated enum LatencyTester {
             throw error
         }
     }
-
-    /// Phases 1 + 2 (untimed): proxy handshake plus a warmup HEAD round-trip.
+    
     private static func establishWarmedConnection(client: ProxyClient) async throws -> ProxyConnection {
         // Phase 1 (untimed): TCP/TLS/outbound handshake.
         let proxyConnection = try await client.connect(to: Self.latencyHost, port: Self.latencyPort)

@@ -25,23 +25,21 @@ typedef void (*lwip_output_fn)(const void *data, int len, int is_ipv6,
                                 void *release_ctx, lwip_release_fn release);
 
 /* TCP accept: new TCP connection accepted. Returning a non-NULL pointer
- * stores it as the PCB's tcp_arg; returning NULL aborts (RST). Rule-based
- * rejects that can be classified before the handshake (IP-CIDR / fake-IP)
- * are handled by `lwip_tcp_syn_filter_fn` at SYN time so they never reach
- * this callback. SNI-based rejects, which require the ClientHello, are
- * still handled inside the connection after it is accepted.
+ * stores it as the PCB's tcp_arg; returning NULL aborts (RST). Routing is
+ * decided here, per connection, so rule-based rejects (IP-CIDR / fake-IP)
+ * abort from this callback. SNI-based rejects, which require the
+ * ClientHello, are handled inside the connection after it is accepted.
  *
  * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6. */
 typedef void *(*lwip_tcp_accept_fn)(const void *src_ip, uint16_t src_port,
                                      const void *dst_ip, uint16_t dst_port,
                                      int is_ipv6, void *pcb);
 
-/* SYN filter: lets the host decide drop/reset/passthrough for an incoming
- * SYN before lwIP allocates a pcb or sends SYN-ACK. Returns one of the
- * `LWIP_BRIDGE_SYN_*` verdicts below. */
+/* SYN filter: admission control for an incoming SYN, before lwIP allocates a
+ * pcb or sends SYN-ACK. Returns one of the `LWIP_BRIDGE_SYN_*` verdicts below;
+ * `DROP` sheds a SYN there is no flow budget for. */
 #define LWIP_BRIDGE_SYN_PASS  0
 #define LWIP_BRIDGE_SYN_DROP  1
-#define LWIP_BRIDGE_SYN_RESET 2
 typedef int (*lwip_tcp_syn_filter_fn)(const void *src_ip, uint16_t src_port,
                                        const void *dst_ip, uint16_t dst_port,
                                        int is_ipv6);

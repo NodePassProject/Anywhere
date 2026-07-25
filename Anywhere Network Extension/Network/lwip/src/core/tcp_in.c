@@ -681,19 +681,13 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     tcp_rst_netif(ip_data.current_input_netif, ackno, seqno + tcplen, ip_current_dest_addr(),
             ip_current_src_addr(), tcphdr->dest, tcphdr->src);
   } else if (flags & TCP_SYN) {
-    /* --- BEGIN Anywhere Patch: rule-based reject at SYN ---
-     * Skip the 3WHS for connections the routing rules have already
-     * classified as `.reject`. The filter sees the dest IP+port, so
-     * everything resolvable pre-handshake (IP-CIDR / fake-IP -> domain)
-     * can be decided here — saves a SYN-ACK + final ACK + accept_cb
-     * for the rejected case. SNI-based rejects still happen later in
-     * `TCPConnection` since the SNI isn't visible until the
-     * ClientHello arrives.
+    /* --- BEGIN Anywhere Patch: SYN admission filter ---
+     * Let the host shed a SYN before a pcb is allocated and a SYN-ACK
+     * is enqueued, so a burst it has no flow budget for costs nothing.
      *
      * Filter verdicts:
      *   PASS  — passthrough, fall through to the normal code path
      *   DROP  — return silently, no SYN-ACK; client times out
-     *   RESET — send RST in response to SYN; client gets ECONNREFUSED
      */
     if (lwip_anywhere_tcp_syn_filter != NULL) {
       u8_t src_bytes[16], dst_bytes[16];
@@ -713,12 +707,6 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
                                                   dst_bytes, tcphdr->dest,
                                                   is_ipv6);
       if (verdict == LWIP_ANYWHERE_SYN_DROP) {
-        return;
-      }
-      if (verdict == LWIP_ANYWHERE_SYN_RESET) {
-        tcp_rst_netif(ip_data.current_input_netif, 0, seqno + tcplen,
-                      ip_current_dest_addr(), ip_current_src_addr(),
-                      tcphdr->dest, tcphdr->src);
         return;
       }
     }

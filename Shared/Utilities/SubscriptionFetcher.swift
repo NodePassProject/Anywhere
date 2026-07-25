@@ -7,6 +7,8 @@
 
 import Foundation
 
+nonisolated private let logger = AnywhereLogger(category: "SubscriptionFetcher")
+
 nonisolated struct SubscriptionFetcher {
     struct Result {
         let configurations: [ProxyConfiguration]
@@ -31,7 +33,9 @@ nonisolated struct SubscriptionFetcher {
         let allowInsecure = AWCore.getAllowInsecure()
         let (data, response): (Data, URLResponse)
         do {
-            if allowInsecure {
+            if let viaUpstream = try await fetchViaConfiguredDNS(request, allowInsecure: allowInsecure) {
+                (data, response) = viaUpstream
+            } else if allowInsecure {
                 let session = URLSession(configuration: .default, delegate: InsecureSessionDelegate(), delegateQueue: nil)
                 defer { session.finishTasksAndInvalidate() }
                 (data, response) = try await session.data(for: request)
@@ -97,6 +101,18 @@ nonisolated struct SubscriptionFetcher {
         )
     }
 
+    // MARK: - Configured DNS
+    
+    private static func fetchViaConfiguredDNS(_ request: URLRequest, allowInsecure: Bool) async throws -> (Data, URLResponse)? {
+        let upstream = AWCore.getSubscriptionDNSUpstream()
+        guard !upstream.isSystem else { return nil }
+
+        let result = try await ResolvedHostFetcher.fetch(request, allowInsecure: allowInsecure) { host in
+            try await DNSUpstreamClient.resolve(host, via: upstream).first
+        }
+        return (result.data, result.response)
+    }
+
     // MARK: - Header Parsing
 
     private static func parseProfileTitle(from response: HTTPURLResponse?) -> String? {
@@ -155,7 +171,7 @@ nonisolated struct SubscriptionFetcher {
     }
 }
 
-// MARK: - URLSession delegate that accepts self-signed certificates (used only when Allow Insecure is enabled)
+// MARK: - URLSession delegate that accepts self-signed certificates
 
 nonisolated private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {

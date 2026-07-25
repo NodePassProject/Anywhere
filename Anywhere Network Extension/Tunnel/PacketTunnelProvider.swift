@@ -300,6 +300,8 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     // MARK: - Path Monitoring
 
     private func resolveAndUpdateNetworkContext(_ path: Network.NWPath) async {
+        DNSResolver.shared.flush()
+
         let primaryType = path.availableInterfaces.first?.type
         let isWiFi = primaryType == .wifi
         let isCellular = primaryType == .cellular

@@ -7,6 +7,7 @@
 
 import Network
 import NetworkExtension
+import Synchronization
 
 nonisolated final class PathMonitorConcurrencyBridge: Sendable {
 
@@ -20,7 +21,16 @@ nonisolated final class PathMonitorConcurrencyBridge: Sendable {
         let queue = self.queue
         return AsyncStream(Network.NWPath.self, bufferingPolicy: .unbounded) { continuation in
             let monitor = NWPathMonitor()
-            monitor.pathUpdateHandler = { continuation.yield($0) }
+            let previous = Mutex<Network.NWPath?>(nil)
+            monitor.pathUpdateHandler = { path in
+                let changed = previous.withLock { stored in
+                    guard stored != path else { return false }
+                    stored = path
+                    return true
+                }
+                guard changed else { return }
+                continuation.yield(path)
+            }
             continuation.onTermination = { _ in monitor.cancel() }
             monitor.start(queue: queue)
         }

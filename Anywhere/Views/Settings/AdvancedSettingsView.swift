@@ -39,6 +39,9 @@ struct AdvancedSettingsView: View {
             }
 
             Section("Network") {
+                NavigationLink("DNS") {
+                    DNSSettingsView()
+                }
                 NavigationLink("IPv6") {
                     IPv6SettingsView()
                 }

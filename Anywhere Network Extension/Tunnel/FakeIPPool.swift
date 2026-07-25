@@ -88,11 +88,19 @@ nonisolated final class FakeIPPool: Sendable {
     private let state = Mutex(State())
 
     // MARK: - Static Helpers
-
-    /// Is this IP in the fake IPv4 or IPv6 range? A string-prefix check suffices:
-    /// lwIP's canonical ntoa always renders fakes with the `2001:db8::` prefix.
+    
     static func isFakeIP(_ ip: String) -> Bool {
         ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") || ip.hasPrefix("2001:db8::")
+    }
+    
+    static func isFakeIP(bytes: UnsafeRawPointer, isIPv6: Bool) -> Bool {
+        let octets = bytes.assumingMemoryBound(to: UInt8.self)
+        if isIPv6 {
+            // 2001:db8::/32, the documentation prefix the pool renders into.
+            return octets[0] == 0x20 && octets[1] == 0x01 && octets[2] == 0x0D && octets[3] == 0xB8
+        }
+        // 198.18.0.0/15.
+        return octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
     }
 
     static func ipv4Bytes(offset: Int) -> (UInt8, UInt8, UInt8, UInt8) {
