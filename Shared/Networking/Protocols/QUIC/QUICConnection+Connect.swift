@@ -19,6 +19,7 @@ extension QUICConnection {
     // MARK: Connect
     
     nonisolated func connect() async throws {
+        let dialAttempt = ConnectionMetrics.currentAttempt
         let resolvedIPs: [String] = transport == nil ? await DNSResolver.shared.resolveAll(host) : []
         try await bridge.runParkedThrowing(host: self) { me, continuation in
             guard me.state == .idle else {
@@ -27,6 +28,7 @@ extension QUICConnection {
             }
             QUICCrypto.registerCallbacks()
             me.state = .connecting
+            me.dialAttempt = dialAttempt
             me.connectContinuation = continuation
             me.setupUDP(resolvedIPs: resolvedIPs)
         }

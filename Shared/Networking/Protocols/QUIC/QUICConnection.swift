@@ -113,6 +113,8 @@ actor QUICConnection {
     
     var connectContinuation: CheckedContinuation<Void, Error>?
     
+    var dialAttempt: ConnectionMetrics.Attempt?
+    
     struct Handlers: Sendable {
         var streamData: (@Sendable (Int64, Data, Bool) -> Void)?
         var streamTermination: (@Sendable (Int64, Error?) -> Void)?

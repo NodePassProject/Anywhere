@@ -64,9 +64,9 @@ extension ProxyClient {
     ) async throws -> ProxyConnection {
         switch command {
         case .tcp, .mux:
-            return try await client.openTCP(destination: destination, isDefaultProxy: isDefaultProxy)
+            return try await client.openTCP(destination: destination)
         case .udp:
-            return try await client.openUDP(destination: destination, isDefaultProxy: isDefaultProxy)
+            return try await client.openUDP(destination: destination)
         }
     }
 

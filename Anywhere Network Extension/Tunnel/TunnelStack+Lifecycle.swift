@@ -98,6 +98,7 @@ extension TunnelStack {
         lwip_bridge_set_host_ctx(nil)
         OutboundConnector.setRoutingContext(nil)
         fakeIPPool.reset()
+        ConnectionMetrics.shared.setDefaultServer(nil)
         configuration = nil
         finishPlaneCommands()
     }

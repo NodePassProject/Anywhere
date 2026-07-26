@@ -8,89 +8,120 @@
 import Foundation
 import Synchronization
 
-/// Default outbound proxy only. Handshake subtraction is global, so timings are
-/// approximate under concurrent dials; clamped at zero.
 nonisolated final class ConnectionMetrics: Sendable {
     static let shared = ConnectionMetrics()
-
-    enum Metric {
-        /// First-hop TCP connect — the "dial".
-        case dial
-        /// Full proxy setup span, includes the dial which `record` subtracts off.
-        case handshake
-        /// QUIC setup span — no first-hop TCP dial.
-        case handshakeNoDial
+    
+    @TaskLocal static var currentAttempt: Attempt?
+    
+    // MARK: - Attempt
+    
+    final class Attempt: Sendable {
+        private let metrics: ConnectionMetrics
+        private let generation: UInt64
+        private let startedAt: ContinuousClock.Instant
+        private let dialRecorded = Atomic<Bool>(false)
+        private let handshakeRecorded = Atomic<Bool>(false)
+        
+        fileprivate init(metrics: ConnectionMetrics, generation: UInt64) {
+            self.metrics = metrics
+            self.generation = generation
+            self.startedAt = ContinuousClock().now
+        }
+        
+        func noteServerResponse() {
+            guard !dialRecorded.load(ordering: .relaxed) else { return }
+            guard !dialRecorded.exchange(true, ordering: .relaxed) else { return }
+            metrics.commit(.dial, elapsed, generation: generation)
+        }
+        
+        func notePayload() {
+            guard !handshakeRecorded.load(ordering: .relaxed) else { return }
+            guard !handshakeRecorded.exchange(true, ordering: .relaxed) else { return }
+            metrics.commit(.handshake, elapsed, generation: generation)
+        }
+        
+        private var elapsed: Duration { ContinuousClock().now - startedAt }
     }
-
+    
+    private enum Milestone {
+        case dial
+        case handshake
+    }
+    
+    // MARK: - State
+    
     private struct State {
-        /// Parked until a default-proxy handshake promotes it — the socket can't
-        /// know its route at dial time.
-        var pendingDialMs: Int?
+        var defaultServerID: UUID?
+        var generation: UInt64 = 0
         var dialMs: Int?
         var handshakeMs: Int?
         var dialTotalMs = 0
         var dialSampleCount = 0
         var handshakeTotalMs = 0
         var handshakeSampleCount = 0
-        /// >0 while a latency-test probe is running; recording is suppressed.
         var suspendDepth = 0
     }
-
+    
     private let state = Mutex(State())
-
+    
     struct Snapshot {
         let dialMs: Int?
         let handshakeMs: Int?
         let avgDialMs: Int?
         let avgHandshakeMs: Int?
     }
-
-    /// No-op while recording is suspended.
-    func record(_ metric: Metric, _ duration: Duration) {
+    
+    // MARK: - Default server
+    
+    func setDefaultServer(_ id: UUID?) {
+        state.withLock { state in
+            guard state.defaultServerID != id else { return }
+            state.defaultServerID = id
+            Self.clear(&state)
+        }
+    }
+    
+    // MARK: - Attempts
+    
+    func beginAttempt() -> Attempt? {
+        let generation: UInt64? = state.withLock { state in
+            guard state.suspendDepth == 0, state.defaultServerID != nil else { return nil }
+            return state.generation
+        }
+        return generation.map { Attempt(metrics: self, generation: $0) }
+    }
+    
+    private func commit(_ milestone: Milestone, _ duration: Duration, generation: UInt64) {
         let ms = max(0, duration.milliseconds)
         state.withLock { state in
-            guard state.suspendDepth == 0 else { return }
-            switch metric {
+            guard state.generation == generation else { return }
+            switch milestone {
             case .dial:
-                state.pendingDialMs = ms
+                state.dialMs = ms
+                state.dialTotalMs += ms
+                state.dialSampleCount += 1
             case .handshake:
-                // Commit pending dial and post-TCP remainder for the same
-                // connection; consume the dial so it isn't double-counted.
-                let remainder: Int
-                if let dial = state.pendingDialMs {
-                    state.pendingDialMs = nil
-                    state.dialMs = dial
-                    state.dialTotalMs += dial
-                    state.dialSampleCount += 1
-                    remainder = max(0, ms - dial)
-                } else {
-                    remainder = ms
-                }
-                state.handshakeMs = remainder
-                state.handshakeTotalMs += remainder
-                state.handshakeSampleCount += 1
-            case .handshakeNoDial:
-                // QUIC: clear the dial gauge so the snapshot doesn't pair a stale dial
-                // with this handshake.
-                state.dialMs = nil
                 state.handshakeMs = ms
                 state.handshakeTotalMs += ms
                 state.handshakeSampleCount += 1
             }
         }
     }
-
-    /// Re-entrant; pair with `resumeRecording()`.
+    
+    // MARK: - Suspension
+    
     func suspendRecording() {
         state.withLock { $0.suspendDepth += 1 }
     }
-
+    
     func resumeRecording() {
         state.withLock { state in
             if state.suspendDepth > 0 { state.suspendDepth -= 1 }
         }
     }
-
+    
+    // MARK: - Readout
+    
     func snapshot() -> Snapshot {
         state.withLock { state in
             Snapshot(
@@ -101,18 +132,51 @@ nonisolated final class ConnectionMetrics: Sendable {
             )
         }
     }
-
+    
     func reset() {
-        // Leaves `suspendDepth` untouched — a reset must not cancel an active suspension.
-        state.withLock { state in
-            state.pendingDialMs = nil
-            state.dialMs = nil
-            state.handshakeMs = nil
-            state.dialTotalMs = 0
-            state.dialSampleCount = 0
-            state.handshakeTotalMs = 0
-            state.handshakeSampleCount = 0
-        }
+        state.withLock { Self.clear(&$0) }
+    }
+    
+    private static func clear(_ state: inout State) {
+        state.generation &+= 1
+        state.dialMs = nil
+        state.handshakeMs = nil
+        state.dialTotalMs = 0
+        state.dialSampleCount = 0
+        state.handshakeTotalMs = 0
+        state.handshakeSampleCount = 0
+    }
+}
+
+// MARK: - Metered connection
+
+nonisolated final class MeteredProxyConnection: ProxyConnection {
+    private let inner: ProxyConnection
+    private let attempt: ConnectionMetrics.Attempt
+    
+    init(_ inner: ProxyConnection, attempt: ConnectionMetrics.Attempt) {
+        self.inner = inner
+        self.attempt = attempt
+    }
+    
+    var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    var deliversDatagrams: Bool { inner.deliversDatagrams }
+    var isConnected: Bool { inner.isConnected }
+    
+    func send(_ data: Data) async throws { try await inner.send(data) }
+    func sendRaw(_ data: Data) async throws { try await inner.sendRaw(data) }
+    func sendDirectRaw(_ data: Data) async throws { try await inner.sendDirectRaw(data) }
+    
+    func receive() async throws -> Data? { note(try await inner.receive()) }
+    func receiveRaw() async throws -> Data? { note(try await inner.receiveRaw()) }
+    func receiveDirectRaw() async throws -> Data? { note(try await inner.receiveDirectRaw()) }
+    
+    func cancel() { inner.cancel() }
+    func abort() { inner.abort() }
+    
+    private func note(_ data: Data?) -> Data? {
+        if let data, !data.isEmpty { attempt.notePayload() }
+        return data
     }
 }
 

@@ -14,34 +14,27 @@ nonisolated final class ProxyClient: Sendable {
 
     private struct State {
         var cancelled = false
-        /// The connection handed back by a successful dial, retained so ``cancel()`` can tear it
-        /// down — its `cancel()` cascade unwinds the whole transport chain.
         var delivered: ProxyConnection?
-        /// Proxy tunnel from a previous chain link (for proxy chaining).
         var tunnel: ProxyConnection?
     }
 
     private let state: Mutex<State>
-
-    /// Proxy tunnel from a previous chain link (for proxy chaining). Read-only snapshot backed
-    /// by ``state``; the late writes (installing a chain tunnel, or clearing it once consumed)
-    /// go through ``setChainTunnel(_:)``, and teardown clears it inline under the lock.
+    
     var tunnel: ProxyConnection? { state.withLock { $0.tunnel } }
-
-    /// Installs (or, with `nil`, clears once consumed) the chain tunnel for this link. Called at
-    /// chain setup and by protocol adapters that adopt the tunnel into a per-flow transport.
+    
     func setChainTunnel(_ tunnel: ProxyConnection?) {
         state.withLock { $0.tunnel = tunnel }
     }
-
-    /// For a chain link, the chain prefix leading to this link's server, so it can rebuild
-    /// that prefix for an extra dial (e.g. SOCKS5's UDP-ASSOCIATE relay). Empty otherwise.
     let parentChain: [ProxyConfiguration]
-
-    /// Whether this client dials the default outbound, gating the live Dial/Handshake stats;
-    /// chain hops, rule-routed proxies, and latency probes leave it `false`.
+    
     let isDefaultProxy: Bool
-
+    
+    var directDialHost: String {
+        useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
+    }
+    
+    var isCancelled: Bool { state.withLock { $0.cancelled } }
+    
     init(
         configuration: ProxyConfiguration,
         tunnel: ProxyConnection? = nil,
@@ -56,23 +49,8 @@ nonisolated final class ProxyClient: Sendable {
         self.isDefaultProxy = isDefaultProxy
     }
 
-    /// Host for direct first-hop dials: the hostname normally, the pre-resolved IP for latency tests.
-    var directDialHost: String {
-        useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
-    }
-
-    /// Whether the client has been torn down. Connect paths that publish a resource mid-dial
-    /// check this and cancel that resource if so; the returned connection is covered by ``deliver``.
-    var isCancelled: Bool { state.withLock { $0.cancelled } }
-
     // MARK: - Delivery / teardown
-
-    /// Runs `dial` and records the delivered connection so ``cancel()`` can reach it; a dial that
-    /// completes after teardown is cancelled and surfaced as a failure. Dial-*failure* cleanup of
-    /// intermediates is structured in the connect methods (`do/catch` for pooled/QUIC resources)
-    /// and, for plain sockets, falls out of ARC — a dropped ``TCPTransport``/``UDPTransport``
-    /// cancels itself in `deinit`. Mid-dial teardown is the flow cancelling the dial task, whose
-    /// `CancellationError` unwinds those same paths.
+    
     private func deliver(_ dial: () async throws -> ProxyConnection) async throws -> ProxyConnection {
         let connection = try await dial()
         let tornDown = state.withLock { s -> Bool in
@@ -95,33 +73,24 @@ nonisolated final class ProxyClient: Sendable {
             || configuration.isXHTTPOverHTTP3
     }
     
-    private var poolsQUICSession: Bool {
-        (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
-            || configuration.outboundProtocol == .hysteria
-    }
-    
-    /// Times the outbound handshake for the default proxy's live stats; matches the former
-    /// `handshakeTimed` decorator (records only on success, skips pooled QUIC sessions).
-    private func withHandshakeTiming(
+    private func withOutboundMetrics(
         _ dial: () async throws -> ProxyConnection
     ) async throws -> ProxyConnection {
-        guard isDefaultProxy, !poolsQUICSession else { return try await dial() }
-        let metric: ConnectionMetrics.Metric = isQUICTransport ? .handshakeNoDial : .handshake
-        var timer = MetricTimer(metric)
-        timer.start()
-        let connection = try await dial()
-        timer.stop()
-        return connection
+        guard isDefaultProxy, let attempt = ConnectionMetrics.shared.beginAttempt() else {
+            return try await dial()
+        }
+        let connection = try await ConnectionMetrics.$currentAttempt.withValue(attempt) {
+            try await dial()
+        }
+        return MeteredProxyConnection(connection, attempt: attempt)
     }
-
-    /// Dials `destinationHost:destinationPort` for a TCP stream, resolving the proxied
-    /// ``ProxyConnection`` or throwing on failure/cancellation.
+    
     func connect(
         to destinationHost: String,
         port destinationPort: UInt16,
         initialData: Data? = nil
     ) async throws -> ProxyConnection {
-        try await withHandshakeTiming {
+        try await withOutboundMetrics {
             try await self.deliver {
                 try await self.connectThroughChainIfNeeded(
                     command: .tcp,
@@ -132,13 +101,12 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-
-    /// Opens a UDP association to `destinationHost:destinationPort`.
+    
     func connectUDP(
         to destinationHost: String,
         port destinationPort: UInt16
     ) async throws -> ProxyConnection {
-        try await withHandshakeTiming {
+        try await withOutboundMetrics {
             try await self.deliver {
                 try await self.connectThroughChainIfNeeded(
                     command: .udp,
@@ -149,10 +117,9 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-
-    /// Opens the protocol's stream multiplexer (VLESS Vision UDP-over-mux, etc.).
+    
     func connectMultiplexer() async throws -> ProxyConnection {
-        try await withHandshakeTiming {
+        try await withOutboundMetrics {
             try await self.deliver {
                 try await self.connectThroughChainIfNeeded(
                     command: .mux,
@@ -212,9 +179,7 @@ nonisolated final class ProxyClient: Sendable {
             initialData: initialData
         )
     }
-
-    /// Per-hop transport commands for a chain wrapped by `outerProtocol`; fails when a
-    /// link can't service what the link above it demands.
+    
     static func computeChainHopCommands(
         chain: [ProxyConfiguration],
         outerProtocol: OutboundProtocol,
@@ -230,8 +195,7 @@ nonisolated final class ProxyClient: Sendable {
 
         return computeChainHopCommands(chain: chain, lastDeliver: lastDeliver)
     }
-
-    /// Variant for chains without a wrapping outer protocol; the caller specifies the last hop's output.
+    
     static func computeChainHopCommands(
         chain: [ProxyConfiguration],
         lastDeliver: ProxyCommand
@@ -256,9 +220,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         return .success(commands)
     }
-
-    /// Builds the chain of hop tunnels sequentially, each dialed over the previous hop.
-    /// Hop clients are registered via `track` (defaulting to `own`) so teardown reaches them.
+    
     @discardableResult
     func buildChainTunnel(
         chain: [ProxyConfiguration],
@@ -270,9 +232,6 @@ nonisolated final class ProxyClient: Sendable {
     ) async throws -> ProxyConnection {
         let resolvedDestination: (host: String, port: UInt16) = finalDestination
             ?? (host: configuration.serverAddress, port: configuration.serverPort)
-        // Default: chain hops are torn down by the delivered connection's `cancel()` cascade
-        // (each hop rides the previous over a `TunneledTransport`), so no per-hop tracking is
-        // needed. Pooled builds pass a `track` that retains hops in the pool instead.
         let resolvedTrack: (ProxyClient) -> Void = track ?? { _ in }
         return try await Self.dialChain(
             chain: chain,
@@ -284,9 +243,7 @@ nonisolated final class ProxyClient: Sendable {
             track: resolvedTrack
         )
     }
-
-    /// Chain build for pooled transports where the pool retains the hops and the
-    /// build may outlive the first caller.
+    
     static func buildDetachedChainTunnel(
         chain: [ProxyConfiguration],
         hopCommands: [ProxyCommand],
@@ -304,10 +261,7 @@ nonisolated final class ProxyClient: Sendable {
             track: track
         )
     }
-
-    /// Self-free sequential hop dial shared by the instance and detached chain builders.
-    /// Replaces the former recursive `dispatchChainHop` with a `for hop in chain` loop:
-    /// each hop dials over the previous hop's tunnel; a throw aborts the remaining hops.
+    
     private static func dialChain(
         chain: [ProxyConfiguration],
         index: Int,
@@ -355,24 +309,15 @@ nonisolated final class ProxyClient: Sendable {
         }
         return tunnel
     }
-
-    /// Tears the client's delivered connection down; its `cancel()` cascade unwinds the whole
-    /// transport chain. A dial still in flight is aborted by the flow cancelling the dial task
-    /// (its `CancellationError` runs the connect methods' cleanup); a dial that *completes* after
-    /// this is torn down by ``deliver(_:)``'s cancelled check. A chain link's inbound tunnel
-    /// belongs to the client that produced it, so it is dropped by reference only.
+    
     func cancel() {
         tearDown()
     }
-
-    /// Connection teardown is synchronous (`cancel()` resolves the transport's teardown promise;
-    /// there is no fd-close to await), so this matches ``cancel()``. Routes through ``tearDown()``
-    /// because in an async context a bare `cancel()` would bind to this async overload and recurse.
+    
     func cancel() async {
         tearDown()
     }
-
-    /// Marks the client cancelled and abortively tears down whatever it has delivered so far.
+    
     private func tearDown() {
         let delivered = state.withLock { s -> ProxyConnection? in
             s.cancelled = true
@@ -1252,6 +1197,10 @@ nonisolated final class ProxyClient: Sendable {
 
     /// Upload-connection factory for combined HTTP/1.1 sessions; the download leg already
     /// consumed any inbound tunnel, so this routes direct or through a fresh chain.
+    ///
+    /// Both branches clear the dial attempt: the factory can be called long after the dial that
+    /// built it — at first upload, or on a pooled socket adopted by another flow — and the
+    /// server's first response belongs to the download leg, which reports it already.
     private func makeXHTTPUploadFactory(
         security: XraySecurityLayer,
         httpVersion: XHTTPHTTPVersion,
@@ -1278,11 +1227,13 @@ nonisolated final class ProxyClient: Sendable {
                 }
             }
             return {
-                guard let lease = await manager.acquire(), let connection = lease.connection as? XHTTPH1Multiplexer else {
-                    throw AnywhereError.transport(.connectionFailed(endpoint: "\(host):\(port)", detail: "xmux H1 upload acquisition failed"))
+                try await ConnectionMetrics.$currentAttempt.withValue(nil) {
+                    guard let lease = await manager.acquire(), let connection = lease.connection as? XHTTPH1Multiplexer else {
+                        throw AnywhereError.transport(.connectionFailed(endpoint: "\(host):\(port)", detail: "xmux H1 upload acquisition failed"))
+                    }
+                    connection.adoptLease(lease)
+                    return connection.sessionTransport
                 }
-                connection.adoptLease(lease)
-                return connection.sessionTransport
             }
         }
 
@@ -1296,7 +1247,9 @@ nonisolated final class ProxyClient: Sendable {
             } else {
                 route = .direct
             }
-            let transport = try await self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route)
+            let transport = try await ConnectionMetrics.$currentAttempt.withValue(nil) {
+                try await self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route)
+            }
             switch transport {
             case .byteStream(let closures):
                 return closures

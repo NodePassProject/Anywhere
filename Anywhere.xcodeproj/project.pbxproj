@@ -160,7 +160,6 @@
 				Networking/DNSResolver.swift,
 				Networking/DNSUpstreamClient.swift,
 				Networking/LatencyTester.swift,
-				Networking/MetricTimer.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexer.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexerPool.swift,
 				Networking/Protocols/AnyTLS/AnyTLSMultiplexerRegistry.swift,

@@ -287,6 +287,8 @@ actor TunnelStack {
         
         loadMITMSetting()
         
+        ConnectionMetrics.shared.setDefaultServer(configuration.id)
+
         publishUDPConfig()
         publishReflector()
         publishOutboundRoutingContext(configuration: configuration)

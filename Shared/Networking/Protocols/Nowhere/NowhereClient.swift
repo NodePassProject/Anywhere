@@ -242,7 +242,7 @@ nonisolated final class NowhereClient: Sendable {
         self.poolKey = poolKey
     }
 
-    private func acquireSession(isDefaultProxy: Bool) async throws -> NowhereSession {
+    private func acquireSession() async throws -> NowhereSession {
         enum Acquired {
             case reuse(NowhereSession)
             case transportSpent
@@ -282,12 +282,7 @@ nonisolated final class NowhereClient: Sendable {
                 self.handleSessionClose(newSession)
             }
 
-            var handshakeTimer = MetricTimer(.handshakeNoDial)
-            handshakeTimer.enabled = isDefaultProxy
-            handshakeTimer.start()
-
             try await newSession.ensureReady()
-            handshakeTimer.stop()
             return newSession
         }
     }
@@ -318,12 +313,11 @@ nonisolated final class NowhereClient: Sendable {
         destination: NowhereProtocol.Target,
         header: NowhereProtocol.FlowHeader,
         initialData: Data?,
-        attempt: NowhereFlowOpenAttempt? = nil,
-        isDefaultProxy: Bool
+        attempt: NowhereFlowOpenAttempt? = nil
     ) async throws -> ProxyConnection {
         let session: NowhereSession
         do {
-            session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+            session = try await acquireSession()
         } catch {
             if Self.isStaleSessionError(error) { invalidateSession() }
             throw error
@@ -353,12 +347,11 @@ nonisolated final class NowhereClient: Sendable {
     func openUDP(
         destination: NowhereProtocol.Target,
         header: NowhereProtocol.FlowHeader,
-        attempt: NowhereFlowOpenAttempt? = nil,
-        isDefaultProxy: Bool
+        attempt: NowhereFlowOpenAttempt? = nil
     ) async throws -> ProxyConnection {
         let session: NowhereSession
         do {
-            session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+            session = try await acquireSession()
         } catch {
             if Self.isStaleSessionError(error) { invalidateSession() }
             throw error

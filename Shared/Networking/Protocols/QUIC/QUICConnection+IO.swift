@@ -16,8 +16,11 @@ extension QUICConnection {
 
     // MARK: Path-aware carrier I/O
     
-    func armReceive(_ carrier: QUICDatagramCarrier, localAddr: sockaddr_storage,
-                            onError: @escaping @Sendable (Int32) -> Void) {
+    func armReceive(
+        _ carrier: QUICDatagramCarrier,
+        localAddr: sockaddr_storage,
+        onError: @escaping @Sendable (Int32) -> Void
+    ) {
         carrier.assumeIsolated {
             $0.startReceiving(
                 onPacket: { [weak self] data in self?.assumeIsolated { $0.handleReceivedPacket(data, localAddr: localAddr) } },
@@ -55,6 +58,11 @@ extension QUICConnection {
     }
     
     func handleReceivedPacket(_ packet: Data, localAddr: sockaddr_storage) {
+        if let dialAttempt {
+            self.dialAttempt = nil
+            dialAttempt.noteServerResponse()
+        }
+
         guard let connectionOpaquePointer else { return }
 
         let ts = currentTimestamp()
@@ -66,8 +74,16 @@ extension QUICConnection {
         let prevBusy = enterConnHeld()
         let rv: Int32 = packet.withUnsafeBytes { raw -> Int32 in
             guard let pointer = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
-            return readPacket(connectionOpaquePointer, localAddr: localAddr, remoteAddr: remoteAddr,
-                              addrLen: addrLen, pktInfo: &pi, data: pointer, count: packet.count, ts: ts)
+            return readPacket(
+                connectionOpaquePointer,
+                localAddr: localAddr,
+                remoteAddr: remoteAddr,
+                addrLen: addrLen,
+                pktInfo: &pi,
+                data: pointer,
+                count: packet.count,
+                ts: ts
+            )
         }
         exitConnHeld(prevBusy)
 
@@ -120,10 +136,17 @@ extension QUICConnection {
                 }
                 return txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                     writeDatagram(
-                        connectionOpaquePointer, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
-                        dest: destination.baseAddress, destCapacity: destination.count,
-                        accepted: &accepted, flags: flags, datagramId: 0,
-                        data: srcPtr, dataLength: datagram.count, ts: ts
+                        connectionOpaquePointer,
+                        chosenLocalAddr: &chosenLocal,
+                        pktInfo: &pi,
+                        dest: destination.baseAddress,
+                        destCapacity: destination.count,
+                        accepted: &accepted,
+                        flags: flags,
+                        datagramId: 0,
+                        data: srcPtr,
+                        dataLength: datagram.count,
+                        ts: ts
                     )
                 }
             }
@@ -168,8 +191,14 @@ extension QUICConnection {
         while true {
             var chosenLocal = sockaddr_storage()
             let nwrite = txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
-                writePacket(connectionOpaquePointer, chosenLocalAddr: &chosenLocal, pktInfo: &pi,
-                            dest: destination.baseAddress, destCapacity: destination.count, ts: ts)
+                writePacket(
+                    connectionOpaquePointer,
+                    chosenLocalAddr: &chosenLocal,
+                    pktInfo: &pi,
+                    dest: destination.baseAddress,
+                    destCapacity: destination.count,
+                    ts: ts
+                )
             }
             if nwrite <= 0 { break }
             sendTxBuf(length: Int(nwrite), to: carrierForOutPath(local: chosenLocal))

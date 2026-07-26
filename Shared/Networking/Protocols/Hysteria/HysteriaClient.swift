@@ -8,9 +8,6 @@
 import Foundation
 import Synchronization
 
-/// Reconnectable wrapper around `HysteriaSession`; dead sessions clear via
-/// `onClose` and callers reconnect on the next acquire. Chained entries are
-/// removed on close because their transport is one-shot.
 nonisolated final class HysteriaClient: Sendable {
 
     private struct Key: Hashable {
@@ -18,14 +15,11 @@ nonisolated final class HysteriaClient: Sendable {
         let port: UInt16
         let sni: String
         let password: String
-        /// Empty for direct entries; colon-joined chain hop IDs otherwise.
         let chainSignature: String
     }
 
     private struct RegistryState {
         var entries: [Key: HysteriaClient] = [:]
-        /// Coalesces concurrent first-time builds for the same key: the leader stores its in-flight
-        /// build task here and every joiner awaits it, so there is no waiter array of continuations.
         var pending: [Key: Task<HysteriaClient, Error>] = [:]
     }
     private static let registry = Mutex(RegistryState())
@@ -50,9 +44,7 @@ nonisolated final class HysteriaClient: Sendable {
             return client
         }
     }
-
-    /// Non-pooled client bound to a per-flow UDP-relay transport (used when
-    /// Hysteria is itself a chain link).
+    
     static func chained(
         configuration: HysteriaConfiguration,
         transport: QUICDatagramTransport
@@ -64,9 +56,7 @@ nonisolated final class HysteriaClient: Sendable {
             poolKey: nil
         )
     }
-
-    /// Pooled chained dial. Shares one client per `(server, chainSignature)`.
-    /// Concurrent cache misses coalesce to a single build.
+    
     static func acquireChained(
         configuration: HysteriaConfiguration,
         chainSignature: String,
@@ -87,7 +77,7 @@ nonisolated final class HysteriaClient: Sendable {
             let task = Task<HysteriaClient, Error> {
                 try await Self.buildChained(key: key, configuration: configuration, builder: builder)
             }
-            state.pending[key] = task           // our task leads; joiners await it
+            state.pending[key] = task
             return .join(task)
         }
         switch decision {
@@ -97,8 +87,7 @@ nonisolated final class HysteriaClient: Sendable {
             return try await task.value
         }
     }
-
-    /// Runs the coalesced build once for the leader; joiners share its result via `task.value`.
+    
     private static func buildChained(
         key: Key,
         configuration: HysteriaConfiguration,
@@ -128,16 +117,12 @@ nonisolated final class HysteriaClient: Sendable {
     }
 
     private let configuration: HysteriaConfiguration
-    /// Set for chained clients; `nil` for direct dials that use the direct UDP carrier.
     private let transport: QUICDatagramTransport?
-    /// Pool-registry key. `nil` for per-call chained clients.
     private let poolKey: Key?
 
     private struct SessionState {
         var session: HysteriaSession? = nil
-        /// `true` once a session has consumed the one-shot chained transport.
         var transportConsumed = false
-        /// Chain hop ProxyClients retained by a pooled chained entry.
         var chainHolders: [ProxyClient]
     }
     private let state: Mutex<SessionState>
@@ -154,7 +139,7 @@ nonisolated final class HysteriaClient: Sendable {
         self.poolKey = poolKey
     }
 
-    private func acquireSession(isDefaultProxy: Bool) async throws -> HysteriaSession {
+    private func acquireSession() async throws -> HysteriaSession {
         enum Acquired {
             case reuse(HysteriaSession)
             case transportSpent
@@ -164,10 +149,7 @@ nonisolated final class HysteriaClient: Sendable {
             if let existing = state.session, !existing.isClosed {
                 return .reuse(existing)
             }
-
-            // Chained transport is one-shot; drop the pool entry inline so acquires
-            // racing `handleSessionClose` don't get this dead client.
-            // Lock order: instance → registry.
+            
             if transport != nil && state.transportConsumed {
                 if let key = poolKey {
                     Self.registry.withLock { registryState in
@@ -197,18 +179,11 @@ nonisolated final class HysteriaClient: Sendable {
                 self.handleSessionClose(newSession)
             }
 
-            var handshakeTimer = MetricTimer(.handshakeNoDial)
-            handshakeTimer.enabled = isDefaultProxy
-            handshakeTimer.start()
-
             try await newSession.ensureReady()
-            handshakeTimer.stop()
             return newSession
         }
     }
-
-    /// Clears the closed session and, for chained entries, cancels chain
-    /// holders and unregisters from the pool. Lock order: instance → registry.
+    
     private func handleSessionClose(_ closedSession: HysteriaSession) {
         let holders: [ProxyClient]? = state.withLock { state in
             guard state.session === closedSession else { return nil }
@@ -230,15 +205,13 @@ nonisolated final class HysteriaClient: Sendable {
             client.cancel()
         }
     }
-
-    // The idle-close timer can fire between the `isClosed` check and stream open; one retry
-    // with a fresh session covers that window. Session acquire and stream open share the budget.
-    func openTCP(destination: String, isDefaultProxy: Bool) async throws -> ProxyConnection {
+    
+    func openTCP(destination: String) async throws -> ProxyConnection {
         var retriesLeft = 1
         while true {
             let session: HysteriaSession
             do {
-                session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+                session = try await acquireSession()
             } catch {
                 if retriesLeft > 0, Self.isStaleSessionError(error) { retriesLeft -= 1; continue }
                 throw error
@@ -255,12 +228,12 @@ nonisolated final class HysteriaClient: Sendable {
         }
     }
 
-    func openUDP(destination: String, isDefaultProxy: Bool) async throws -> ProxyConnection {
+    func openUDP(destination: String) async throws -> ProxyConnection {
         var retriesLeft = 1
         while true {
             let session: HysteriaSession
             do {
-                session = try await acquireSession(isDefaultProxy: isDefaultProxy)
+                session = try await acquireSession()
             } catch {
                 if retriesLeft > 0, Self.isStaleSessionError(error) { retriesLeft -= 1; continue }
                 throw error
@@ -276,9 +249,7 @@ nonisolated final class HysteriaClient: Sendable {
             }
         }
     }
-
-    /// True for failures meaning the cached session went away mid-acquire;
-    /// `udpNotSupported` is excluded as a permanent server-side property.
+    
     private static func isStaleSessionError(_ error: Error) -> Bool {
         guard case AnywhereError.proxy(.hysteria, let failure) = error else { return false }
         switch failure {
@@ -286,9 +257,7 @@ nonisolated final class HysteriaClient: Sendable {
         default: return false
         }
     }
-
-    /// Synchronously drops the cached session. For chained entries also
-    /// cancels chain holders and unregisters from the pool.
+    
     private func invalidateSession() {
         let (current, holders): (HysteriaSession?, [ProxyClient]) = state.withLock { state in
             let current = state.session
@@ -311,9 +280,7 @@ nonisolated final class HysteriaClient: Sendable {
             client.cancel()
         }
     }
-
-    /// Invalidates every pooled session — the kernel tears down UDP sockets
-    /// during sleep, and a reused dead session stalls until ngtcp2's idle timeout.
+    
     static func closeAll() {
         let clients = registry.withLock { state in Array(state.entries.values) }
         for client in clients {

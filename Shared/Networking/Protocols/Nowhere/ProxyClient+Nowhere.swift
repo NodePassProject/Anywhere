@@ -519,15 +519,13 @@ nonisolated extension ProxyClient {
                 destination: destination,
                 header: header,
                 initialData: initialData,
-                attempt: attempt,
-                isDefaultProxy: isDefaultProxy
+                attempt: attempt
             )
         }
         return try await client.openUDP(
             destination: destination,
             header: header,
-            attempt: attempt,
-            isDefaultProxy: isDefaultProxy
+            attempt: attempt
         )
     }
 
@@ -546,15 +544,13 @@ nonisolated extension ProxyClient {
                     destination: destination,
                     header: header,
                     initialData: initialData,
-                    attempt: attempt,
-                    isDefaultProxy: isDefaultProxy
+                    attempt: attempt
                 )
             case .udp:
                 connection = try await client.openUDP(
                     destination: destination,
                     header: header,
-                    attempt: attempt,
-                    isDefaultProxy: isDefaultProxy
+                    attempt: attempt
                 )
             }
         } catch {
