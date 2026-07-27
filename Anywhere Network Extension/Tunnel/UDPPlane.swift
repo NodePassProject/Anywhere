@@ -170,10 +170,8 @@ actor UDPPlane {
         
         let decision = stack.connectionRouter.decision(forIP: dstIPString, port: datagram.dstPort, proto: "UDP")
         
-        if !awaitedResolution, decision.viaDefault, decision.hostIsResolvedDomain,
+        if !awaitedResolution, decision.ipRuleLookupPending,
            FlowGauge.admissionLoad < TunnelLimits.udpFlowAdmissionWatermark,
-           !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed),
-           RuleResolver.shared.cachedIPv4(for: decision.host) == nil,
            deferUntilResolved(datagram, flowKey: flowKey, domain: decision.host) {
             return
         }

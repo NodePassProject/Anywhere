@@ -195,7 +195,8 @@ actor TunnelStack {
             domainRouter: domainRouter,
             requestLog: requestLog,
             defaultRouteTarget: defaultRouteTarget,
-            defaultConfiguration: configuration
+            defaultConfiguration: configuration,
+            preventDNSLeak: connectionRouter.preventDNSLeak.load(ordering: .relaxed)
         ))
     }
     

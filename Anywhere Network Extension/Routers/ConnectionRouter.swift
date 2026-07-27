@@ -22,6 +22,8 @@ nonisolated struct RouteDecision {
     let hostIsResolvedDomain: Bool
     let action: Action
     
+    var ipRuleLookupPending = false
+
     var viaDefault: Bool {
         if case .routeViaDefault = action { return true }
         return false
@@ -94,6 +96,12 @@ nonisolated final class ConnectionRouter: Sendable {
                 }
             } else {
                 RuleResolver.shared.warm(domain)
+                return RouteDecision(
+                    host: domain,
+                    hostIsResolvedDomain: true,
+                    action: .routeViaDefault,
+                    ipRuleLookupPending: true
+                )
             }
         }
 

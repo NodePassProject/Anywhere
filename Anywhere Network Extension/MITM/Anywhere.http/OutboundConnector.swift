@@ -19,18 +19,13 @@ nonisolated enum OutboundConnector {
     }
 
     // MARK: - Ambient Routing Context
-    //
-    // Script `Anywhere.http` fetches are detached, process-lifetime outbound —
-    // not tied to any accepted connection — so they resolve their route against
-    // a context the tunnel publishes at start and clears at stop. A narrow,
-    // read-only snapshot behind a Mutex; the extension runs one tunnel at a time.
-
-    /// The routing inputs a detached dial needs.
+    
     struct RoutingContext {
         let domainRouter: DomainRouter
         let requestLog: RequestLog
         let defaultRouteTarget: RouteTarget
         let defaultConfiguration: ProxyConfiguration?
+        let preventDNSLeak: Bool
 
         func isDefaultConfiguration(_ id: UUID) -> Bool {
             defaultConfiguration?.id == id
@@ -38,8 +33,7 @@ nonisolated enum OutboundConnector {
     }
 
     private static let context = Mutex<RoutingContext?>(nil)
-
-    /// Publishes the active routing context. Called by the tunnel on start/restart.
+    
     static func setRoutingContext(_ context: RoutingContext?) {
         Self.context.withLock { $0 = context }
     }
@@ -49,29 +43,30 @@ nonisolated enum OutboundConnector {
     }
 
     // MARK: - Route resolution
-
-    /// Resolves the route, whether it came from the global default (vs. an explicit
-    /// rule), and the rule set behind an explicit match.
-    static func resolveRoute(host: String) -> (target: RouteTarget, viaDefault: Bool, ruleSetName: String?) {
+    
+    static func resolveRoute(host: String) async -> (target: RouteTarget, viaDefault: Bool, ruleSetName: String?) {
         guard let context = routingContext() else { return (.direct, false, nil) }
         let router = context.domainRouter
 
-        let matched = isIPLiteral(host) ? router.matchIP(host) : router.matchDomain(host)
+        let literal = isIPLiteral(host)
+        let matched = literal ? router.matchIP(host) : router.matchDomain(host)
         if let matched { return (matched.action, false, matched.ruleSetName) }
-
-        // No explicit rule: keep loopback / LAN destinations off any proxy.
+        
         if isLoopbackOrPrivate(host) { return (.direct, false, nil) }
+        
+        if !literal, !context.preventDNSLeak,
+           let ip = await RuleResolver.shared.resolveIPv4(for: host),
+           let ruleMatch = router.matchIP(ip) {
+            return (ruleMatch.action, false, ruleMatch.ruleSetName)
+        }
+
         return (context.defaultRouteTarget, true, nil)
     }
 
     // MARK: - Dial
-
-    /// Resolves the route and dials it (direct or via proxy), returning the live connection.
+    
     static func dial(host: String, port: UInt16) async throws -> Dialed {
-        let (route, viaDefault, ruleSetName) = resolveRoute(host: host)
-        // The only place script `Anywhere.http` fetches reach the Requests log — they're the
-        // extension's own outbound, not captured device traffic. A pooled HTTP/2 connection
-        // logs once per dial, shared across its streams.
+        let (route, viaDefault, ruleSetName) = await resolveRoute(host: host)
         routingContext()?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
         switch route {
         case .reject:
@@ -88,8 +83,7 @@ nonisolated enum OutboundConnector {
             return try await dialProxy(configuration: configuration, host: host, port: port)
         }
     }
-
-    /// The global default route's configuration is carried by the context, not the router's map.
+    
     private static func resolveConfiguration(for route: RouteTarget, context: RoutingContext) -> ProxyConfiguration? {
         if let resolved = context.domainRouter.resolveConfiguration(action: route) { return resolved }
         if route == context.defaultRouteTarget { return context.defaultConfiguration }
@@ -97,8 +91,6 @@ nonisolated enum OutboundConnector {
     }
 
     private static func dialDirect(host: String, port: UInt16) async throws -> Dialed {
-        // Direct dial — not a proxied connection. TCPTransport has no dial timer,
-        // so it stays out of the Dial metric automatically.
         let transport = TCPTransport(host: host, port: port)
         let connection = DirectProxyConnection(transport: transport)
         do {

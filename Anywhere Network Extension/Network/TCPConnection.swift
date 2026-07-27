@@ -395,13 +395,13 @@ actor TCPConnection: MITMSessionHost {
             return
         }
 
-        ruleMatched = true
-
         switch match.action {
         case .direct:
+            ruleMatched = true
             ruleSetName = match.ruleSetName
             routeTarget = .direct
         case .reject:
+            ruleMatched = true
             ruleSetName = match.ruleSetName
             routeTarget = .reject
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
@@ -412,6 +412,7 @@ actor TCPConnection: MITMSessionHost {
                 logger.report("[TCP] SNI route", error: AnywhereError.routing(.configurationMissing(host: sni)))
                 return
             }
+            ruleMatched = true
             ruleSetName = match.ruleSetName
             routeTarget = .proxy(id)
             configuration = resolved
@@ -918,6 +919,14 @@ actor TCPConnection: MITMSessionHost {
         case direct
         case reject
         case proxy(routeTarget: RouteTarget, configuration: ProxyConfiguration)
+
+        var target: RouteTarget {
+            switch self {
+            case .direct: return .direct
+            case .reject: return .reject
+            case .proxy(let target, _): return target
+            }
+        }
     }
 
     // MARK: - MITMSessionHost
@@ -925,7 +934,7 @@ actor TCPConnection: MITMSessionHost {
     func mitmDialUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
         guard !closed else { throw AnywhereError.transport(.notConnected) }
         let route: DialRoute
-        switch commitUpstreamRoute(forDialHost: host, port: port) {
+        switch await commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
             throw AnywhereError.routing(.rejectedByRule(host: host))
         case .direct:
@@ -1055,41 +1064,70 @@ actor TCPConnection: MITMSessionHost {
         }
     }
 
-    private func commitUpstreamRoute(forDialHost host: String, port: UInt16) -> UpstreamRoute {
-        let resolved = resolveUpstreamRoute(forDialHost: host)
-        switch resolved.route {
-        case .direct:
-            routeTarget = .direct
-        case .reject:
-            routeTarget = .reject
-        case .proxy(let target, let configuration):
-            routeTarget = target
-            self.configuration = configuration
+    private func commitUpstreamRoute(forDialHost host: String, port: UInt16) async -> UpstreamRoute {
+        let resolved = await resolveUpstreamRoute(forDialHost: host)
+        if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
+            routeTarget = resolved.route.target
+            if case .proxy(_, let configuration) = resolved.route {
+                self.configuration = configuration
+            }
+            ruleSetName = resolved.ruleSetName
         }
-        ruleSetName = resolved.ruleSetName
-        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: routeTarget, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
+        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: resolved.route.target, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
         return resolved.route
     }
 
-    private func resolveUpstreamRoute(forDialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?) {
-        if let router = stack?.domainRouter, let match = router.matchDomain(host) {
-            switch match.action {
-            case .direct:
-                return (.direct, false, match.ruleSetName)
-            case .reject:
-                return (.reject, false, match.ruleSetName)
-            case .proxy:
-                if let configuration = router.resolveConfiguration(action: match.action) {
-                    return (.proxy(routeTarget: match.action, configuration: configuration), false, match.ruleSetName)
-                }
-                logger.report("[TCP] MITM dial route", error: AnywhereError.routing(.configurationMissing(host: host)))
-            }
+    private func resolveUpstreamRoute(forDialHost host: String) async -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?) {
+        if let router = stack?.domainRouter, let match = router.matchDomain(host),
+           let applied = upstreamRoute(applying: match, dialHost: host) {
+            return applied
         }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
             let route: UpstreamRoute = bypass ? .direct : .proxy(routeTarget: routeTarget, configuration: configuration)
             return (route, !ruleMatched, ruleSetName)
         }
+        if let router = stack?.domainRouter,
+           let ip = await ipRuleCandidate(forDialHost: host),
+           let match = router.matchIP(ip),
+           let applied = upstreamRoute(applying: match, dialHost: host) {
+            return applied
+        }
         return (defaultUpstreamRoute(), true, nil)
+    }
+
+    private func upstreamRoute(applying match: DomainRouter.Match, dialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?)? {
+        switch match.action {
+        case .direct:
+            return (.direct, false, match.ruleSetName)
+        case .reject:
+            return (.reject, false, match.ruleSetName)
+        case .proxy:
+            guard let configuration = stack?.domainRouter.resolveConfiguration(action: match.action) else {
+                logger.report("[TCP] MITM dial route", error: AnywhereError.routing(.configurationMissing(host: host)))
+                return nil
+            }
+            return (.proxy(routeTarget: match.action, configuration: configuration), false, match.ruleSetName)
+        }
+    }
+
+    private func ipRuleCandidate(forDialHost host: String) async -> String? {
+        if let literal = Self.bareIPLiteral(host) { return literal }
+        guard let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed) else { return nil }
+        return await RuleResolver.shared.resolveIPv4(for: host)
+    }
+
+    nonisolated private static func bareIPLiteral(_ host: String) -> String? {
+        let bare: String
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            bare = String(host.dropFirst().dropLast())
+        } else {
+            bare = host
+        }
+        var v4 = in_addr()
+        if inet_pton(AF_INET, bare, &v4) == 1 { return bare }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, bare, &v6) == 1 { return bare }
+        return nil
     }
 
     private func defaultUpstreamRoute() -> UpstreamRoute {
