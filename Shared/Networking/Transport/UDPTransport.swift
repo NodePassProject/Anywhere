@@ -49,7 +49,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         }
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
-        let slot = FlowSlot(.udp, context: "[UDP] \(endpointDescription)")
+        let slot = FlowSlot(context: "[UDP] \(endpointDescription)")
         
         let connection = NetworkConnection(to: endpoint) { UDP() }
 

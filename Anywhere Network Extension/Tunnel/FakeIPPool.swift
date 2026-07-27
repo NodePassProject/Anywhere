@@ -92,16 +92,6 @@ nonisolated final class FakeIPPool: Sendable {
     static func isFakeIP(_ ip: String) -> Bool {
         ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") || ip.hasPrefix("2001:db8::")
     }
-    
-    static func isFakeIP(bytes: UnsafeRawPointer, isIPv6: Bool) -> Bool {
-        let octets = bytes.assumingMemoryBound(to: UInt8.self)
-        if isIPv6 {
-            // 2001:db8::/32, the documentation prefix the pool renders into.
-            return octets[0] == 0x20 && octets[1] == 0x01 && octets[2] == 0x0D && octets[3] == 0xB8
-        }
-        // 198.18.0.0/15.
-        return octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
-    }
 
     static func ipv4Bytes(offset: Int) -> (UInt8, UInt8, UInt8, UInt8) {
         let ip32 = TunnelConstants.fakeIPPoolBaseIPv4 + UInt32(offset)

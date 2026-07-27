@@ -75,6 +75,15 @@ void lwip_bridge_shutdown(void);
  * for a gentler, per-connection close instead. */
 void lwip_bridge_abort_all_tcp(void);
 
+/* Silently discard every active TCP PCB and clear TIME_WAIT: like
+ * lwip_bridge_abort_all_tcp but WITHOUT emitting RST segments, so client
+ * apps are never notified — they discover the dead connection through their
+ * own timers and reconnect. The err callback still fires with ERR_ABRT so
+ * each Swift TCPConnection tears down its outbound leg and balances its
+ * retain. Used by the pressure cap to flush the whole table when a SYN
+ * would exceed it. */
+void lwip_bridge_discard_all_tcp(void);
+
 /* Iterate every active TCP PCB, invoking `fn` with each PCB's Swift
  * callback_arg (the retained TCPConnection, or NULL if already cleared).
  * `next` is captured before each call, so `fn` may gracefully close or abort

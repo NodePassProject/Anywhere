@@ -191,6 +191,7 @@ extension TunnelStack {
         isTearingDown.store(true, ordering: .relaxed)
         lwip_bridge_shutdown()
         isTearingDown.store(false, ordering: .relaxed)
+        FlowGauge.publishTCPTable(0)
         logger.debug("[TunnelStack] Shutdown complete")
     }
     

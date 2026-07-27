@@ -119,6 +119,7 @@ extension TunnelStack {
             }
         }
         lwip_bridge_input_batch_end()
+        FlowGauge.publishTCPTable(Int(lwip_bridge_active_tcp_count()))
         lwipTick?.resume()
     }
 
@@ -130,7 +131,9 @@ extension TunnelStack {
             leewayMs: TunnelConstants.lwipTimeoutLeewayMs
         ) { [weak self] in
             guard let self, self.running.load(ordering: .relaxed) else { return }
-            if lwip_bridge_check_timeouts() != 0 {
+            let idle = lwip_bridge_check_timeouts() != 0
+            FlowGauge.publishTCPTable(Int(lwip_bridge_active_tcp_count()))
+            if idle {
                 self.assumeIsolated { $0.lwipTick?.suspend() }
             }
         }

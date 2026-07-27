@@ -58,7 +58,7 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         }
         let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
-        let slot = FlowSlot(.tcp, context: "[TCP] \(endpointDescription)")
+        let slot = FlowSlot(context: "[TCP] \(endpointDescription)")
         
         let connection = NetworkConnection(to: endpoint) { Self.makeProtocolStack() }
 

@@ -317,6 +317,26 @@ void lwip_bridge_abort_all_tcp(void) {
     }
 }
 
+void lwip_bridge_discard_all_tcp(void) {
+    /* Silent variant of lwip_bridge_abort_all_tcp: tcp_abandon with reset=0
+     * frees the PCB — unacked/unsent/ooseq segments included — without
+     * queueing an RST, so nothing is written back to the client app. The err
+     * callback still fires (ERR_ABRT), so Swift releases each connection's
+     * resources exactly as in the abort path; SYN_RCVD PCBs have no errf yet
+     * and are freed without a callback. tcp_abandon unlinks the PCB from
+     * tcp_active_pcbs, so always take the fresh list head. */
+    while (tcp_active_pcbs != NULL) {
+        tcp_abandon(tcp_active_pcbs, 0);
+    }
+
+    /* TIME_WAIT PCBs carry no Swift connection; remove and free directly. */
+    while (tcp_tw_pcbs != NULL) {
+        struct tcp_pcb *pcb = tcp_tw_pcbs;
+        tcp_pcb_remove(&tcp_tw_pcbs, pcb);
+        tcp_free(pcb);
+    }
+}
+
 void lwip_bridge_for_each_tcp(void (*fn)(void *arg)) {
     if (fn == NULL) return;
     /* Capture `next` before invoking `fn`: a graceful close may keep the PCB

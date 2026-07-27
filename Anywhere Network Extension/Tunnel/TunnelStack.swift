@@ -97,6 +97,7 @@ actor TunnelStack {
     
     let running = Atomic<Bool>(false)
     let isTearingDown = Atomic<Bool>(false)
+    let isPressureFlushing = Atomic<Bool>(false)
     
     var lastRestartTime: CFAbsoluteTime = 0
     var deferredRestartGeneration = 0
@@ -218,9 +219,6 @@ actor TunnelStack {
             "\(TunnelStack.ipAddrToString(srcIP, isIPv6: isIPv6)):\(srcPort)-\(TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)):\(dstPort)"
         }
     }
-    
-    var tcpConnectionCapWarned = false
-    var flowShedWarned = false
     
     nonisolated let domainRouter: DomainRouter
     

@@ -45,12 +45,11 @@ extension TunnelStack {
             }
         }
         
-        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, _, isIPv6 in
-            guard let stack = TunnelStack.lwipHost(), let dstIP else {
+        lwip_bridge_set_tcp_syn_filter_fn { _, _, _, _, _ in
+            guard let stack = TunnelStack.lwipHost() else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
             }
-            let dstIPBox = LWIPRawPointer(raw: dstIP)
-            return stack.assumeIsolated { $0.lwipSynVerdict(dstIP: dstIPBox.raw, isIPv6: isIPv6 != 0) }
+            return stack.assumeIsolated { $0.lwipSynVerdict() }
         }
         
         lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb in
@@ -116,25 +115,15 @@ extension TunnelStack {
         }
     }
     
-    func lwipSynVerdict(dstIP: UnsafeRawPointer, isIPv6: Bool) -> Int32 {
-        let load = FlowGauge.admissionLoad
-        let watermark = FakeIPPool.isFakeIP(bytes: dstIP, isIPv6: isIPv6)
-            ? TunnelLimits.flowBudget
-            : TunnelLimits.flowPressureWatermark
-
-        guard load >= watermark else {
-            if flowShedWarned, load < TunnelLimits.flowPressureWatermark {
-                flowShedWarned = false
-                logger.info("[TCP] flow budget recovered; admitting SYNs")
-            }
-            return Int32(LWIP_BRIDGE_SYN_PASS)
+    func lwipSynVerdict() -> Int32 {
+        let activeTCP = Int(lwip_bridge_active_tcp_count())
+        if activeTCP >= TunnelLimits.tcpMaxConnections {
+            logger.warning("[TCP] Connection cap reached (\(activeTCP)/\(TunnelLimits.tcpMaxConnections))")
+            isPressureFlushing.store(true, ordering: .relaxed)
+            lwip_bridge_discard_all_tcp()
+            isPressureFlushing.store(false, ordering: .relaxed)
         }
-
-        if !flowShedWarned {
-            flowShedWarned = true
-            logger.warning("[TCP] flow budget exhausted; dropping new SYNs")
-        }
-        return Int32(LWIP_BRIDGE_SYN_DROP)
+        return Int32(LWIP_BRIDGE_SYN_PASS)
     }
     
     func lwipAccept(
@@ -148,17 +137,6 @@ extension TunnelStack {
             return nil
         }
         
-        let activeTCP = Int(lwip_bridge_active_tcp_count())
-        if activeTCP > TunnelLimits.tcpMaxConnections {
-            if !tcpConnectionCapWarned {
-                tcpConnectionCapWarned = true
-                logger.warning("[TCP] Connection table at capacity (\(TunnelLimits.tcpMaxConnections)); refusing new connections to bound memory")
-            }
-            return nil
-        } else if tcpConnectionCapWarned && activeTCP < TunnelLimits.tcpMaxConnections * 3 / 4 {
-            tcpConnectionCapWarned = false
-        }
-
         let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
         let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
 

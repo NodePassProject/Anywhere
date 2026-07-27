@@ -21,7 +21,9 @@ actor UDPPlane {
     
     // MARK: Registry / session state
     
-    private var flows: [TunnelStack.UDPFlowKey: UDPFlow] = [:]
+    private var flows: [TunnelStack.UDPFlowKey: UDPFlow] = [:] {
+        didSet { FlowGauge.publishUDPTable(flows.count) }
+    }
     
     private struct PendingDatagrams {
         var datagrams: [UDPPacket.Inbound] = []
@@ -32,10 +34,7 @@ actor UDPPlane {
     private var ssSessions: [UUID: ShadowsocksUDPSession] = [:]
     
     private var multiplexerPoolStorage: VLESSVisionUDPMultiplexerPool?
-    
-    private var flowCapWarned = false
-    private var shedWarned = false
-    private var pressureShedding = false
+
     private var pendingResolutionCapWarned = false
     
     init(stack: TunnelStack) {
@@ -171,7 +170,6 @@ actor UDPPlane {
         let decision = stack.connectionRouter.decision(forIP: dstIPString, port: datagram.dstPort, proto: "UDP")
         
         if !awaitedResolution, decision.ipRuleLookupPending,
-           FlowGauge.admissionLoad < TunnelLimits.udpFlowAdmissionWatermark,
            deferUntilResolved(datagram, flowKey: flowKey, domain: decision.host) {
             return
         }
@@ -215,20 +213,6 @@ actor UDPPlane {
             return
         }
         
-        let sheddingNewFlows = FlowGauge.admissionLoad >= TunnelLimits.udpFlowAdmissionWatermark
-        if sheddingNewFlows {
-            if datagram.dstPort != 53 {
-                if !shedWarned {
-                    shedWarned = true
-                    logger.warning("[UDP] dropping new flows: kernel flow pressure [flows=\(FlowGauge.live) udp=\(FlowGauge.liveUDP)]")
-                }
-                return
-            }
-        } else if shedWarned {
-            shedWarned = false
-            logger.info("[UDP] flow pressure recovered; admitting new flows")
-        }
-        
         stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: decision.viaDefault, ruleSetName: ruleSetName)
         
         let flow = UDPFlow(
@@ -245,71 +229,39 @@ actor UDPPlane {
             configuration: flowConfiguration,
             routeTarget: routeTarget
         )
-        evictUDPFlowsToAdmit()
+        flushAllFlowsIfAtCap()
         flows[flowKey] = flow
         Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
     }
-    
+
     // MARK: - Flow registry
-    
+
     func remove(_ flow: UDPFlow) {
         if flows[flow.flowKey] === flow {
             flows.removeValue(forKey: flow.flowKey)
         }
     }
     
-    private func currentUDPFlowCap() -> Int {
-        let load = FlowGauge.admissionLoad
-        if pressureShedding {
-            if load < TunnelLimits.flowPressureExitWatermark {
-                pressureShedding = false
-                return TunnelLimits.udpMaxFlows
-            }
-            return TunnelLimits.udpMaxFlowsUnderPressure
+    private func flushAllFlowsIfAtCap() {
+        guard flows.count >= TunnelLimits.udpMaxFlows else { return }
+        logger.warning("[UDP] Flow cap reached (\(flows.count)/\(TunnelLimits.udpMaxFlows)); silently flushing all UDP flows, clients will retry")
+        let all = Array(flows.values)
+        flows.removeAll()
+        for flow in all {
+            Task { await flow.close() }
         }
-        if load >= TunnelLimits.flowPressureWatermark {
-            pressureShedding = true
-            return TunnelLimits.udpMaxFlowsUnderPressure
-        }
-        return TunnelLimits.udpMaxFlows
+        pendingResolutions.removeAll()
+        pendingResolutionCapWarned = false
+        purgeShadowsocksUDPSessions()
     }
-    
-    private func evictUDPFlowsToAdmit() {
-        let cap = currentUDPFlowCap()
-        guard flows.count >= cap else { return }
-        if !flowCapWarned {
-            flowCapWarned = true
-            logger.warning("[UDP] Flow table at capacity (\(cap)); evicting flows with least time left to bound memory")
-        }
-        shedUDPFlows(count: flows.count - cap + 1)
-    }
-    
-    private func shedUDPFlows(count: Int) {
-        let shedCount = min(count, TunnelLimits.udpShedBatchLimit)
-        guard shedCount > 0 else { return }
-        let victims = flows.values.sorted { $0.idleDeadline < $1.idleDeadline }.prefix(shedCount)
-        for victim in victims {
-            Task { await victim.close() }
-            if flows[victim.flowKey] === victim {
-                flows.removeValue(forKey: victim.flowKey)
-            }
-        }
-    }
-    
+
     // MARK: - Cleanup
-    
+
     func cleanup() {
         let now = MonotonicClock.now
         for (key, flow) in flows where now > flow.idleDeadline {
             Task { await flow.close() }
             flows.removeValue(forKey: key)
-        }
-        let cap = currentUDPFlowCap()
-        if flows.count > cap {
-            shedUDPFlows(count: flows.count - cap)
-        }
-        if flowCapWarned && flows.count < cap {
-            flowCapWarned = false
         }
     }
     
@@ -483,7 +435,7 @@ actor UDPPlane {
             configuration: flowConfiguration,
             routeTarget: routeTarget
         )
-        evictUDPFlowsToAdmit()
+        flushAllFlowsIfAtCap()
         flows[flowKey] = flow
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(datagram.dstPort) via \(flowConfiguration.name)")
         Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }

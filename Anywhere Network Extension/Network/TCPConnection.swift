@@ -106,10 +106,8 @@ actor TCPConnection: MITMSessionHost {
 
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
 
-    private var pendingAdmissionCounted = true
-
     // MARK: Lifecycle
-    
+
     init(
         stack: TunnelStack,
         pcb: LWIPPCBHandle, dstHost: String, dstPort: UInt16,
@@ -120,7 +118,6 @@ actor TCPConnection: MITMSessionHost {
         hostIsResolvedDomain: Bool = false,
         bridge: LWIPConcurrencyBridge
     ) {
-        FlowGauge.incrementPendingTCP()
         self.stack = stack
         self.pcb = pcb.raw
         self.dstHost = dstHost
@@ -160,12 +157,6 @@ actor TCPConnection: MITMSessionHost {
                 }
             }
         }
-    }
-
-    deinit {
-        guard pendingAdmissionCounted else { return }
-        FlowGauge.decrementPendingTCP()
-        logger.error("[TCP] Connection deallocated with its admission still counted — teardown never ran. Recovered the FlowGauge count in deinit; a teardown path has regressed.")
     }
 
     // MARK: - Lifecycle flow
@@ -452,8 +443,6 @@ actor TCPConnection: MITMSessionHost {
     // MARK: Direct connection (bypass)
 
     private func connectDirect() async -> Establishment {
-        settlePendingAdmission()
-
         let initialData: Data? = pendingData.isEmpty ? nil : pendingData
         if initialData != nil {
             pendingData.removeAll(keepingCapacity: true)
@@ -494,8 +483,6 @@ actor TCPConnection: MITMSessionHost {
     // MARK: Proxy connection
 
     private func connectProxy() async -> Establishment {
-        settlePendingAdmission()
-
         // Protocol-specific policy selects the prefix that can ride the opening write.
         let initialData: Data?
         let prefixLength = configuration.outboundProtocol.initialDataPolicy.prefixLength(
@@ -766,6 +753,10 @@ actor TCPConnection: MITMSessionHost {
         } else if err == -13, stack?.isTearingDown.load(ordering: .relaxed) == true {
             // ERR_ABRT during deliberate teardown; otherwise it's an lwIP pressure abort and warns below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
+        } else if err == -13, stack?.isPressureFlushing.load(ordering: .relaxed) == true {
+            // ERR_ABRT from the pressure-cap flush: expected for every live
+            // connection at once, and already announced by one warning there.
+            logger.debug("[TCP] Connection flushed by pressure cap: \(endpointDescription)")
         } else {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }
@@ -781,12 +772,6 @@ actor TCPConnection: MITMSessionHost {
 
     private func reportFailure(_ operation: String, error: Error) {
         failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
-    }
-
-    private func settlePendingAdmission() {
-        guard pendingAdmissionCounted else { return }
-        pendingAdmissionCounted = false
-        FlowGauge.decrementPendingTCP()
     }
 
     // MARK: - Idle timer
@@ -858,7 +843,6 @@ actor TCPConnection: MITMSessionHost {
 
     private func startMITMSession() -> Establishment {
         guard let stack else { abort(); return .done }
-        settlePendingAdmission()
         let sni = mitmSNI ?? dstHost
 
         let cache: MITMLeafCertCache?
@@ -1224,8 +1208,6 @@ actor TCPConnection: MITMSessionHost {
     }
     
     private func teardown(abortive: Bool) {
-        settlePendingAdmission()
-        
         for (_, waiter) in dialWaiters {
             waiter.resume(throwing: AnywhereError.transport(.terminated))
         }

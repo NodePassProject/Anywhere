@@ -35,7 +35,7 @@ actor QUICDatagramCarrier {
 
     private var ready = false
     private var closed = false
-    private var flowCounted = false
+    private var flowSlot: FlowSlot?
     
     private var cachedInterfaceType: NWInterface.InterfaceType?
 
@@ -46,10 +46,6 @@ actor QUICDatagramCarrier {
 
     deinit {
         driverTask?.cancel()
-        guard flowCounted else { return }
-        flowCounted = false
-        FlowGauge.decrementUDP()
-        logger.error("[QUIC] Datagram carrier deallocated without close() — recovered the FlowGauge count in deinit; a close() path has regressed.")
     }
     
     var currentInterfaceType: NWInterface.InterfaceType? {
@@ -64,8 +60,7 @@ actor QUICDatagramCarrier {
         }
         Self.fillAnyLocalAddr(&localAddr, family: remoteAddr.ss_family)
 
-        FlowGauge.incrementUDP()
-        flowCounted = true
+        flowSlot = FlowSlot(context: "[QUIC] Datagram carrier")
 
         let connection = NetworkConnection(to: endpoint) { UDP() }
         let bridge = bridge
@@ -150,7 +145,7 @@ actor QUICDatagramCarrier {
     func close() {
         guard !closed else { return }
         closed = true
-        releaseFlowCount()
+        releaseFlowSlot()
         udpConnection = nil
         driverTask?.cancel()
         driverTask = nil
@@ -187,7 +182,7 @@ actor QUICDatagramCarrier {
         }
         bridge.enqueue { carrier.value?.assumeIsolated {
             $0.udpConnection = nil
-            $0.releaseFlowCount()
+            $0.releaseFlowSlot()
         } }
     }
     
@@ -286,10 +281,9 @@ actor QUICDatagramCarrier {
         handler(code)
     }
     
-    private func releaseFlowCount() {
-        guard flowCounted else { return }
-        flowCounted = false
-        FlowGauge.decrementUDP()
+    private func releaseFlowSlot() {
+        flowSlot?.release()
+        flowSlot = nil
     }
 
     // MARK: - Address conversion

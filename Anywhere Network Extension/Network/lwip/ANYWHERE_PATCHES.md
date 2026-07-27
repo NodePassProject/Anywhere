@@ -248,10 +248,15 @@ The filter pointer is declared in `tcp_priv.h`
 
 **Why:** `tcp_accept_cb` fires only after the final ACK, so by the time
 the host sees a connection a pcb exists and the handshake is paid for.
-The filter is the one place a SYN can be shed while it is still free,
-which is what `lwipSynVerdict` uses to hold new flows against the flow
-gauge under pressure. Fake-IP destinations stand for domains and draw on
-the fuller budget; raw-IP flows are shed first.
+The filter is the one place a SYN can be observed before lwIP allocates
+anything for it, which is what `lwipSynVerdict` uses to enforce the
+pressure cap: when the active-PCB count has reached
+`TunnelLimits.tcpMaxConnections`, it flushes the entire table
+(`lwip_bridge_discard_all_tcp`, silent `tcp_abandon` — no RST) and then
+PASSes the SYN into the now-empty table. Running before `tcp_alloc`
+means the flush can free every PCB while lwIP holds no reference to any
+of them on the stack; only the LISTEN pcb is live at the call site, and
+the flush never touches listeners.
 
 **What is unaffected:**
 
