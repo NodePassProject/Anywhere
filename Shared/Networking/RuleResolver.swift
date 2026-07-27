@@ -19,13 +19,8 @@ nonisolated final class RuleResolver: Sendable {
     
     static let lookupDeadline: Duration = .seconds(4)
 
-    private enum Outcome {
-        case address(String)
-        case failed
-    }
-
     private struct Entry {
-        let outcome: Outcome
+        let ip: String
         let expiry: CFAbsoluteTime
     }
 
@@ -48,10 +43,8 @@ nonisolated final class RuleResolver: Sendable {
     func cachedIPv4(for domain: String) -> String? {
         let key = Self.key(for: domain)
         return state.withLock { state in
-            guard let entry = state.cache[key], entry.expiry > CFAbsoluteTimeGetCurrent(),
-                  case .address(let ip) = entry.outcome
-            else { return nil }
-            return ip
+            guard let entry = state.cache[key], entry.expiry > CFAbsoluteTimeGetCurrent() else { return nil }
+            return entry.ip
         }
     }
     
@@ -85,17 +78,14 @@ nonisolated final class RuleResolver: Sendable {
     // MARK: - Internal
 
     private enum Action {
-        case cached(String?)
+        case cached(String)
         case join(Task<String?, Never>)
     }
-    
+
     private func lookupAction(for key: String) -> Action {
         state.withLock { state in
             if let entry = state.cache[key], entry.expiry > CFAbsoluteTimeGetCurrent() {
-                switch entry.outcome {
-                case .address(let ip): return .cached(ip)
-                case .failed: return .cached(nil)
-                }
+                return .cached(entry.ip)
             }
             if let existing = state.inFlight[key] {
                 return .join(existing)          // await the in-flight leader
@@ -130,7 +120,9 @@ nonisolated final class RuleResolver: Sendable {
         state.withLock { state in
             guard scheduledGeneration == state.generation else { return }
             state.inFlight[key] = nil
-            Self.store(&state, key: key, outcome: ip.map(Outcome.address) ?? .failed)
+            if let ip {
+                Self.store(&state, key: key, ip: ip)
+            }
         }
         if let ip {
             logger.debug("[RuleResolver] Resolved \(key) → \(ip) for IP-rule matching")
@@ -150,10 +142,10 @@ nonisolated final class RuleResolver: Sendable {
         }
     }
     
-    private static func store(_ state: inout State, key: String, outcome: Outcome) {
+    private static func store(_ state: inout State, key: String, ip: String) {
         let now = CFAbsoluteTimeGetCurrent()
         if state.cache[key] == nil { state.order.append(key) }
-        state.cache[key] = Entry(outcome: outcome, expiry: now + Self.entryTTL)
+        state.cache[key] = Entry(ip: ip, expiry: now + Self.entryTTL)
 
         if state.cache.contains(where: { $0.value.expiry <= now }) {
             state.cache = state.cache.filter { $0.value.expiry > now }
