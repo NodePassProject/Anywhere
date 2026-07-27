@@ -35,7 +35,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         private let inbox = AsyncInbox<Data>()
         private struct State {
             var closed = false
-            var receiveClosed = false
             weak var host: MITMSessionHost?
         }
         private let state = Mutex(State())
@@ -60,8 +59,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             }
         }
 
-        func finishSend() async throws { }
-
         func receive() async throws -> TransportChunk {
             if let next = try await inbox.next() { return .bytes(next) }
             return .end
@@ -75,13 +72,8 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         // MARK: External Inputs
 
         func feedFromClient(_ data: Data) {
-            guard !state.withLock({ $0.closed || $0.receiveClosed }) else { return }
+            guard !state.withLock({ $0.closed }) else { return }
             inbox.yield(data)
-        }
-
-        func endOfClient() {
-            state.withLock { $0.receiveClosed = true }
-            inbox.finish()
         }
     }
 
@@ -435,15 +427,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 return
             }
             pendingClientBytes.append(data)
-        }
-    }
-
-    func clientDidClose() {
-        guard !torn else { return }
-        if innerRecord != nil {
-            innerTransport.endOfClient()
-        } else {
-            cancel(error: nil)
         }
     }
 

@@ -186,8 +186,6 @@ nonisolated final class WebSocketConnection: Sendable {
                     let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
                     try? await transport.send(closeFrame)
                     state.withLock { $0.isConnected = false }
-                    // A normal (1000) or no-status (1005) close is a graceful end-of-stream, not a
-                    // failure — surface it as EOF so callers half-close instead of resetting.
                     if code == 1000 || code == 1005 {
                         return nil
                     }

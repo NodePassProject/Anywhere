@@ -45,9 +45,8 @@ actor TCPConnection: MITMSessionHost {
     private var pendingData = Data()
     private var closed = false
     
-    private enum EstablishSignal: Sendable { case data, clientFIN }
     private var establishing = true
-    private let establishInbox = AsyncInbox<EstablishSignal>()
+    private let establishInbox = AsyncInbox<Void>()
     
     // MARK: MITM
 
@@ -76,10 +75,8 @@ actor TCPConnection: MITMSessionHost {
     private nonisolated let lastActivityTick = Atomic<TimeInterval>(0)
     private nonisolated let idlePoke = AsyncInbox<Void>(capacity: 1)
 
-    // MARK: - Half-close
+    // MARK: - Deferred close
 
-    private var uplinkDone = false
-    private var downlinkDone = false
     private var closePending = false
 
     // MARK: - Nursery jobs
@@ -252,10 +249,6 @@ actor TCPConnection: MITMSessionHost {
         sniffer != nil || httpSniffer != nil
     }
 
-    private var initialIdleTimeout: TimeInterval {
-        uplinkDone ? TunnelConstants.downlinkOnlyTimeout : TunnelConstants.connectionIdleTimeout
-    }
-
     private var mitmCanInterceptPlaintext: Bool {
         stack?.mitmEnabled == true
     }
@@ -291,17 +284,7 @@ actor TCPConnection: MITMSessionHost {
         while true {
             feedSniffState()
             if closed || !isSniffing { return }
-            let signal: EstablishSignal?
-            do {
-                signal = try await establishInbox.next()
-            } catch {
-                return
-            }
-            guard let signal else { return }
-            if case .clientFIN = signal {
-                handleFINDuringSniff()
-                return
-            }
+            if (try? await establishInbox.next()) == nil { return }
         }
     }
     
@@ -363,14 +346,6 @@ actor TCPConnection: MITMSessionHost {
         }
     }
     
-    private func handleFINDuringSniff() {
-        sniffer = nil
-        httpSniffer = nil
-        if pendingData.isEmpty {
-            close()
-        }
-    }
-
     private func applySNI(_ sni: String) {
         guard let stack else { return }
         sniffedSNI = sni
@@ -574,7 +549,6 @@ actor TCPConnection: MITMSessionHost {
         startRelaySetup(connection, stream: stream, seed: seed)
         let context = RelayContext(stack: stack, routeTarget: routeTarget)
         await runRelay(connection, stream: stream, context: context)
-        relayFinished()
     }
 
     private func startRelaySetup(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) {
@@ -591,7 +565,6 @@ actor TCPConnection: MITMSessionHost {
             }
         }
         if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
-        if uplinkDone { stream.assumeIsolated { $0.deliverUploadEOF() } }
     }
 
     private struct RelayContext: Sendable {
@@ -604,6 +577,8 @@ actor TCPConnection: MITMSessionHost {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.runUploadRelay(connection, stream, context: context) }
             group.addTask { await self.runDownloadRelay(connection, stream, context: context) }
+            await group.next()
+            await self.relayFinished()
         }
     }
 
@@ -633,7 +608,10 @@ actor TCPConnection: MITMSessionHost {
                 await relayFailed("Receive", error: error)
                 return
             }
-            guard let data, !data.isEmpty else { break }
+            guard let data, !data.isEmpty else {
+                await boundDownlinkDrain()
+                break
+            }
             if stream.canPushDownload {
                 stream.pushDownload(data)
             } else {
@@ -649,20 +627,18 @@ actor TCPConnection: MITMSessionHost {
             markActivity()
             context.stack?.addBytesIn(Int64(data.count), target: context.routeTarget)
         }
-        await downlinkReachedEOF()
         await stream.awaitDownloadDrained()
+    }
+
+    private func boundDownlinkDrain() {
+        guard !closed else { return }
+        setIdleTimeout(TunnelConstants.drainBeforeCloseTimeout)
     }
 
     private func relayFailed(_ operation: String, error: Error) {
         guard !closed else { return }
         reportFailure(operation, error: error)
         abort()
-    }
-
-    private func downlinkReachedEOF() {
-        guard !closed else { return }
-        downlinkDone = true
-        if !uplinkDone { setIdleTimeout(TunnelConstants.uplinkOnlyTimeout) }
     }
 
     private func relayFinished() {
@@ -704,7 +680,7 @@ actor TCPConnection: MITMSessionHost {
         }
         
         guard appendPendingData(bytes: bytePtr, count: count) else { return }
-        establishInbox.yield(.data)
+        establishInbox.yield(())
     }
 
     @discardableResult
@@ -726,22 +702,7 @@ actor TCPConnection: MITMSessionHost {
 
     func handleRemoteClose() {
         guard !closed else { return }
-
-        if establishing {
-            uplinkDone = true
-            establishInbox.yield(.clientFIN)
-            return
-        }
-        
-        mitmSession?.assumeIsolated { $0.clientDidClose() }
-
-        uplinkDone = true
-        if let stream {
-            stream.assumeIsolated { $0.deliverUploadEOF() }
-            if !downlinkDone { setIdleTimeout(TunnelConstants.downlinkOnlyTimeout) }
-        } else if !downlinkDone {
-            setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
-        }
+        close()
     }
 
     func handleError(err: Int32) {
@@ -777,7 +738,7 @@ actor TCPConnection: MITMSessionHost {
     // MARK: - Idle timer
 
     private func startIdleTimer() {
-        idleTimeoutValue = initialIdleTimeout
+        idleTimeoutValue = TunnelConstants.connectionIdleTimeout
         markActivity()
         idleActive = true
         idlePoke.yield(())
@@ -801,6 +762,7 @@ actor TCPConnection: MITMSessionHost {
             close()
             return
         }
+        idlePoke.yield(())
     }
 
     private enum IdleAction { case stop, waitActivation, sleep(TimeInterval), fire }
@@ -832,10 +794,19 @@ actor TCPConnection: MITMSessionHost {
             case .waitActivation:
                 if (try? await idlePoke.next()) == nil { return }
             case .sleep(let seconds):
-                try? await Task.sleep(for: .seconds(seconds))
+                await idleSleep(seconds)
             case .fire:
                 if await idleFireAndReport() { return }
             }
+        }
+    }
+    
+    private nonisolated func idleSleep(_ seconds: TimeInterval) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { try? await Task.sleep(for: .seconds(seconds)) }
+            group.addTask { _ = try? await self.idlePoke.next() }
+            defer { group.cancelAll() }
+            _ = await group.next()
         }
     }
 
@@ -1129,7 +1100,7 @@ actor TCPConnection: MITMSessionHost {
         guard !closed else { return }
         guard stream != nil else { close(); return }
         closePending = true
-        setIdleTimeout(TunnelConstants.downlinkOnlyTimeout)
+        setIdleTimeout(TunnelConstants.drainBeforeCloseTimeout)
         nurseryJobContinuation.yield(.drainThenClose)
     }
 

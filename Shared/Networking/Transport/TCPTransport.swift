@@ -95,15 +95,6 @@ nonisolated final class TCPTransport: ByteTransport, Sendable {
         }
     }
 
-    func finishSend() async throws {
-        let connection = try activeConnection()
-        do {
-            try await connection.send(Data(), endOfStream: true)
-        } catch {
-            throw latchedFailure() ?? AnywhereError.networkFailure(error, op: .send)
-        }
-    }
-
     func receive() async throws -> TransportChunk {
         while true {
             if state.withLock({ $0.eofLatched }) { return .end }

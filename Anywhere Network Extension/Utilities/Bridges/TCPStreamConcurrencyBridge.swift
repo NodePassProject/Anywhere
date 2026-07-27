@@ -24,7 +24,6 @@ actor TCPStreamConcurrencyBridge {
     // MARK: Upload (app → upstream)
 
     private var uploadBuffer = Data()
-    private var uploadEOF = false
     private var uploadWaiter: CheckedContinuation<Void, Never>?
 
     // MARK: Download (upstream → app)
@@ -53,12 +52,6 @@ actor TCPStreamConcurrencyBridge {
     func deliverUpload(_ bytes: Data) {
         guard !terminated, !bytes.isEmpty else { return }
         uploadBuffer.append(bytes)
-        resumeUploadWaiter()
-    }
-    
-    func deliverUploadEOF() {
-        guard !terminated else { return }
-        uploadEOF = true
         resumeUploadWaiter()
     }
     
@@ -105,7 +98,6 @@ actor TCPStreamConcurrencyBridge {
                 uploadBuffer = Data()
                 return chunk
             }
-            if uploadEOF { return nil }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 uploadWaiter = continuation
             }

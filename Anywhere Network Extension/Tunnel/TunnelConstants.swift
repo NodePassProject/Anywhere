@@ -23,13 +23,8 @@ nonisolated enum TunnelConstants {
 
     /// Inactivity timeout for TCP connections.
     static let connectionIdleTimeout: TimeInterval = 300
-    /// Idle timeout once the app has FIN'd but the remote may still respond;
-    /// each downlink chunk refreshes it. Doubles as the stall bound for
-    /// TCPConnection's drain-before-close flush.
-    static let downlinkOnlyTimeout: TimeInterval = 5
-    /// Idle timeout once the remote EOF'd (forwarded to the app as a FIN) while
-    /// the app is still uploading; bounds apps that hold the socket open.
-    static let uplinkOnlyTimeout: TimeInterval = 5
+    /// Stall bound for TCPConnection's drain-before-close flush.
+    static let drainBeforeCloseTimeout: TimeInterval = 5
     /// Timeout for the entire connection setup phase.
     static let handshakeTimeout: TimeInterval = 10
     /// Max wait for a TLS ClientHello before falling back to IP-based routing,
