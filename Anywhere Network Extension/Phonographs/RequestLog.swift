@@ -13,9 +13,7 @@ nonisolated final class RequestLog: Sendable {
     typealias Entry = TunnelRequestEntry
 
     private let entries = Mutex<[Entry]>([])
-
-    /// Records one routing decision; `host` is the domain if known, else the IP literal.
-    /// `ruleSetName` names the rule set behind the decision, nil for default routes.
+    
     func record(
         protocol: TunnelRequestProtocol,
         host: String,

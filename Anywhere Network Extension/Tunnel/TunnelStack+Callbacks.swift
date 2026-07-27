@@ -193,15 +193,6 @@ extension TunnelStack {
 
         let dstHost = decision.host
 
-        requestLog.record(
-            protocol: .tcp,
-            host: dstHost,
-            port: dstPort,
-            routeTarget: routeTarget,
-            viaDefault: decision.viaDefault,
-            ruleSetName: ruleSetName
-        )
-        
         var sniffSNI = !decision.hostIsResolvedDomain
         if mitmEnabled && mitmPolicy.matches(dstHost) {
             sniffSNI = true

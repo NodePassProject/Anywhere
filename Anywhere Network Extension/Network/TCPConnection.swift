@@ -32,8 +32,6 @@ actor TCPConnection: MITMSessionHost {
     
     private var rootTask: Task<Void, Never>?
 
-    private let acceptedViaDefault: Bool
-
     private var routeTarget: RouteTarget
     private var ruleSetName: String?
     
@@ -61,10 +59,11 @@ actor TCPConnection: MITMSessionHost {
     private let hostIsResolvedDomain: Bool
 
     // MARK: SNI / HTTP Sniffing
-    
+
     private var sniffer: TLSClientHelloSniffer?
     private var httpSniffer: HTTPRequestSniffer?
     private var sniffFedOffset = 0
+    private var sniffedSNI: String?
 
     // MARK: Relay
 
@@ -129,7 +128,6 @@ actor TCPConnection: MITMSessionHost {
         self.configuration = configuration
         self.bridge = bridge
         self.routeTarget = routeTarget
-        self.acceptedViaDefault = viaDefault
         self.ruleMatched = !viaDefault
         self.ruleSetName = ruleSetName
         self.hostIsResolvedDomain = hostIsResolvedDomain
@@ -240,7 +238,6 @@ actor TCPConnection: MITMSessionHost {
             ruleMatched = true
             ruleSetName = match.ruleSetName
             routeTarget = .direct
-            stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .direct, ruleSetName: match.ruleSetName)
         case .reject:
             ruleMatched = true
             ruleSetName = match.ruleSetName
@@ -257,7 +254,6 @@ actor TCPConnection: MITMSessionHost {
             ruleSetName = match.ruleSetName
             routeTarget = .proxy(id)
             configuration = resolved
-            stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .proxy(id), ruleSetName: match.ruleSetName)
         }
     }
 
@@ -386,6 +382,7 @@ actor TCPConnection: MITMSessionHost {
 
     private func applySNI(_ sni: String) {
         guard let stack else { return }
+        sniffedSNI = sni
 
         if stack.mitmEnabled, stack.mitmPolicy.matches(sni) {
             mitmEnabled = true
@@ -404,7 +401,6 @@ actor TCPConnection: MITMSessionHost {
         case .direct:
             ruleSetName = match.ruleSetName
             routeTarget = .direct
-            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .direct, ruleSetName: match.ruleSetName)
         case .reject:
             ruleSetName = match.ruleSetName
             routeTarget = .reject
@@ -419,7 +415,6 @@ actor TCPConnection: MITMSessionHost {
             ruleSetName = match.ruleSetName
             routeTarget = .proxy(id)
             configuration = resolved
-            stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .proxy(id), ruleSetName: match.ruleSetName)
         }
     }
 
@@ -439,6 +434,14 @@ actor TCPConnection: MITMSessionHost {
         if mitmEnabled {
             return startMITMSession()
         }
+        stack?.requestLog.record(
+            protocol: .tcp,
+            host: sniffedSNI ?? dstHost,
+            port: dstPort,
+            routeTarget: routeTarget,
+            viaDefault: !ruleMatched,
+            ruleSetName: ruleSetName
+        )
         if bypass {
             return await connectDirect()
         }
@@ -1084,7 +1087,7 @@ actor TCPConnection: MITMSessionHost {
         }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
             let route: UpstreamRoute = bypass ? .direct : .proxy(routeTarget: routeTarget, configuration: configuration)
-            return (route, acceptedViaDefault, ruleSetName)
+            return (route, !ruleMatched, ruleSetName)
         }
         return (defaultUpstreamRoute(), true, nil)
     }
