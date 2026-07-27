@@ -278,7 +278,7 @@
 				Networking/Protocols/QUIC/ngtcp2/ngtcp2_unreachable.c,
 				Networking/Protocols/QUIC/ngtcp2/ngtcp2_vec.c,
 				Networking/Protocols/QUIC/ngtcp2/ngtcp2_version.c,
-				Networking/Protocols/QUIC/ngtcp2/ngtcp2_window_filter.c,
+				Networking/Protocols/QUIC/ngtcp2/ngtcp2_wf.c,
 				Networking/Protocols/QUIC/ngtcp2/shared.c,
 				Networking/Protocols/QUIC/QUICConnection.swift,
 				"Networking/Protocols/QUIC/QUICConnection+BridgeHost.swift",

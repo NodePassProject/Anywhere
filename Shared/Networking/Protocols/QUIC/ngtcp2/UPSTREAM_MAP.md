@@ -3,9 +3,9 @@
 This directory is a **vendored, flattened** copy of [ngtcp2](https://github.com/ngtcp2/ngtcp2)
 plus a custom Apple/CryptoKit crypto backend and a "brutal" congestion-control add-on.
 
-- **Current version:** `1.23.0` (see `ngtcp2/version.h`)
+- **Current version:** `1.25.0` (see `ngtcp2/version.h`)
 - **Upstream layout** (`lib/`, `crypto/`, `lib/includes/`) is **flattened** into this single
-  directory. Header search path is just `$(SRCROOT)/Shared/Networking/QUIC/ngtcp2`.
+  directory. Header search path is just `$(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2`.
 
 The single rule that makes upgrades mechanical:
 
@@ -80,7 +80,7 @@ They are expected to be undefined in the C objects — that is normal.
 
 - `GCC_PREPROCESSOR_DEFINITIONS` includes `HAVE_CONFIG_H=1` → stock headers `#include <config.h>`,
   which resolves to our hand-written `config.h`.
-- `HEADER_SEARCH_PATHS = $(SRCROOT)/Shared/Networking/QUIC/ngtcp2` → makes both `<ngtcp2/ngtcp2.h>`
+- `HEADER_SEARCH_PATHS = $(SRCROOT)/Shared/Networking/Protocols/QUIC/ngtcp2` → makes both `<ngtcp2/ngtcp2.h>`
   and `<config.h>` resolve.
 - Project uses **file-system-synchronized groups**. `Shared/` is a synchronized group of the
   **Anywhere** and **Anywhere TV** targets, so every `.c` here joins those two automatically.
@@ -90,7 +90,8 @@ They are expected to be undefined in the C objects — that is normal.
 - **When upstream adds or removes a file**, the synchronized group picks it up automatically for
   Anywhere / Anywhere TV, BUT you must add/remove it in the Network-Extension
   `membershipExceptions` list or the NE link will fail on the missing symbols.
-  (Between 1.22.90 → 1.23.0 there were no added/removed files.)
+  (1.22.90 → 1.23.0 added/removed nothing. 1.23.0 → 1.25.0 **renamed**
+  `ngtcp2_window_filter.{c,h}` → `ngtcp2_wf.{c,h}`, which did require editing the NE list.)
 
 `config.h` currently provides: `HAVE_ARPA_INET_H`, `HAVE_NETINET_IN_H`, `HAVE_UNISTD_H`,
 `HAVE_MEMSET_S`, `HAVE_DECL_BE64TOH=0`, `HAVE_DECL_BSWAP_64=0`; everything else
@@ -104,8 +105,8 @@ They are expected to be undefined in the C objects — that is normal.
 Set `UP` to the unpacked upstream release, then run from this directory.
 
 ```sh
-cd /Volumes/Work/Anywhere/Shared/Networking/QUIC/ngtcp2
-UP=/Volumes/Work/ngtcp2-<NEW_VERSION>     # e.g. ngtcp2-1.24.0
+cd /Volumes/Work/Anywhere/Shared/Networking/Protocols/QUIC/ngtcp2
+UP=/Volumes/Work/ngtcp2-<NEW_VERSION>     # e.g. ngtcp2-1.26.0
 CUSTOM="config.h ngtcp2_bridge.h ngtcp2_crypto_apple.c ngtcp2_swift_bridge.h ngtcp2_swift_brutal.c"
 ```
 
@@ -179,9 +180,9 @@ Anything else in (b) is a **missing backend function** to implement in `ngtcp2_c
 
 Finally, confirm only stock files + `version.h` changed and the 5 other custom files are untouched:
 ```sh
-git -C /Volumes/Work/Anywhere status --short -- Shared/Networking/QUIC/ngtcp2
+git -C /Volumes/Work/Anywhere status --short -- Shared/Networking/Protocols/QUIC/ngtcp2
 for f in config.h ngtcp2_bridge.h ngtcp2_crypto_apple.c ngtcp2_swift_bridge.h ngtcp2_swift_brutal.c; do
-  git -C /Volumes/Work/Anywhere diff --quiet -- "Shared/Networking/QUIC/ngtcp2/$f" || echo "REVIEW: $f changed"
+  git -C /Volumes/Work/Anywhere diff --quiet -- "Shared/Networking/Protocols/QUIC/ngtcp2/$f" || echo "REVIEW: $f changed"
 done
 ```
 
@@ -192,3 +193,4 @@ done
 | Date       | From      | To       | Notes |
 |------------|-----------|----------|-------|
 | 2026-06-01 | 1.22.90   | 1.23.0   | 34 stock files refreshed + version bump. No files added/removed upstream; no Apple-backend changes needed. |
+| 2026-07-27 | 1.23.0    | 1.25.0   | 15 stock files refreshed + version bump. **Rename:** `ngtcp2_window_filter.{c,h}` → `ngtcp2_wf.{c,h}` (symbols `ngtcp2_window_filter_*` → `ngtcp2_wf_*`, `_reset` dropped) — NE `membershipExceptions` updated. `NGTCP2_CALLBACKS_VERSION` V3 → V5: two new **optional** callbacks (`recv_stop_sending` 1.24.0, `stream_close2` 1.25.0); Swift zero-inits `ngtcp2_callbacks`, and the `ngtcp2_swift_bridge.h` inline wrapper picks the version up from the macro, so no Swift change needed. Crypto helper interface (`ngtcp2/ngtcp2_crypto.h`, `shared.h`) unchanged → no Apple-backend changes. |
