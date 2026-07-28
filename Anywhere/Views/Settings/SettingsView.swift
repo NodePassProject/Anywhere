@@ -165,12 +165,10 @@ struct SettingsView: View {
             } label: {
                 SettingsItem.reflection.label
             }
-            if settings.experimentalEnabled {
-                NavigationLink {
-                    MITMSettingsView()
-                } label: {
-                    SettingsItem.mitm.label
-                }
+            NavigationLink {
+                MITMSettingsView()
+            } label: {
+                SettingsItem.mitm.label
             }
         }
     }
