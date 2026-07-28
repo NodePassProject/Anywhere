@@ -204,6 +204,48 @@ final class AppSettings {
         }
     }
     
+    var proxyDNSMode: DNSMode {
+        didSet {
+            AWCore.setProxyDNSMode(proxyDNSMode)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var proxyDNSPlainServer: String {
+        didSet {
+            AWCore.setProxyDNSPlainServer(proxyDNSPlainServer)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var proxyDNSDoHURL: String {
+        didSet {
+            AWCore.setProxyDNSDoHURL(proxyDNSDoHURL)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var echDNSMode: DNSMode {
+        didSet {
+            AWCore.setECHDNSMode(echDNSMode)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var echDNSPlainServer: String {
+        didSet {
+            AWCore.setECHDNSPlainServer(echDNSPlainServer)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var echDNSDoHURL: String {
+        didSet {
+            AWCore.setECHDNSDoHURL(echDNSDoHURL)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
     var fallbackDNSMode: FallbackDNSMode {
         didSet {
             AWCore.setFallbackDNSMode(fallbackDNSMode)
@@ -282,6 +324,9 @@ final class AppSettings {
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
+        echDNSMode = AWCore.getECHDNSMode()
+        echDNSPlainServer = AWCore.getECHDNSPlainServer()
+        echDNSDoHURL = AWCore.getECHDNSDoHURL()
         fallbackDNSMode = AWCore.getFallbackDNSMode()
         fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
@@ -289,6 +334,9 @@ final class AppSettings {
         ipRuleDNSPlainServer = AWCore.getIPRuleDNSPlainServer()
         ipRuleDNSDoHURL = AWCore.getIPRuleDNSDoHURL()
         preventDNSLeak = AWCore.getPreventDNSLeak()
+        proxyDNSMode = AWCore.getProxyDNSMode()
+        proxyDNSPlainServer = AWCore.getProxyDNSPlainServer()
+        proxyDNSDoHURL = AWCore.getProxyDNSDoHURL()
         proxyMode = AWCore.getProxyMode()
         quicPolicy = AWCore.getQUICPolicy()
         reflectionAddresses = AWCore.getReflectionAddresses()

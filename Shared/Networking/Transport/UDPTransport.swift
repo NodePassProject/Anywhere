@@ -30,11 +30,13 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
 
     private let host: String
     private let port: UInt16
+    private let resolvesViaProxyDNS: Bool
     let endpointDescription: String
-
-    init(host: String, port: UInt16) {
+    
+    init(host: String, port: UInt16, resolvesViaProxyDNS: Bool = false) {
         self.host = host
         self.port = port
+        self.resolvesViaProxyDNS = resolvesViaProxyDNS
         self.endpointDescription = "\(host):\(port)"
     }
 
@@ -52,7 +54,7 @@ nonisolated final class UDPTransport: DatagramTransport, Sendable {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "invalid port \(port)"))
         }
-        let endpointHost = NWEndpoint.Host(ipLiteral: host) ?? .name(host, nil)
+        let endpointHost = await NWEndpoint.Host.dialHost(for: host, viaProxyDNS: resolvesViaProxyDNS)
         let endpoint = NWEndpoint.hostPort(host: endpointHost, port: nwPort)
         let slot = FlowSlot(context: "[UDP] \(endpointDescription)")
         

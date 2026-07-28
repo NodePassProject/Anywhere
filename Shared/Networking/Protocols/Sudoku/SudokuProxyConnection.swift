@@ -1019,7 +1019,7 @@ nonisolated final class SudokuConnectionFactory: Sendable {
             }
         }
 
-        let transport = TCPTransport(host: directDialHost, port: port)
+        let transport = TCPTransport(host: directDialHost, port: port, resolvesViaProxyDNS: true)
         guard retainTransport(transport) else {
             throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil))
         }

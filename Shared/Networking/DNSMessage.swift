@@ -8,23 +8,24 @@
 import Foundation
 
 nonisolated enum DNSMessage {
-
     static let typeA: UInt16 = 1
     static let typeAAAA: UInt16 = 28
+    static let typeHTTPS: UInt16 = 65
 
+    private static let typeOPT: UInt16 = 41
     private static let classIN: UInt16 = 1
     private static let headerLength = 12
 
     // MARK: - Query
-    
-    static func makeQuery(domain: String, type: UInt16, id: UInt16) -> Data? {
+
+    static func makeQuery(domain: String, type: UInt16, id: UInt16, udpPayloadSize: UInt16? = nil) -> Data? {
         var message = Data(capacity: 32 + domain.utf8.count)
         message.append(contentsOf: [UInt8(id >> 8), UInt8(id & 0xFF)])
         message.append(contentsOf: [0x01, 0x00])    // RD=1, everything else clear
         message.append(contentsOf: [0x00, 0x01])    // QDCOUNT = 1
         message.append(contentsOf: [0x00, 0x00])    // ANCOUNT
         message.append(contentsOf: [0x00, 0x00])    // NSCOUNT
-        message.append(contentsOf: [0x00, 0x00])    // ARCOUNT
+        message.append(contentsOf: [0x00, udpPayloadSize == nil ? 0x00 : 0x01])    // ARCOUNT
 
         var labelCount = 0
         for label in domain.split(separator: ".") {
@@ -39,7 +40,15 @@ nonisolated enum DNSMessage {
 
         message.append(contentsOf: [UInt8(type >> 8), UInt8(type & 0xFF)])
         message.append(contentsOf: [UInt8(classIN >> 8), UInt8(classIN & 0xFF)])
-        
+
+        if let udpPayloadSize {
+            message.append(0)                       // root owner name
+            message.append(contentsOf: [UInt8(typeOPT >> 8), UInt8(typeOPT & 0xFF)])
+            message.append(contentsOf: [UInt8(udpPayloadSize >> 8), UInt8(udpPayloadSize & 0xFF)])
+            message.append(contentsOf: [0x00, 0x00, 0x00, 0x00])    // extended RCODE/flags clear
+            message.append(contentsOf: [0x00, 0x00])                // RDLENGTH = 0
+        }
+
         guard message.count <= 512 else { return nil }
         return message
     }
@@ -48,13 +57,38 @@ nonisolated enum DNSMessage {
 
     enum ParseFailure: Error, Equatable {
         case malformed
-        /// Not an answer to the query that was sent.
         case identifierMismatch
-        /// Non-zero RCODE, including NXDOMAIN (3).
         case serverFailure(rcode: UInt8)
     }
     
     static func parseAddresses(_ response: Data, expectedID: UInt16) throws(ParseFailure) -> [String] {
+        var ipv4: [String] = []
+        var ipv6: [String] = []
+        try walkAnswers(response, expectedID: expectedID) { type, _, rdata in
+            if type == typeA, rdata.count == 4 {
+                if let address = formatIPv4(Array(rdata)) { ipv4.append(address) }
+            } else if type == typeAAAA, rdata.count == 16 {
+                if let address = formatIPv6(Array(rdata)) { ipv6.append(address) }
+            }
+        }
+        return ipv4 + ipv6
+    }
+    
+    static func parseRecords(_ response: Data, expectedID: UInt16,
+                             type wantedType: UInt16) throws(ParseFailure) -> [(rdata: Data, ttl: UInt32)] {
+        var records: [(rdata: Data, ttl: UInt32)] = []
+        try walkAnswers(response, expectedID: expectedID) { type, ttl, rdata in
+            if type == wantedType { records.append((Data(rdata), ttl)) }
+        }
+        return records
+    }
+
+    // MARK: - Internal
+
+    private static func walkAnswers(
+        _ response: Data, expectedID: UInt16,
+        onRecord: (_ type: UInt16, _ ttl: UInt32, _ rdata: ArraySlice<UInt8>) -> Void
+    ) throws(ParseFailure) {
         let bytes = [UInt8](response)
         guard bytes.count >= headerLength else { throw .malformed }
 
@@ -75,8 +109,6 @@ nonisolated enum DNSMessage {
             guard offset <= bytes.count else { throw .malformed }
         }
 
-        var ipv4: [String] = []
-        var ipv6: [String] = []
         for _ in 0..<answerCount {
             guard let afterName = skipName(bytes, from: offset) else { throw .malformed }
             offset = afterName
@@ -84,22 +116,18 @@ nonisolated enum DNSMessage {
 
             let type = UInt16(bytes[offset]) << 8 | UInt16(bytes[offset + 1])
             let recordClass = UInt16(bytes[offset + 2]) << 8 | UInt16(bytes[offset + 3])
+            let ttl = UInt32(bytes[offset + 4]) << 24 | UInt32(bytes[offset + 5]) << 16
+                    | UInt32(bytes[offset + 6]) << 8 | UInt32(bytes[offset + 7])
             let rdLength = Int(UInt16(bytes[offset + 8]) << 8 | UInt16(bytes[offset + 9]))
             offset += 10
             guard offset + rdLength <= bytes.count else { throw .malformed }
 
-            if recordClass == classIN, type == typeA, rdLength == 4 {
-                if let address = formatIPv4(Array(bytes[offset..<offset + 4])) { ipv4.append(address) }
-            } else if recordClass == classIN, type == typeAAAA, rdLength == 16 {
-                if let address = formatIPv6(Array(bytes[offset..<offset + 16])) { ipv6.append(address) }
+            if recordClass == classIN {
+                onRecord(type, ttl, bytes[offset..<offset + rdLength])
             }
             offset += rdLength
         }
-
-        return ipv4 + ipv6
     }
-
-    // MARK: - Internal
     
     private static func skipName(_ bytes: [UInt8], from offset: Int) -> Int? {
         var cursor = offset

@@ -12,6 +12,10 @@ private struct ServerDrafts: Equatable {
     var subscriptionDoH = DNSUpstream.defaultDoHURL
     var ipRulePlain = DNSUpstream.defaultPlainServer
     var ipRuleDoH = DNSUpstream.defaultDoHURL
+    var proxyPlain = DNSUpstream.defaultPlainServer
+    var proxyDoH = DNSUpstream.defaultDoHURL
+    var echPlain = DNSUpstream.defaultPlainServer
+    var echDoH = DNSUpstream.defaultDoHURL
     var fallback = DNSUpstream.defaultPlainServer
 }
 
@@ -57,6 +61,38 @@ struct DNSSettingsView: View {
                     plainRow($drafts.ipRulePlain)
                 case .doh:
                     dohRow($drafts.ipRuleDoH)
+                }
+            }
+
+            Section("Proxies") {
+                Picker("Resolver", selection: $settings.proxyDNSMode) {
+                    ForEach(DNSMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                switch settings.proxyDNSMode {
+                case .default:
+                    EmptyView()
+                case .plain:
+                    plainRow($drafts.proxyPlain)
+                case .doh:
+                    dohRow($drafts.proxyDoH)
+                }
+            }
+
+            Section("ECH") {
+                Picker("Resolver", selection: $settings.echDNSMode) {
+                    ForEach(DNSMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                switch settings.echDNSMode {
+                case .default:
+                    EmptyView()
+                case .plain:
+                    plainRow($drafts.echPlain)
+                case .doh:
+                    dohRow($drafts.echDoH)
                 }
             }
 
@@ -134,6 +170,10 @@ struct DNSSettingsView: View {
             subscriptionDoH: settings.subscriptionDNSDoHURL,
             ipRulePlain: settings.ipRuleDNSPlainServer,
             ipRuleDoH: settings.ipRuleDNSDoHURL,
+            proxyPlain: settings.proxyDNSPlainServer,
+            proxyDoH: settings.proxyDNSDoHURL,
+            echPlain: settings.echDNSPlainServer,
+            echDoH: settings.echDNSDoHURL,
             fallback: settings.fallbackDNSServer
         )
     }
@@ -144,6 +184,10 @@ struct DNSSettingsView: View {
             subscriptionDoH: Self.normalized(drafts.subscriptionDoH, empty: DNSUpstream.defaultDoHURL),
             ipRulePlain: Self.normalized(drafts.ipRulePlain, empty: DNSUpstream.defaultPlainServer),
             ipRuleDoH: Self.normalized(drafts.ipRuleDoH, empty: DNSUpstream.defaultDoHURL),
+            proxyPlain: Self.normalized(drafts.proxyPlain, empty: DNSUpstream.defaultPlainServer),
+            proxyDoH: Self.normalized(drafts.proxyDoH, empty: DNSUpstream.defaultDoHURL),
+            echPlain: Self.normalized(drafts.echPlain, empty: DNSUpstream.defaultPlainServer),
+            echDoH: Self.normalized(drafts.echDoH, empty: DNSUpstream.defaultDoHURL),
             fallback: Self.normalized(drafts.fallback, empty: DNSUpstream.defaultPlainServer)
         )
 
@@ -160,6 +204,18 @@ struct DNSSettingsView: View {
         }
         if settings.ipRuleDNSDoHURL != drafts.ipRuleDoH {
             settings.ipRuleDNSDoHURL = drafts.ipRuleDoH
+        }
+        if settings.proxyDNSPlainServer != drafts.proxyPlain {
+            settings.proxyDNSPlainServer = drafts.proxyPlain
+        }
+        if settings.proxyDNSDoHURL != drafts.proxyDoH {
+            settings.proxyDNSDoHURL = drafts.proxyDoH
+        }
+        if settings.echDNSPlainServer != drafts.echPlain {
+            settings.echDNSPlainServer = drafts.echPlain
+        }
+        if settings.echDNSDoHURL != drafts.echDoH {
+            settings.echDNSDoHURL = drafts.echDoH
         }
         if settings.fallbackDNSServer != drafts.fallback {
             settings.fallbackDNSServer = drafts.fallback

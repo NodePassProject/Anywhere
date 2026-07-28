@@ -30,10 +30,14 @@ nonisolated final class AWCore {
         defaults.register(defaults: [
             UserDefaultsKey.blockWebRTC: true,
             UserDefaultsKey.bypassCountryCode: "",
+            UserDefaultsKey.echDNSDoHURL: DNSUpstream.defaultDoHURL,
+            UserDefaultsKey.echDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.identifier: UUID().uuidString,
             UserDefaultsKey.ipRuleDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.ipRuleDNSPlainServer: DNSUpstream.defaultPlainServer,
+            UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
+            UserDefaultsKey.proxyDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
             UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
             UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
@@ -57,6 +61,9 @@ nonisolated final class AWCore {
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let chainLatencyResults = "chainLatencyResults"
+        static let echDNSDoHURL = "echDNSDoHURL"
+        static let echDNSMode = "echDNSMode"
+        static let echDNSPlainServer = "echDNSPlainServer"
         static let experimentalEnabled = "experimentalEnabled"
         static let fallbackDNSMode = "fallbackDNSMode"
         static let fallbackDNSServer = "fallbackDNSServer"
@@ -72,6 +79,9 @@ nonisolated final class AWCore {
         static let mitmEnabled = "mitmEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
+        static let proxyDNSDoHURL = "proxyDNSDoHURL"
+        static let proxyDNSMode = "proxyDNSMode"
+        static let proxyDNSPlainServer = "proxyDNSPlainServer"
         static let proxyMode = "proxyMode"
         static let quicPolicy = "quicPolicy"
         static let reflectionAddresses = "reflectionAddresses"
@@ -421,7 +431,55 @@ nonisolated final class AWCore {
     static func setFallbackDNSServer(_ value: String) {
         userDefaults.set(value, forKey: UserDefaultsKey.fallbackDNSServer)
     }
-    
+
+    static func getProxyDNSMode() -> DNSMode {
+        userDefaults.string(forKey: UserDefaultsKey.proxyDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
+    }
+
+    static func setProxyDNSMode(_ value: DNSMode) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.proxyDNSMode)
+    }
+
+    static func getProxyDNSPlainServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.proxyDNSPlainServer)!
+    }
+
+    static func setProxyDNSPlainServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.proxyDNSPlainServer)
+    }
+
+    static func getProxyDNSDoHURL() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.proxyDNSDoHURL)!
+    }
+
+    static func setProxyDNSDoHURL(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.proxyDNSDoHURL)
+    }
+
+    static func getECHDNSMode() -> DNSMode {
+        userDefaults.string(forKey: UserDefaultsKey.echDNSMode).flatMap(DNSMode.init(rawValue:)) ?? .default
+    }
+
+    static func setECHDNSMode(_ value: DNSMode) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.echDNSMode)
+    }
+
+    static func getECHDNSPlainServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.echDNSPlainServer)!
+    }
+
+    static func setECHDNSPlainServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.echDNSPlainServer)
+    }
+
+    static func getECHDNSDoHURL() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.echDNSDoHURL)!
+    }
+
+    static func setECHDNSDoHURL(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.echDNSDoHURL)
+    }
+
     static func getSubscriptionDNSUpstream() -> DNSUpstream {
         DNSUpstream(
             mode: getSubscriptionDNSMode(),
@@ -443,6 +501,22 @@ nonisolated final class AWCore {
         case .default: return .defaultPlain
         case .plain: return DNSUpstream.parsePlain(getFallbackDNSServer()) ?? .defaultPlain
         }
+    }
+
+    static func getProxyDNSUpstream() -> DNSUpstream {
+        DNSUpstream(
+            mode: getProxyDNSMode(),
+            plainServer: getProxyDNSPlainServer(),
+            dohURL: getProxyDNSDoHURL()
+        )
+    }
+
+    static func getECHDNSUpstream() -> DNSUpstream {
+        DNSUpstream(
+            mode: getECHDNSMode(),
+            plainServer: getECHDNSPlainServer(),
+            dohURL: getECHDNSDoHURL()
+        )
     }
 
     static func getAdvertiseIPv6ToApps() -> Bool {

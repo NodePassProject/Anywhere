@@ -48,7 +48,7 @@ actor RealityClient {
         let clientHello = try buildRealityClientHello(privateKey: privateKey)
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = TCPTransport(host: host, port: port)
+        let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
         self.connection = transport
         do {
             try await transport.connect(initialData: clientHello)

@@ -29,6 +29,8 @@ extension TunnelStack {
         let upstreams = [
             AWCore.getSubscriptionDNSUpstream(),
             AWCore.getIPRuleDNSUpstream(),
+            AWCore.getProxyDNSUpstream(),
+            AWCore.getECHDNSUpstream(),
             AWCore.getFallbackDNSUpstream()
         ]
         var addresses: Set<String> = []

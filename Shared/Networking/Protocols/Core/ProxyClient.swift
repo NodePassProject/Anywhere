@@ -538,7 +538,7 @@ nonisolated final class ProxyClient: Sendable {
         } else if let tunnel = self.tunnel {
             wsConnection = WebSocketConnection(tunnel: tunnel, configuration: wsConfig)
         } else {
-            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
             try await transport.connect()
             wsConnection = WebSocketConnection(transport: transport, configuration: wsConfig)
         }
@@ -576,7 +576,7 @@ nonisolated final class ProxyClient: Sendable {
         } else if let tunnel = self.tunnel {
             huConnection = HTTPUpgradeConnection(tunnel: tunnel, configuration: huConfig)
         } else {
-            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
             try await transport.connect()
             huConnection = HTTPUpgradeConnection(transport: transport, configuration: huConfig)
         }
@@ -629,7 +629,7 @@ nonisolated final class ProxyClient: Sendable {
         } else if let tunnel = self.tunnel {
             grpcConnection = GRPCConnection(tunnel: tunnel, configuration: grpcConfig, authority: authority)
         } else {
-            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
             try await transport.connect()
             grpcConnection = GRPCConnection(transport: transport, configuration: grpcConfig, authority: authority)
         }
@@ -660,7 +660,7 @@ nonisolated final class ProxyClient: Sendable {
         if let tunnel = self.tunnel {
             directProxyConnection = DirectProxyConnection(transport: TunneledTransport(tunnel: tunnel))
         } else {
-            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort)
+            let transport = TCPTransport(host: directDialHost, port: configuration.serverPort, resolvesViaProxyDNS: true)
             try await transport.connect()
             directProxyConnection = DirectProxyConnection(transport: transport)
         }
@@ -1092,7 +1092,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         switch security {
         case .none:
-            let transport = TCPTransport(host: host, port: port)
+            let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
             try await transport.connect()
             return try await bringUp(transport, retaining: transport)
         case .tls(let tlsConfig):
@@ -1149,7 +1149,7 @@ nonisolated final class ProxyClient: Sendable {
             if let tunnel = overTunnel {
                 return .byteStream(TunneledTransport(tunnel: tunnel))
             } else {
-                let transport = TCPTransport(host: host, port: port)
+                let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
                 try await transport.connect()
                 return .byteStream(transport)
             }
@@ -1273,7 +1273,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         switch security {
         case .none:
-            let transport = TCPTransport(host: host, port: port)
+            let transport = TCPTransport(host: host, port: port, resolvesViaProxyDNS: true)
             do {
                 try await transport.connect()
             } catch {

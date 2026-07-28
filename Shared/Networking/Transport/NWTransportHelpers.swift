@@ -69,4 +69,13 @@ extension NWEndpoint.Host {
             self = .ipv4(address)
         }
     }
+    
+    nonisolated static func dialHost(for host: String, viaProxyDNS: Bool) async -> NWEndpoint.Host {
+        if let literal = NWEndpoint.Host(ipLiteral: host) { return literal }
+        guard viaProxyDNS,
+              let resolved = await DNSResolver.shared.resolveDialAddress(for: host),
+              let literal = NWEndpoint.Host(ipLiteral: resolved)
+        else { return .name(host, nil) }
+        return literal
+    }
 }

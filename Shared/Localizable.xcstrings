@@ -5777,6 +5777,9 @@
         }
       }
     },
+    "ECH" : {
+      "shouldTranslate" : false
+    },
     "ECH Config" : {
       "shouldTranslate" : false
     },

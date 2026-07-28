@@ -38,6 +38,8 @@ nonisolated final class DNSResolver: Sendable {
         var echCache: [String: ECHCacheEntry] = [:]
         var echInFlight: [String: Task<Data?, Never>] = [:]
         var generation: UInt64 = 0
+        var hostUpstream: DNSUpstream = .system
+        var echUpstream: DNSUpstream = .system
     }
 
     private let state = Mutex(State())
@@ -54,6 +56,7 @@ nonisolated final class DNSResolver: Sendable {
         if Self.isIPAddress(bare) { return [bare] }
 
         let key = Self.cacheKey(for: bare)
+        let upstream = AWCore.getProxyDNSUpstream()
 
         enum Role {
             case cacheHit([String])
@@ -61,6 +64,14 @@ nonisolated final class DNSResolver: Sendable {
         }
 
         let (role, cached): (Role, [String]?) = state.withLock { state in
+            if state.hostUpstream != upstream {
+                state.hostUpstream = upstream
+                state.generation &+= 1
+                state.cache.removeAll(keepingCapacity: true)
+                state.inFlight.removeAll(keepingCapacity: true)
+                logger.info("[DNS] Proxy DNS upstream changed; host cache flushed")
+            }
+
             let entry = state.cache[key]
             let cached = entry?.ips
             let expired = entry.map { $0.expiry <= CFAbsoluteTimeGetCurrent() } ?? false
@@ -70,7 +81,7 @@ nonisolated final class DNSResolver: Sendable {
 
             let scheduledGeneration = state.generation
             let task = Task<[String], Never> { [self] in
-                await lookup(key: key, host: bare, scheduledGeneration: scheduledGeneration)
+                await lookup(key: key, host: bare, upstream: upstream, scheduledGeneration: scheduledGeneration)
             }
             state.inFlight[key] = task
             return (.join(task), cached)
@@ -93,6 +104,11 @@ nonisolated final class DNSResolver: Sendable {
 
     func resolveHost(_ host: String, forceFresh: Bool = false) async -> String? {
         await resolveAll(host, forceFresh: forceFresh).first
+    }
+    
+    func resolveDialAddress(for host: String) async -> String? {
+        guard !AWCore.getProxyDNSUpstream().isSystem else { return nil }
+        return await resolveHost(host)
     }
 
     func prewarm(_ host: String, forceFresh: Bool = false) async {
@@ -120,8 +136,17 @@ nonisolated final class DNSResolver: Sendable {
 
     // MARK: - Internal
     
-    private func lookup(key: String, host: String, scheduledGeneration: UInt64) async -> [String] {
-        let resolved = await Self.blockingBridge.run { Self.resolveViaGetaddrinfo(host) }
+    private func lookup(key: String, host: String, upstream: DNSUpstream, scheduledGeneration: UInt64) async -> [String] {
+        var resolved: [String] = []
+        if !upstream.isSystem {
+            resolved = (try? await DNSUpstreamClient.resolve(host, via: upstream)) ?? []
+            if resolved.isEmpty {
+                logger.warning("[DNS] Configured upstream produced nothing for \(host); falling back to system")
+            }
+        }
+        if resolved.isEmpty {
+            resolved = await Self.blockingBridge.run { Self.resolveViaGetaddrinfo(host) }
+        }
         state.withLock { state in
             state.inFlight.removeValue(forKey: key)
             guard scheduledGeneration == state.generation, !resolved.isEmpty else { return }
@@ -208,14 +233,22 @@ nonisolated final class DNSResolver: Sendable {
     
     func resolveECHConfigList(for host: String) async -> Data? {
         let bare = Self.stripBrackets(host)
-        // An IP literal has no domain that could carry an HTTPS record.
         if bare.isEmpty || Self.isIPAddress(bare) { return nil }
 
         let key = Self.cacheKey(for: bare)
         let now = CFAbsoluteTimeGetCurrent()
+        let upstream = AWCore.getECHDNSUpstream()
 
         enum Action { case cached(Data?); case join(Task<Data?, Never>) }
         let action: Action = state.withLock { state in
+            if state.echUpstream != upstream {
+                state.echUpstream = upstream
+                state.generation &+= 1
+                state.echCache.removeAll(keepingCapacity: true)
+                state.echInFlight.removeAll(keepingCapacity: true)
+                logger.info("[DNS] ECH DNS upstream changed; ECH cache flushed")
+            }
+
             if let entry = state.echCache[key], entry.expiry > now {
                 return .cached(entry.config)
             }
@@ -224,7 +257,7 @@ nonisolated final class DNSResolver: Sendable {
             }
             let scheduledGeneration = state.generation
             let task = Task<Data?, Never> { [self] in
-                await lookupECH(bare: bare, key: key, scheduledGeneration: scheduledGeneration)
+                await lookupECH(bare: bare, key: key, upstream: upstream, scheduledGeneration: scheduledGeneration)
             }
             state.echInFlight[key] = task
             return .join(task)
@@ -238,13 +271,23 @@ nonisolated final class DNSResolver: Sendable {
         }
     }
     
-    private func lookupECH(bare: String, key: String, scheduledGeneration: UInt64) async -> Data? {
-        let result = await Self.blockingBridge.queryFirstRecord(
-            host: bare,
-            rrtype: kHTTPSRecordType,
-            timeout: Self.echQueryTimeout,
-            accept: { echParseSVCBECH($0) }
-        )
+    private func lookupECH(bare: String, key: String, upstream: DNSUpstream, scheduledGeneration: UInt64) async -> Data? {
+        let result: (payload: Data, ttl: UInt32)?
+        if upstream.isSystem {
+            result = await Self.blockingBridge.queryFirstRecord(
+                host: bare,
+                rrtype: DNSMessage.typeHTTPS,
+                timeout: Self.echQueryTimeout,
+                accept: { echParseSVCBECH($0) }
+            )
+        } else {
+            result = (try? await DNSUpstreamClient.queryRecord(
+                bare,
+                type: DNSMessage.typeHTTPS,
+                via: upstream,
+                accept: { echParseSVCBECH($0) }
+            )) ?? nil
+        }
 
         return state.withLock { state in
             state.echInFlight[key] = nil
@@ -264,8 +307,6 @@ nonisolated final class DNSResolver: Sendable {
 private nonisolated protocol ExpiringEntry {
     var expiry: CFAbsoluteTime { get }
 }
-
-private nonisolated let kHTTPSRecordType: UInt16 = 65
 
 private nonisolated func echParseSVCBECH(_ rdata: Data) -> Data? {
     return rdata.withUnsafeBytes { raw -> Data? in
