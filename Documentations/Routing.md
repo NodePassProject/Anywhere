@@ -47,7 +47,7 @@ The matching rule's **rule set** carries the action, so a match resolves to
 one of:
 
 - **direct** — bypass the proxy and connect straight to the destination.
-- **reject** — drop the connection (TCP is closed / a TLS alert is sent).
+- **reject** — block the destination.
 - **proxy** — route through the configuration or chain assigned to that set.
 
 A connection that matches **no** rule takes the app's **default route** (the

@@ -175,5 +175,5 @@ nonisolated struct TunnelRequestEntry: Codable, Sendable, Hashable {
 nonisolated enum TunnelRequestProtocol: String, Codable, Sendable, Hashable {
     case tcp
     case udp
-    case http
+    case unknown
 }

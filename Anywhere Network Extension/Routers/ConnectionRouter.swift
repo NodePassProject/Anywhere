@@ -43,6 +43,9 @@ nonisolated final class ConnectionRouter: Sendable {
     }
     private let rejectedIPs = Mutex(RejectedIPs())
     private static let rejectedIPCap = 4096
+    
+    private let dnsRejectLogged = Mutex(Set<String>())
+    private static let dnsRejectLoggedCap = 4096
 
     init(fakeIPPool: FakeIPPool, domainRouter: DomainRouter) {
         self.fakeIPPool = fakeIPPool
@@ -75,8 +78,17 @@ nonisolated final class ConnectionRouter: Sendable {
             return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .unreachable)
         }
         let domain = entry.domain
+        
+        let rulesVersion = domainRouter.currentRulesVersion
+        let match: DomainRouter.Match?
+        if entry.verdictVersion == rulesVersion {
+            match = entry.verdict
+        } else {
+            match = domainRouter.matchDomain(domain)
+            fakeIPPool.cacheVerdict(domain: domain, match: match, version: rulesVersion)
+        }
 
-        if let match = domainRouter.matchDomain(domain) {
+        if let match {
             return RouteDecision(
                 host: domain,
                 hostIsResolvedDomain: true,
@@ -167,8 +179,22 @@ nonisolated final class ConnectionRouter: Sendable {
         }
     }
 
-    // MARK: - Reject-mark intake checks
+    // MARK: - DNS-time verdict
     
+    func dnsVerdict(forDomain domain: String) -> (match: DomainRouter.Match?, rulesVersion: UInt64) {
+        let version = domainRouter.currentRulesVersion
+        return (domainRouter.matchDomain(domain), version)
+    }
+    
+    func shouldLogDNSReject(domain: String) -> Bool {
+        dnsRejectLogged.withLock { set in
+            if set.count >= Self.dnsRejectLoggedCap { set.removeAll(keepingCapacity: true) }
+            return set.insert(domain).inserted
+        }
+    }
+
+    // MARK: - Reject-mark intake checks
+
     func isRejectMarkedDestination(rawIP: UnsafeRawPointer, isIPv6: Bool) -> Bool {
         if fakeIPPool.isRejectMarked(rawIP: rawIP, isIPv6: isIPv6) { return true }
         if isIPv6 {
@@ -195,6 +221,7 @@ nonisolated final class ConnectionRouter: Sendable {
     func clearRejectMarks() {
         fakeIPPool.clearRejectMarks()
         rejectedIPs.withLock { $0 = RejectedIPs() }
+        dnsRejectLogged.withLock { $0.removeAll(keepingCapacity: true) }
     }
 
     private func action(for match: DomainRouter.Match, host: String, port: UInt16,

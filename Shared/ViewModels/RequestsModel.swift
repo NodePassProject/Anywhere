@@ -19,7 +19,7 @@ class RequestsModel {
             case tcp
             case udp
             case quic
-            case http
+            case unknown
         }
         
         let id: UUID
@@ -67,8 +67,8 @@ class RequestsModel {
                 } else {
                     `protocol` = .udp
                 }
-            case .http:
-                `protocol` = .http
+            case .unknown:
+                `protocol` = .unknown
             }
             return Entry(
                 id: entry.id,

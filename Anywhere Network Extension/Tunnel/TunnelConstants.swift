@@ -101,4 +101,11 @@ nonisolated enum TunnelConstants {
     static let fakeIPPoolBaseIPv4: UInt32 = 0xC612_0000
     /// Usable offsets in the fake-IP pool; bounds the backing maps in a long-running tunnel.
     static let fakeIPPoolSize = 16_384
+
+    // MARK: - Synthesized DNS answers
+
+    /// TTL for fake-IP answers.
+    static let dnsFakeIPAnswerTTL: UInt32 = 300
+    /// TTL for zero-IP answers to reject-ruled domains.
+    static let dnsBlockedAnswerTTL: UInt32 = 10
 }

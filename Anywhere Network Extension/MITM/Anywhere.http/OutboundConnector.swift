@@ -67,7 +67,14 @@ nonisolated enum OutboundConnector {
     
     static func dial(host: String, port: UInt16) async throws -> Dialed {
         let (route, viaDefault, ruleSetName) = await resolveRoute(host: host)
-        routingContext()?.requestLog.record(protocol: .http, host: host, port: port, routeTarget: route, viaDefault: viaDefault, ruleSetName: ruleSetName)
+        routingContext()?.requestLog.record(
+            protocol: .unknown,
+            host: host,
+            port: port,
+            routeTarget: route,
+            viaDefault: viaDefault,
+            ruleSetName: ruleSetName
+        )
         switch route {
         case .reject:
             throw AnywhereError.routing(.rejectedByRule(host: host))

@@ -8,8 +8,6 @@
 import Foundation
 
 nonisolated enum DNSPacket {
-
-    /// Extracts the queried domain name and QTYPE, or nil on failure.
     static func parseQuery(_ data: UnsafeBufferPointer<UInt8>) -> (domain: String, qtype: UInt16)? {
         // DNS header is 12 bytes
         guard data.count >= 12 else { return nil }
@@ -47,11 +45,13 @@ nonisolated enum DNSPacket {
         let domain = String(bytes: domainBytes, encoding: .ascii) ?? ""
         return (domain, qtype)
     }
-
-    /// Generates a minimal DNS response: an A/AAAA record when fakeIP is non-nil
-    /// and QTYPE matches, otherwise NODATA (ANCOUNT=0).
-    static func generateResponse(query queryData: UnsafeBufferPointer<UInt8>,
-                                 fakeIP: [UInt8]?, qtype: UInt16) -> Data? {
+    
+    static func generateResponse(
+        query queryData: UnsafeBufferPointer<UInt8>,
+        answerIP: [UInt8]?,
+        qtype: UInt16,
+        ttl: UInt32 = TunnelConstants.dnsFakeIPAnswerTTL
+    ) -> Data? {
         guard queryData.count >= 12 else { return nil }
 
         var offset = 12
@@ -70,7 +70,7 @@ nonisolated enum DNSPacket {
 
         var rdLength: UInt16 = 0
         var ansType: UInt16 = 0
-        if fakeIP != nil {
+        if answerIP != nil {
             if qtype == 1 {        // A
                 rdLength = 4
                 ansType = 1
@@ -80,7 +80,7 @@ nonisolated enum DNSPacket {
             }
         }
 
-        if rdLength > 0, let ipBytes = fakeIP {
+        if rdLength > 0, let ipBytes = answerIP {
             let answerRecLen = 12 + Int(rdLength)
             let responseLen = questionEnd + answerRecLen
 
@@ -104,8 +104,10 @@ nonisolated enum DNSPacket {
                 p[answerOffset + 2] = UInt8(ansType >> 8)               // TYPE
                 p[answerOffset + 3] = UInt8(ansType & 0xFF)
                 p[answerOffset + 4] = 0x00; p[answerOffset + 5] = 0x01          // CLASS = IN
-                p[answerOffset + 6] = 0x00; p[answerOffset + 7] = 0x00
-                p[answerOffset + 8] = 0x01; p[answerOffset + 9] = 0x2C
+                p[answerOffset + 6] = UInt8((ttl >> 24) & 0xFF)         // TTL
+                p[answerOffset + 7] = UInt8((ttl >> 16) & 0xFF)
+                p[answerOffset + 8] = UInt8((ttl >> 8) & 0xFF)
+                p[answerOffset + 9] = UInt8(ttl & 0xFF)
                 p[answerOffset + 10] = UInt8(rdLength >> 8)             // RDLENGTH
                 p[answerOffset + 11] = UInt8(rdLength & 0xFF)
 

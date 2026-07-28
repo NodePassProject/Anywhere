@@ -337,6 +337,30 @@ actor UDPPlane {
             return sendNODATA(answering: datagram, qtype: qtype)
         }
         
+        let (ruleMatch, rulesVersion) = stack.connectionRouter.dnsVerdict(forDomain: domain)
+        if let ruleMatch, case .reject = ruleMatch.action {
+            if stack.connectionRouter.shouldLogDNSReject(domain: domain) {
+                stack.requestLog.record(
+                    protocol: .unknown,
+                    host: domain,
+                    port: 53,
+                    routeTarget: .reject,
+                    ruleSetName: ruleMatch.ruleSetName
+                )
+                logger.debug("[DNS] Rejected by domain rule: \(domain)")
+            }
+            guard qtype == 1 || qtype == 28 else {
+                return sendNODATA(answering: datagram, qtype: qtype)
+            }
+            let zeroIP = [UInt8](repeating: 0, count: qtype == 1 ? 4 : 16)
+            return sendAddressAnswer(
+                answering: datagram,
+                ip: zeroIP,
+                qtype: qtype,
+                ttl: TunnelConstants.dnsBlockedAnswerTTL
+            )
+        }
+
         guard qtype == 1 || qtype == 28 else {
             if destination == .anywhereResolver {
                 if forwardToUpstreamResolver(datagram, domain: domain, qtype: qtype) {
@@ -347,32 +371,26 @@ actor UDPPlane {
             return false
         }
         
-        let offset = stack.fakeIPPool.allocate(domain: domain)
-        
-        var fakeIPBytes: [UInt8]?
+        let offset = stack.fakeIPPool.allocate(domain: domain, verdict: ruleMatch, verdictVersion: rulesVersion)
+
         if qtype == 1 {
             let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
-            fakeIPBytes = [ipv4.0, ipv4.1, ipv4.2, ipv4.3]
-        } else if qtype == 28, stack.udpConfig().advertiseIPv6ToApps {
-            fakeIPBytes = FakeIPPool.ipv6Bytes(offset: offset)
-        }
-        
-        guard let responseData = payload.withUnsafeBytes({ ptr -> Data? in
-            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
-            return DNSPacket.generateResponse(
-                query: UnsafeBufferPointer(start: base, count: ptr.count),
-                fakeIP: fakeIPBytes,
-                qtype: qtype
+            return sendAddressAnswer(
+                answering: datagram,
+                ip: [ipv4.0, ipv4.1, ipv4.2, ipv4.3],
+                qtype: qtype,
+                ttl: TunnelConstants.dnsFakeIPAnswerTTL
             )
-        }) else { return false }
-        
-        stack.writeOutboundUDP(
-            srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
-            dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
-            isIPv6: datagram.isIPv6, payload: responseData
+        }
+        guard stack.udpConfig().advertiseIPv6ToApps else {
+            return sendNODATA(answering: datagram, qtype: qtype)
+        }
+        return sendAddressAnswer(
+            answering: datagram,
+            ip: FakeIPPool.ipv6Bytes(offset: offset),
+            qtype: qtype,
+            ttl: TunnelConstants.dnsFakeIPAnswerTTL
         )
-        
-        return true
     }
     
     private func forwardToUpstreamResolver(_ datagram: UDPPacket.Inbound, domain: String, qtype: UInt16) -> Bool {
@@ -450,17 +468,44 @@ actor UDPPlane {
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
             return DNSPacket.generateResponse(
                 query: UnsafeBufferPointer(start: base, count: ptr.count),
-                fakeIP: nil,
+                answerIP: nil,
                 qtype: qtype
             )
         }) else { return false }
-        
+
         stack.writeOutboundUDP(
             srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
             dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
-            isIPv6: datagram.isIPv6, payload: responseData
+            isIPv6: datagram.isIPv6,
+            payload: responseData
         )
-        
+
+        return true
+    }
+
+    private func sendAddressAnswer(
+        answering datagram: UDPPacket.Inbound,
+        ip: [UInt8],
+        qtype: UInt16,
+        ttl: UInt32
+    ) -> Bool {
+        guard let responseData = datagram.payload.withUnsafeBytes({ ptr -> Data? in
+            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            return DNSPacket.generateResponse(
+                query: UnsafeBufferPointer(start: base, count: ptr.count),
+                answerIP: ip,
+                qtype: qtype,
+                ttl: ttl
+            )
+        }) else { return false }
+
+        stack.writeOutboundUDP(
+            srcIP: datagram.dstIPData, srcPort: datagram.dstPort,
+            dstIP: datagram.srcIPData, dstPort: datagram.srcPort,
+            isIPv6: datagram.isIPv6,
+            payload: responseData
+        )
+
         return true
     }
     

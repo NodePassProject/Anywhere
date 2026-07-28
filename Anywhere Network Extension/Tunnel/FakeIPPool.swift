@@ -14,6 +14,8 @@ nonisolated final class FakeIPPool: Sendable {
     struct Entry {
         let domain: String
         var shouldReject = false
+        var verdict: DomainRouter.Match?
+        var verdictVersion: UInt64 = 0
     }
 
     private class LRUNode {
@@ -115,10 +117,12 @@ nonisolated final class FakeIPPool: Sendable {
 
     // MARK: - Pool Operations
 
-    func allocate(domain: String) -> Int {
+    func allocate(domain: String, verdict: DomainRouter.Match?, verdictVersion: UInt64) -> Int {
         state.withLock { state in
             if let offset = state.domainToOffset[domain] {
                 state.touchLRU(offset)
+                state.offsetToEntry[offset]?.verdict = verdict
+                state.offsetToEntry[offset]?.verdictVersion = verdictVersion
                 return offset
             }
 
@@ -131,10 +135,18 @@ nonisolated final class FakeIPPool: Sendable {
             }
 
             state.domainToOffset[domain] = offset
-            state.offsetToEntry[offset] = Entry(domain: domain)
+            state.offsetToEntry[offset] = Entry(domain: domain, verdict: verdict, verdictVersion: verdictVersion)
             state.appendLRU(offset)
 
             return offset
+        }
+    }
+    
+    func cacheVerdict(domain: String, match: DomainRouter.Match?, version: UInt64) {
+        state.withLock { state in
+            guard let offset = state.domainToOffset[domain] else { return }
+            state.offsetToEntry[offset]?.verdict = match
+            state.offsetToEntry[offset]?.verdictVersion = version
         }
     }
 

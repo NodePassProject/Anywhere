@@ -116,7 +116,7 @@ struct RequestsView: View {
         case .tcp: String(localized: "TCP")
         case .udp: String(localized: "UDP")
         case .quic: String(localized: "QUIC")
-        case .http: String(localized: "HTTP")
+        case .unknown: String(localized: "Unknown")
         }
     }
 
@@ -138,7 +138,7 @@ struct RequestsView: View {
         case .tcp: .blue
         case .udp: .pink
         case .quic: .mint
-        case .http: .gray
+        case .unknown: .gray
         }
     }
 

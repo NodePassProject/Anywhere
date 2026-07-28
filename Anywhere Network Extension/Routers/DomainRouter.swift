@@ -34,7 +34,6 @@ nonisolated final class DomainRouter: Sendable {
     fileprivate struct RoutingState: Sendable {
         var matcher = TieredRouteMatcher<RulePayload>(tierCount: Tier.allCases.count)
         var configurationMap: [UUID: ProxyConfiguration] = [:]
-        /// Rule-set display names by payload entry index; empty for older payloads.
         var ruleSetNames: [String] = []
 
         func match(resolving payload: RulePayload?) -> Match? {
@@ -84,16 +83,22 @@ nonisolated final class DomainRouter: Sendable {
     }
 
     private let routingState = Mutex(RoutingState())
+    
+    private let rulesVersion = Atomic<UInt64>(1)
+
+    var currentRulesVersion: UInt64 { rulesVersion.load(ordering: .relaxed) }
 
     // MARK: - Loading
-    
+
     func reset() {
         routingState.withLock { $0 = RoutingState() }
+        rulesVersion.wrappingAdd(1, ordering: .relaxed)
     }
-    
+
     func loadRoutingConfiguration() {
         let newState = Self.makeRoutingState()
         routingState.withLock { $0 = newState }
+        rulesVersion.wrappingAdd(1, ordering: .relaxed)
     }
     
     struct CompiledRouting: Sendable {
@@ -107,6 +112,7 @@ nonisolated final class DomainRouter: Sendable {
     
     func install(_ compiled: CompiledRouting) {
         routingState.withLock { $0 = compiled.state }
+        rulesVersion.wrappingAdd(1, ordering: .relaxed)
     }
 
     private static func makeRoutingState() -> RoutingState {
