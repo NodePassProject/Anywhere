@@ -16,8 +16,7 @@ nonisolated extension ProxyConfiguration {
     static func canParseURL(_ string: String) -> Bool {
         parsableURLPrefixes.contains { string.hasPrefix($0) }
     }
-
-    /// Parses a proxy share link; per-scheme formats are documented on the private parsers.
+    
     static func parse(url: String) throws -> ProxyConfiguration {
         if url.hasPrefix("nowhere://") {
             return try parseNowhere(url: url)
@@ -47,10 +46,7 @@ nonisolated extension ProxyConfiguration {
     }
 
     // MARK: - Per-Scheme Parsers
-
-    /// Parses `nowhere://<key>@host:port?up=udp|tcp&down=udp|tcp&pool=0..9#name`.
-    /// Unknown parameters (including the retired `spec`) are ignored and the first
-    /// occurrence of every recognized parameter wins.
+    
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let body = try splitLinkBody(url, scheme: "nowhere://", label: "Nowhere")
         let parameters = body.firstParameters
@@ -106,8 +102,8 @@ nonisolated extension ProxyConfiguration {
         } else {
             alpn = nil
         }
-        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
+        let ech = TLSConfiguration.echSettings(fromQueryValue: parameters["ech"])
+        let tlsConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: ech.enabled, echConfig: ech.config)
 
         return ProxyConfiguration(
             name: body.fragment ?? "Nowhere",
@@ -122,8 +118,7 @@ nonisolated extension ProxyConfiguration {
             )
         )
     }
-
-    /// Parses `vless://uuid@host:port?type=…&security=…#name`.
+    
     private static func parseVLESS(url: String) throws -> ProxyConfiguration {
         let body = try splitLinkBody(url, scheme: "vless://", label: "vless", allowBase64Body: true)
 
@@ -177,8 +172,7 @@ nonisolated extension ProxyConfiguration {
             )
         )
     }
-
-    /// Parses `hysteria2://password@host:port/?sni=...&insecure=0#name` (`hy2://` alias accepted).
+    
     private static func parseHysteria(url: String) throws -> ProxyConfiguration {
         let scheme = url.hasPrefix("hysteria2://") ? "hysteria2://" : "hy2://"
         let body = try splitLinkBody(url, scheme: scheme, label: "hysteria")
@@ -221,8 +215,7 @@ nonisolated extension ProxyConfiguration {
             )
         )
     }
-
-    /// Parses `trojan://password@host:port?sni=...&alpn=...&fp=...#name`; TLS is mandatory.
+    
     private static func parseTrojan(url: String) throws -> ProxyConfiguration {
         let body = try splitLinkBody(url, scheme: "trojan://", label: "trojan")
 
@@ -237,8 +230,7 @@ nonisolated extension ProxyConfiguration {
             outbound: .trojan(password: password, securityLayer: .tls(tlsConfiguration))
         )
     }
-
-    /// Parses `anytls://password@host:port?sni=…[&ici=30&it=30&mis=0]#name`; TLS is mandatory.
+    
     private static func parseAnyTLS(url: String) throws -> ProxyConfiguration {
         let body = try splitLinkBody(url, scheme: "anytls://", label: "anytls")
         let parameters = body.parameters
@@ -263,9 +255,7 @@ nonisolated extension ProxyConfiguration {
             )
         )
     }
-
-    /// Parses SIP002 `ss://` links (plain or websafe-base64 userinfo) plus the legacy
-    /// pre-SIP002 `ss://base64(method:password@host:port)#name` shape.
+    
     private static func parseShadowsocks(url: String) throws -> ProxyConfiguration {
         var urlWithoutScheme = String(url.dropFirst("ss://".count))
         let fragmentName = extractFragment(&urlWithoutScheme)
@@ -320,9 +310,7 @@ nonisolated extension ProxyConfiguration {
             outbound: .shadowsocks(password: password, method: method)
         )
     }
-
-    /// A literal `:` means the plain form (password percent-encoded, used by SS2022 links);
-    /// otherwise the whole string is websafe-base64(method:password).
+    
     private static func decodeShadowsocksUserInfo(_ userInfo: String) throws -> (method: String, password: String) {
         if let colonIndex = userInfo.firstIndex(of: ":") {
             let method = String(userInfo[..<colonIndex])
@@ -338,8 +326,7 @@ nonisolated extension ProxyConfiguration {
         let password = String(decodedString[decodedString.index(after: colonIndex)...])
         return (method, password)
     }
-
-    /// Parses `socks5://user:pass@host:port#name` or `socks5://host:port#name`.
+    
     private static func parseSOCKS5(url: String) throws -> ProxyConfiguration {
         let urlWithoutScheme: String
         if url.hasPrefix("socks5://") {
@@ -387,8 +374,7 @@ nonisolated extension ProxyConfiguration {
             outbound: .socks5(username: username, password: password)
         )
     }
-
-    /// Parses a `sudoku://` short link (base64URL JSON payload).
+    
     private static func parseSudoku(url: String) throws -> ProxyConfiguration {
         let encoded = String(url.dropFirst("sudoku://".count))
         guard let payload = Data(base64URLEncoded: encoded),
@@ -460,9 +446,7 @@ nonisolated extension ProxyConfiguration {
     }
 
     // MARK: - Shared Link Decomposition
-
-    /// The structural pieces shared by `userinfo@host:port/?query#fragment` share links.
-    /// `userInfo` is returned raw so each scheme can decide whether to percent-decode it.
+    
     private struct LinkBody {
         let userInfo: String
         let host: String
@@ -517,16 +501,14 @@ nonisolated extension ProxyConfiguration {
             fragment: fragment
         )
     }
-
-    /// Strips a trailing `#fragment` from `remaining`, returning its percent-decoded value.
+    
     private static func extractFragment(_ remaining: inout String) -> String? {
         guard let hashIndex = remaining.lastIndex(of: "#") else { return nil }
         let fragment = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
         remaining = String(remaining[..<hashIndex])
         return fragment
     }
-
-    /// Decodes a body that some providers base64-encode in full (e.g. `vless://<base64>`).
+    
     private static func base64DecodedBody(_ string: String) -> String? {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
@@ -552,8 +534,8 @@ nonisolated extension ProxyConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
         let fingerprint = TLSFingerprint(rawValue: parameters["fp"] ?? "chrome_120") ?? .chrome120
-        let ech = (parameters["ech"]?.isEmpty == false) ? parameters["ech"] : nil
-        return TLSConfiguration(serverName: serverName, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+        let ech = TLSConfiguration.echSettings(fromQueryValue: parameters["ech"])
+        return TLSConfiguration(serverName: serverName, alpn: alpn, echEnabled: ech.enabled, echConfig: ech.config, fingerprint: fingerprint)
     }
 
     static func parseQueryParams(_ queryString: String?, keepFirst: Bool = false) -> [String: String] {

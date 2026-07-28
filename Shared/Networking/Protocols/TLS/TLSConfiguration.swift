@@ -15,26 +15,15 @@ nonisolated enum TLSVersion: UInt16, Codable {
 }
 
 nonisolated struct TLSConfiguration {
-    let serverName: String              // SNI (defaults to server address)
-    let alpn: [String]?                 // e.g. ["h2", "http/1.1"]
-    let minVersion: TLSVersion?         // nil = no constraint
-    let maxVersion: TLSVersion?         // nil = no constraint
-
-    /// Skip server-certificate validation for this connection (accepts self-signed / mismatched
-    /// certs). Off by default; opt-in per connection.
+    let serverName: String
+    let alpn: [String]?
+    let minVersion: TLSVersion?
+    let maxVersion: TLSVersion?
+    
     let insecureSkipVerify: Bool
-
-    /// Master switch for Encrypted Client Hello. Without an inline `echConfig` the
-    /// ECHConfigList is discovered from the server's DNS HTTPS record (RFC 9460
-    /// SvcParamKey 5, `ech`), fail-closed: finding none errors out rather than
-    /// sending the real SNI in the clear.
+    
     let echEnabled: Bool
-
-    /// Inline base64 ECHConfigList. `nil` when ECH is off, or on but discovered
-    /// from DNS (see `echIsOpportunistic`).
     let echConfig: String?
-
-    /// ECH on with no inline config: the ECHConfigList must be discovered from DNS.
     var echIsOpportunistic: Bool { echEnabled && echConfig == nil }
 
     let fingerprint: TLSFingerprint
@@ -49,18 +38,18 @@ nonisolated struct TLSConfiguration {
         self.minVersion = minVersion
         self.maxVersion = maxVersion
         self.insecureSkipVerify = insecureSkipVerify
-        // Normalize empty inline config to nil so `echConfig == nil` is the one
-        // canonical "no inline ECH" test everywhere.
         let inlineECH = (echConfig?.isEmpty ?? true) ? nil : echConfig
-        // Default ECH on whenever an inline config is supplied; pass `echEnabled`
-        // explicitly for opportunistic mode or to suppress it.
         self.echEnabled = echEnabled ?? (inlineECH != nil)
         self.echConfig = inlineECH
         self.fingerprint = fingerprint
     }
-
-    /// Parse TLS parameters from URL query parameters.
-    /// Expected: `security=tls&sni=example.com&alpn=h2,http/1.1&fp=chrome_133[&minVersion=1.2&maxVersion=1.3]`
+    
+    static func echSettings(fromQueryValue value: String?) -> (config: String?, enabled: Bool) {
+        guard let value, !value.isEmpty else { return (nil, false) }
+        guard ECHConfigResolver.resolveImmediate(value) != nil else { return (nil, true) }
+        return (value, true)
+    }
+    
     static func parse(from params: [String: String], serverAddress: String) throws -> TLSConfiguration? {
         guard params["security"] == "tls" else { return nil }
 
@@ -77,14 +66,15 @@ nonisolated struct TLSConfiguration {
         let minVersion = Self.parseTLSVersion(params["minVersion"])
         let maxVersion = Self.parseTLSVersion(params["maxVersion"])
 
-        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let ech = echSettings(fromQueryValue: params["ech"])
 
         return TLSConfiguration(
             serverName: sni,
             alpn: alpn,
             minVersion: minVersion,
             maxVersion: maxVersion,
-            echConfig: ech,
+            echEnabled: ech.enabled,
+            echConfig: ech.config,
             fingerprint: fingerprint
         )
     }
@@ -98,10 +88,7 @@ nonisolated struct TLSConfiguration {
         default:    return nil
         }
     }
-
-    /// Percent-encoded `ech=` query value for a `vless://` URL, or nil when unset.
-    /// Encodes `+`, `/`, `=` so a base64 ECHConfigList survives the round-trip
-    /// (a bare `+` would otherwise decode back to a space).
+    
     var echQueryValue: String? {
         guard let ech = echConfig, !ech.isEmpty else { return nil }
         var allowed = CharacterSet.urlQueryAllowed
