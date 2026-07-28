@@ -61,7 +61,17 @@ struct DNSSettingsView: View {
             }
 
             Section("Fallback") {
-                plainRow($drafts.fallback)
+                Picker("Resolver", selection: $settings.fallbackDNSMode) {
+                    ForEach(FallbackDNSMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                switch settings.fallbackDNSMode {
+                case .default:
+                    EmptyView()
+                case .plain:
+                    plainRow($drafts.fallback)
+                }
             }
         }
         .navigationTitle("DNS")

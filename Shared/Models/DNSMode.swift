@@ -21,6 +21,18 @@ nonisolated enum DNSMode: String, CaseIterable {
     }
 }
 
+nonisolated enum FallbackDNSMode: String, CaseIterable {
+    case `default`
+    case plain
+
+    var title: String {
+        switch self {
+        case .default: return String(localized: "Default")
+        case .plain: return String(localized: "Plain")
+        }
+    }
+}
+
 nonisolated enum DNSUpstream: Sendable, Equatable {
     case system
     case plain(host: String, port: UInt16)

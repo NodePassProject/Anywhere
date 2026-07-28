@@ -204,6 +204,13 @@ final class AppSettings {
         }
     }
     
+    var fallbackDNSMode: FallbackDNSMode {
+        didSet {
+            AWCore.setFallbackDNSMode(fallbackDNSMode)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
     var fallbackDNSServer: String {
         didSet {
             AWCore.setFallbackDNSServer(fallbackDNSServer)
@@ -275,6 +282,7 @@ final class AppSettings {
         alwaysUntrustCellular = AWCore.getAlwaysUntrustCellular()
         blockUDP = AWCore.getBlockUDP()
         blockWebRTC = AWCore.getBlockWebRTC()
+        fallbackDNSMode = AWCore.getFallbackDNSMode()
         fallbackDNSServer = AWCore.getFallbackDNSServer()
         hideVPNIcon = AWCore.getHideVPNIcon()
         ipRuleDNSMode = AWCore.getIPRuleDNSMode()

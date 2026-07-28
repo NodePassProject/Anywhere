@@ -10,6 +10,7 @@ import Foundation
 nonisolated private let logger = AnywhereLogger(category: "AWCore")
 
 nonisolated final class AWCore {
+    
     // MARK: - Identifiers
 
     enum Identifier {
@@ -57,6 +58,7 @@ nonisolated final class AWCore {
         static let bypassCountryCode = "bypassCountryCode"
         static let chainLatencyResults = "chainLatencyResults"
         static let experimentalEnabled = "experimentalEnabled"
+        static let fallbackDNSMode = "fallbackDNSMode"
         static let fallbackDNSServer = "fallbackDNSServer"
         static let hideVPNIcon = "hideVPNIcon"
         static let homeColorScheme = "homeColorScheme"
@@ -404,10 +406,18 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.ipRuleDNSDoHURL)
     }
 
+    static func getFallbackDNSMode() -> FallbackDNSMode {
+        userDefaults.string(forKey: UserDefaultsKey.fallbackDNSMode).flatMap(FallbackDNSMode.init(rawValue:)) ?? .default
+    }
+
+    static func setFallbackDNSMode(_ value: FallbackDNSMode) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.fallbackDNSMode)
+    }
+
     static func getFallbackDNSServer() -> String {
         userDefaults.string(forKey: UserDefaultsKey.fallbackDNSServer)!
     }
-    
+
     static func setFallbackDNSServer(_ value: String) {
         userDefaults.set(value, forKey: UserDefaultsKey.fallbackDNSServer)
     }
@@ -429,7 +439,10 @@ nonisolated final class AWCore {
     }
     
     static func getFallbackDNSUpstream() -> DNSUpstream {
-        DNSUpstream.parsePlain(getFallbackDNSServer()) ?? .defaultPlain
+        switch getFallbackDNSMode() {
+        case .default: return .defaultPlain
+        case .plain: return DNSUpstream.parsePlain(getFallbackDNSServer()) ?? .defaultPlain
+        }
     }
 
     static func getAdvertiseIPv6ToApps() -> Bool {
