@@ -104,8 +104,6 @@ nonisolated enum DNSPacket {
                 p[answerOffset + 2] = UInt8(ansType >> 8)               // TYPE
                 p[answerOffset + 3] = UInt8(ansType & 0xFF)
                 p[answerOffset + 4] = 0x00; p[answerOffset + 5] = 0x01          // CLASS = IN
-                // TTL = 300 s; routing is decided at connect time, so longer fake-IP
-                // caching doesn't impede rule changes.
                 p[answerOffset + 6] = 0x00; p[answerOffset + 7] = 0x00
                 p[answerOffset + 8] = 0x01; p[answerOffset + 9] = 0x2C
                 p[answerOffset + 10] = UInt8(rdLength >> 8)             // RDLENGTH

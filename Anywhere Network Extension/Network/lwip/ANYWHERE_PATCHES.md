@@ -261,10 +261,15 @@ the flush never touches listeners.
 **What is unaffected:**
 
 - Routing, including rule-based rejects, is decided per connection in
-  `lwipAccept`; a rejected connection is aborted from there.
+  `lwipAccept`; a rejected connection is silently abandoned from there
+  (`tcp_abandon`, no RST) and its destination is marked — fake-IP pool
+  entry or the router's rejected-IP set — so later SYNs are shed by this
+  filter (see Patch 5 for the companion stray-segment handling).
 - SNI-based rejects need the ClientHello, so they land in
-  `LWIPTCPConnection` and emit a fatal TLS Alert post-handshake
-  (`rejectWithTLSAlert`).
+  `LWIPTCPConnection` post-handshake; they too go dark
+  (`rejectSilently` → `lwip_bridge_tcp_discard`) but mark nothing —
+  the verdict is per-hostname, and the destination is a real, possibly
+  shared IP.
 - If the filter pointer is `NULL` (e.g. Swift hasn't registered yet),
   the patch is a no-op — `tcp_listen_input` proceeds exactly as
   upstream lwIP.
@@ -282,6 +287,56 @@ the flush never touches listeners.
 
 The pointer storage and bridge setter live in `lwip/lwip_bridge.c` and
 don't need re-applying.
+
+---
+
+### 5. `src/core/tcp_in.c` + `src/include/lwip/priv/tcp_priv.h` — stray-segment filter
+
+**What:** In `tcp_listen_input`, before the `TCP_ACK ⇒ tcp_rst_netif`
+reply for a segment that matched no active pcb, call a host-provided
+filter with the same signature and verdicts as the SYN filter (Patch 4).
+`DROP` returns silently instead of sending the RST; `PASS` keeps the
+upstream behavior.
+
+**Why:** Connections to reject-marked fake IPs are dropped without any
+client-visible signal: the first connection's pcb is freed via
+`tcp_abandon(pcb, 0)` from `tcp_accept_cb` (no RST), and subsequent SYNs
+are shed by the Patch 4 filter. Between those two, the client app —
+which believes the handshake succeeded — sends its request data. Those
+segments match no active pcb, fall through to the wildcard LISTEN pcb,
+and upstream lwIP would answer them with RST, converting the silent drop
+into an instant `ECONNRESET` and re-arming the app's tight retry loop.
+The filter lets the host swallow exactly those segments (it checks the
+destination against the cached reject verdicts — fake-IP pool marks and
+the router's rejected real-IP set) while every other stray segment —
+e.g. stragglers of normally closed connections — still draws the RST
+that clears dead client state quickly. In-flight rejects torn down via
+`lwip_bridge_tcp_discard` (async IP-rule and SNI rejects) rarely need
+this: their client data was already ACKed on arrival, so nothing
+retransmits; at most a late FIN or keepalive draws a harmless RST on
+unmarked (SNI-rejected real-IP) destinations.
+
+**What is unaffected:**
+
+- SYN handling: this hook sits in the `TCP_ACK` branch only; SYN
+  admission stays with Patch 4.
+- RST/no-flag segments to LISTEN: ignored/dropped upstream as before,
+  filter not consulted.
+- If the filter pointer is `NULL`, the patch is a no-op and
+  `tcp_listen_input` behaves exactly as upstream lwIP.
+- IPv4/IPv6 symmetric, same byte-extraction as Patch 4.
+
+**Upgrade notes:** When bumping the vendored lwIP version, re-apply:
+
+- `src/core/tcp_in.c`: search for `if (flags & TCP_ACK)` in
+  `tcp_listen_input`.
+- `src/include/lwip/priv/tcp_priv.h`: search for
+  `lwip_anywhere_tcp_stray_filter`.
+
+The pointer storage and `lwip_bridge_set_tcp_stray_filter_fn` live in
+`lwip/lwip_bridge.c` and don't need re-applying. The silent teardown in
+`tcp_accept_cb` (`tcp_abandon` on `silent_drop`) also lives in the
+bridge, outside vendored lwIP.
 
 ---
 

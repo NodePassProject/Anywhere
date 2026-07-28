@@ -675,6 +675,36 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
   /* In the LISTEN state, we check for incoming SYN segments,
      creates a new PCB, and responds with a SYN|ACK. */
   if (flags & TCP_ACK) {
+    /* --- BEGIN Anywhere Patch: stray-segment filter ---
+     * A non-SYN segment here matched no active pcb. After a reject-marked
+     * connection is silently abandoned (tcp_accept_cb / pressure flush),
+     * the app's in-flight data segments land exactly here; answering RST
+     * would undo the silent drop, so let the host swallow them. PASS keeps
+     * the RST for everything else — stragglers of normally closed
+     * connections rely on it to clear dead client state quickly.
+     */
+    if (lwip_anywhere_tcp_stray_filter != NULL) {
+      u8_t src_bytes[16], dst_bytes[16];
+      int is_ipv6 = 0;
+#if LWIP_IPV6
+      if (IP_IS_V6(ip_current_dest_addr())) {
+        SMEMCPY(src_bytes, ip_2_ip6(ip_current_src_addr()), 16);
+        SMEMCPY(dst_bytes, ip_2_ip6(ip_current_dest_addr()), 16);
+        is_ipv6 = 1;
+      } else
+#endif /* LWIP_IPV6 */
+      {
+        SMEMCPY(src_bytes, ip_2_ip4(ip_current_src_addr()), 4);
+        SMEMCPY(dst_bytes, ip_2_ip4(ip_current_dest_addr()), 4);
+      }
+      int verdict = lwip_anywhere_tcp_stray_filter(src_bytes, tcphdr->src,
+                                                    dst_bytes, tcphdr->dest,
+                                                    is_ipv6);
+      if (verdict == LWIP_ANYWHERE_SYN_DROP) {
+        return;
+      }
+    }
+    /* --- END Anywhere Patch --- */
     /* For incoming segments with the ACK flag set, respond with a
        RST. */
     LWIP_DEBUGF(TCP_RST_DEBUG, ("tcp_listen_input: ACK in LISTEN, sending reset\n"));

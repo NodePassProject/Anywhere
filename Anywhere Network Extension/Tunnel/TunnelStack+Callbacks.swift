@@ -45,23 +45,40 @@ extension TunnelStack {
             }
         }
         
-        lwip_bridge_set_tcp_syn_filter_fn { _, _, _, _, _ in
+        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, _, isIPv6 in
             guard let stack = TunnelStack.lwipHost() else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
+            }
+            if let dstIP, stack.connectionRouter.isRejectMarkedDestination(rawIP: dstIP, isIPv6: isIPv6 != 0) {
+                return Int32(LWIP_BRIDGE_SYN_DROP)
             }
             return stack.assumeIsolated { $0.lwipSynVerdict() }
         }
         
-        lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb in
+        lwip_bridge_set_tcp_stray_filter_fn { _, _, dstIP, _, isIPv6 in
+            guard let stack = TunnelStack.lwipHost(), let dstIP,
+                  stack.connectionRouter.isRejectMarkedDestination(rawIP: dstIP, isIPv6: isIPv6 != 0) else {
+                return Int32(LWIP_BRIDGE_SYN_PASS)
+            }
+            return Int32(LWIP_BRIDGE_SYN_DROP)
+        }
+
+        lwip_bridge_set_tcp_accept_fn { _, _, dstIP, dstPort, isIPv6, pcb, silentDrop in
             guard let stack = TunnelStack.lwipHost(), let pcb, let dstIP else { return nil }
             let pcbHandle = LWIPPCBHandle(raw: pcb)
             let dstIPBox = LWIPRawPointer(raw: dstIP)
-            guard let connection = stack.assumeIsolated({
+            let verdict = stack.assumeIsolated({
                 $0.lwipAccept(pcb: pcbHandle.raw, dstIP: dstIPBox.raw, dstPort: dstPort, isIPv6: isIPv6 != 0)
-            }) else {
+            })
+            switch verdict {
+            case .accept(let connection):
+                return connection.adopt()
+            case .dropSilently:
+                silentDrop?.pointee = 1
+                return nil
+            case .abort:
                 return nil
             }
-            return connection.adopt()
         }
         
         lwip_bridge_set_tcp_recv_fn { connection, data, len in
@@ -126,17 +143,23 @@ extension TunnelStack {
         return Int32(LWIP_BRIDGE_SYN_PASS)
     }
     
+    enum AcceptVerdict {
+        case accept(TCPConnection)
+        case dropSilently
+        case abort
+    }
+
     func lwipAccept(
         pcb: UnsafeMutableRawPointer,
         dstIP: UnsafeRawPointer,
         dstPort: UInt16,
         isIPv6: Bool
-    ) -> TCPConnection? {
+    ) -> AcceptVerdict {
         guard let defaultConfiguration = configuration else {
             logger.debug("[TunnelStack] tcp_accept: guard failed")
-            return nil
+            return .abort
         }
-        
+
         let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)
         let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
 
@@ -162,11 +185,11 @@ extension TunnelStack {
                 ruleSetName: matchedRuleSet
             )
             let reason = decision.hostIsResolvedDomain ? "fake-IP domain rule" : "IP rule"
-            logger.debug("[TCP] Rejected by \(reason): \(decision.host):\(dstPort)")
-            return nil
+            logger.debug("[TCP] Rejected by \(reason) (going dark): \(decision.host):\(dstPort)")
+            return .dropSilently
         case .unreachable:
             logger.debug("[TCP] Aborted (stale fake-IP): \(dstIPString):\(dstPort)")
-            return nil
+            return .abort
         }
 
         let dstHost = decision.host
@@ -176,7 +199,7 @@ extension TunnelStack {
             sniffSNI = true
         }
 
-        return TCPConnection(
+        return .accept(TCPConnection(
             stack: self,
             pcb: LWIPPCBHandle(raw: pcb),
             dstHost: dstHost,
@@ -188,6 +211,6 @@ extension TunnelStack {
             sniffSNI: sniffSNI,
             hostIsResolvedDomain: decision.hostIsResolvedDomain,
             bridge: lwipBridge
-        )
+        ))
     }
 }

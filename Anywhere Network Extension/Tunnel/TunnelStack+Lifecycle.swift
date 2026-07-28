@@ -98,6 +98,7 @@ extension TunnelStack {
         lwip_bridge_set_host_ctx(nil)
         OutboundConnector.setRoutingContext(nil)
         fakeIPPool.reset()
+        connectionRouter.clearRejectMarks()
         ConnectionMetrics.shared.setDefaultServer(nil)
         configuration = nil
         finishPlaneCommands()
@@ -237,6 +238,8 @@ extension TunnelStack {
         lastRestartTime = CFAbsoluteTimeGetCurrent()
 
         shutdownInternal()
+        
+        connectionRouter.clearRejectMarks()
 
         self.configuration = configuration
         configureRuntime(for: configuration)
@@ -327,6 +330,7 @@ extension TunnelStack {
         guard proxyMode == .rule else { return }
         logger.info("[VPN] Routing changed")
         domainRouter.install(await domainRouter.compileRoutingConfiguration())
+        connectionRouter.clearRejectMarks()
     }
     
     private func handleMITMChanged() {

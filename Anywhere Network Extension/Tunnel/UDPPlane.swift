@@ -161,6 +161,10 @@ actor UDPPlane {
             return
         }
         
+        if stack.connectionRouter.isRejectMarkedDestination(ipBytes: datagram.dstIP, isIPv6: isIPv6) {
+            return
+        }
+
         guard let defaultConfiguration = udpConfig.configuration else { return }
         let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
         let srcHost = TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: isIPv6)
@@ -192,7 +196,6 @@ actor UDPPlane {
             break
         case .reject(let matchedRuleSet):
             stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
-            stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         case .unreachable:
             stack.sendICMPPortUnreachable(rejecting: datagram)

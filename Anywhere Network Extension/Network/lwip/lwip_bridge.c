@@ -34,10 +34,17 @@ int (*lwip_anywhere_tcp_syn_filter)(const void *src_ip, u16_t src_port,
                                     const void *dst_ip, u16_t dst_port,
                                     int is_ipv6) = NULL;
 
+int (*lwip_anywhere_tcp_stray_filter)(const void *src_ip, u16_t src_port,
+                                      const void *dst_ip, u16_t dst_port,
+                                      int is_ipv6) = NULL;
+
 void lwip_bridge_set_output_fn(lwip_output_fn fn)         { s_output_fn = fn; }
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn) { s_tcp_accept_fn = fn; }
 void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn) {
     lwip_anywhere_tcp_syn_filter = fn;
+}
+void lwip_bridge_set_tcp_stray_filter_fn(lwip_tcp_syn_filter_fn fn) {
+    lwip_anywhere_tcp_stray_filter = fn;
 }
 void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn)   { s_tcp_recv_fn = fn; }
 void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn)   { s_tcp_sent_fn = fn; }
@@ -148,11 +155,16 @@ static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     ip_addr_to_bytes(&newpcb->remote_ip, src_bytes, &is_ipv6);
     ip_addr_to_bytes(&newpcb->local_ip, dst_bytes, &is_ipv6);
 
+    int silent_drop = 0;
     void *conn = s_tcp_accept_fn(src_bytes, newpcb->remote_port,
                                   dst_bytes, newpcb->local_port,
-                                  is_ipv6, newpcb);
+                                  is_ipv6, newpcb, &silent_drop);
     if (!conn) {
-        tcp_abort(newpcb);
+        if (silent_drop) {
+            tcp_abandon(newpcb, 0);
+        } else {
+            tcp_abort(newpcb);
+        }
         return ERR_ABRT;
     }
 
@@ -492,6 +504,15 @@ void lwip_bridge_tcp_abort(void *pcb) {
     tcp_sent(tpcb, NULL);
     tcp_err(tpcb, NULL);
     tcp_abort(tpcb);
+}
+
+void lwip_bridge_tcp_discard(void *pcb) {
+    struct tcp_pcb *tpcb = (struct tcp_pcb *)pcb;
+    tcp_arg(tpcb, NULL);
+    tcp_recv(tpcb, NULL);
+    tcp_sent(tpcb, NULL);
+    tcp_err(tpcb, NULL);
+    tcp_abandon(tpcb, 0);
 }
 
 int lwip_bridge_tcp_sndbuf(void *pcb) {

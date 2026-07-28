@@ -481,6 +481,18 @@ extern int (*lwip_anywhere_tcp_syn_filter)(const void *src_ip, u16_t src_port,
 #define LWIP_ANYWHERE_SYN_DROP  1
 /* --- END Anywhere Patch --- */
 
+/* --- BEGIN Anywhere Patch: stray-segment filter ---
+ * Hook called from `tcp_listen_input` when a non-SYN segment reaches the
+ * LISTEN pcb (i.e. it matched no active connection) and lwIP would reply
+ * with RST. `DROP` suppresses the RST so segments for silently-abandoned
+ * reject-marked connections stay unanswered. Same signature and verdict
+ * values as the SYN filter. See lwip/ANYWHERE_PATCHES.md.
+ */
+extern int (*lwip_anywhere_tcp_stray_filter)(const void *src_ip, u16_t src_port,
+                                              const void *dst_ip, u16_t dst_port,
+                                              int is_ipv6);
+/* --- END Anywhere Patch --- */
+
 #define tcp_ack_now(pcb)                           \
   tcp_set_flags(pcb, TF_ACK_NOW)
 

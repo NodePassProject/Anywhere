@@ -25,15 +25,23 @@ typedef void (*lwip_output_fn)(const void *data, int len, int is_ipv6,
                                 void *release_ctx, lwip_release_fn release);
 
 /* TCP accept: new TCP connection accepted. Returning a non-NULL pointer
- * stores it as the PCB's tcp_arg; returning NULL aborts (RST). Routing is
- * decided here, per connection, so rule-based rejects (IP-CIDR / fake-IP)
- * abort from this callback. SNI-based rejects, which require the
- * ClientHello, are handled inside the connection after it is accepted.
+ * stores it as the PCB's tcp_arg; returning NULL declines the connection.
+ * Routing is decided here, per connection, so rule-based rejects
+ * (IP-CIDR / fake-IP) decline from this callback. SNI-based rejects, which
+ * require the ClientHello, are handled inside the connection after it is
+ * accepted.
+ *
+ * A declined connection is torn down per `*out_silent_drop` (pre-set to 0
+ * by the bridge, ignored when the return value is non-NULL):
+ *   0 — tcp_abort: RST tells the app immediately (stale fake IP, errors).
+ *   1 — tcp_abandon without reset: nothing is sent; reject-marked flows
+ *       go dark and the app throttles itself against its own timeouts.
  *
  * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6. */
 typedef void *(*lwip_tcp_accept_fn)(const void *src_ip, uint16_t src_port,
                                      const void *dst_ip, uint16_t dst_port,
-                                     int is_ipv6, void *pcb);
+                                     int is_ipv6, void *pcb,
+                                     int *out_silent_drop);
 
 /* SYN filter: admission control for an incoming SYN, before lwIP allocates a
  * pcb or sends SYN-ACK. Returns one of the `LWIP_BRIDGE_SYN_*` verdicts below;
@@ -43,6 +51,14 @@ typedef void *(*lwip_tcp_accept_fn)(const void *src_ip, uint16_t src_port,
 typedef int (*lwip_tcp_syn_filter_fn)(const void *src_ip, uint16_t src_port,
                                        const void *dst_ip, uint16_t dst_port,
                                        int is_ipv6);
+
+/* Stray-segment filter: consulted for a non-SYN segment that matched no
+ * active PCB and fell through to the LISTEN pcb, where lwIP would answer
+ * with RST. Same signature and verdicts as the SYN filter: `DROP`
+ * suppresses the RST so the segment dies silently — used for
+ * reject-marked fake IPs, whose PCBs are abandoned without notice and
+ * whose in-flight segments must stay unanswered; `PASS` keeps the RST
+ * (stragglers of normally closed connections rely on it). */
 
 /* TCP recv: data received on a TCP connection */
 typedef void (*lwip_tcp_recv_fn)(void *conn, const void *data, int len);
@@ -61,6 +77,7 @@ void *lwip_bridge_host_ctx(void);
 void lwip_bridge_set_output_fn(lwip_output_fn fn);
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn);
 void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn);
+void lwip_bridge_set_tcp_stray_filter_fn(lwip_tcp_syn_filter_fn fn);
 void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn);
 void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn);
 void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn);
@@ -119,6 +136,12 @@ void lwip_bridge_tcp_shutdown_tx(void *pcb);
 
 void lwip_bridge_tcp_close(void *pcb);
 void lwip_bridge_tcp_abort(void *pcb);
+
+/* Free the PCB without emitting anything on the wire — no RST, no FIN,
+ * no err callback (callbacks are cleared first, like _close/_abort; the
+ * Swift caller runs its own teardown). For rule rejects that go dark on
+ * an already-established connection. */
+void lwip_bridge_tcp_discard(void *pcb);
 int  lwip_bridge_tcp_sndbuf(void *pcb);
 int  lwip_bridge_tcp_snd_queuelen(void *pcb);
 

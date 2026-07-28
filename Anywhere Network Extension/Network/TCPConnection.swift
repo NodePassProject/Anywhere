@@ -232,7 +232,8 @@ actor TCPConnection: MITMSessionHost {
             routeTarget = .reject
             stack.requestLog.record(protocol: .tcp, host: dstHost, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
             logger.debug("[TCP] Rejected by IP rule: \(dstHost) → \(ip):\(dstPort)")
-            rejectGracefully()
+            stack.fakeIPPool.markRejected(domain: dstHost)
+            rejectSilently()
         case .proxy(let id):
             guard let resolved = router.resolveConfiguration(action: match.action) else {
                 logger.report("[TCP] IP-rule route", error: AnywhereError.routing(.configurationMissing(host: dstHost)))
@@ -372,7 +373,7 @@ actor TCPConnection: MITMSessionHost {
             routeTarget = .reject
             stack.requestLog.record(protocol: .tcp, host: sni, port: dstPort, routeTarget: .reject, ruleSetName: match.ruleSetName)
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
-            rejectWithTLSAlert()
+            rejectSilently()
         case .proxy(let id):
             guard let resolved = router.resolveConfiguration(action: match.action) else {
                 logger.report("[TCP] SNI route", error: AnywhereError.routing(.configurationMissing(host: sni)))
@@ -1151,6 +1152,14 @@ actor TCPConnection: MITMSessionHost {
             lwip_bridge_tcp_recved(pcb, chunk)
         }
         close()
+    }
+    
+    private func rejectSilently() {
+        guard !closed else { return }
+        closed = true
+        lwip_bridge_tcp_discard(pcb)
+        BridgeContext.release(self)
+        teardown(abortive: true)
     }
 
     private func rejectWithTLSAlert() {

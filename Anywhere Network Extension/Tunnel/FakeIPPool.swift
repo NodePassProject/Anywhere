@@ -11,14 +11,10 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "FakeIPPool")
 
 nonisolated final class FakeIPPool: Sendable {
-
     struct Entry {
         let domain: String
+        var shouldReject = false
     }
-
-    // IPv4: 198.18.0.0/15, offsets 1...fakeIPPoolSize (LRU-capped).
-    // IPv6: 2001:db8::/96 (RFC 3849), offset in low 32 bits. Prefix must stay inside
-    // the tunnel's routes or fakes black-hole; rules out ULA.
 
     private class LRUNode {
         let offset: Int
@@ -26,8 +22,7 @@ nonisolated final class FakeIPPool: Sendable {
         var next: LRUNode?
         init(offset: Int) { self.offset = offset }
     }
-
-    /// All mutable state, guarded as one unit so the LRU invariant holds.
+    
     private struct State {
         var domainToOffset: [String: Int] = [:]
         var offsetToEntry: [Int: Entry] = [:]
@@ -158,6 +153,66 @@ nonisolated final class FakeIPPool: Sendable {
 
     var count: Int { state.withLock { $0.domainToOffset.count } }
 
+    // MARK: - Reject Marks
+    
+    func markRejected(domain: String) {
+        let marked = state.withLock { state -> Bool in
+            guard let offset = state.domainToOffset[domain],
+                  state.offsetToEntry[offset]?.shouldReject == false else { return false }
+            state.offsetToEntry[offset]?.shouldReject = true
+            return true
+        }
+        if marked {
+            logger.debug("[FakeIPPool] Reject-marked \(domain)")
+        }
+    }
+    
+    func clearRejectMarks() {
+        state.withLock { state in
+            for (offset, entry) in state.offsetToEntry where entry.shouldReject {
+                state.offsetToEntry[offset]?.shouldReject = false
+            }
+        }
+    }
+    
+    func isRejectMarked(rawIP: UnsafeRawPointer, isIPv6: Bool) -> Bool {
+        guard let offset = Self.offset(isIPv6: isIPv6, byteAt: {
+            rawIP.load(fromByteOffset: $0, as: UInt8.self)
+        }) else { return false }
+        return isRejectMarked(offset: offset)
+    }
+    
+    func isRejectMarked(ipBytes: SIMD16<UInt8>, isIPv6: Bool) -> Bool {
+        guard let offset = Self.offset(isIPv6: isIPv6, byteAt: { ipBytes[$0] }) else {
+            return false
+        }
+        return isRejectMarked(offset: offset)
+    }
+
+    private func isRejectMarked(offset: Int) -> Bool {
+        state.withLock { $0.offsetToEntry[offset]?.shouldReject ?? false }
+    }
+    
+    private static func offset(isIPv6: Bool, byteAt: (Int) -> UInt8) -> Int? {
+        if isIPv6 {
+            guard byteAt(0) == 0x20, byteAt(1) == 0x01,
+                  byteAt(2) == 0x0D, byteAt(3) == 0xB8 else { return nil }
+            for i in 4...11 {
+                guard byteAt(i) == 0 else { return nil }
+            }
+            let offset = (Int(byteAt(12)) << 24) | (Int(byteAt(13)) << 16)
+                       | (Int(byteAt(14)) << 8) | Int(byteAt(15))
+            guard offset >= 1, offset <= TunnelConstants.fakeIPPoolSize else { return nil }
+            return offset
+        }
+        let ip32 = (UInt32(byteAt(0)) << 24) | (UInt32(byteAt(1)) << 16)
+                 | (UInt32(byteAt(2)) << 8) | UInt32(byteAt(3))
+        guard ip32 > TunnelConstants.fakeIPPoolBaseIPv4 else { return nil }
+        let offset = Int(ip32 - TunnelConstants.fakeIPPoolBaseIPv4)
+        guard offset <= TunnelConstants.fakeIPPoolSize else { return nil }
+        return offset
+    }
+
     // MARK: - IP ↔ Offset Conversion
 
     private func ipToOffset(_ ip: String) -> Int? {
@@ -218,5 +273,4 @@ nonisolated final class FakeIPPool: Sendable {
             return offset
         }
     }
-
 }
