@@ -161,15 +161,15 @@ actor TCPConnection: MITMSessionHost {
     private func runLifecycle() async {
         let outcome = await withHandshakeDeadline { await self.establishAndDial() }
         switch outcome {
-        case .relay(let connection, let stream, let seed):
-            await runRelayAndClose(connection, stream: stream, seed: seed)
+        case .relay(let connection, let stream):
+            await runRelayAndClose(connection, stream: stream)
         case .mitm, .done:
             return
         }
     }
 
     private enum Establishment {
-        case relay(ProxyConnection, TCPStreamConcurrencyBridge, seed: Data)
+        case relay(ProxyConnection, TCPStreamConcurrencyBridge)
         case mitm
         case done
     }
@@ -442,18 +442,22 @@ actor TCPConnection: MITMSessionHost {
             return handleConnectFailure(error, bufferedClientData: initialData)
         }
 
-        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
-        self.stream = stream
-        establishing = false
-        startIdleTimer()
-
         var seed = Data()
         if let initialData { seed.append(initialData) }
         if !pendingData.isEmpty {
             seed.append(pendingData)
             pendingData.removeAll(keepingCapacity: true)
         }
-        return .relay(connection, stream, seed: seed)
+        return .relay(connection, installStream(seed: seed))
+    }
+    
+    private func installStream(seed: Data) -> TCPStreamConcurrencyBridge {
+        let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
+        if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
+        self.stream = stream
+        establishing = false
+        startIdleTimer()
+        return stream
     }
 
     // MARK: Proxy connection
@@ -495,20 +499,16 @@ actor TCPConnection: MITMSessionHost {
         switch result {
         case .success(let proxyConnection):
             self.proxyConnection = proxyConnection
-            let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
-            self.stream = stream
-            establishing = false
-            startIdleTimer()
-            if let initialData {
-                // Connect success implies the handshake-carried initialData was accepted.
-                acknowledgeReceivedBytes(initialData.count)
-            }
             var seed = Data()
             if !pendingData.isEmpty {
                 seed.append(pendingData)
                 pendingData.removeAll(keepingCapacity: true)
             }
-            return .relay(proxyConnection, stream, seed: seed)
+            let stream = installStream(seed: seed)
+            if let initialData {
+                acknowledgeReceivedBytes(initialData.count)
+            }
+            return .relay(proxyConnection, stream)
 
         case .failure(let error):
             return handleConnectFailure(error, bufferedClientData: initialData)
@@ -546,13 +546,13 @@ actor TCPConnection: MITMSessionHost {
 
     // MARK: - Relay
 
-    private func runRelayAndClose(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) async {
-        startRelaySetup(connection, stream: stream, seed: seed)
+    private func runRelayAndClose(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge) async {
+        startRelaySetup(stream: stream)
         let context = RelayContext(stack: stack, routeTarget: routeTarget)
         await runRelay(connection, stream: stream, context: context)
     }
 
-    private func startRelaySetup(_ connection: ProxyConnection, stream: TCPStreamConcurrencyBridge, seed: Data) {
+    private func startRelaySetup(stream: TCPStreamConcurrencyBridge) {
         stream.assumeIsolated { s in
             s.onFatalWrite = { [weak self] error in
                 guard let self else { return }
@@ -565,7 +565,6 @@ actor TCPConnection: MITMSessionHost {
                 }
             }
         }
-        if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
     }
 
     private struct RelayContext: Sendable {
