@@ -453,6 +453,7 @@ nonisolated final class AnyTLSMultiplexer: Multiplexer, Sendable {
             stream.deliverClose(error: error)
         }
         readTask?.cancel()
+        sendChain.cancel()
         inner.cancel()
         onClose?(self)
     }

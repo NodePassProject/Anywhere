@@ -8,8 +8,6 @@
 import Foundation
 
 extension ProxyClient {
-    /// Dials the SOCKS5 outbound: establishes the control transport, runs the async
-    /// handshake over it, then wraps the result as a TCP stream or a UDP-associate relay.
     func connectWithSOCKS5(
         command: ProxyCommand,
         destinationHost: String,
@@ -29,43 +27,46 @@ extension ProxyClient {
         }
 
         let buffer = SOCKS5AsyncBuffer(transport: transport)
-
-        if command == .udp {
-            let relay = try await SOCKS5Handshake.performUDPAssociate(
-                buffer: buffer,
-                transport: transport,
-                username: username,
-                password: password,
-                serverAddress: configuration.serverAddress
-            )
-            // The relay transport must ride the same chain as the control channel.
-            let relayConnection = try await openSOCKS5UDPRelay(
-                relayHost: relay.host,
-                relayPort: relay.port
-            )
-            return SOCKS5UDPProxyConnection(
-                tcpTransport: transport,
-                relay: relayConnection,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort
-            )
-        } else {
-            try await SOCKS5Handshake.perform(
-                buffer: buffer,
-                transport: transport,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                username: username,
-                password: password
-            )
-            let dataTransport: any ByteTransport
-            if let excess = buffer.remaining {
-                // Handshake-leftover bytes belong to the tunneled stream; replay them first.
-                dataTransport = SOCKS5ReplayTransport(inner: transport, initialData: excess)
+        
+        do {
+            if command == .udp {
+                let relay = try await SOCKS5Handshake.performUDPAssociate(
+                    buffer: buffer,
+                    transport: transport,
+                    username: username,
+                    password: password,
+                    serverAddress: configuration.serverAddress
+                )
+                let relayConnection = try await openSOCKS5UDPRelay(
+                    relayHost: relay.host,
+                    relayPort: relay.port
+                )
+                return SOCKS5UDPProxyConnection(
+                    tcpTransport: transport,
+                    relay: relayConnection,
+                    destinationHost: destinationHost,
+                    destinationPort: destinationPort
+                )
             } else {
-                dataTransport = transport
+                try await SOCKS5Handshake.perform(
+                    buffer: buffer,
+                    transport: transport,
+                    destinationHost: destinationHost,
+                    destinationPort: destinationPort,
+                    username: username,
+                    password: password
+                )
+                let dataTransport: any ByteTransport
+                if let excess = buffer.remaining {
+                    dataTransport = SOCKS5ReplayTransport(inner: transport, initialData: excess)
+                } else {
+                    dataTransport = transport
+                }
+                return DirectProxyConnection(transport: dataTransport)
             }
-            return DirectProxyConnection(transport: dataTransport)
+        } catch {
+            transport.cancel()
+            throw error
         }
     }
 

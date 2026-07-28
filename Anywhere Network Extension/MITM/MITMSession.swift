@@ -469,7 +469,10 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         proxyClient?.cancel()
         proxyClient = nil
         pendingUpstreamBytes = Data()
+        for sender in legSenders.values { sender.cancel() }
         legSenders.removeAll()
+        for abort in legAborts.values { abort.cont.finish() }
+        legAborts.removeAll()
         innerTransport.cancel()
         sessionJobContinuation.finish()
         deferredActionContinuation.finish()
@@ -637,6 +640,32 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         legSenders[key] = sender
         return sender
     }
+
+    // MARK: - Per-leg retirement
+    
+    private var legAborts: [ObjectIdentifier: (token: UInt64, cont: AsyncStream<Never>.Continuation)] = [:]
+    private var nextLegAbortToken: UInt64 = 0
+    
+    private func pumpUntilRetired(_ leg: AnyObject, _ body: @escaping @Sendable () async -> Void) async {
+        let key = ObjectIdentifier(leg)
+        let (signal, continuation) = AsyncStream.makeStream(of: Never.self)
+        nextLegAbortToken &+= 1
+        let token = nextLegAbortToken
+        legAborts.updateValue((token, continuation), forKey: key)?.cont.finish()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await body() }
+            group.addTask { for await _ in signal {} }
+            await group.next()
+            group.cancelAll()
+        }
+        if legAborts[key]?.token == token { legAborts.removeValue(forKey: key) }
+    }
+    
+    private func retireLeg(_ leg: AnyObject) {
+        let key = ObjectIdentifier(leg)
+        legSenders.removeValue(forKey: key)?.cancel()
+        legAborts.removeValue(forKey: key)?.cont.finish()
+    }
     
     private func sendChunkedCancellingOnError(_ data: Data, via record: any MITMByteLeg) {
         guard !torn else { return }
@@ -801,7 +830,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         let oldOuter = outerRecord
         outerRecord = nil
         if let oldOuter {
-            legSenders.removeValue(forKey: ObjectIdentifier(oldOuter))
+            retireLeg(oldOuter)
             oldOuter.cancel()
         }
         tlsClient?.cancel()
@@ -904,6 +933,10 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     }
     
     private func runOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) async {
+        await pumpUntilRetired(outer) { await self.driveOutboundPump(inner: inner, outer: outer) }
+    }
+
+    private func driveOutboundPump(inner: any MITMByteLeg, outer: any MITMByteLeg) async {
         while true {
             let data: Data?
             let error: Error?
@@ -1378,7 +1411,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         bs.connection?.cancel()
         bs.proxyClient?.cancel()
         if let record = bs.upstreamRecord {
-            legSenders.removeValue(forKey: ObjectIdentifier(record))
+            retireLeg(record)
             record.cancel()
         }
         bs.responseStream.assumeIsolated { $0.markTorn() }
@@ -1443,6 +1476,10 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     
     private func runBridgeUpstreamPump(streamID: UInt32) async {
         guard let record = bridgeStreams[streamID]?.upstreamRecord else { return }
+        await pumpUntilRetired(record) { await self.driveBridgeUpstreamPump(streamID: streamID, record: record) }
+    }
+
+    private func driveBridgeUpstreamPump(streamID: UInt32, record: TLSRecordConnection) async {
         while true {
             let data: Data?
             let error: Error?

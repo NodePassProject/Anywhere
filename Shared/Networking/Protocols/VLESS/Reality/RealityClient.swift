@@ -97,6 +97,8 @@ actor RealityClient {
                 Task { await self.cancel() }
             }, error: {
                 AnywhereError.tls(.handshakeFailed(detail: "Reality handshake timed out"))
+            }, discardingLateResult: { record in
+                record.cancel()
             }, operation: handshake)
         } catch {
             releaseOnFailure()

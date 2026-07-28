@@ -9,6 +9,8 @@ import Foundation
 import Synchronization
 
 nonisolated final class ProxyClient: Sendable {
+    fileprivate static let sharedH2BringUpTimeout: TimeInterval = 30
+
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
 
@@ -319,21 +321,19 @@ nonisolated final class ProxyClient: Sendable {
     }
     
     private func tearDown() {
-        let delivered = state.withLock { s -> ProxyConnection? in
+        let (delivered, tunnel) = state.withLock { s -> (ProxyConnection?, ProxyConnection?) in
             s.cancelled = true
-            let delivered = s.delivered
+            let pair = (s.delivered, s.tunnel)
             s.delivered = nil
             s.tunnel = nil
-            return delivered
+            return pair
         }
         delivered?.cancel()
+        tunnel?.cancel()
     }
 
     // MARK: - Protocol Handshake
-
-    /// Async protocol handshake over an established transport; dispatches to the VLESS or
-    /// Shadowsocks handshake. Used by the native-async dial paths (Direct/TLS-record layers
-    /// migrate their consumers onto this as their stages land).
+    
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -490,9 +490,7 @@ nonisolated final class ProxyClient: Sendable {
             destinationPort: destinationPort, initialData: initialData, supportsVision: true
         )
     }
-
-    /// Runs the TLS handshake async-natively. Dials over the chain tunnel when present, else
-    /// directly to the configured server.
+    
     private func connectTLSRecord(_ tlsClient: TLSClient) async throws -> TLSRecordConnection {
         if let tunnel = self.tunnel {
             return try await tlsClient.connect(overTunnel: tunnel)
@@ -500,9 +498,7 @@ nonisolated final class ProxyClient: Sendable {
             return try await tlsClient.connect(host: self.directDialHost, port: self.configuration.serverPort)
         }
     }
-
-    /// Runs the Reality handshake async-natively. Dials over the chain tunnel when present, else
-    /// directly to the configured server.
+    
     private func connectRealityRecord(_ realityClient: RealityClient) async throws -> TLSRecordConnection {
         if let tunnel = self.tunnel {
             return try await realityClient.connect(overTunnel: tunnel)
@@ -664,11 +660,16 @@ nonisolated final class ProxyClient: Sendable {
             try await transport.connect()
             directProxyConnection = DirectProxyConnection(transport: transport)
         }
-        return try await sendProtocolHandshake(
-            over: directProxyConnection, command: command, destinationHost: destinationHost,
-            destinationPort: destinationPort, initialData: initialData,
-            supportsVision: supportsVision
-        )
+        do {
+            return try await sendProtocolHandshake(
+                over: directProxyConnection, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData,
+                supportsVision: supportsVision
+            )
+        } catch {
+            directProxyConnection.cancel()
+            throw error
+        }
     }
 
     // MARK: - gRPC Connection
@@ -702,8 +703,7 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-
-    /// Selects the XHTTP HTTP version: Reality forces h2; plain TCP is http/1.1; otherwise per TLS ALPN.
+    
     private func decideXHTTPHTTPVersion(for xraySecurityLayer: XraySecurityLayer? = nil) -> XHTTPHTTPVersion {
         let security = xraySecurityLayer ?? configuration.xraySecurityLayer
         if case .reality = security {
@@ -728,8 +728,7 @@ nonisolated final class ProxyClient: Sendable {
             return .http2
         }
     }
-
-    /// Strips ALPN entries (e.g. `h3`) that the chosen HTTP version can't satisfy over TCP.
+    
     private func sanitizedXHTTPTLSConfiguration(
         from base: TLSConfiguration,
         httpVersion: XHTTPHTTPVersion
@@ -811,10 +810,8 @@ nonisolated final class ProxyClient: Sendable {
         )
     }
 
-    // MARK: Combined XHTTP (single server)
-
-    /// HTTP/1.1 can't multiplex, so packet-up/stream-up dial a second connection for
-    /// the upload POST; HTTP/2 and HTTP/3 carry both directions over one transport.
+    // MARK: Combined XHTTP
+    
     private func connectXHTTPCombined(
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
@@ -863,9 +860,7 @@ nonisolated final class ProxyClient: Sendable {
     }
 
     // MARK: XHTTP up/download detach
-
-    /// Dials separate upload (POST) and download (GET) legs joined by a shared session ID.
-    /// The download leg is the coordinator and always dials its own server directly.
+    
     private func connectXHTTPDetached(
         xhttpConfig: XHTTPConfiguration,
         downloadSettings: XHTTPDownloadSettings,
@@ -894,9 +889,6 @@ nonisolated final class ProxyClient: Sendable {
             uploadLeg.cancel()
             throw error
         }
-
-        // Download leg is the coordinator; it owns the upload leg (`uploadChannel`), so cancelling
-        // it cascades to the upload leg too.
         downloadLeg.attachUploadChannel(uploadLeg)
         do {
             return try await performXHTTPSetup(
@@ -910,14 +902,11 @@ nonisolated final class ProxyClient: Sendable {
         }
     }
 
-    // MARK: XHTTP leg factory (shared by combined & detach)
+    // MARK: XHTTP leg factory
 
     private struct XHTTPEndpoint {
-        /// Host for a direct kernel dial (a pre-resolved IP when latency testing).
         let directHost: String
-        /// Logical server identity, used as the HTTP/3 host when chained.
         let chainHost: String
-        /// SNI / HTTP/3 server name.
         let serverName: String
         let port: UInt16
         let security: XraySecurityLayer
@@ -953,10 +942,8 @@ nonisolated final class ProxyClient: Sendable {
             security: downloadSettings.xraySecurityLayer
         )
     }
-
-    /// Resolves the main leg's route, consuming `self.tunnel` so it is dialed exactly once.
+    
     private func consumeMainXHTTPRoute() -> XHTTPLegRoute {
-        // Atomic take-and-clear so the tunnel is dialed exactly once even under a racing cancel.
         let takenTunnel: ProxyConnection? = state.withLock { state in
             let tunnel = state.tunnel
             state.tunnel = nil
@@ -970,8 +957,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         return .direct
     }
-
-    /// Dials one XHTTP leg and wraps it in an `XHTTPConnection` with the given role.
+    
     private func dialXHTTPLeg(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
@@ -982,9 +968,6 @@ nonisolated final class ProxyClient: Sendable {
         role: XHTTPChannelRole,
         uploadFactory: (@Sendable () async throws -> any ByteTransport)?
     ) async throws -> XHTTPConnection {
-        // xmux: pool/multiplex direct-route XHTTP connections. XHTTP always pools — serial-reuse
-        // defaults apply when xmux is omitted (see `effectiveXMUX`). Tunneled/chained routes
-        // can't pool (single-use tunnel), so they fall through to a fresh dial below.
         if httpVersion == .http3, case .direct = route {
             return try await acquirePooledH3(
                 endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
@@ -1015,9 +998,7 @@ nonisolated final class ProxyClient: Sendable {
         connection.configureRole(role)
         return connection
     }
-
-    /// Acquires a shared, xmux-pooled HTTP/3 session for a direct-route XHTTP leg; the
-    /// factory is destination-bound (captures no per-flow state) so the manager is reusable.
+    
     private func acquirePooledH3(
         endpoint: XHTTPEndpoint,
         xmux: XHTTPXMUXMultiplexerConfiguration,
@@ -1046,9 +1027,7 @@ nonisolated final class ProxyClient: Sendable {
         connection.configureXMUXLease(lease)
         return connection
     }
-
-    /// Acquires a shared, xmux-pooled HTTP/2 connection for a direct-route XHTTP leg; the
-    /// factory is destination-bound (captures no per-flow state) so the manager is reusable.
+    
     private func acquirePooledH2(
         endpoint: XHTTPEndpoint,
         xmux: XHTTPXMUXMultiplexerConfiguration,
@@ -1075,10 +1054,7 @@ nonisolated final class ProxyClient: Sendable {
         connection.configureXMUXLease(lease)
         return connection
     }
-
-    /// Dials a byte stream and brings up a shared multiplexing H2 connection on it (xmux).
-    /// Static so the pooled manager's factory captures no per-flow state; the dial client is
-    /// retained by the shared connection for its lifetime.
+    
     private static func dialSharedH2(
         host: String,
         port: UInt16,
@@ -1087,7 +1063,29 @@ nonisolated final class ProxyClient: Sendable {
         func bringUp(_ transport: any ByteTransport, retaining object: (any Sendable)?) async throws -> XHTTPH2Multiplexer {
             let shared = XHTTPH2Multiplexer(transport: transport)
             if let object { shared.retain(object) }
-            try await shared.connect()
+            do {
+                try await withDialDeadline(
+                    .seconds(Self.sharedH2BringUpTimeout),
+                    onExpiry: { shared.poolClose() },
+                    error: {
+                        AnywhereError.transport(
+                            .timedOut(
+                                .connect,
+                                endpoint: "\(host):\(port)",
+                                detail: "shared H2 settings")
+                        )
+                    }
+                ) {
+                    try await withTaskCancellationHandler {
+                        try await shared.connect()
+                    } onCancel: {
+                        shared.poolClose()
+                    }
+                }
+            } catch {
+                shared.poolClose()
+                throw error
+            }
             return shared
         }
         switch security {
@@ -1096,7 +1094,6 @@ nonisolated final class ProxyClient: Sendable {
             try await transport.connect()
             return try await bringUp(transport, retaining: transport)
         case .tls(let tlsConfig):
-            // XHTTP rides h2; advertise it (fall back to http/1.1) regardless of the configured ALPN.
             let h2TLS = TLSConfiguration(
                 serverName: tlsConfig.serverName, alpn: ["h2", "http/1.1"],
                 echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
@@ -1110,9 +1107,7 @@ nonisolated final class ProxyClient: Sendable {
             return try await bringUp(TLSByteTransport(connection), retaining: client)
         }
     }
-
-    /// HTTP/1.1 and HTTP/2 ride a byte stream; HTTP/3 rides a QUIC session whose
-    /// datagram transport encodes the route.
+    
     private func dialXHTTPTransport(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
@@ -1129,7 +1124,6 @@ nonisolated final class ProxyClient: Sendable {
             return try await dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
                                 httpVersion: httpVersion, overTunnel: tunnel)
         case .buildChain(let chain):
-            // XHTTP requires a TCP stream end-to-end.
             let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
             let tunnel = try await self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands)
             return try await dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
@@ -1173,9 +1167,7 @@ nonisolated final class ProxyClient: Sendable {
             return .byteStream(TLSByteTransport(connection))
         }
     }
-
-    /// QUIC performs TLS natively, so the route is encoded as the session's datagram
-    /// transport instead of a TLS/Reality client.
+    
     private func dialXHTTPHTTP3Session(
         endpoint: XHTTPEndpoint,
         route: XHTTPLegRoute
@@ -1194,21 +1186,13 @@ nonisolated final class ProxyClient: Sendable {
             return makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))
         }
     }
-
-    /// Upload-connection factory for combined HTTP/1.1 sessions; the download leg already
-    /// consumed any inbound tunnel, so this routes direct or through a fresh chain.
-    ///
-    /// Both branches clear the dial attempt: the factory can be called long after the dial that
-    /// built it — at first upload, or on a pooled socket adopted by another flow — and the
-    /// server's first response belongs to the download leg, which reports it already.
+    
     private func makeXHTTPUploadFactory(
         security: XraySecurityLayer,
         httpVersion: XHTTPHTTPVersion,
         mode: XHTTPMode,
         xmux: XHTTPXMUXMultiplexerConfiguration
     ) -> (@Sendable () async throws -> any ByteTransport) {
-        // xmux: pool the packet-up upload socket across sessions for direct routes.
-        // stream-up's upload is one indefinite POST (never reusable); chained routes can't pool.
         let hasChain = (configuration.chain?.isEmpty == false)
         if mode == .packetUp, !hasChain {
             let endpoint = mainXHTTPEndpoint()
@@ -1216,8 +1200,6 @@ nonisolated final class ProxyClient: Sendable {
             let port = endpoint.port
             let sec = endpoint.security
             let serverName = endpoint.serverName
-            // HTTP/1.1 can't multiplex: force exclusive use (concurrency 1) so a socket is never
-            // handed to concurrent sessions. Rotation limits (connections/reuse/lifetime) still apply.
             var uploadXMUX = xmux
             uploadXMUX.maxConcurrency = XHTTPXMUXMultiplexerRange(from: 1, to: 1)
             let key = "h1up|\(host)|\(port)|\(serverName)"
@@ -1258,9 +1240,7 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-
-    /// Dials a fresh HTTP/1.1 upload byte stream and wraps it as a poolable upload connection (xmux).
-    /// Static so the pooled manager's factory captures no per-flow state.
+    
     private static func dialH1UploadConnection(
         host: String,
         port: UInt16,
@@ -1277,6 +1257,7 @@ nonisolated final class ProxyClient: Sendable {
             do {
                 try await transport.connect()
             } catch {
+                transport.cancel()
                 return nil
             }
             return wrap(transport, retaining: transport)

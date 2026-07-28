@@ -12,6 +12,7 @@ nonisolated func withDialDeadline<T: Sendable>(
     _ duration: Duration,
     onExpiry: @escaping @Sendable () -> Void,
     error makeError: @escaping @Sendable () -> any Error,
+    discardingLateResult discard: (@Sendable (T) -> Void)? = nil,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
     let winner = RaceClaim()
@@ -19,7 +20,11 @@ nonisolated func withDialDeadline<T: Sendable>(
         group.addTask {
             do {
                 let value = try await operation()
-                return winner.claim() ? value : nil
+                guard winner.claim() else {
+                    discard?(value)
+                    return nil
+                }
+                return value
             } catch {
                 if winner.claim() { throw error }
                 return nil

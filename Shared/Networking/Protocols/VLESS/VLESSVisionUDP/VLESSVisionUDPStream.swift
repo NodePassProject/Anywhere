@@ -99,6 +99,7 @@ actor VLESSVisionUDPStream {
     nonisolated func close() {
         guard !_closed.exchange(true, ordering: .relaxed) else { return }
         inbox.finish()
+        sendChain.cancel()
         Task { await self.sendEndAndRemove() }
     }
 

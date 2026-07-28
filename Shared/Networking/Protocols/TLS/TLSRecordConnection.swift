@@ -332,9 +332,11 @@ nonisolated final class TLSRecordConnection: Sendable {
     func cancel() {
         let transport = connectionBox.withLock { box -> (any ByteTransport)? in
             let transport = box
-            box = nil                // in-flight and subsequent sends see nil and abort
+            box = nil
             return transport
         }
+        
+        sendChain.cancel()
 
         receiveState.withLock { $0.buffer.removeAll() }
 

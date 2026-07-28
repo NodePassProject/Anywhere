@@ -333,7 +333,8 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         for stream in teardown.streams {
             stream.deliverClose(error: error)
         }
-
+        
+        sendChain.cancel()
         teardown.connection?.cancel()
         teardown.client?.cancel()
         teardown.readyTask?.cancel()

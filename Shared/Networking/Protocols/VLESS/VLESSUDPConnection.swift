@@ -55,6 +55,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     func cancel() {
         udpState.withLock { clearUDPBuffer(&$0) }
+        sendChain.cancel()
         inner.cancel()
     }
 }

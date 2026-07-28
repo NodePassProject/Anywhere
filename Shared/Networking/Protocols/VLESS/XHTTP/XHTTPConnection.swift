@@ -10,106 +10,61 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "XHTTPConnection")
 
-// MARK: - XHTTP Channel Role
-
-/// A detached session pairs a `.downloadOnly` leg (GET) with an `.uploadOnly` leg (POSTs) sharing one session ID.
 nonisolated enum XHTTPChannelRole {
     case combined
     case downloadOnly
     case uploadOnly
 }
 
-// MARK: - XHTTPConnection
-
 nonisolated final class XHTTPConnection: Sendable {
-
     let configuration: XHTTPConfiguration
     let mode: XHTTPMode
     let sessionId: String
-
-    // Download / stream-one transport.
+    
     let download: any ByteTransport
-
-    // Upload transport factory (packet-up and stream-up), async-native.
+    
     let uploadConnectionFactory: (@Sendable () async throws -> any ByteTransport)?
-
-    // The seven setup values below are written once at setup and read on the send/receive path;
-    // their storage lives in `state` (see `State`). Reads are read-only atomic snapshots; the
-    // one-time writes go through the explicit `configure…`/`adopt…` methods so no caller mistakes
-    // a lock-guarded field for a plain settable variable. Reads inside an existing `withLock` use
-    // the `state` fields directly to avoid re-entering the lock.
+    
     var role: XHTTPChannelRole { state.withLock { $0.role } }
-    /// Sets the channel role. Called once by the coordinator before the leg goes on the wire.
     func configureRole(_ role: XHTTPChannelRole) { state.withLock { $0.role = role } }
-
-    /// Upload leg owned by this download leg when detached; sends are delegated to it.
+    
     var uploadChannel: XHTTPConnection? { state.withLock { $0.uploadChannel } }
-    /// Attaches the owned upload leg. Called once by the coordinator during detached setup.
     func attachUploadChannel(_ channel: XHTTPConnection?) { state.withLock { $0.uploadChannel = channel } }
-
-    /// Non-nil when the transport is a pooled, shared xmux connection; teardown then
-    /// releases the lease instead of closing the shared transport (others may still use it).
+    
     var xmuxLease: XHTTPXMUXMultiplexerLease? { state.withLock { $0.xmuxLease } }
-    /// Records the xmux pool lease. Called once by the coordinator at acquisition.
     func configureXMUXLease(_ lease: XHTTPXMUXMultiplexerLease) { state.withLock { $0.xmuxLease = lease } }
-
-    // Packet-up: one POST at a time, no more often than `scMinPostsIntervalMs` apart. Each POST
-    // runs in submission order on this serializer, so they go strictly one at a time (rate-limit
-    // wait included) without a lock held across the `await`.
+    
     let packetUpChain = SerialSender()
-
-    // HTTP/2 state
+    
     let useHTTP2: Bool
-    /// Demuxes the byte transport into H2 frames (1:1 path); idle on H3/shared-H2 legs.
     let h2FrameReader: H2FrameReader
-
-    /// Caps the H2 frame reader's buffer to bound memory growth.
     static let maxH2ReadBufferSize = 2_097_152
-
-    // HTTP/2 multiplexing stream IDs (set at H2 setup, read on the send/receive path).
-    var h2UploadStreamId: UInt32 { state.withLock { $0.h2UploadStreamId } }      // Fixed upload stream for stream-up
-    /// Download (GET) stream id when reading H2 frames; set out of range on an
-    /// `.uploadOnly` leg so its POST responses are drained, not delivered.
+    
+    var h2UploadStreamId: UInt32 { state.withLock { $0.h2UploadStreamId } }
     var h2DownloadStreamId: UInt32 { state.withLock { $0.h2DownloadStreamId } }
-    /// Sets both H2 stream ids together at H2 setup, so they publish as one unit.
     func configureH2StreamIDs(upload: UInt32, download: UInt32) {
         state.withLock { $0.h2UploadStreamId = upload; $0.h2DownloadStreamId = download }
     }
-
-    // HTTP/3 state (modes multiplexed onto QUIC streams via HTTP3Multiplexer)
+    
     var h3Multiplexer: HTTP3Multiplexer? { state.withLock { $0.h3Multiplexer } }
-    /// Adopts the pooled H3 session. Called once from the convenience init before the leg is shared.
     func adoptH3Multiplexer(_ multiplexer: HTTP3Multiplexer) { state.withLock { $0.h3Multiplexer = multiplexer } }
 
     var useHTTP3: Bool { h3Multiplexer != nil }
-
-    // Pooled shared-H2 multiplexing state (xmux). When `sharedH2` is set, this session's
-    // streams ride a shared connection instead of running its own 1:1 H2 framing.
+    
     var sharedH2: XHTTPH2Multiplexer? { state.withLock { $0.sharedH2 } }
-    /// Adopts the shared xmux H2 connection. Called once from the convenience init before sharing.
     func adoptSharedH2(_ multiplexer: XHTTPH2Multiplexer) { state.withLock { $0.sharedH2 = multiplexer } }
 
     var usesSharedH2: Bool { sharedH2 != nil }
 
     // MARK: - Guarded State
-
-    /// All mutable per-connection state, guarded by the `state` mutex. Continuations parked here
-    /// are always resumed *after* `withLock` returns, never while the lock is held.
+    
     nonisolated struct State {
-        // Setup values: written once during `performSetup`, read on the send/receive path.
         var role: XHTTPChannelRole = .combined
-        /// Upload leg owned by this download leg when detached; sends are delegated to it.
         var uploadChannel: XHTTPConnection?
-        /// Non-nil when the transport is a pooled, shared xmux connection.
         var xmuxLease: XHTTPXMUXMultiplexerLease?
-        /// Fixed upload stream for stream-up.
         var h2UploadStreamId: UInt32 = 3
-        /// Download (GET) stream id; set out of range on an `.uploadOnly` leg so its POST
-        /// responses are drained, not delivered.
         var h2DownloadStreamId: UInt32 = 1
-        /// HTTP/3 multiplexer (QUIC streams); nil unless the leg runs over H3.
         var h3Multiplexer: HTTP3Multiplexer?
-        /// Pooled shared-H2 multiplexer (xmux); when set, streams ride a shared connection.
         var sharedH2: XHTTPH2Multiplexer?
         
         var uploadTransport: (any ByteTransport)?
@@ -119,49 +74,33 @@ nonisolated final class XHTTPConnection: Sendable {
         var chunkedDecoder = ChunkedTransferDecoder()
         var downloadHeadersParsed = false
         var _isConnected = false
-
-        /// Timestamp of the last packet-up POST, for `scMinPostsIntervalMs` rate limiting.
+        
         var packetUpLastFlushTime: UInt64 = 0
-
-        /// Leftover data after HTTP response headers.
+        
         var headerBuffer = Data()
-
-        // HTTP/2 flow-control & framing state
+        
         var h2DataBuffer = Data()
-        /// Connection-level send window (RFC 7540 §6.9); updated by WINDOW_UPDATE on stream 0 only.
         var h2PeerConnectionWindow: Int = 65535
-        /// Send window for the active upload stream; updated by SETTINGS INITIAL_WINDOW_SIZE and stream WINDOW_UPDATE.
         var h2PeerStreamSendWindow: Int = 65535
         var h2PeerInitialWindowSize: Int = 65535
-        var h2LocalWindowSize: Int = 4_194_304  // Match h2StreamWindowSize (4MB)
+        var h2LocalWindowSize: Int = 4_194_304
         var h2MaxFrameSize: Int = 16384
         var h2ResponseReceived = false
         var h2StreamClosed = false
-
-        /// Sends blocked on flow control; the WINDOW_UPDATE handler resumes all, each re-checks its window.
+        
         var h2FlowGate = H2FlowGate()
-        /// Send windows for packet-up streams blocked on flow control, keyed by stream ID.
         var h2PacketStreamWindows: [UInt32: Int] = [:]
-
-        /// Bytes received but not yet acknowledged via WINDOW_UPDATE (connection level).
+        
         var h2ConnectionReceiveConsumed: Int = 0
-        /// Bytes received but not yet acknowledged via WINDOW_UPDATE (stream level, download stream).
         var h2StreamReceiveConsumed: Int = 0
-
-        /// Next stream ID for packet-up uploads.
+        
         var h2NextPacketStreamId: UInt32 = 3
-
-        // HTTP/3 streams
-        /// Download stream: the GET response body, or the full-duplex stream in stream-one.
+        
         var h3Download: XHTTPH3RequestStream?
-        /// Persistent upload POST stream (stream-up only).
         var h3Upload: XHTTPH3RequestStream?
         var h3Closed = false
-
-        // Pooled shared-H2 (xmux) streams
-        /// GET download stream, or the full-duplex stream in stream-one.
+        
         var sharedH2Download: XHTTPH2Stream?
-        /// Persistent upload POST stream (stream-up only).
         var sharedH2Upload: XHTTPH2Stream?
     }
 
@@ -174,8 +113,7 @@ nonisolated final class XHTTPConnection: Sendable {
     }
 
     // MARK: - X-Padding
-
-    /// Applies X-Padding to the raw HTTP request (Referer-based by default, obfs placements otherwise).
+    
     func applyPadding(to request: inout String, forPath path: String) {
         let padding = configuration.generatePadding()
 
@@ -501,7 +439,8 @@ nonisolated final class XHTTPConnection: Sendable {
                 upload
             )
         }
-
+        
+        packetUpChain.cancel()
         download.cancel()
         teardown.upload?.cancel()
         teardown.h3Download?.close()
@@ -609,7 +548,8 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         var leftRequests: Int
         let unreusableAt: CFAbsoluteTime?
         var dialTask: Task<XHTTPXMUXMultiplexerPoolable?, Never>?
-        
+        var dialWaiters: [(id: UInt64, cont: AsyncStream<Never>.Continuation)] = []
+
         func isRetired(now: CFAbsoluteTime) -> Bool {
             if phase == .dialing { return false }
             if phase == .failed { return true }
@@ -623,6 +563,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     private struct PoolState {
         var entries: [UInt64: ClientEntry] = [:]
         var nextID: UInt64 = 0
+        var nextWaiterID: UInt64 = 0
     }
     private let pool = Mutex(PoolState())
     
@@ -698,26 +639,68 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
         case .failed:
             return nil
         case .dialOrJoin(let id):
-            let task = pool.withLock { $0.entries[id]?.dialTask }
-            guard let connection = await task?.value else { return nil }
+            guard let connection = await joinDial(id: id) else {
+                releaseSlot(id)
+                return nil
+            }
             return makeLease(connection, id)
         }
     }
     
+    private func joinDial(id: UInt64) async -> XHTTPXMUXMultiplexerPoolable? {
+        enum Step {
+            case settled(XHTTPXMUXMultiplexerPoolable?)
+            case wait(AsyncStream<Never>, UInt64)
+        }
+        while true {
+            let step: Step = pool.withLock { pool in
+                guard var entry = pool.entries[id] else { return .settled(nil) }
+                switch entry.phase {
+                case .ready: return .settled(entry.connection)
+                case .failed: return .settled(nil)
+                case .dialing:
+                    let waiterID = pool.nextWaiterID
+                    pool.nextWaiterID &+= 1
+                    let (stream, cont) = AsyncStream.makeStream(of: Never.self)
+                    entry.dialWaiters.append((id: waiterID, cont: cont))
+                    pool.entries[id] = entry
+                    return .wait(stream, waiterID)
+                }
+            }
+            switch step {
+            case .settled(let connection):
+                return connection
+            case .wait(let stream, let waiterID):
+                for await _ in stream {}
+                pool.withLock { pool in
+                    pool.entries[id]?.dialWaiters.removeAll { $0.id == waiterID }
+                }
+                if Task.isCancelled { return nil }
+            }
+        }
+    }
+
     private func performDial(for id: UInt64) async -> XHTTPXMUXMultiplexerPoolable? {
         let connection = await newConnection()
+        var adopted = false
         var drained = false
+        var waiters: [AsyncStream<Never>.Continuation] = []
         pool.withLock { pool in
-            if let connection {
-                pool.entries[id]?.connection = connection
-                pool.entries[id]?.phase = .ready
+            waiters = pool.entries[id]?.dialWaiters.map(\.cont) ?? []
+            pool.entries[id]?.dialWaiters.removeAll()
+            if let connection, pool.entries[id] != nil {
+                pool.entries[id]!.connection = connection
+                pool.entries[id]!.phase = .ready
+                adopted = true
             } else {
                 pool.entries[id] = nil
                 drained = pool.entries.isEmpty
             }
         }
+        for cont in waiters { cont.finish() }
+        if !adopted { connection?.poolClose() }
         if drained { registry?.evictIfEmpty(self) }
-        return connection
+        return adopted ? connection : nil
     }
     
     private func selectReusable(in entries: [UInt64: ClientEntry]) -> UInt64? {
@@ -760,12 +743,21 @@ nonisolated final class XHTTPXMUXMultiplexerManager: Sendable {
     }
     
     func closeAll() {
-        let pooledConnections: [XHTTPXMUXMultiplexerPoolable] = pool.withLock { pool in
-            let pooled = pool.entries.values.compactMap { $0.connection }
+        typealias Drained = (
+            connections: [XHTTPXMUXMultiplexerPoolable],
+            dials: [Task<XHTTPXMUXMultiplexerPoolable?, Never>],
+            waiters: [AsyncStream<Never>.Continuation]
+        )
+        let drained: Drained = pool.withLock { pool in
+            let result = (pool.entries.values.compactMap { $0.connection },
+                          pool.entries.values.compactMap { $0.dialTask },
+                          pool.entries.values.flatMap { $0.dialWaiters.map(\.cont) })
             pool.entries.removeAll()
-            return pooled
+            return result
         }
-        for connection in pooledConnections { connection.poolClose() }
+        for connection in drained.connections { connection.poolClose() }
+        for dial in drained.dials { dial.cancel() }
+        for waiter in drained.waiters { waiter.finish() }
     }
 }
 

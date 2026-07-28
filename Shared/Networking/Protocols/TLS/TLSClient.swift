@@ -15,10 +15,8 @@ import Synchronization
 // MARK: - ServerHello Result
 
 nonisolated private enum ServerHelloResult {
-    /// key_share carries an X25519 public key.
     case tls13(keyShare: Data, cipherSuite: UInt16)
     case tls12(cipherSuite: UInt16, serverRandom: Data, version: UInt16, extendedMasterSecret: Bool)
-    /// Surfaced as a terminal outcome: we don't send a second ClientHello flight.
     case helloRetryRequest
 }
 
@@ -26,26 +24,14 @@ nonisolated private enum ServerHelloResult {
 
 actor TLSClient {
     let configuration: TLSConfiguration
-
-    /// The live transport, kept behind a `Mutex` (not actor-isolated) so the synchronous
-    /// ``cancel()`` — called from teardown on other tasks — can abort an in-flight handshake without
-    /// hopping onto the actor. Cancelling it makes the driver's parked `receive()` throw, which
-    /// unwinds the handshake and clears the isolated crypto state via `releaseOnFailure`.
-    /// Read via the ``connection`` snapshot; mutations go through ``adoptTransport(_:)`` and the
-    /// atomic ``takeConnection()`` so no caller treats the lock as a plain variable.
+    
     private let connectionBox = Mutex<(any ByteTransport)?>(nil)
-
-    /// Read-only snapshot of the live transport; `nil` before adoption and after teardown.
     nonisolated var connection: (any ByteTransport)? { connectionBox.withLock { $0 } }
-
-    /// Publishes the handshake's transport. Called once per connect attempt before the first send.
+    
     private func adoptTransport(_ transport: any ByteTransport) {
         connectionBox.withLock { $0 = transport }
     }
-
-    /// Atomically detaches and returns the transport, so a racing adopt/cancel can never leave a
-    /// transport both published and cancelled-behind-its-back. Internal: the TLS 1.2/1.3 finish
-    /// paths use it to hand the transport over to the record connection.
+    
     nonisolated func takeConnection() -> (any ByteTransport)? {
         connectionBox.withLock { connection in
             let taken = connection
@@ -53,42 +39,31 @@ actor TLSClient {
             return taken
         }
     }
-
-    // Cleared after handshake.
+    
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var storedClientHello: Data?
     private var sentSessionID: Data?
-
-    /// Inner-hello transcript material used to detect ECH acceptance; `nil` means ECH was not attempted.
+    
     var echContext: ECHClientContext?
-    /// Set once the ECH accept-confirmation in the ServerHello verifies.
     var echAccepted = false
-
-    /// ECHConfigList discovered from DNS HTTPS record by `prepareECH`, when ECH is enabled without an inline `echConfig`.
     private var resolvedECHConfigList: Data?
-
-    // Cleared after handshake.
+    
     var tls13 = TLS13HandshakeState()
-
-    // TLS 1.2 session state, cleared after handshake.
+    
     var clientRandom: Data?
     var serverRandom: Data?
     var masterSecret: Data?
     var tls12CipherSuite: UInt16 = 0
     var negotiatedVersion: UInt16 = 0
-    /// Whether the server echoed the extended_master_secret extension (RFC 7627).
     var useExtendedMasterSecret = false
     var ecdhP256PrivateKey: P256.KeyAgreement.PrivateKey?
     var ecdhP384PrivateKey: P384.KeyAgreement.PrivateKey?
-    /// Handshake transcript for TLS 1.2 Finished computation.
     var tls12Transcript: Data?
 
     var serverCertificates: [SecCertificate] = []
-
-    // Buffer for data received after Server Finished (e.g. NewSessionTicket)
+    
     var postHandshakeBuffer: Data?
-
-    /// The value of the ALPN sent by the peer; empty when the server echoed none.
+    
     var negotiatedALPN: String = ""
 
     private static let supportedTLS12CipherSuites: Set<UInt16> = [
@@ -132,6 +107,8 @@ actor TLSClient {
                 self.cancel()
             }, error: {
                 AnywhereError.tls(.handshakeFailed(detail: "handshake timed out"))
+            }, discardingLateResult: { record in
+                record.cancel()
             }, operation: handshake)
         } catch {
             releaseOnFailure()
@@ -207,9 +184,7 @@ actor TLSClient {
     }
 
     // MARK: - ClientHello
-
-    /// Resolves an opportunistic ECHConfigList from DNS before the handshake.
-    /// Fail-closed: a discovery miss errors so the caller never falls back to a cleartext-SNI handshake.
+    
     private func prepareECH() async throws {
         guard configuration.echIsOpportunistic else { return }
         let serverName = configuration.serverName
@@ -233,8 +208,7 @@ actor TLSClient {
             throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate session ID"))
         }
         sentSessionID = sessionId
-
-        // ECH: send a ClientHelloOuter carrying the cover name and the HPKE-sealed inner.
+        
         if configuration.echEnabled,
            let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) ?? resolvedECHConfigList {
             let configs = try ECHConfigParser.parseConfigList(echConfigData)
@@ -263,10 +237,8 @@ actor TLSClient {
             self.echContext = context
             return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: outerMessage)
         } else if configuration.echEnabled, configuration.echConfig != nil {
-            // Fail rather than silently send the real SNI in the clear.
             throw AnywhereError.tls(.handshakeFailed(detail: "ECH requested but its ECHConfigList is not valid base64"))
         } else if configuration.echEnabled {
-            // `prepareECH` is fail-closed; guard defensively rather than leak the SNI.
             throw AnywhereError.tls(.handshakeFailed(detail: "Opportunistic ECH requested but no ECH config was discovered"))
         }
 
@@ -288,8 +260,7 @@ actor TLSClient {
     }
 
     // MARK: - Server Response Processing
-
-    /// Buffers until a complete TLS record header arrives, then dispatches on content type.
+    
     private func receiveServerResponse(buffer: Data = Data()) async throws -> TLSRecordConnection {
         var buffer = buffer
         while buffer.count < 5 {
@@ -315,8 +286,7 @@ actor TLSClient {
             throw AnywhereError.tls(.handshakeFailed(detail: "Unexpected content type: \(contentType)"))
         }
     }
-
-    /// Continues receiving handshake messages until ServerHello is complete, then dispatches.
+    
     private func continueReceivingHandshake(buffer: Data) async throws -> TLSRecordConnection {
         var buffer = buffer
         while !bufferContainsCompleteServerHello(buffer) {
@@ -338,8 +308,6 @@ actor TLSClient {
 
         switch serverHelloResult {
         case .helloRetryRequest:
-            // We don't implement the second ClientHello flight HRR requires. Aborting
-            // here doesn't leak the inner SNI, since the ClientHello is already sent.
             throw AnywhereError.tls(.helloRetryRequest)
 
         case .tls13(let serverKeyShare, let cipherSuite):
@@ -380,8 +348,7 @@ actor TLSClient {
 
         return false
     }
-
-    /// Handles records that coalesce multiple handshake messages.
+    
     func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {
@@ -423,10 +390,7 @@ actor TLSClient {
                 offset += recordLen
                 continue
             }
-
-            // ServerHello validation: compression must be zero; for TLS 1.3 the
-            // legacy version must be TLSv1.2 and the server must echo our legacy
-            // session ID (TLS 1.2 and below carry the server's own session ID, not an echo).
+            
             let randomOffset = offset + 1 + 3 + 2
             guard randomOffset + 32 <= data.count else { return nil }
 
