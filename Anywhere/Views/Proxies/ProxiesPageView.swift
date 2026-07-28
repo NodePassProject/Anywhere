@@ -77,63 +77,7 @@ struct ProxiesPageView: View {
         }
         .navigationTitle("Proxies")
         .toolbar {
-            ToolbarItemGroup(placement: .principal) {
-                Picker("Proxy Type", selection: $proxyType) {
-                    Image(systemName: "server.rack")
-                        .tag(ProxyType.servers)
-                    Image(systemName: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
-                        .tag(ProxyType.chains)
-                }
-                .pickerStyle(.segmented)
-            }
-            
-            if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 {
-//                if #available(iOS 27.0, *) {
-//                    ToolbarItemGroup {
-//                        NavigationLink {
-//                            ReorderProxiesView()
-//                        } label: {
-//                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
-//                        }
-//                    }
-//                    .visibilityPriority(.low)
-//                } else {
-//                    ToolbarItemGroup {
-//                        NavigationLink {
-//                            ReorderProxiesView()
-//                        } label: {
-//                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
-//                        }
-//                    }
-//                }
-                ToolbarItemGroup {
-                    NavigationLink {
-                        ReorderProxiesView()
-                    } label: {
-                        Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
-                    }
-                }
-            }
-            
-            if #available(iOS 26.0, *) {
-                ToolbarSpacer()
-            }
-            
-            ToolbarItemGroup {
-                Button {
-                    switch proxyType {
-                    case .servers:
-                        let visible = configStore.configurations.filter { configuration in
-                            guard let subscriptionId = configuration.subscriptionId else { return true }
-                            return !collapsedSubscriptions.contains(subscriptionId)
-                        }
-                        viewModel.testLatencies(for: visible)
-                    case .chains:
-                        viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
-                    }
-                } label: {
-                    Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
-                }
+            ToolbarItem {
                 Button {
                     switch proxyType {
                     case .servers:
@@ -147,6 +91,52 @@ struct ProxiesPageView: View {
                     }
                 } label: {
                     Label("Add", systemImage: "plus")
+                }
+            }
+            
+            ToolbarItem {
+                Menu("More", systemImage: "ellipsis") {
+                    Section {
+                        Picker("Proxy Type", selection: $proxyType) {
+                            Label("Servers", systemImage: "server.rack")
+                                .tag(ProxyType.servers)
+                            Label("Chains", systemImage:  "point.bottomleft.forward.to.point.topright.scurvepath.fill")
+                                .tag(ProxyType.chains)
+                        }
+                    }
+                    Section {
+                        Button {
+                            switch proxyType {
+                            case .servers:
+                                let visible = configStore.configurations.filter { configuration in
+                                    guard let subscriptionId = configuration.subscriptionId else { return true }
+                                    return !collapsedSubscriptions.contains(subscriptionId)
+                                }
+                                viewModel.testLatencies(for: visible)
+                            case .chains:
+                                viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
+                            }
+                        } label: {
+                            Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                        }
+                        
+                        if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 {
+                            NavigationLink {
+                                ReorderProxiesView()
+                            } label: {
+                                Label("Reorder", systemImage: "arrow.up.arrow.down")
+                            }
+                        }
+                    }
+                    if !subscriptionStore.subscriptions.isEmpty {
+                        Section {
+                            Button {
+                                updateAllSubscriptions()
+                            } label: {
+                                Label("Update", systemImage: "arrow.clockwise")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -281,6 +271,27 @@ struct ProxiesPageView: View {
                 showingSubscriptionError = true
             }
             updatingSubscription = nil
+        }
+    }
+
+    private func updateAllSubscriptions() {
+        guard updatingSubscription == nil else { return }
+        Task {
+            var failures: [String] = []
+            for id in subscriptionStore.subscriptions.map(\.id) {
+                guard let subscription = subscriptionStore.subscriptions.first(where: { $0.id == id }) else { continue }
+                updatingSubscription = subscription
+                do {
+                    try await subscriptionStore.refresh(subscription)
+                } catch {
+                    failures.append("\(subscription.name): \(error.localizedDescription)")
+                }
+            }
+            updatingSubscription = nil
+            if !failures.isEmpty {
+                subscriptionErrorMessage = failures.joined(separator: "\n")
+                showingSubscriptionError = true
+            }
         }
     }
 

@@ -74,6 +74,6 @@ struct ReorderProxiesView: View {
             }
         }
         .environment(\.editMode, .constant(.active))
-        .navigationTitle("Reorder Proxies")
+        .navigationTitle("Reorder")
     }
 }

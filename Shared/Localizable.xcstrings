@@ -13375,54 +13375,54 @@
         }
       }
     },
-    "Reorder Proxies" : {
+    "Reorder" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "إعادة ترتيب البروكسيات"
+            "value" : "إعادة ترتيب"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Reorder Proxies"
+            "value" : "Reorder"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Reordenar proxies"
+            "value" : "Reordenar"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "مرتب‌سازی مجدد پروکسی‌ها"
+            "value" : "تغییر ترتیب"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Изменить порядок прокси"
+            "value" : "Изменить порядок"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Proxy'leri Yeniden Sırala"
+            "value" : "Yeniden Sırala"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sắp xếp lại Proxy"
+            "value" : "Sắp xếp lại"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "重新排序代理"
+            "value" : "重新排序"
           }
         }
       }
