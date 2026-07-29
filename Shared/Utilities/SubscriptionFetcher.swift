@@ -27,7 +27,7 @@ nonisolated struct SubscriptionFetcher {
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
         if withRemnawaveHWID {
-            request.setValue(AWCore.getIdentifier(), forHTTPHeaderField: "x-hwid")
+            request.setValue(AWCore.getRemnawaveHWID(), forHTTPHeaderField: "x-hwid")
         }
 
         let allowInsecure = AWCore.getAllowInsecure()

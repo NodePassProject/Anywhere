@@ -33,7 +33,6 @@ nonisolated final class AWCore {
             UserDefaultsKey.echDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.echDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.fallbackDNSServer: DNSUpstream.defaultPlainServer,
-            UserDefaultsKey.identifier: UUID().uuidString,
             UserDefaultsKey.ipRuleDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.ipRuleDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.proxyDNSDoHURL: DNSUpstream.defaultDoHURL,
@@ -41,6 +40,7 @@ nonisolated final class AWCore {
             UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
             UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
             UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
+            UserDefaultsKey.remnawaveHWID: UUID().uuidString,
             UserDefaultsKey.subscriptionDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.trustedCertificateSHA256s: [],
@@ -86,6 +86,7 @@ nonisolated final class AWCore {
         static let quicPolicy = "quicPolicy"
         static let reflectionAddresses = "reflectionAddresses"
         static let reflectionEnabled = "reflectionEnabled"
+        static let remnawaveHWID = "remnawaveHWID"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
         static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedChainId = "selectedChainId"
@@ -120,10 +121,6 @@ nonisolated final class AWCore {
     // MARK: - Typed UserDefaults Accessors
     
     // App
-    static func getIdentifier() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.identifier)!
-    }
-    
     static func getOnboardingCompleted() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.onboardingCompleted)
     }
@@ -533,6 +530,10 @@ nonisolated final class AWCore {
 
     static func setRemnawaveHWIDEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.remnawaveHWIDEnabled)
+    }
+    
+    static func getRemnawaveHWID() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.remnawaveHWID)!
     }
 
     static func getTunnelIncludeAllNetworks() -> Bool {
