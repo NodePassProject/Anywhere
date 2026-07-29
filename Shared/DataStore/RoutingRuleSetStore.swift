@@ -92,10 +92,10 @@ class RoutingRuleSetStore {
     private static let syncDebounceInterval: Duration = .seconds(2)
 
     var adBlockRuleSet: RoutingRuleSet? {
-        ruleSets.first(where: { $0.name == "ADBlock" })
+        ruleSets.first(where: { $0.id == "ADBlock" })
     }
     var builtInServiceRuleSets: [RoutingRuleSet] {
-        ruleSets.filter { $0.name != "ADBlock" }
+        ruleSets.filter { $0.id != "ADBlock" }
     }
 
     private static let builtIn: [String] = {
@@ -332,7 +332,8 @@ class RoutingRuleSetStore {
             var configurationsById: [String: ProxyConfiguration] = [:]
 
             for ruleSet in snapshot {
-                guard let assignedId = ruleSet.assignedConfigurationId ?? defaultTargetId else { continue }
+                let fallbackId = ruleSet.id == "ADBlock" ? nil : defaultTargetId
+                guard let assignedId = ruleSet.assignedConfigurationId ?? fallbackId else { continue }
 
                 let rules: [RoutingRule]
                 if ruleSet.isCustom,
