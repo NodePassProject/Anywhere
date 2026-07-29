@@ -26,12 +26,14 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     private let sendState: Mutex<SendState>
     private let receiveState: Mutex<ReceiveState>
-
-    init(inner: ProxyConnection,
-         outCTR: sending VLESSEncryptionCTR,
-         inCTR: sending VLESSEncryptionCTR?,
-         outSkip: Int,
-         inSkip: Int) {
+    
+    init(
+        inner: ProxyConnection,
+        outCTR: sending VLESSEncryptionCTR,
+        inCTR: sending VLESSEncryptionCTR?,
+        outSkip: Int,
+        inSkip: Int
+    ) {
         self.inner = inner
         self.sendState = Mutex(SendState(outCTR: outCTR, outSkip: outSkip))
         self.receiveState = Mutex(ReceiveState(inCTR: inCTR, inSkip: inSkip))
@@ -67,8 +69,8 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
             let needed = 5 - state.outHeader.count
             let avail = bytes.count - offset
             let chunk = min(needed, avail)
-            state.outCTR.processInPlace(&bytes, range: offset..<(offset + chunk))
             state.outHeader.append(contentsOf: bytes[offset..<(offset + chunk)])
+            state.outCTR.processInPlace(&bytes, range: offset..<(offset + chunk))
             offset += chunk
             if state.outHeader.count == 5 {
                 let length = decodeHeaderLength(state.outHeader)
