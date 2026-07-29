@@ -94,13 +94,10 @@ nonisolated struct XHTTPXMUXMultiplexerConfiguration: Codable, Equatable, Hashab
         maxConcurrency: .zero, maxConnections: .zero, cMaxReuseTimes: .zero,
         hMaxRequestTimes: .zero, hMaxReusableSecs: .zero, hKeepAlivePeriod: 0
     )
-
-    /// Default applied when XHTTP omits `xmux`: serial connection reuse (`maxConcurrency` 1)
-    /// with rotation after 600–900 requests / 1800–3000 s. `maxConnections`, `cMaxReuseTimes`,
-    /// and `hKeepAlivePeriod` stay unset.
-    static let serialReuseDefault = XHTTPXMUXMultiplexerConfiguration(
-        maxConcurrency: XHTTPXMUXMultiplexerRange(from: 1, to: 1),
-        maxConnections: .zero,
+    
+    static let connectionSpreadDefault = XHTTPXMUXMultiplexerConfiguration(
+        maxConcurrency: .zero,
+        maxConnections: XHTTPXMUXMultiplexerRange(from: 3, to: 3),
         cMaxReuseTimes: .zero,
         hMaxRequestTimes: XHTTPXMUXMultiplexerRange(from: 600, to: 900),
         hMaxReusableSecs: XHTTPXMUXMultiplexerRange(from: 1800, to: 3000),
@@ -279,13 +276,10 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
         _downloadSettings = try c.decodeIfPresent(XHTTPDownloadSettingsBox.self, forKey: ._downloadSettings)
         xmux = try c.decodeIfPresent(XHTTPXMUXMultiplexerConfiguration.self, forKey: .xmux)
     }
-
-    /// xmux settings used at runtime: the configured values, or the serial-reuse + rotation
-    /// default when XHTTP omits xmux. The default applies only when xmux is entirely unset;
-    /// a partial xmux is used verbatim.
+    
     var effectiveXMUX: XHTTPXMUXMultiplexerConfiguration {
         if let xmux, xmux.isEnabled { return xmux }
-        return .serialReuseDefault
+        return .connectionSpreadDefault
     }
 
     /// Normalized path: ensure leading "/" and trailing "/".
