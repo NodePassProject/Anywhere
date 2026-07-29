@@ -10,6 +10,7 @@ import SwiftUI
 struct JoinBetaView: View {
     @Environment(VoyagerStore.self) private var voyagerStore
 
+    @State private var verifying = false
     @State private var token: String?
     @State private var copied = false
     @State private var reverifying = false
@@ -21,21 +22,25 @@ struct JoinBetaView: View {
             }
 
             Section {
-                if voyagerStore.isMember && token != nil {
-                    Button {
-                        Task { await copyToken() }
-                    } label: {
-                        Label("Copy Verification Token", systemImage: copied ? "checkmark" : "doc.on.doc")
-                            .contentTransition(.symbolEffect(.replace))
-                    }
+                if verifying {
+                    ProgressView()
                 } else {
-                    Button {
-                        Task { await reverify() }
-                    } label: {
-                        if reverifying {
-                            ProgressView()
-                        } else {
-                            Label("Reverify Membership", systemImage: "arrow.clockwise")
+                    if voyagerStore.isMember && token != nil {
+                        Button {
+                            Task { await copyToken() }
+                        } label: {
+                            Label("Copy Verification Token", systemImage: copied ? "checkmark" : "doc.on.doc")
+                                .contentTransition(.symbolEffect(.replace))
+                        }
+                    } else {
+                        Button {
+                            Task { await reverify() }
+                        } label: {
+                            if reverifying {
+                                ProgressView()
+                            } else {
+                                Label("Reverify Membership", systemImage: "arrow.clockwise")
+                            }
                         }
                     }
                 }
@@ -44,7 +49,9 @@ struct JoinBetaView: View {
         }
         .navigationTitle("Public Beta")
         .task {
+            verifying = true
             token = await voyagerStore.verificationToken()
+            verifying = false
         }
     }
 
