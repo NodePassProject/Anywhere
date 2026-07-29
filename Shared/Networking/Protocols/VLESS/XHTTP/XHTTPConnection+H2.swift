@@ -87,7 +87,7 @@ nonisolated extension XHTTPConnection {
 
         // :path — RequestURI form (path + query)
         var path = configuration.normalizedPath
-        if includeMeta && !sessionId.isEmpty && configuration.sessionPlacement == .path {
+        if includeMeta && !sessionId.isEmpty && configuration.sessionIDPlacement == .path {
             path = appendToPath(path, sessionId)
         }
         var queryParts: [String] = []
@@ -96,8 +96,8 @@ nonisolated extension XHTTPConnection {
             queryParts.append(configQuery)
         }
         if includeMeta {
-            if !sessionId.isEmpty && configuration.sessionPlacement == .query {
-                queryParts.append("\(configuration.normalizedSessionKey)=\(sessionId)")
+            if !sessionId.isEmpty && configuration.sessionIDPlacement == .query {
+                queryParts.append("\(configuration.normalizedSessionIDKey)=\(sessionId)")
             }
         }
         if !queryParts.isEmpty {
@@ -126,16 +126,16 @@ nonisolated extension XHTTPConnection {
 
         // Session metadata — non-path placements
         if includeMeta && !sessionId.isEmpty {
-            switch configuration.sessionPlacement {
+            switch configuration.sessionIDPlacement {
             case .header:
                 block.append(0x40)
-                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSessionKey.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSessionIDKey.lowercased()))
                 block.append(contentsOf: Self.hpackEncodeString(sessionId))
             case .cookie:
                 var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 6)
                 cookieBytes[0] |= 0x40
                 block.append(contentsOf: cookieBytes)
-                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSessionKey)=\(sessionId)"))
+                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSessionIDKey)=\(sessionId)"))
             default:
                 break // path and query handled above
             }
@@ -172,7 +172,7 @@ nonisolated extension XHTTPConnection {
         }
 
         var path = configuration.normalizedPath
-        if !sessionId.isEmpty && configuration.sessionPlacement == .path {
+        if !sessionId.isEmpty && configuration.sessionIDPlacement == .path {
             path = appendToPath(path, sessionId)
         }
         if let seq, configuration.seqPlacement == .path {
@@ -183,8 +183,8 @@ nonisolated extension XHTTPConnection {
         if !configQuery.isEmpty {
             queryParts.append(configQuery)
         }
-        if !sessionId.isEmpty && configuration.sessionPlacement == .query {
-            queryParts.append("\(configuration.normalizedSessionKey)=\(sessionId)")
+        if !sessionId.isEmpty && configuration.sessionIDPlacement == .query {
+            queryParts.append("\(configuration.normalizedSessionIDKey)=\(sessionId)")
         }
         if let seq, configuration.seqPlacement == .query {
             queryParts.append("\(configuration.normalizedSeqKey)=\(seq)")
@@ -218,16 +218,16 @@ nonisolated extension XHTTPConnection {
 
         // Session metadata — non-path placements
         if !sessionId.isEmpty {
-            switch configuration.sessionPlacement {
+            switch configuration.sessionIDPlacement {
             case .header:
                 block.append(0x40)
-                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSessionKey.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSessionIDKey.lowercased()))
                 block.append(contentsOf: Self.hpackEncodeString(sessionId))
             case .cookie:
                 var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 6)
                 cookieBytes[0] |= 0x40
                 block.append(contentsOf: cookieBytes)
-                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSessionKey)=\(sessionId)"))
+                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSessionIDKey)=\(sessionId)"))
             default:
                 break
             }

@@ -149,8 +149,8 @@ nonisolated final class XHTTPConnection: Sendable {
 
     func applySessionId(to request: inout String, path: inout String) {
         guard !sessionId.isEmpty else { return }
-        let key = configuration.normalizedSessionKey
-        switch configuration.sessionPlacement {
+        let key = configuration.normalizedSessionIDKey
+        switch configuration.sessionIDPlacement {
         case .path:
             path = appendToPath(path, sessionId)
         case .query:
@@ -167,8 +167,8 @@ nonisolated final class XHTTPConnection: Sendable {
 
     func queryParamsForMeta(seq: Int64? = nil) -> String {
         var parts: [String] = []
-        if !sessionId.isEmpty && configuration.sessionPlacement == .query {
-            let key = configuration.normalizedSessionKey
+        if !sessionId.isEmpty && configuration.sessionIDPlacement == .query {
+            let key = configuration.normalizedSessionIDKey
             parts.append("\(key)=\(sessionId)")
         }
         if let seq, configuration.seqPlacement == .query {
