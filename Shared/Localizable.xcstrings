@@ -18811,6 +18811,9 @@
     "Voyager" : {
       "shouldTranslate" : false
     },
+    "Voyager Member Card" : {
+      "shouldTranslate" : false
+    },
     "Voyager Only" : {
       "localizations" : {
         "ar" : {

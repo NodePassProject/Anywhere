@@ -20,10 +20,12 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section {
-                VoyagerSettingsCard()
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(VoyagerCardBackground())
+            if settings.showVoyagerCard {
+                Section {
+                    VoyagerSettingsCard()
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(VoyagerCardBackground())
+                }
             }
             appSection
             vpnSection

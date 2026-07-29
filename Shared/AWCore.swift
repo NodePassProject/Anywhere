@@ -41,6 +41,7 @@ nonisolated final class AWCore {
             UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
             UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
             UserDefaultsKey.remnawaveHWID: UUID().uuidString,
+            UserDefaultsKey.showVoyagerCard: true,
             UserDefaultsKey.subscriptionDNSDoHURL: DNSUpstream.defaultDoHURL,
             UserDefaultsKey.subscriptionDNSPlainServer: DNSUpstream.defaultPlainServer,
             UserDefaultsKey.trustedCertificateSHA256s: [],
@@ -91,6 +92,7 @@ nonisolated final class AWCore {
         static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedChainId = "selectedChainId"
         static let selectedConfigurationId = "selectedConfigurationId"
+        static let showVoyagerCard = "showVoyagerCard"
         static let subscriptionDNSDoHURL = "subscriptionDNSDoHURL"
         static let subscriptionDNSMode = "subscriptionDNSMode"
         static let subscriptionDNSPlainServer = "subscriptionDNSPlainServer"
@@ -148,6 +150,14 @@ nonisolated final class AWCore {
 
     static func clearVoyagerMembership() {
         userDefaults.removeObject(forKey: UserDefaultsKey.voyagerMembership)
+    }
+
+    static func getShowVoyagerCard() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.showVoyagerCard)
+    }
+
+    static func setShowVoyagerCard(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.showVoyagerCard)
     }
 
     enum ThemeColorSlot: String {

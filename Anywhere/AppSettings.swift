@@ -22,6 +22,10 @@ final class AppSettings {
     var iCloudSyncEnabled: Bool {
         didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
     }
+    
+    var showVoyagerCard: Bool {
+        didSet { AWCore.setShowVoyagerCard(showVoyagerCard) }
+    }
 
     var homeColorScheme: HomeColorScheme {
         didSet { AWCore.setHomeColorScheme(homeColorScheme.rawValue) }
@@ -315,6 +319,7 @@ final class AppSettings {
         disconnectedBackgroundStartData = AWCore.getThemeColorData(.disconnectedBackgroundStart)
         disconnectedBackgroundEndData = AWCore.getThemeColorData(.disconnectedBackgroundEnd)
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
+        showVoyagerCard = AWCore.getShowVoyagerCard()
         subscriptionDNSMode = AWCore.getSubscriptionDNSMode()
         subscriptionDNSPlainServer = AWCore.getSubscriptionDNSPlainServer()
         subscriptionDNSDoHURL = AWCore.getSubscriptionDNSDoHURL()
