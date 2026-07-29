@@ -209,53 +209,71 @@ struct ProxiesPageView: View {
 
     @ViewBuilder
     private func subscriptionLabel(_ subscription: Subscription) -> some View {
-        VStack(alignment: .leading) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(subscription.name)
                     .font(.body.weight(.medium))
-                Spacer()
-                HStack(spacing: 20) {
-                    if updatingSubscription?.id == subscription.id {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Button {
-                            updateSubscription(subscription)
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                    Menu {
-                        Button {
-                            viewModel.testLatencies(for: configStore.configurations(for: subscription))
-                        } label: {
-                            Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                        }
-                        Button {
-                            renameText = subscription.name
-                            renamingSubscription = subscription
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        Button {
-                            updateSubscription(subscription)
-                        } label: {
-                            Label("Update", systemImage: "arrow.clockwise")
-                        }
-                        Button(role: .destructive) {
-                            subscriptionStore.delete(subscription)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
+                if updatingSubscription?.id == subscription.id {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        updateSubscription(subscription)
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.borderless)
                 }
             }
+            SubscriptionUsageView(subscription: subscription)
         }
         .padding(.trailing, 10)
+        .swipeActions {
+            Button(role: .destructive) {
+                subscriptionStore.delete(subscription)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                updateSubscription(subscription)
+            } label: {
+                Label("Update", systemImage: "arrow.clockwise")
+            }
+            .tint(.blue)
+            Button {
+                renameText = subscription.name
+                renamingSubscription = subscription
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+        }
+        .contextMenu {
+            Section {
+                Button {
+                    viewModel.testLatencies(for: configStore.configurations(for: subscription))
+                } label: {
+                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                }
+            }
+            Section {
+                Button {
+                    renameText = subscription.name
+                    renamingSubscription = subscription
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Button {
+                    updateSubscription(subscription)
+                } label: {
+                    Label("Update", systemImage: "arrow.clockwise")
+                }
+                Button(role: .destructive) {
+                    subscriptionStore.delete(subscription)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
     }
 
     // MARK: - Formatting
@@ -333,5 +351,106 @@ struct ProxiesPageView: View {
             onEdit: { chainToEdit = chain(item.id) },
             onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }
         )
+    }
+}
+
+private struct SubscriptionUsageView: View {
+    let subscription: Subscription
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .binary
+        formatter.allowsNonnumericFormatting = false
+        return formatter
+    }()
+    
+    private var totalBytes: Int64? {
+        guard let total = subscription.total, total > 0 else { return nil }
+        return total
+    }
+
+    private var usedBytes: Int64? {
+        guard subscription.upload != nil || subscription.download != nil else { return nil }
+        return (subscription.upload ?? 0) + (subscription.download ?? 0)
+    }
+
+    private var usedFraction: Double? {
+        guard let usedBytes, let totalBytes else { return nil }
+        return Double(usedBytes) / Double(totalBytes)
+    }
+
+    var body: some View {
+        if usageDescription != nil || subscription.expire != nil {
+            HStack(spacing: 5) {
+                if let usedFraction {
+                    UsageRing(fraction: usedFraction)
+                }
+                if let usageDescription, let expire = subscription.expire {
+                    Text([usageDescription, expireDescription(expire)].joined(separator: " · "))
+                } else if let usageDescription {
+                    Text(usageDescription)
+                } else if let expire = subscription.expire {
+                    Text(expireDescription(expire))
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+    
+    private struct UsageRing: View {
+        let fraction: Double
+
+        var body: some View {
+            ZStack {
+                Circle()
+                    .inset(by: 1)
+                    .stroke(.quaternary, lineWidth: 2)
+                Circle()
+                    .inset(by: 1)
+                    .trim(from: 0, to: max(0.03, min(fraction, 1)))
+                    .stroke(usageWarningColor(for: fraction), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: 12, height: 12)
+            .animation(.snappy(duration: 0.3, extraBounce: 0), value: fraction)
+        }
+        
+        private func usageWarningColor(for fraction: Double) -> Color {
+            if fraction >= 0.95 {
+                .red
+            } else if fraction >= 0.8 {
+                .orange
+            } else {
+                .blue
+            }
+        }
+    }
+    
+    private var usageDescription: String? {
+        switch (usedBytes, totalBytes) {
+        case let (used?, total?):
+            String(localized: "\(Self.byteFormatter.string(fromByteCount: used)) of \(Self.byteFormatter.string(fromByteCount: total)) used")
+        case let (used?, nil):
+            String(localized: "\(Self.byteFormatter.string(fromByteCount: used)) used")
+        case let (nil, total?):
+            String(localized: "\(Self.byteFormatter.string(fromByteCount: total)) total")
+        case (nil, nil):
+            nil
+        }
+    }
+    
+    private func expireDescription(_ expire: Date) -> String {
+        let calendar = Calendar.current
+        let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: .now),
+            to: calendar.startOfDay(for: expire)
+        ).day ?? 0
+        if expire < .now {
+            return String(localized: "Expired")
+        } else {
+            return String(localized: "Expires in \(days) day(s)")
+        }
     }
 }
