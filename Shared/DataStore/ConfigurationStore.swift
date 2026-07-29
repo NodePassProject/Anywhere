@@ -22,54 +22,75 @@ class ConfigurationStore {
     private(set) var isLoaded = false
 
     @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private var mutationEpoch = 0
+    
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     private init() {
         Task { @MainActor in await self.loadInitial() }
     }
 
-    /// One-time initial load; decodes off the main actor before publishing.
     private func loadInitial() async {
-        let outcome = await Task.detached(priority: .userInitiated) {
-            () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
-            let data = JSONBlobStore.shared.load(.configurations)
-            let split = Self.decodeSplit(from: data)
-            return (data, split.live, split.tombstones)
-        }.value
-        loadedBlob = outcome.data
-        configurations = outcome.live
-        tombstones = outcome.tombstones
-        isLoaded = true
-        coordinate()
+        while true {
+            let epoch = mutationEpoch
+            await saveTask?.value
+            guard epoch == mutationEpoch else { continue }
+            let outcome = await Task.detached(priority: .userInitiated) {
+                () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
+                let data = JSONBlobStore.shared.load(.configurations)
+                let split = Self.decodeSplit(from: data)
+                return (data, split.live, split.tombstones)
+            }.value
+            guard epoch == mutationEpoch else { continue }
+            loadedBlob = outcome.data
+            configurations = outcome.live
+            tombstones = outcome.tombstones
+            isLoaded = true
+            coordinate()
+            return
+        }
     }
-    
+
     func reload() async {
-        let previous = loadedBlob
-        let outcome = await Task.detached(priority: .utility) {
-            () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
-            let data = JSONBlobStore.shared.load(.configurations)
-            guard data != previous else { return nil }
-            let split = Self.decodeSplit(from: data)
-            return (data, split.live, split.tombstones)
-        }.value
-        guard let outcome else { return }
-        loadedBlob = outcome.data
-        configurations = outcome.live
-        tombstones = outcome.tombstones
-        coordinate()
+        while true {
+            let previous = loadedBlob
+            let epoch = mutationEpoch
+            await saveTask?.value
+            guard epoch == mutationEpoch else { continue }
+            let outcome = await Task.detached(priority: .utility) {
+                () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
+                let data = JSONBlobStore.shared.load(.configurations)
+                guard data != previous else { return nil }
+                let split = Self.decodeSplit(from: data)
+                return (data, split.live, split.tombstones)
+            }.value
+            guard let outcome else { return }
+            guard epoch == mutationEpoch else { continue }
+            loadedBlob = outcome.data
+            configurations = outcome.live
+            tombstones = outcome.tombstones
+            coordinate()
+            return
+        }
     }
 
     // MARK: - CRUD
 
     func add(_ configuration: ProxyConfiguration) {
+        let tombstone = tombstones.first { $0.id == configuration.id }
         tombstones.removeAll { $0.id == configuration.id }
-        configurations.append(configuration)
+        var stamped = configuration
+        stamped.updatedAt = SyncStamp.after(tombstone)
+        configurations.append(stamped)
         save()
         coordinate()
     }
 
     func update(_ configuration: ProxyConfiguration) {
         if let index = configurations.firstIndex(where: { $0.id == configuration.id }) {
-            configurations[index] = configuration
+            var stamped = configuration
+            stamped.updatedAt = SyncStamp.after(configurations[index])
+            configurations[index] = stamped
             save()
             coordinate()
         }
@@ -89,27 +110,39 @@ class ConfigurationStore {
         save()
         coordinate()
     }
-
-    /// Replaces a subscription's configurations in a single assignment so observers are notified once.
+    
     func replaceConfigurations(for subscriptionId: UUID, with newConfigurations: [ProxyConfiguration]) {
         let newIds = Set(newConfigurations.map { $0.id })
-        // Configs that were owned by this subscription but are gone upstream must be tombstoned,
-        // not merely dropped: a bare removal is undone by the cross-device union-merge, which
-        // revives any id still live in another device's blob. Their ids are disjoint from newIds.
         let removed = configurations.filter { $0.subscriptionId == subscriptionId && !newIds.contains($0.id) }
+        
+        let previousById = Dictionary(
+            configurations.filter { $0.subscriptionId == subscriptionId }.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let tombstonesById = Dictionary(
+            tombstones.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let stamped = newConfigurations.map { configuration in
+            var copy = configuration
+            if let previous = previousById[configuration.id], previous.contentEquals(configuration) {
+                copy.updatedAt = previous.updatedAt
+            } else {
+                copy.updatedAt = SyncStamp.after(previousById[configuration.id] ?? tombstonesById[configuration.id])
+            }
+            return copy
+        }
 
         var updated = configurations.filter { $0.subscriptionId != subscriptionId }
-        updated.append(contentsOf: newConfigurations)
+        updated.append(contentsOf: stamped)
         configurations = updated
 
         recordTombstones(removed)
-        // An id coming back live must clear any stale tombstone so the merge won't suppress it elsewhere.
         tombstones.removeAll { newIds.contains($0.id) }
         save()
         coordinate()
     }
-
-    /// Reorders standalone configurations; subscription-owned ones keep their absolute positions.
+    
     func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
         let standaloneIndices = configurations.indices.filter { configurations[$0].subscriptionId == nil }
         var standalone = standaloneIndices.map { configurations[$0] }
@@ -124,8 +157,7 @@ class ConfigurationStore {
     }
 
     // MARK: - Coordination
-
-    /// Keeps the VPN selection and routing-rule state consistent after any change to the proxy list.
+    
     private func coordinate() {
         let chains = ChainStore.shared.chains
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
@@ -136,7 +168,9 @@ class ConfigurationStore {
     // MARK: - Persistence
     
     nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {
-        guard let data, let all = JSONDecoder().decodeSkippingInvalid([ProxyConfiguration].self, from: data) else {
+        guard let data else { return ([], []) }
+        guard let all = JSONDecoder().decodeSkippingInvalid([ProxyConfiguration].self, from: data) else {
+            JSONBlobStore.quarantine(.configurations, data)
             return ([], [])
         }
         return Tombstone.split(all)
@@ -148,15 +182,21 @@ class ConfigurationStore {
         let ids = Set(removed.map { $0.id })
         tombstones.removeAll { ids.contains($0.id) }
         for item in removed {
-            var tomb = item
+            var tomb = ProxyConfiguration(
+                id: item.id,
+                name: item.name,
+                serverAddress: "",
+                serverPort: 0,
+                outbound: .socks5(username: nil, password: nil),
+                updatedAt: item.updatedAt
+            )
             tomb.deletedAt = now
             tombstones.append(tomb)
         }
     }
-    
-    @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     private func save() {
+        mutationEpoch += 1
         let snapshot = configurations + tombstones
         let previous = saveTask
         saveTask = Task.detached {

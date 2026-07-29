@@ -10,61 +10,60 @@ import CoreData
 
 nonisolated private let logger = AnywhereLogger(category: "BlobSync")
 
-nonisolated enum Tombstone {
-    static let lifetime: TimeInterval = 7 * 24 * 60 * 60
-
-    /// Drops tombstones older than `lifetime`; live records always pass.
-    static func collected<T: SoftDeletable>(_ items: [T], now: Date = .now) -> [T] {
-        items.filter { item in
-            guard let deletedAt = item.deletedAt else { return true }
-            return now.timeIntervalSince(deletedAt) < lifetime
-        }
-    }
-
-    /// Garbage-collects, then partitions into live records and the tombstones still worth syncing.
-    static func split<T: SoftDeletable>(_ items: [T], now: Date = .now) -> (live: [T], tombstones: [T]) {
-        let kept = collected(items, now: now)
-        return (kept.filter { $0.deletedAt == nil }, kept.filter { $0.deletedAt != nil })
-    }
-}
-
 nonisolated enum BlobMerge {
     static func register() {
-        JSONBlobStore.installMergeResolver { key, rows in
+        JSONBlobStore.installMergeResolver({ key, rows in
             switch key {
-            case .configurations: return mergeArray(ProxyConfiguration.self, rows)
-            case .subscriptions:  return mergeArray(Subscription.self, rows)
-            case .chains:         return mergeArray(ProxyChain.self, rows)
-            case .customRuleSets: return mergeArray(CustomRoutingRuleSet.self, rows)
-            case .mitm:           return mergeMITM(rows)
+            case .configurations: return mergeArray(ProxyConfiguration.self, key, rows)
+            case .subscriptions:  return mergeArray(Subscription.self, key, rows)
+            case .chains:         return mergeArray(ProxyChain.self, key, rows)
+            case .customRuleSets: return mergeArray(CustomRoutingRuleSet.self, key, rows)
+            case .mitm:           return mergeMITM(key, rows)
             }
-        }
+        }, canFullyDecode: { key, data in
+            switch key {
+            case .configurations: return decodesFully([ProxyConfiguration].self, data)
+            case .subscriptions:  return decodesFully([Subscription].self, data)
+            case .chains:         return decodesFully([ProxyChain].self, data)
+            case .customRuleSets: return decodesFully([CustomRoutingRuleSet].self, data)
+            case .mitm:           return decodesFully(MITMSnapshot.self, data)
+            }
+        })
     }
     
-    private static func mergeArray<T: Codable & Identifiable & SoftDeletable>(
-        _ type: T.Type, _ rows: [(data: Data, updatedAt: Date)]
-    ) -> Data {
+    private static func decodesFully<T: Decodable>(_ type: T.Type, _ data: Data) -> Bool {
+        let tally = DecodeLossTally()
         let decoder = JSONDecoder()
-        // Oldest → newest, so the value merge below lets the newest blob's copy win per id.
-        let blobs: [[T]] = rows
-            .sorted { $0.updatedAt < $1.updatedAt }
-            .compactMap { try? decoder.decode([T].self, from: $0.data) }
+        decoder.userInfo[DecodeLossTally.key] = tally
+        guard (try? decoder.decode(T.self, from: data)) != nil else { return false }
+        return tally.dropped == 0
+    }
 
+    static func prevails<T: Codable & SoftDeletable>(_ challenger: T, over incumbent: T) -> Bool {
+        let challengerStamp = challenger.syncStamp, incumbentStamp = incumbent.syncStamp
+        if challengerStamp != incumbentStamp { return challengerStamp > incumbentStamp }
+        switch (challenger.deletedAt != nil, incumbent.deletedAt != nil) {
+        case (true, false): return true
+        case (false, true): return false
+        default: break
+        }
+        guard let challengerData = encode(challenger), let incumbentData = encode(incumbent),
+              challengerData != incumbentData else { return false }
+        if challengerData.count != incumbentData.count {
+            return incumbentData.count < challengerData.count
+        }
+        return incumbentData.lexicographicallyPrecedes(challengerData)
+    }
+    
+    static func mergeItems<T: Codable & Identifiable & SoftDeletable>(_ blobs: [[T]]) -> [T] {
         var byId: [T.ID: T] = [:]
         for items in blobs {
             for item in items {
-                // Sticky delete: once any blob tombstones an id, a live copy from another blob
-                // can't revive it. Among two live or two tombstoned copies, newest still wins.
-                if let existing = byId[item.id], existing.deletedAt != nil, item.deletedAt == nil {
-                    continue
-                }
+                if let existing = byId[item.id], !prevails(item, over: existing) { continue }
                 byId[item.id] = item
             }
         }
 
-        // Order follows the newest blob that contains each id, so a reorder on the most
-        // recently-saving device wins instead of reverting to an older blob's order. Ids
-        // present only in older blobs trail, most-recent first.
         var order: [T.ID] = []
         var seen = Set<T.ID>()
         for items in blobs.reversed() {
@@ -73,36 +72,34 @@ nonisolated enum BlobMerge {
             }
         }
 
-        return encode(order.compactMap { byId[$0] }) ?? newest(rows)
+        return Tombstone.collected(order.compactMap { byId[$0] })
     }
-    
-    private static func mergeMITM(_ rows: [(data: Data, updatedAt: Date)]) -> Data {
+
+    private static func mergeArray<T: Codable & Identifiable & SoftDeletable>(
+        _ type: T.Type, _ key: JSONBlobStore.Key, _ rows: [(data: Data, updatedAt: Date)]
+    ) -> Data {
+        let decoder = JSONDecoder()
+        let blobs: [[T]] = rows
+            .sorted { $0.updatedAt < $1.updatedAt }
+            .compactMap { row in
+                if let items = decoder.decodeSkippingInvalid([T].self, from: row.data) { return items }
+                JSONBlobStore.quarantine(key, row.data)
+                return nil
+            }
+        return encode(mergeItems(blobs)) ?? newest(rows)
+    }
+
+    private static func mergeMITM(_ key: JSONBlobStore.Key, _ rows: [(data: Data, updatedAt: Date)]) -> Data {
         let decoder = JSONDecoder()
         let snapshots: [MITMSnapshot] = rows
             .sorted { $0.updatedAt < $1.updatedAt }
-            .compactMap { try? decoder.decode(MITMSnapshot.self, from: $0.data) }
-
-        var byId: [MITMRuleSet.ID: MITMRuleSet] = [:]
-        for snapshot in snapshots {
-            for set in snapshot.ruleSets {
-                // Sticky delete, same as mergeArray: a tombstoned set isn't revived by a live copy.
-                if let existing = byId[set.id], existing.deletedAt != nil, set.deletedAt == nil {
-                    continue
-                }
-                byId[set.id] = set
+            .compactMap { row in
+                if let snapshot = try? decoder.decode(MITMSnapshot.self, from: row.data) { return snapshot }
+                JSONBlobStore.quarantine(key, row.data)
+                return nil
             }
-        }
 
-        // Order follows the newest snapshot that contains each set (see mergeArray).
-        var order: [MITMRuleSet.ID] = []
-        var seen = Set<MITMRuleSet.ID>()
-        for snapshot in snapshots.reversed() {
-            for set in snapshot.ruleSets where seen.insert(set.id).inserted {
-                order.append(set.id)
-            }
-        }
-
-        let merged = MITMSnapshot(ruleSets: order.compactMap { byId[$0] })
+        let merged = MITMSnapshot(ruleSets: mergeItems(snapshots.map(\.ruleSets)))
         return encode(merged) ?? newest(rows)
     }
 
@@ -131,7 +128,7 @@ nonisolated enum CloudBlobSync {
             logger.info("[iCloud] Store changed remotely; reloading synced stores")
             Task { @MainActor in scheduleRefresh() }
         }
-        Task.detached(priority: .utility) { JSONBlobStore.shared.compactDuplicates() }
+        Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
     }
 
     @MainActor
@@ -152,6 +149,6 @@ nonisolated enum CloudBlobSync {
         await ConfigurationStore.shared.reload()   // after chains: coordinate() reads configs + chains
         await RoutingRuleSetStore.shared.reload()
         await MITMRuleSetStore.shared.reload()
-        Task.detached(priority: .utility) { JSONBlobStore.shared.compactDuplicates() }
+        Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
     }
 }

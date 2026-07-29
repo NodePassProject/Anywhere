@@ -20,6 +20,9 @@ class SubscriptionStore {
     private var tombstones: [Subscription] = []
     
     @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private var mutationEpoch = 0
+    
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     private init() {
         let data = JSONBlobStore.shared.load(.subscriptions)
@@ -28,39 +31,49 @@ class SubscriptionStore {
         subscriptions = split.live
         tombstones = split.tombstones
     }
-    
+
     func reload() async {
-        let previous = loadedBlob
-        let outcome = await Task.detached(priority: .utility) {
-            () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
-            let data = JSONBlobStore.shared.load(.subscriptions)
-            guard data != previous else { return nil }
-            let split = Self.decodeSplit(from: data)
-            return (data, split.live, split.tombstones)
-        }.value
-        guard let outcome else { return }
-        loadedBlob = outcome.data
-        subscriptions = outcome.live
-        tombstones = outcome.tombstones
+        while true {
+            let previous = loadedBlob
+            let epoch = mutationEpoch
+            await saveTask?.value
+            guard epoch == mutationEpoch else { continue }
+            let outcome = await Task.detached(priority: .utility) {
+                () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
+                let data = JSONBlobStore.shared.load(.subscriptions)
+                guard data != previous else { return nil }
+                let split = Self.decodeSplit(from: data)
+                return (data, split.live, split.tombstones)
+            }.value
+            guard let outcome else { return }
+            guard epoch == mutationEpoch else { continue }
+            loadedBlob = outcome.data
+            subscriptions = outcome.live
+            tombstones = outcome.tombstones
+            return
+        }
     }
 
     // MARK: - CRUD
 
     func add(_ subscription: Subscription) {
+        let tombstone = tombstones.first { $0.id == subscription.id }
         tombstones.removeAll { $0.id == subscription.id }
-        subscriptions.append(subscription)
+        var stamped = subscription
+        stamped.updatedAt = SyncStamp.after(tombstone)
+        subscriptions.append(stamped)
         save()
     }
 
     func update(_ subscription: Subscription) {
         if let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) {
-            subscriptions[index] = subscription
+            var stamped = subscription
+            stamped.updatedAt = SyncStamp.after(subscriptions[index])
+            subscriptions[index] = stamped
             save()
         }
     }
-
-    /// `configurationStore` defaults to `.shared`, resolved in the method body because a
-    /// default-argument expression is evaluated outside this type's MainActor isolation.
+    
     func delete(_ subscription: Subscription, configurationStore: ConfigurationStore? = nil) {
         let configurationStore = configurationStore ?? .shared
         configurationStore.deleteConfigurations(for: subscription.id)
@@ -77,22 +90,28 @@ class SubscriptionStore {
     // MARK: - Persistence
     
     nonisolated private static func decodeSplit(from data: Data?) -> (live: [Subscription], tombstones: [Subscription]) {
-        guard let data, let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) else {
+        guard let data else { return ([], []) }
+        guard let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) else {
+            JSONBlobStore.quarantine(.subscriptions, data)
             return ([], [])
         }
         return Tombstone.split(all)
     }
     
     private func recordTombstone(_ subscription: Subscription) {
-        var tomb = subscription
+        var tomb = Subscription(
+            id: subscription.id,
+            name: subscription.name,
+            url: "",
+            updatedAt: subscription.updatedAt
+        )
         tomb.deletedAt = .now
         tombstones.removeAll { $0.id == subscription.id }
         tombstones.append(tomb)
     }
-    
-    @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     private func save() {
+        mutationEpoch += 1
         let snapshot = subscriptions + tombstones
         let previous = saveTask
         saveTask = Task.detached {
@@ -114,8 +133,7 @@ extension SubscriptionStore {
         guard let subId = configuration.subscriptionId else { return nil }
         return subscriptions.first { $0.id == subId }
     }
-
-    /// One picker section per non-empty subscription.
+    
     var pickerSections: [PickerSection] {
         let configStore = ConfigurationStore.shared
         return subscriptions.compactMap { subscription in
@@ -143,7 +161,6 @@ extension SubscriptionStore {
     }
 
     func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration]) {
-        // Persist subscription first so an interrupted import never leaves orphan proxies.
         add(subscription)
         let tagged = newConfigurations.map { configuration in
             ProxyConfiguration(
@@ -155,13 +172,10 @@ extension SubscriptionStore {
         }
         ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: tagged)
     }
-
-    /// Re-fetches a subscription and replaces its configurations, matching new configs to
-    /// old ones by name to preserve IDs (and routing-rule assignments).
+    
     func refresh(_ subscription: Subscription) async throws {
         let result = try await SubscriptionFetcher.fetch(url: subscription.url)
-
-        // Configs sharing a name match positionally within that group.
+        
         let oldConfigurations = ConfigurationStore.shared.configurations(for: subscription)
         var oldByName: [String: [ProxyConfiguration]] = [:]
         for old in oldConfigurations {

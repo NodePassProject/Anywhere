@@ -27,8 +27,6 @@ extension MITMPhase: CustomStringConvertible {
     }
 }
 
-/// `path` is a JSONPath; `value`/`values` are JSON literals, but a non-JSON
-/// string is taken literally (`value = Anywhere` means `"Anywhere"`).
 nonisolated enum MITMJSONOperation: Equatable {
     /// Upsert: create or overwrite the addressed member; an array index appends when index == count.
     case add(path: String, value: String)
@@ -47,7 +45,6 @@ nonisolated enum MITMJSONOperation: Equatable {
 }
 
 extension MITMJSONOperation: CustomStringConvertible {
-    /// Action token; must match the text import format.
     var action: String {
         switch self {
         case .add:                  return "add"
@@ -165,7 +162,6 @@ extension MITMJSONOperation: Codable {
     }
 }
 
-/// A single rewrite operation; the gating `urlPattern` lives on `MITMRule`.
 nonisolated enum MITMOperation: Equatable {
     /// Request-phase only: rewrites the request URL, redirects with a synthesized
     /// `302`, or rejects with a synthesized `200`, per the `MITMRewriteAction` sub-mode.
@@ -306,8 +302,6 @@ extension MITMOperation: Codable {
 nonisolated struct MITMRule: Codable, Equatable, Identifiable {
     var id = UUID()
     var phase: MITMPhase
-    /// `NSRegularExpression` over the whole request URL (`https://host/path?query`);
-    /// the set's domain suffixes gate the host first.
     var urlPattern: String
     var operation: MITMOperation
 
@@ -381,9 +375,6 @@ extension MITMRule {
     }
 }
 
-/// Cases map 1:1 to the import format's numeric ids (transparent 0 … reject200Data 4).
-/// Only `transparent` dials upstream — it rewrites the URL and `Host`/`:authority`;
-/// the rest synthesize the response locally.
 nonisolated enum MITMRewriteAction: Equatable {
     case transparent(url: String)
     case redirect302(url: String)
@@ -476,17 +467,14 @@ nonisolated struct MITMParameter: Codable, Equatable, Identifiable {
         self.label = label
         self.description = description
     }
-
-    /// Whether `value` is still valid: a picker's value must be a current option.
+    
     func accepts(_ value: String) -> Bool {
         switch type {
         case .picker: return options.contains(value)
         case .input:  return true
         }
     }
-
-    /// The override when still valid, else the default — so a picker whose option
-    /// was removed falls back to the default everywhere it's resolved.
+    
     func effectiveValue(_ override: String?) -> String {
         guard let override, accepts(override) else { return defaultValue }
         return override
@@ -499,17 +487,13 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
 
     var id = UUID()
     var name: String
-    /// Per-set master switch; a disabled set stays editable but matches no traffic.
     var enabled: Bool
     var domainSuffixes: [String]
     var rules: [MITMRule]
     var parameters: [MITMParameter]
-    /// User overrides keyed by name. On the NE data path this instead holds the
-    /// already-resolved values from the binary (definitions stay app-side).
     var parameterValues: [String: String]
-    /// When set, the suffixes and rules are sourced from a remote `.amrs` file
-    /// and replaced on refresh; `id` and `name` are preserved.
     var subscriptionURL: URL?
+    var updatedAt: Date
     var deletedAt: Date? = nil
 
     init(
@@ -520,7 +504,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         rules: [MITMRule] = [],
         parameters: [MITMParameter] = [],
         parameterValues: [String: String] = [:],
-        subscriptionURL: URL? = nil
+        subscriptionURL: URL? = nil,
+        updatedAt: Date = .now
     ) {
         self.id = id
         self.name = name
@@ -530,9 +515,9 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         self.parameters = parameters
         self.parameterValues = parameterValues
         self.subscriptionURL = subscriptionURL
+        self.updatedAt = updatedAt
     }
-
-    /// `name → effective value`, in definition order; the only view the data path consumes.
+    
     func resolvedParameters() -> [(name: String, value: String)] {
         parameters.map { ($0.name, $0.effectiveValue(parameterValues[$0.name])) }
     }
@@ -547,13 +532,12 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         case parameters
         case parameterValues
         case subscriptionURL
+        case updatedAt
         case deletedAt
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        // Persisted id keeps MITMScriptStore scope keys stable across reloads;
-        // pre-id blobs decode with a fresh UUID.
         self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         let legacySuffix = try c.decodeIfPresent(String.self, forKey: .domainSuffix)
         if let suffixes = try c.decodeIfPresent([String].self, forKey: .domainSuffixes) {
@@ -565,11 +549,11 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         }
         self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
         self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
-        self.parameters = (try? c.decodeIfPresent([MITMParameter].self, forKey: .parameters)) ?? []
+        self.parameters = (try? c.decodeSkippingInvalid([MITMParameter].self, forKey: .parameters)) ?? []
         self.parameterValues = (try? c.decodeIfPresent([String: String].self, forKey: .parameterValues)) ?? [:]
         self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
         self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 
@@ -580,14 +564,13 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         try c.encode(enabled, forKey: .enabled)
         try c.encode(domainSuffixes, forKey: .domainSuffixes)
         try c.encode(rules, forKey: .rules)
-        // Omit when empty so paramless sets keep their existing on-disk shape.
         if !parameters.isEmpty { try c.encode(parameters, forKey: .parameters) }
         if !parameterValues.isEmpty { try c.encode(parameterValues, forKey: .parameterValues) }
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try c.encode(updatedAt, forKey: .updatedAt)
         try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
-
-    /// Returns a parsed http(s) URL whose path ends with `.amrs` (case-insensitive), or nil.
+    
     static func validSubscriptionURL(from rawValue: String) -> URL? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
@@ -602,8 +585,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     var ruleSets: [MITMRuleSet]
 
     static let empty = MITMSnapshot(ruleSets: [])
-
-    /// Rule sets minus soft-deleted tombstones — the set the data path should actually apply.
+    
     var liveRuleSets: [MITMRuleSet] { ruleSets.filter { $0.deletedAt == nil } }
 
     init(ruleSets: [MITMRuleSet]) {
@@ -630,8 +612,11 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     }
     
     nonisolated static func decode(from data: Data?) -> MITMSnapshot {
-        if let data, let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
-            return snapshot
+        if let data {
+            if let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
+                return snapshot
+            }
+            JSONBlobStore.quarantine(.mitm, data)
         }
         if let data = legacyDefaultsBlob(),
            let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
@@ -639,9 +624,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
         }
         return .empty
     }
-
-    /// Reads the master toggle out of a blob written by a build that still stored it there.
-    /// Migration only — see `MITMRuleSetStore.init`; the toggle is never written back.
+    
     nonisolated static func legacyEnabled(in data: Data?) -> Bool {
         struct LegacyToggle: Decodable { var enabled: Bool? }
         let decoder = JSONDecoder()
@@ -660,8 +643,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     }
 
     private static let legacyMITMDefaultsKey = "mitmData"
-
-    /// Persists the snapshot and fires the Darwin notification the extension observes.
+    
     func save() {
         let data: Data
         do {

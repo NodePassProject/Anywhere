@@ -27,6 +27,7 @@ final class MITMRuleSetStore {
     private var tombstones: [MITMRuleSet] = []
     
     @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private var mutationEpoch = 0
 
     private init() {
         let data = JSONBlobStore.shared.load(.mitm)
@@ -47,46 +48,53 @@ final class MITMRuleSetStore {
     }
     
     func reload() async {
-        let previous = loadedBlob
-        let outcome = await Task.detached(priority: .utility) {
-            () -> (data: Data?, snapshot: MITMSnapshot)? in
-            let data = JSONBlobStore.shared.load(.mitm)
-            guard data != previous else { return nil }
-            return (data, MITMSnapshot.decode(from: data))
-        }.value
-        guard let outcome else { return }
-        loadedBlob = outcome.data
-        let split = Tombstone.split(outcome.snapshot.ruleSets)
-        ruleSets = split.live
-        tombstones = split.tombstones
-        MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
+        while true {
+            let previous = loadedBlob
+            let epoch = mutationEpoch
+            let outcome = await Task.detached(priority: .utility) {
+                () -> (data: Data?, snapshot: MITMSnapshot)? in
+                let data = JSONBlobStore.shared.load(.mitm)
+                guard data != previous else { return nil }
+                return (data, MITMSnapshot.decode(from: data))
+            }.value
+            guard let outcome else { return }
+            guard epoch == mutationEpoch else { continue }
+            loadedBlob = outcome.data
+            let split = Tombstone.split(outcome.snapshot.ruleSets)
+            ruleSets = split.live
+            tombstones = split.tombstones
+            MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
+            return
+        }
     }
 
     // MARK: - Rule set CRUD
 
     func addRuleSet(_ ruleSet: MITMRuleSet) {
+        let tombstone = tombstones.first { $0.id == ruleSet.id }
         tombstones.removeAll { $0.id == ruleSet.id }
-        ruleSets.append(ruleSet)
+        var stamped = ruleSet
+        stamped.updatedAt = SyncStamp.after(tombstone)
+        ruleSets.append(stamped)
         save()
     }
 
     func updateRuleSet(_ ruleSet: MITMRuleSet) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
-        ruleSets[index] = ruleSet
+        var stamped = ruleSet
+        stamped.updatedAt = SyncStamp.after(ruleSets[index])
+        ruleSets[index] = stamped
         save()
     }
 
-    /// Persists immediately — covers read-only subscribed sets, which never go
-    /// through the draft-based editor.
     func setRuleSet(_ id: UUID, enabled: Bool) {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }) else { return }
         guard ruleSets[index].enabled != enabled else { return }
         ruleSets[index].enabled = enabled
+        ruleSets[index].updatedAt = SyncStamp.after(ruleSets[index])
         save()
     }
-
-    /// Sets one parameter value (persists immediately, works for subscribed sets).
-    /// A value equal to the default clears the override, so it keeps following the default.
+    
     func setParameterValue(_ id: UUID, name: String, value: String) {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }),
               let definition = ruleSets[index].parameters.first(where: { $0.name == name })
@@ -98,6 +106,7 @@ final class MITMRuleSetStore {
             guard ruleSets[index].parameterValues[name] != value else { return }
             ruleSets[index].parameterValues[name] = value
         }
+        ruleSets[index].updatedAt = SyncStamp.after(ruleSets[index])
         save()
     }
 
@@ -128,10 +137,9 @@ final class MITMRuleSetStore {
 
     func addRule(_ rule: MITMRule, toRuleSet ruleSetID: UUID) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
-        // Cap like the subscription path: every rule is recompiled on reload and
-        // evaluated per request head, so an unbounded set stalls the data path.
         guard ruleSets[index].rules.count < MITMRuleSet.maxRuleCount else { return }
         ruleSets[index].rules.append(rule)
+        ruleSets[index].updatedAt = SyncStamp.after(ruleSets[index])
         save()
     }
 
@@ -141,15 +149,17 @@ final class MITMRuleSetStore {
             return
         }
         ruleSets[setIndex].rules[ruleIndex] = rule
+        ruleSets[setIndex].updatedAt = SyncStamp.after(ruleSets[setIndex])
         save()
     }
 
     func removeRules(atOffsets offsets: IndexSet, inRuleSet ruleSetID: UUID) {
         guard let setIndex = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
         ruleSets[setIndex].rules.remove(atOffsets: offsets)
+        ruleSets[setIndex].updatedAt = SyncStamp.after(ruleSets[setIndex])
         save()
     }
-
+    
     func moveRules(
         fromOffsets source: IndexSet,
         toOffset destination: Int,
@@ -157,13 +167,12 @@ final class MITMRuleSetStore {
     ) {
         guard let setIndex = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
         ruleSets[setIndex].rules.move(fromOffsets: source, toOffset: destination)
+        ruleSets[setIndex].updatedAt = SyncStamp.after(ruleSets[setIndex])
         save()
     }
 
     // MARK: - Subscription
-
-    /// Replaces the set's suffixes and rules in place; `id` and `name` are
-    /// preserved so the script-store scope and any rename stick.
+    
     @discardableResult
     func refreshRuleSet(id: UUID) async throws -> MITMRuleSet {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }),
@@ -183,12 +192,9 @@ final class MITMRuleSetStore {
         guard parsed.rules.count <= MITMRuleSet.maxRuleCount else {
             throw MITMRuleSetRefreshError.tooManyRules
         }
-        // Re-resolve after the await: a delete/move during the fetch could have
-        // shifted or removed the set, leaving the pre-await `index` stale.
         guard let writeIndex = ruleSets.firstIndex(where: { $0.id == id }) else {
             throw MITMRuleSetRefreshError.ruleSetRemoved
         }
-        // Preserve user overrides across the refresh (see mergedParameterValues).
         let previousValues = ruleSets[writeIndex].parameterValues
         ruleSets[writeIndex].domainSuffixes = parsed.domainSuffixes
         ruleSets[writeIndex].rules = parsed.rules
@@ -197,12 +203,11 @@ final class MITMRuleSetStore {
             definitions: parsed.parameters,
             previousValues: previousValues
         )
+        ruleSets[writeIndex].updatedAt = SyncStamp.after(ruleSets[writeIndex])
         save()
         return ruleSets[writeIndex]
     }
-
-    /// Carries user overrides forward onto a refreshed definition set, dropping any
-    /// whose parameter vanished or whose value is no longer one of a picker's options.
+    
     private static func mergedParameterValues(
         definitions: [MITMParameter],
         previousValues: [String: String]
@@ -226,11 +231,16 @@ final class MITMRuleSetStore {
         for item in removed {
             var tomb = item
             tomb.deletedAt = now
+            tomb.domainSuffixes = []
+            tomb.rules = []
+            tomb.parameters = []
+            tomb.parameterValues = [:]
             tombstones.append(tomb)
         }
     }
 
     private func save() {
+        mutationEpoch += 1
         MITMSnapshot(ruleSets: ruleSets + tombstones).save()
     }
 }

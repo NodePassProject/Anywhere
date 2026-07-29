@@ -17,10 +17,10 @@ class ChainStore {
     static let shared = ChainStore()
 
     private(set) var chains: [ProxyChain] = []
-    /// Soft-deleted chains kept so the deletion syncs to other devices; hidden from `chains`.
     private var tombstones: [ProxyChain] = []
     
     @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private var mutationEpoch = 0
 
     private init() {
         let data = JSONBlobStore.shared.load(.chains)
@@ -28,23 +28,26 @@ class ChainStore {
         let split = Self.decodeSplit(from: data)
         chains = split.live
         tombstones = split.tombstones
-        // Must stay deferred: coordinate() reads ConfigurationStore.shared, which references
-        // back here; calling it synchronously re-enters this type's `shared` init and deadlocks.
         Task { @MainActor in self.coordinate() }
     }
 
     // MARK: - CRUD
 
     func add(_ chain: ProxyChain) {
+        let tombstone = tombstones.first { $0.id == chain.id }
         tombstones.removeAll { $0.id == chain.id }
-        chains.append(chain)
+        var stamped = chain
+        stamped.updatedAt = SyncStamp.after(tombstone)
+        chains.append(stamped)
         save()
         coordinate()
     }
 
     func update(_ chain: ProxyChain) {
         if let index = chains.firstIndex(where: { $0.id == chain.id }) {
-            chains[index] = chain
+            var stamped = chain
+            stamped.updatedAt = SyncStamp.after(chains[index])
+            chains[index] = stamped
             save()
             coordinate()
         }
@@ -63,11 +66,8 @@ class ChainStore {
     }
 
     // MARK: - Coordination
-
-    /// Keeps the VPN selection and routing-rule state consistent after any change to the chain list.
+    
     private func coordinate() {
-        // Configs load asynchronously; running against the empty list would let clearOrphans()
-        // strip every config-assigned rule set as orphaned. loadInitial() does the full pass later.
         guard ConfigurationStore.shared.isLoaded else { return }
         let configurations = ConfigurationStore.shared.configurations
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
@@ -76,25 +76,32 @@ class ChainStore {
     }
     
     func reload() async {
-        let previous = loadedBlob
-        let outcome = await Task.detached(priority: .utility) {
-            () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
-            let data = JSONBlobStore.shared.load(.chains)
-            guard data != previous else { return nil }
-            let split = Self.decodeSplit(from: data)
-            return (data, split.live, split.tombstones)
-        }.value
-        guard let outcome else { return }
-        loadedBlob = outcome.data
-        chains = outcome.live
-        tombstones = outcome.tombstones
-        coordinate()
+        while true {
+            let previous = loadedBlob
+            let epoch = mutationEpoch
+            let outcome = await Task.detached(priority: .utility) {
+                () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
+                let data = JSONBlobStore.shared.load(.chains)
+                guard data != previous else { return nil }
+                let split = Self.decodeSplit(from: data)
+                return (data, split.live, split.tombstones)
+            }.value
+            guard let outcome else { return }
+            guard epoch == mutationEpoch else { continue }
+            loadedBlob = outcome.data
+            chains = outcome.live
+            tombstones = outcome.tombstones
+            coordinate()
+            return
+        }
     }
 
     // MARK: - Persistence
     
     nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
-        guard let data, let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) else {
+        guard let data else { return ([], []) }
+        guard let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) else {
+            JSONBlobStore.quarantine(.chains, data)
             return ([], [])
         }
         return Tombstone.split(all)
@@ -103,11 +110,13 @@ class ChainStore {
     private func recordTombstone(_ chain: ProxyChain) {
         var tomb = chain
         tomb.deletedAt = .now
+        tomb.proxyIds = []
         tombstones.removeAll { $0.id == chain.id }
         tombstones.append(tomb)
     }
 
     private func save() {
+        mutationEpoch += 1
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -120,7 +129,6 @@ class ChainStore {
 }
 
 extension ChainStore {
-    /// Valid chains (those resolving to ≥2 proxies) as picker items.
     var pickerItems: [PickerItem] {
         let configurations = ConfigurationStore.shared.configurations
         return chains.compactMap { chain in

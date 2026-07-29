@@ -7,16 +7,22 @@
 
 import Foundation
 
-/// Wraps a `Decodable` so one corrupt element doesn't fail the whole array.
+nonisolated final class DecodeLossTally: @unchecked Sendable {
+    static let key = CodingUserInfoKey(rawValue: "AnywhereDecodeLossTally")!
+    var dropped = 0
+}
+
 nonisolated struct FailableDecodable<T: Decodable>: Decodable {
     let value: T?
     init(from decoder: Decoder) throws {
         value = try? T(from: decoder)
+        if value == nil, let tally = decoder.userInfo[DecodeLossTally.key] as? DecodeLossTally {
+            tally.dropped += 1
+        }
     }
 }
 
 nonisolated extension JSONDecoder {
-    /// Decodes `[T]`, dropping elements that fail; nil only when the JSON isn't an array at all.
     func decodeSkippingInvalid<T: Decodable>(
         _ type: [T].Type,
         from data: Data
@@ -29,7 +35,6 @@ nonisolated extension JSONDecoder {
 }
 
 nonisolated extension KeyedDecodingContainer {
-    /// Decodes `[T]` for `key`, dropping elements that fail; throws only when the key is missing or not an array.
     func decodeSkippingInvalid<T: Decodable>(
         _ type: [T].Type,
         forKey key: Key

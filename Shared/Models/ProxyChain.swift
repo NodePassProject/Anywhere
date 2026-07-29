@@ -10,22 +10,30 @@ import Foundation
 nonisolated struct ProxyChain: Identifiable, Codable, Hashable, SoftDeletable {
     let id: UUID
     var name: String
-    /// Ordered proxy IDs. First is the entry (outermost TCP), last is the exit.
     var proxyIds: [UUID]
+    var updatedAt: Date
     var deletedAt: Date? = nil
 
-    init(id: UUID = UUID(), name: String, proxyIds: [UUID] = []) {
+    init(id: UUID = UUID(), name: String, proxyIds: [UUID] = [], updatedAt: Date = .now) {
         self.id = id
         self.name = name
         self.proxyIds = proxyIds
+        self.updatedAt = updatedAt
     }
-
-    /// Missing IDs are skipped.
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        proxyIds = try container.decode([UUID].self, forKey: .proxyIds)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
+    }
+    
     func resolveProxies(from pool: [ProxyConfiguration]) -> [ProxyConfiguration] {
         proxyIds.compactMap { id in pool.first(where: { $0.id == id }) }
     }
-
-    /// Composite config: last = exit, rest fill `chain`. nil if any proxy is missing or fewer than 2 resolve.
+    
     func resolveComposite(from pool: [ProxyConfiguration]) -> ProxyConfiguration? {
         let configs = resolveProxies(from: pool)
         guard configs.count == proxyIds.count, configs.count >= 2 else { return nil }
@@ -38,8 +46,7 @@ nonisolated struct ProxyChain: Identifiable, Codable, Hashable, SoftDeletable {
             chain: Array(configs.dropLast())
         )
     }
-
-    /// `isValid` means complete: ≥2 proxies, none missing.
+    
     func listDisplayInfo(configurations: [ProxyConfiguration]) -> (names: [String], isValid: Bool, entry: String?, exit: String?) {
         let proxies = resolveProxies(from: configurations)
         let isValid = proxies.count == proxyIds.count && proxies.count >= 2

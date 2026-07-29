@@ -235,6 +235,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
     let outbound: Outbound
     /// Proxies to chain through, outermost first; `nil` or empty means a direct connection.
     let chain: [ProxyConfiguration]?
+    var updatedAt: Date
     var deletedAt: Date? = nil
 
     var connectAddress: String { resolvedIP ?? serverAddress }
@@ -367,7 +368,8 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         resolvedIP: String? = nil,
         subscriptionId: UUID? = nil,
         outbound: Outbound,
-        chain: [ProxyConfiguration]? = nil
+        chain: [ProxyConfiguration]? = nil,
+        updatedAt: Date = .now
     ) {
         self.id = id
         self.name = name
@@ -377,13 +379,14 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         self.subscriptionId = subscriptionId
         self.outbound = outbound
         self.chain = chain
+        self.updatedAt = updatedAt
     }
 
     func withChain(_ chain: [ProxyConfiguration]?) -> ProxyConfiguration {
         ProxyConfiguration(
             id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
             resolvedIP: resolvedIP, subscriptionId: subscriptionId,
-            outbound: outbound, chain: chain
+            outbound: outbound, chain: chain, updatedAt: updatedAt
         )
     }
 
@@ -391,12 +394,10 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         ProxyConfiguration(
             id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
             resolvedIP: resolvedIP, subscriptionId: subscriptionId,
-            outbound: outbound, chain: chain
+            outbound: outbound, chain: chain, updatedAt: updatedAt
         )
     }
-
-    /// Compares content ignoring `id`, `resolvedIP`, and `subscriptionId`,
-    /// to detect unchanged configs during subscription updates.
+    
     func contentEquals(_ other: ProxyConfiguration) -> Bool {
         name == other.name &&
         serverAddress == other.serverAddress &&
@@ -425,6 +426,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         case http2Username, http2Password
         case http3Username, http3Password
         case chain
+        case updatedAt
         case deletedAt
     }
 
@@ -613,6 +615,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         }
 
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 
@@ -727,6 +730,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         }
 
         try container.encodeIfPresent(chain, forKey: .chain)
+        try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 }
