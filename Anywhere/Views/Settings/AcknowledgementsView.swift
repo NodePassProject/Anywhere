@@ -18,12 +18,13 @@ struct AcknowledgementsView: View {
     private static let trademarks: [(name: String, owner: String)] = [
         ("Google", "Google LLC"),
         ("Telegram", "Telegram FZ-LLC"),
+        ("X", "X Corp."),
         ("Netflix", "Netflix, Inc."),
         ("YouTube", "Google LLC"),
         ("TikTok", "ByteDance Ltd."),
+        ("Spotify", "Spotify AB"),
         ("ChatGPT", "OpenAI, Inc."),
         ("Claude", "Anthropic, PBC"),
-        ("Spotify", "Spotify AB"),
     ]
 
     private static let libraries: [OpenSourceLibrary] = [

@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/hiDandelion/AnywhereRules.git",
       "state" : {
-        "revision" : "dd41220721f6d92f347e95d9ede4d52f1eff70d6",
-        "version" : "1.0.1"
+        "revision" : "4f1b27c1954818cc866985a0f4d4685931a00c89",
+        "version" : "1.1.0"
       }
     }
   ],
