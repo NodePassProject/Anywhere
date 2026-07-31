@@ -11,6 +11,7 @@ enum SettingsItem: String {
     case iCloudSync
     case personalization
     case alwaysOn
+    case tunnelScope
     case globalMode
     case adBlocking
     case countryBypass
@@ -29,6 +30,7 @@ enum SettingsItem: String {
         case .iCloudSync: "iCloud Sync"
         case .personalization: "Personalization"
         case .alwaysOn: "Always On"
+        case .tunnelScope: "Tunnel Scope"
         case .globalMode: "Global Mode"
         case .adBlocking: "AD Blocking"
         case .countryBypass: "Country Bypass"
@@ -49,6 +51,7 @@ enum SettingsItem: String {
         case .iCloudSync: "icloud.fill"
         case .personalization: "paintpalette.fill"
         case .alwaysOn: "poweron"
+        case .tunnelScope: "scope"
         case .globalMode: "arrow.merge"
         case .adBlocking: "shield.checkered"
         case .countryBypass: "globe.americas.fill"
@@ -81,6 +84,7 @@ enum SettingsItem: String {
         case .iCloudSync: .white
         case .personalization: .pink
         case .alwaysOn: .green
+        case .tunnelScope: .blue
         case .globalMode: .orange
         case .adBlocking: .red
         case .countryBypass: .blue

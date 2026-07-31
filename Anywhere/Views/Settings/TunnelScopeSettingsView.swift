@@ -1,5 +1,5 @@
 //
-//  TunnelSettingsView.swift
+//  TunnelScopeSettingsView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/18/26.
@@ -12,7 +12,7 @@ private struct RouteDraft: Identifiable, Equatable {
     var value: String
 }
 
-struct TunnelSettingsView: View {
+struct TunnelScopeSettingsView: View {
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(\.editMode) private var editMode
 
@@ -49,7 +49,7 @@ struct TunnelSettingsView: View {
                 Text("Excluded Routes")
             }
         }
-        .navigationTitle("Tunnel")
+        .navigationTitle("Tunnel Scope")
         .toolbar {
             ToolbarItem {
                 EditButton()

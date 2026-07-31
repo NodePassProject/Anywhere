@@ -85,6 +85,11 @@ struct SettingsView: View {
                 SettingsItem.alwaysOn.label
             }
             .disabled(viewModel.pendingReconnect)
+            NavigationLink {
+                TunnelScopeSettingsView()
+            } label: {
+                SettingsItem.tunnelScope.label
+            }
         }
     }
 

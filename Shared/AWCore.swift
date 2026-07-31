@@ -255,6 +255,54 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
     }
     
+    static func getTunnelIncludeAllNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func setTunnelIncludeAllNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func getTunnelIncludeLocalNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    }
+
+    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    }
+
+    static func getTunnelIncludeAPNs() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    }
+
+    static func setTunnelIncludeAPNs(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    }
+
+    static func getTunnelIncludeCellularServices() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    }
+
+    static func setTunnelIncludeCellularServices(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    }
+
+    static func getTunnelIncludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
+    }
+
+    static func setTunnelIncludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
+    }
+
+    static func getTunnelExcludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
+    }
+
+    static func setTunnelExcludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
+    }
+    
     static func getProxyMode() -> ProxyMode {
         ProxyMode(rawValue: userDefaults.string(forKey: UserDefaultsKey.proxyMode)!) ?? .rule
     }
@@ -552,54 +600,6 @@ nonisolated final class AWCore {
     
     static func getRemnawaveHWID() -> String {
         userDefaults.string(forKey: UserDefaultsKey.remnawaveHWID)!
-    }
-
-    static func getTunnelIncludeAllNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
-    }
-
-    static func setTunnelIncludeAllNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
-    }
-
-    static func getTunnelIncludeLocalNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
-    }
-
-    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
-    }
-
-    static func getTunnelIncludeAPNs() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
-    }
-
-    static func setTunnelIncludeAPNs(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
-    }
-
-    static func getTunnelIncludeCellularServices() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
-    }
-
-    static func setTunnelIncludeCellularServices(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
-    }
-
-    static func getTunnelIncludedRoutes() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
-    }
-
-    static func setTunnelIncludedRoutes(_ routes: [String]) {
-        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
-    }
-
-    static func getTunnelExcludedRoutes() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
-    }
-
-    static func setTunnelExcludedRoutes(_ routes: [String]) {
-        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
     }
 
     // MARK: - Routing Data

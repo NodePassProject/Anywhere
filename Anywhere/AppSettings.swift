@@ -74,66 +74,16 @@ final class AppSettings {
 
     // MARK: - Persist + notify the tunnel
 
-    var advertiseIPv6ToApps: Bool {
+    var tunnelExcludedRoutes: [String] {
         didSet {
-            AWCore.setAdvertiseIPv6ToApps(advertiseIPv6ToApps)
+            AWCore.setTunnelExcludedRoutes(tunnelExcludedRoutes)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
 
-    var alwaysTrustCellular: Bool {
+    var tunnelIncludedRoutes: [String] {
         didSet {
-            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
-            if alwaysTrustCellular, alwaysUntrustCellular {
-                alwaysUntrustCellular = false
-            }
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var alwaysUntrustCellular: Bool {
-        didSet {
-            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
-            if alwaysUntrustCellular, alwaysTrustCellular {
-                alwaysTrustCellular = false
-            }
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var blockUDP: Bool {
-        didSet {
-            AWCore.setBlockUDP(blockUDP)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var blockWebRTC: Bool {
-        didSet {
-            AWCore.setBlockWebRTC(blockWebRTC)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var hideVPNIcon: Bool {
-        didSet {
-            AWCore.setHideVPNIcon(hideVPNIcon)
-            if hideVPNIcon, advertiseIPv6ToApps {
-                advertiseIPv6ToApps = false
-            } else {
-                AWNotificationCenter.notifyTunnelSettingsChanged()
-            }
-        }
-    }
-    
-    var isGlobalMode: Bool {
-        get { proxyMode == .global }
-        set { proxyMode = newValue ? .global : .rule }
-    }
-    
-    var preventDNSLeak: Bool {
-        didSet {
-            AWCore.setPreventDNSLeak(preventDNSLeak)
+            AWCore.setTunnelIncludedRoutes(tunnelIncludedRoutes)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -144,10 +94,63 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
-
+    
+    var isGlobalMode: Bool {
+        get { proxyMode == .global }
+        set { proxyMode = newValue ? .global : .rule }
+    }
+    
+    var alwaysTrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
+            if alwaysTrustCellular, alwaysUntrustCellular {
+                alwaysUntrustCellular = false
+            }
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var alwaysUntrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
+            if alwaysUntrustCellular, alwaysTrustCellular {
+                alwaysTrustCellular = false
+            }
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var trustedSSIDs: [String] {
+        didSet {
+            AWCore.setTrustedSSIDs(trustedSSIDs)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var blockUDP: Bool {
+        didSet {
+            AWCore.setBlockUDP(blockUDP)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
     var quicPolicy: QUICPolicy {
         didSet {
             AWCore.setQUICPolicy(quicPolicy)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+
+    var blockWebRTC: Bool {
+        didSet {
+            AWCore.setBlockWebRTC(blockWebRTC)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var preventDNSLeak: Bool {
+        didSet {
+            AWCore.setPreventDNSLeak(preventDNSLeak)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
@@ -165,28 +168,18 @@ final class AppSettings {
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }
-
-    var trustedSSIDs: [String] {
-        didSet {
-            AWCore.setTrustedSSIDs(trustedSSIDs)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var tunnelExcludedRoutes: [String] {
-        didSet {
-            AWCore.setTunnelExcludedRoutes(tunnelExcludedRoutes)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-
-    var tunnelIncludedRoutes: [String] {
-        didSet {
-            AWCore.setTunnelIncludedRoutes(tunnelIncludedRoutes)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
     
+    var hideVPNIcon: Bool {
+        didSet {
+            AWCore.setHideVPNIcon(hideVPNIcon)
+            if hideVPNIcon, advertiseIPv6ToApps {
+                advertiseIPv6ToApps = false
+            } else {
+                AWNotificationCenter.notifyTunnelSettingsChanged()
+            }
+        }
+    }
+
     var ipRuleDNSMode: DNSMode {
         didSet {
             AWCore.setIPRuleDNSMode(ipRuleDNSMode)
@@ -260,6 +253,13 @@ final class AppSettings {
     var fallbackDNSServer: String {
         didSet {
             AWCore.setFallbackDNSServer(fallbackDNSServer)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var advertiseIPv6ToApps: Bool {
+        didSet {
+            AWCore.setAdvertiseIPv6ToApps(advertiseIPv6ToApps)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }

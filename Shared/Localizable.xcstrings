@@ -17800,54 +17800,54 @@
         }
       }
     },
-    "Tunnel" : {
+    "Tunnel Scope" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "النفق"
+            "value" : "نطاق النفق"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tunnel"
+            "value" : "Tunnel Scope"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Túnel"
+            "value" : "Alcance del túnel"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "تونل"
+            "value" : "محدوده تونل"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Туннель"
+            "value" : "Область действия туннеля"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tünel"
+            "value" : "Tünel Kapsamı"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Đường hầm"
+            "value" : "Phạm vi đường hầm"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "隧道"
+            "value" : "隧道范围"
           }
         }
       }
