@@ -40,14 +40,10 @@ class VPNViewModel {
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
     @ObservationIgnored private var statusObserver: Task<Void, Never>?
     private(set) var pendingReconnect = false
-    /// Debounces a transient `.reasserting` (network blip) while connected so the UI keeps
-    /// showing "Connected" unless the reconnect persists past ``reassertingDebounceInterval``.
     @ObservationIgnored private var reassertingDebounceTask: Task<Void, Never>?
     private static let reassertingDebounceInterval: Duration = .seconds(5)
-    /// Set only via `withoutSelectionPersistence` so the flag always resets.
     @ObservationIgnored private var _suppressSelectionPersistence = false
-
-    /// Assigns `selectedConfiguration` without triggering the chain-clearing didSet branch.
+    
     private func withoutSelectionPersistence(_ block: () -> Void) {
         _suppressSelectionPersistence = true
         defer { _suppressSelectionPersistence = false }
@@ -151,33 +147,41 @@ class VPNViewModel {
 
     // MARK: - Latency Testing
 
-    @ObservationIgnored private var latencyTask: Task<Void, Never>?
+    @ObservationIgnored private var batchLatencyTask: Task<Void, Never>?
+    @ObservationIgnored private var batchLatencyTargetIds: Set<UUID> = []
+    @ObservationIgnored private var singleLatencyTasks: [UUID: Task<Void, Never>] = [:]
 
     nonisolated private static let maxConcurrentLatencyTests = 8
 
     func testLatency(for configuration: ProxyConfiguration) {
-        latencyTask?.cancel()
         let configurationId = configuration.id
+        singleLatencyTasks[configurationId]?.cancel()
         latencyResults[configurationId] = .testing
         let useIPC = vpnStatus == .connected
-        latencyTask = Task { [weak self] in
+        singleLatencyTasks[configurationId] = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: configuration, viaIPC: useIPC, session: useIPC ? self?.providerSession : nil)
             await MainActor.run {
                 guard !Task.isCancelled else { return }
+                self?.singleLatencyTasks[configurationId] = nil
                 self?.recordLatencyResult(result, for: configurationId)
             }
         }
     }
 
     func testLatencies(for targets: [ProxyConfiguration]) {
-        latencyTask?.cancel()
+        batchLatencyTask?.cancel()
+        let targetIds = Set(targets.map(\.id))
+        restoreDisplacedResults(in: \.latencyResults, stored: storedLatencyResults, previousTargets: batchLatencyTargetIds, newTargets: targetIds)
+        batchLatencyTargetIds = targetIds
         for config in targets {
             latencyResults[config.id] = .testing
         }
         let useIPC = vpnStatus == .connected
         let session = useIPC ? providerSession : nil
-        latencyTask = Task { [weak self] in
-            await Self.runLatencyTests(targets, viaIPC: useIPC, session: session) { id, result in
+        batchLatencyTask = Task { [weak self] in
+            await Self.runLatencyTests(targets, viaIPC: useIPC, session: session, isStillWanted: { id in
+                ConfigurationStore.shared.configurations.contains { $0.id == id }
+            }) { id, result in
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
                     self?.recordLatencyResult(result, for: id)
@@ -185,41 +189,66 @@ class VPNViewModel {
             }
         }
     }
+    
+    private func restoreDisplacedResults(
+        in results: ReferenceWritableKeyPath<VPNViewModel, [UUID: LatencyResult]>,
+        stored: [UUID: LatencyResult],
+        previousTargets: Set<UUID>,
+        newTargets: Set<UUID>
+    ) {
+        for staleId in previousTargets where !newTargets.contains(staleId) {
+            if self[keyPath: results][staleId] == .testing {
+                self[keyPath: results][staleId] = stored[staleId]
+            }
+        }
+    }
 
     // MARK: - Chain Latency Testing
 
-    @ObservationIgnored private var chainLatencyTask: Task<Void, Never>?
+    @ObservationIgnored private var batchChainLatencyTask: Task<Void, Never>?
+    @ObservationIgnored private var batchChainLatencyTargetIds: Set<UUID> = []
+    @ObservationIgnored private var singleChainLatencyTasks: [UUID: Task<Void, Never>] = [:]
 
     func testChainLatency(for chain: ProxyChain, configurations: [ProxyConfiguration]) {
         guard let resolved = chain.resolveComposite(from: configurations) else { return }
-        chainLatencyResults[chain.id] = .testing
         let chainId = chain.id
+        singleChainLatencyTasks[chainId]?.cancel()
+        chainLatencyResults[chainId] = .testing
         let useIPC = vpnStatus == .connected
         let session = useIPC ? providerSession : nil
-        chainLatencyTask?.cancel()
-        chainLatencyTask = Task { [weak self] in
+        singleChainLatencyTasks[chainId] = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: resolved, viaIPC: useIPC, session: session)
             await MainActor.run {
                 guard !Task.isCancelled else { return }
+                self?.singleChainLatencyTasks[chainId] = nil
                 self?.recordChainLatencyResult(result, for: chainId)
             }
         }
     }
 
     func testAllChainLatencies(chains: [ProxyChain], configurations: [ProxyConfiguration]) {
-        chainLatencyTask?.cancel()
+        batchChainLatencyTask?.cancel()
         var chainData: [(UUID, ProxyConfiguration)] = []
         for chain in chains {
             if let resolved = chain.resolveComposite(from: configurations) {
-                chainLatencyResults[chain.id] = .testing
                 chainData.append((chain.id, resolved))
             }
+        }
+        let targetIds = Set(chainData.map(\.0))
+        restoreDisplacedResults(in: \.chainLatencyResults, stored: storedChainLatencyResults, previousTargets: batchChainLatencyTargetIds, newTargets: targetIds)
+        batchChainLatencyTargetIds = targetIds
+        for (chainId, _) in chainData {
+            chainLatencyResults[chainId] = .testing
         }
         let chainIdByConfigId: [UUID: UUID] = Dictionary(uniqueKeysWithValues: chainData.map { ($0.1.id, $0.0) })
         let useIPC = vpnStatus == .connected
         let session = useIPC ? providerSession : nil
-        chainLatencyTask = Task { [weak self] in
-            await Self.runLatencyTests(chainData.map(\.1), viaIPC: useIPC, session: session) { configId, result in
+        batchChainLatencyTask = Task { [weak self] in
+            await Self.runLatencyTests(chainData.map(\.1), viaIPC: useIPC, session: session, isStillWanted: { compositeId in
+                guard let chainId = chainIdByConfigId[compositeId],
+                      let chain = ChainStore.shared.chains.first(where: { $0.id == chainId }) else { return false }
+                return chain.resolveComposite(from: ConfigurationStore.shared.configurations) != nil
+            }) { configId, result in
                 if let chainId = chainIdByConfigId[configId] {
                     await MainActor.run {
                         guard !Task.isCancelled else { return }
@@ -243,6 +272,7 @@ class VPNViewModel {
     }
 
     private func recordLatencyResult(_ result: LatencyResult, for configurationId: UUID) {
+        guard ConfigurationStore.shared.configurations.contains(where: { $0.id == configurationId }) else { return }
         latencyResults[configurationId] = result
         storedLatencyResults[configurationId] = result
         if let data = Self.encodeLatencyResults(storedLatencyResults) {
@@ -251,10 +281,43 @@ class VPNViewModel {
     }
 
     private func recordChainLatencyResult(_ result: LatencyResult, for chainId: UUID) {
+        guard ChainStore.shared.chains.contains(where: { $0.id == chainId }) else { return }
         chainLatencyResults[chainId] = result
         storedChainLatencyResults[chainId] = result
         if let data = Self.encodeLatencyResults(storedChainLatencyResults) {
             AWCore.setChainLatencyResultsData(data)
+        }
+    }
+    
+    func pruneLatencyState(liveConfigurationIds: Set<UUID>) {
+        for (id, task) in singleLatencyTasks where !liveConfigurationIds.contains(id) {
+            task.cancel()
+            singleLatencyTasks[id] = nil
+        }
+        let staleLive = latencyResults.keys.filter { !liveConfigurationIds.contains($0) }
+        for id in staleLive { latencyResults[id] = nil }
+        let staleStored = storedLatencyResults.keys.filter { !liveConfigurationIds.contains($0) }
+        if !staleStored.isEmpty {
+            for id in staleStored { storedLatencyResults[id] = nil }
+            if let data = Self.encodeLatencyResults(storedLatencyResults) {
+                AWCore.setLatencyResultsData(data)
+            }
+        }
+    }
+    
+    func pruneChainLatencyState(liveChainIds: Set<UUID>) {
+        for (id, task) in singleChainLatencyTasks where !liveChainIds.contains(id) {
+            task.cancel()
+            singleChainLatencyTasks[id] = nil
+        }
+        let staleLive = chainLatencyResults.keys.filter { !liveChainIds.contains($0) }
+        for id in staleLive { chainLatencyResults[id] = nil }
+        let staleStored = storedChainLatencyResults.keys.filter { !liveChainIds.contains($0) }
+        if !staleStored.isEmpty {
+            for id in staleStored { storedChainLatencyResults[id] = nil }
+            if let data = Self.encodeLatencyResults(storedChainLatencyResults) {
+                AWCore.setChainLatencyResultsData(data)
+            }
         }
     }
     
@@ -286,12 +349,12 @@ class VPNViewModel {
         }
         return await LatencyTester.test(configuration)
     }
-
-    /// Runs a batch of tests with at most `maxConcurrentLatencyTests` in flight, reporting each result as it arrives.
+    
     nonisolated private static func runLatencyTests(
         _ configurations: [ProxyConfiguration],
         viaIPC: Bool,
         session: NETunnelProviderSession?,
+        isStillWanted: (@MainActor @Sendable (UUID) -> Bool)? = nil,
         onResult: @Sendable @escaping (UUID, LatencyResult) async -> Void
     ) async {
         guard !configurations.isEmpty else { return }
@@ -307,18 +370,18 @@ class VPNViewModel {
             }
             for await pair in group {
                 await onResult(pair.0, pair.1)
-                if let config = iterator.next() {
+                while let config = iterator.next() {
+                    if let isStillWanted, await !isStillWanted(config.id) { continue }
                     group.addTask {
                         let r = await runSingleLatencyTest(for: config, viaIPC: viaIPC, session: session)
                         return (config.id, r)
                     }
+                    break
                 }
             }
         }
     }
-
-    /// Sends one `testLatency` IPC message and awaits the extension's reply. The extension
-    /// resolves the address itself — main-app DNS while the tunnel is up yields lwIP fake IPs.
+    
     nonisolated private static func sendLatencyTestMessage(
         for configuration: ProxyConfiguration,
         session: NETunnelProviderSession
@@ -328,10 +391,7 @@ class VPNViewModel {
         let responseData = await ProviderMessageConcurrencyBridge.send(messageData, over: session)
         return (responseData.flatMap { try? JSONDecoder().decode(LatencyTestResponse.self, from: $0) })?.asLatencyResult ?? .failed
     }
-
-    /// Returns `configuration` with `resolvedIP` set, preferring an existing value, then `fallback`,
-    /// then a DNS lookup via the shared `DNSResolver` — on its blocking-resolve worker, so callers
-    /// on the main actor or the cooperative pool never block on `getaddrinfo`.
+    
     nonisolated static func withResolvedIP(
         _ configuration: ProxyConfiguration,
         fallback: String? = nil
@@ -361,8 +421,6 @@ class VPNViewModel {
     // MARK: - Setup
 
     private func setupStatusObserver() {
-        // The enclosing type is @MainActor, so this Task and `handleStatusChange` run on the
-        // main actor.
         statusObserver = Task { [weak self] in
             for await note in NotificationCenter.default.notifications(named: .NEVPNStatusDidChange) {
                 guard !Task.isCancelled, let self else { return }
@@ -372,8 +430,7 @@ class VPNViewModel {
             }
         }
     }
-
-    /// Routes a raw tunnel status to the UI, debouncing a transient reconnect.
+    
     private func handleStatusChange(_ status: NEVPNStatus, on connection: NEVPNConnection) {
         reassertingDebounceTask?.cancel()
         reassertingDebounceTask = nil
@@ -391,8 +448,7 @@ class VPNViewModel {
 
         applyStatus(status, on: connection)
     }
-
-    /// Applies a tunnel status to `vpnStatus` and drives the stats-polling side effects.
+    
     private func applyStatus(_ status: NEVPNStatus, on connection: NEVPNConnection) {
         vpnStatus = status
         let stats = ConnectionStatsModel.shared
@@ -451,8 +507,6 @@ class VPNViewModel {
               let configuration = selectedConfiguration else { return }
 
         Task { [self] in
-            // Resolves on DNSResolver's worker queue, off both the main actor and
-            // the cooperative pool.
             let resolvedIP = await VPNViewModel.resolveServerAddress(configuration.serverAddress)
 
             let tunnelProtocol = NETunnelProviderProtocol()
@@ -482,12 +536,10 @@ class VPNViewModel {
 
             do {
                 try await manager.saveToPreferences()
-                // Reload so the connection reference is valid after the save round-trip.
                 try await manager.loadFromPreferences()
 
                 let resolved = await Self.withResolvedIP(configuration, fallback: resolvedIP)
-
-                // Persist to App Group so the NE can read it when started from Settings or On Demand, where options is nil.
+                
                 if let configData = try? JSONEncoder().encode(resolved) {
                     AWCore.setLastConfigurationData(configData)
                 }
@@ -502,7 +554,6 @@ class VPNViewModel {
 
     func disconnectVPN() {
         guard let manager = vpnManager else { return }
-        // Clear any pending reconnect — an explicit disconnect should not auto-reconnect
         pendingReconnect = false
         if manager.isOnDemandEnabled {
             manager.isOnDemandEnabled = false
@@ -519,7 +570,6 @@ class VPNViewModel {
         guard let manager = vpnManager,
               vpnStatus == .connected || vpnStatus == .connecting else { return }
         pendingReconnect = true
-        // Disable on-demand first to prevent system auto-restart during reconnection
         if manager.isOnDemandEnabled {
             manager.isOnDemandEnabled = false
             Task {
@@ -550,10 +600,7 @@ class VPNViewModel {
     }
 
     // MARK: - DNS Resolution
-
-    /// Resolves a server address to an IP string (IP literals pass through) via the
-    /// shared `DNSResolver`, so proxy lookups share the transport layers' cache. The
-    /// blocking lookup runs on the resolver's worker queue, not the caller's thread.
+    
     nonisolated static func resolveServerAddress(_ address: String) async -> String? {
         await DNSResolver.shared.resolveHost(address)
     }
@@ -567,7 +614,6 @@ extension NEVPNStatus {
 }
 
 extension VPNStatus {
-    /// Unknown future tunnel states read as `.invalid`.
     init(_ status: NEVPNStatus) {
         switch status {
         case .invalid: self = .invalid

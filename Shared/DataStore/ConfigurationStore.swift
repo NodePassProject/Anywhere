@@ -161,6 +161,7 @@ class ConfigurationStore {
     private func coordinate() {
         let chains = ChainStore.shared.chains
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
+        VPNViewModel.shared.pruneLatencyState(liveConfigurationIds: Set(configurations.map(\.id)))
         RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
         RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
     }

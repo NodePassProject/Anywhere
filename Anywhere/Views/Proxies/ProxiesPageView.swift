@@ -108,9 +108,10 @@ struct ProxiesPageView: View {
                         Button {
                             switch proxyType {
                             case .servers:
+                                let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
                                 let visible = configStore.configurations.filter { configuration in
                                     guard let subscriptionId = configuration.subscriptionId else { return true }
-                                    return !collapsedSubscriptions.contains(subscriptionId)
+                                    return liveSubscriptionIds.contains(subscriptionId) && !collapsedSubscriptions.contains(subscriptionId)
                                 }
                                 viewModel.testLatencies(for: visible)
                             case .chains:

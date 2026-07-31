@@ -203,9 +203,10 @@ class TVProxyListViewController: UITableViewController {
     }
 
     @objc private func testAllTapped() {
+        let liveSubscriptionIds = Set(SubscriptionStore.shared.subscriptions.map(\.id))
         let visible = ConfigurationStore.shared.configurations.filter { configuration in
             guard let subId = configuration.subscriptionId else { return true }
-            return !collapsedSubscriptions.contains(subId)
+            return liveSubscriptionIds.contains(subId) && !collapsedSubscriptions.contains(subId)
         }
         viewModel.testLatencies(for: visible)
     }

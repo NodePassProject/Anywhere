@@ -68,6 +68,7 @@ class ChainStore {
     // MARK: - Coordination
     
     private func coordinate() {
+        VPNViewModel.shared.pruneChainLatencyState(liveChainIds: Set(chains.map(\.id)))
         guard ConfigurationStore.shared.isLoaded else { return }
         let configurations = ConfigurationStore.shared.configurations
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
