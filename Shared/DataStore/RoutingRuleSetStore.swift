@@ -258,8 +258,7 @@ class RoutingRuleSetStore {
     }
     
     func refreshCustomRuleSet(_ id: UUID) async throws {
-        guard let index = customRuleSets.firstIndex(where: { $0.id == id }),
-              let url = customRuleSets[index].subscriptionURL else {
+        guard let url = customRuleSets.first(where: { $0.id == id })?.subscriptionURL else {
             throw CustomRoutingRuleSetRefreshError.missingSubscriptionURL
         }
 
@@ -275,6 +274,8 @@ class RoutingRuleSetStore {
         guard parsed.rules.count <= CustomRoutingRuleSet.maxRuleCount else {
             throw CustomRoutingRuleSetRefreshError.tooManyRules
         }
+        
+        guard let index = customRuleSets.firstIndex(where: { $0.id == id }) else { return }
         guard customRuleSets[index].rules != parsed.rules else { return }
         customRuleSets[index].rules = parsed.rules
         customRuleSets[index].updatedAt = SyncStamp.after(customRuleSets[index])

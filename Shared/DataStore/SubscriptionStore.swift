@@ -64,14 +64,14 @@ class SubscriptionStore {
         subscriptions.append(stamped)
         save()
     }
-
-    func update(_ subscription: Subscription) {
-        if let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) {
-            var stamped = subscription
-            stamped.updatedAt = SyncStamp.after(subscriptions[index])
-            subscriptions[index] = stamped
-            save()
-        }
+    
+    private func mutate(id: UUID, _ apply: (inout Subscription) -> Void) {
+        guard let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        var record = subscriptions[index]
+        apply(&record)
+        record.updatedAt = SyncStamp.after(subscriptions[index])
+        subscriptions[index] = record
+        save()
     }
     
     func delete(_ subscription: Subscription, configurationStore: ConfigurationStore? = nil) {
@@ -148,16 +148,14 @@ extension SubscriptionStore {
     }
 
     func toggleCollapsed(_ subscription: Subscription) {
-        var updated = subscription
-        updated.collapsed.toggle()
-        update(updated)
+        mutate(id: subscription.id) { $0.collapsed.toggle() }
     }
 
     func rename(_ subscription: Subscription, to newName: String) {
-        var updated = subscription
-        updated.name = newName
-        updated.isNameCustomized = true
-        update(updated)
+        mutate(id: subscription.id) {
+            $0.name = newName
+            $0.isNameCustomized = true
+        }
     }
 
     func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration]) {
@@ -174,9 +172,13 @@ extension SubscriptionStore {
     }
     
     func refresh(_ subscription: Subscription) async throws {
-        let result = try await SubscriptionFetcher.fetch(url: subscription.url)
+        let subscriptionId = subscription.id
+        let url = subscriptions.first { $0.id == subscriptionId }?.url ?? subscription.url
+        let result = try await SubscriptionFetcher.fetch(url: url)
         
-        let oldConfigurations = ConfigurationStore.shared.configurations(for: subscription)
+        guard let current = subscriptions.first(where: { $0.id == subscriptionId }) else { return }
+
+        let oldConfigurations = ConfigurationStore.shared.configurations(for: current)
         var oldByName: [String: [ProxyConfiguration]] = [:]
         for old in oldConfigurations {
             oldByName[old.name, default: []].append(old)
@@ -197,22 +199,22 @@ extension SubscriptionStore {
             newConfigurations.append(ProxyConfiguration(
                 id: id, name: configuration.name,
                 serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscription.id,
+                subscriptionId: subscriptionId,
                 outbound: configuration.outbound
             ))
         }
 
-        ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: newConfigurations)
+        ConfigurationStore.shared.replaceConfigurations(for: subscriptionId, with: newConfigurations)
 
-        var updated = subscription
-        updated.lastUpdate = Date()
-        updated.upload = result.upload ?? subscription.upload
-        updated.download = result.download ?? subscription.download
-        updated.total = result.total ?? subscription.total
-        updated.expire = result.expire ?? subscription.expire
-        if let name = result.name, !updated.isNameCustomized {
-            updated.name = name
+        mutate(id: subscriptionId) { record in
+            record.lastUpdate = Date()
+            record.upload = result.upload ?? record.upload
+            record.download = result.download ?? record.download
+            record.total = result.total ?? record.total
+            record.expire = result.expire ?? record.expire
+            if let name = result.name, !record.isNameCustomized {
+                record.name = name
+            }
         }
-        update(updated)
     }
 }

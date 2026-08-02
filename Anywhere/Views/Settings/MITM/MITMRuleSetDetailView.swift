@@ -19,7 +19,6 @@ struct MITMRuleSetDetailView: View {
 
     let ruleSet: MITMRuleSet?
 
-    @State private var name: String = ""
     @State private var enabled: Bool = true
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
 
@@ -130,21 +129,12 @@ struct MITMRuleSetDetailView: View {
     }
 
     private func save() {
+        guard let id = ruleSet?.id else { return }
         suffixDrafts = suffixDrafts
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let result = MITMRuleSet(
-            id: ruleSet?.id ?? UUID(),
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            enabled: enabled,
-            domainSuffixes: suffixes,
-            rules: rules,
-            parameters: currentRuleSet?.parameters ?? parameters,
-            parameterValues: currentRuleSet?.parameterValues ?? [:],
-            subscriptionURL: currentRuleSet?.subscriptionURL
-        )
-        store.updateRuleSet(result)
+        store.updateRuleSet(id, domainSuffixes: suffixes, rules: rules)
     }
 
     @ViewBuilder
@@ -324,7 +314,6 @@ struct MITMRuleSetDetailView: View {
     }
     
     private func loadState(from ruleSet: MITMRuleSet) {
-        name = ruleSet.name
         enabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules

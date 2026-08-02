@@ -79,11 +79,12 @@ final class MITMRuleSetStore {
         save()
     }
 
-    func updateRuleSet(_ ruleSet: MITMRuleSet) {
-        guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
-        var stamped = ruleSet
-        stamped.updatedAt = SyncStamp.after(ruleSets[index])
-        ruleSets[index] = stamped
+    func updateRuleSet(_ id: UUID, domainSuffixes: [String], rules: [MITMRule]) {
+        guard let index = ruleSets.firstIndex(where: { $0.id == id }) else { return }
+        guard ruleSets[index].domainSuffixes != domainSuffixes || ruleSets[index].rules != rules else { return }
+        ruleSets[index].domainSuffixes = domainSuffixes
+        ruleSets[index].rules = rules
+        ruleSets[index].updatedAt = SyncStamp.after(ruleSets[index])
         save()
     }
 
