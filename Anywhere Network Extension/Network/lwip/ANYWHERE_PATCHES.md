@@ -10,10 +10,11 @@ deployment. Every in-source modification is bracketed with
 /* --- END Anywhere Patch --- */
 ```
 
-so the full set can be located with:
+so the full set can be located with (`-i`: older one-line patches use
+lowercase `/* Anywhere patch: ... */` markers):
 
 ```
-grep -rn "Anywhere Patch" "Anywhere Network Extension/Network/lwip/src"
+grep -rni "Anywhere Patch" "Anywhere Network Extension/Network/lwip/src"
 ```
 
 ## Deployment context
@@ -337,6 +338,70 @@ The pointer storage and `lwip_bridge_set_tcp_stray_filter_fn` live in
 `lwip/lwip_bridge.c` and don't need re-applying. The silent teardown in
 `tcp_accept_cb` (`tcp_abandon` on `silent_drop`) also lives in the
 bridge, outside vendored lwIP.
+
+---
+
+### 6. `src/core/ipv6/ip6.c` — catch-all netif acceptance for IPv6
+
+**What:** At the top of `ip6_input_accept`, accept every packet when the
+netif's first IPv6 address is `::` in VALID state:
+
+```c
+if (netif_is_up(netif) &&
+    ip6_addr_isvalid(netif_ip6_addr_state(netif, 0)) &&
+    ip6_addr_isany(netif_ip6_addr(netif, 0))) {
+  return 1;
+}
+```
+
+**Why:** `lwip_bridge_init` marks the TUN netif as a catch-all by
+assigning `0.0.0.0` (IPv4) and `::` (IPv6 address slot 0, state VALID).
+For IPv4 the catch-all works via two pre-existing one-line patches in
+`src/core/ipv4/ip4.c` (lowercase `Anywhere patch:` markers): accept-all
+in `ip4_input_accept` when the netif address is `0.0.0.0`, and a removed
+`ip4_addr_isany_val` check in `ip4_route` so packets can also be routed
+*out* through that netif. Stock `ip6_input_accept`, however, accepts
+only packets whose destination exactly equals a configured address —
+nothing ever equals `::` — and with `LWIP_SINGLE_NETIF=1` /
+`LWIP_IPV6_FORWARD=0` there is no fallback, so every tunneled IPv6
+packet was freed in `ip6_input`'s "packet not for us" branch without a
+trace (`LWIP_DEBUGF` compiles out).
+
+Net effect before this patch: with **Advertise IPv6 To Apps** enabled
+the provider claimed `::/0`, apps received fake AAAA answers (UDP/DNS
+is handled in Swift and was unaffected) and dialed IPv6 first, and every
+IPv6 TCP connect blackholed — the v6 side of the stack (wildcard
+listener, `output_ip6`, family-agnostic Swift callbacks) was unreachable
+dead code. Confirmed on device 2026-08-03: fake (`2001:db8::…`) and real
+(GUA) SYNs all dropped at this branch.
+
+Unlike IPv4, `ip6_route` needs **no** companion patch: under
+`LWIP_SINGLE_NETIF` it falls through to `netif_default` (up + link-up,
+both set by the bridge) without inspecting addresses, so the reply path
+already worked.
+
+**What is unaffected:**
+
+- Multicast input (MLDv2 reports to `ff02::16`, DAD probes to
+  solicited-node groups — routine OS chatter on the utun): handled by
+  the separate multicast branch in `ip6_input`, which still finds no
+  joined group (`LWIP_IPV6_MLD=0`) and drops silently. Correct for a
+  TUN peer; lwIP should not answer ND/MLD.
+- The "src is `::`" DAD drop, extension-header parsing, ICMPv6 error
+  generation, and the protocol dispatch below the acceptance check.
+- The v6 wildcard port-0 TCP listener (Patch family in `tcp_in.c`):
+  already family-correct via `IP_ADDR_PCB_VERSION_MATCH_EXACT`; it
+  simply never saw a packet before this patch.
+- IPv4 acceptance and routing (`ip4.c` patches, untouched).
+- Side effect matching IPv4 behavior: lwIP now answers ICMPv6 echo for
+  any tunneled destination, same as the v4 catch-all does for ICMP.
+
+**Upgrade notes:** When bumping the vendored lwIP version, re-apply at
+the top of `ip6_input_accept` in `src/core/ipv6/ip6.c` (search for the
+function name), together with the two `ip4.c` one-liners (search
+case-insensitively for `Anywhere patch` in `src/core/ipv4/ip4.c`) — the
+three lines form one catch-all feature and none works fully without the
+others.
 
 ---
 

@@ -468,6 +468,17 @@ ip6_forward(struct pbuf *p, struct ip6_hdr *iphdr, struct netif *inp)
 static int
 ip6_input_accept(struct netif *netif)
 {
+  /* --- BEGIN Anywhere Patch: accept all packets when the netif's first
+   * address is :: (catch-all TUN interface — mirrors the 0.0.0.0 patch in
+   * ip4_input_accept). lwip_bridge_init assigns :: as address 0 precisely to
+   * mark this netif as the catch-all; without this, stock lwIP requires an
+   * exact destination match and silently drops every tunneled IPv6 packet. */
+  if (netif_is_up(netif) &&
+      ip6_addr_isvalid(netif_ip6_addr_state(netif, 0)) &&
+      ip6_addr_isany(netif_ip6_addr(netif, 0))) {
+    return 1;
+  }
+  /* --- END Anywhere Patch --- */
   /* interface is up? */
   if (netif_is_up(netif)) {
     u8_t i;
