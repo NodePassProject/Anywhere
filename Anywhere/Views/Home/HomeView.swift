@@ -26,8 +26,10 @@ struct HomeView: View {
     
     @State private var connectionEffectsEnabled = false
     
+    @State private var showingProxiesSheet = false
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
+    @State private var showingSettingsSheet = false
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -61,6 +63,11 @@ struct HomeView: View {
         } action: { size in
             containerSize = size
         }
+        .sheet(isPresented: $showingProxiesSheet) {
+            NavigationStack {
+                ProxiesPageView()
+            }
+        }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                 AddProxyView(showingManualAddSheet: $showingManualAddSheet)
@@ -69,6 +76,11 @@ struct HomeView: View {
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
                 configStore.add(configuration); viewModel.selectIfNone(configuration)
+            }
+        }
+        .sheet(isPresented: $showingSettingsSheet) {
+            NavigationStack {
+                SettingsView()
             }
         }
         .alert("VPN Error", isPresented: Binding(
@@ -145,8 +157,13 @@ struct HomeView: View {
                 statusLabel
                     .matchedGeometryEffect(id: "statusLabel", in: namespace)
             }
-            configurationCard
-                .matchedGeometryEffect(id: "configurationCard", in: namespace)
+            HStack {
+                configurationCard
+                    .matchedGeometryEffect(id: "configurationCard", in: namespace)
+                settingsButton
+                    .matchedGeometryEffect(id: "settingsButton", in: namespace)
+            }
+            .frame(maxWidth: Self.maxControlPaneWidth)
         }
     }
 
@@ -172,14 +189,29 @@ struct HomeView: View {
     }
 
     private var configurationCard: some View {
-        ConfigurationCapsule(isConnected: isConnected, showingAddSheet: $showingAddSheet)
-            .frame(maxWidth: Self.maxControlPaneWidth)
+        ConfigurationCapsule(
+            isConnected: isConnected,
+            showingProxiesSheet: $showingProxiesSheet,
+            showingAddSheet: $showingAddSheet
+        )
     }
     
     private var statusLabel: some View {
         Text(viewModel.statusText)
             .font(.headline)
             .foregroundStyle(.secondary)
+    }
+    
+    private var settingsButton: some View {
+        Button {
+            showingSettingsSheet = true
+        } label: {
+            ProminentCircle {
+                Image(systemName: "gearshape.fill")
+                    .accessibilityLabel("Settings")
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -271,10 +303,9 @@ private struct PowerButton: View {
 private struct ConfigurationCapsule: View {
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
-    @Environment(ChainStore.self) private var chainStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
 
     let isConnected: Bool
+    @Binding var showingProxiesSheet: Bool
     @Binding var showingAddSheet: Bool
 
     var body: some View {
@@ -287,43 +318,9 @@ private struct ConfigurationCapsule: View {
         }
     }
 
-    private func select(id: UUID) {
-        if let chain = chainStore.chains.first(where: { $0.id == id }) {
-            viewModel.selectChain(chain, configurations: configStore.configurations)
-        } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
-            viewModel.selectedConfiguration = configuration
-        }
-    }
-
-    @ViewBuilder
     private func selectedCapsule(_ configuration: ProxyConfiguration) -> some View {
-        Menu {
-            ForEach(configStore.standalonePickerItems) { item in
-                Button(item.name) { select(id: item.id) }
-            }
-            if !chainStore.pickerItems.isEmpty {
-                Section {
-                    ForEach(chainStore.pickerItems) { item in
-                        Button(item.name) { select(id: item.id) }
-                    }
-                } header: {
-                    Text("Chains")
-                }
-            }
-            ForEach(subscriptionStore.pickerSections) { section in
-                Section {
-                    ForEach(section.items) { item in
-                        Button(item.name) { select(id: item.id) }
-                    }
-                } header: {
-                    Text(section.header ?? "")
-                }
-            }
-            Button {
-                showingAddSheet = true
-            } label: {
-                Label("Add", systemImage: "plus")
-            }
+        Button {
+            showingProxiesSheet = true
         } label: {
             ProminentCapsule {
                 HStack {
@@ -401,6 +398,36 @@ private struct ProminentCapsule<Content: View>: View {
                 .contentShape(Capsule())
                 .background(
                     Capsule()
+                        .fill(.white.opacity(0.2))
+                )
+        }
+    }
+}
+
+private struct ProminentCircle<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        if #available(iOS 27.0, *) {
+            content
+                .padding(16)
+                .contentShape(Circle())
+                .glassEffect(.regular.interactive(), in: .capsule)
+        } else if #available(iOS 26.0, *) {
+            content
+                .padding(16)
+                .contentShape(Circle())
+                .glassEffect(.clear.interactive(), in: .capsule)
+        } else {
+            content
+                .padding(16)
+                .contentShape(Circle())
+                .background(
+                    Circle()
                         .fill(.white.opacity(0.2))
                 )
         }

@@ -61,6 +61,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
 
                 if revealsDetail {
                     detail
+                        .frame(maxWidth: .infinity, minHeight: viewport.height)
                         .transition(.blurReplace)
                         .id(DetailRevealPage.detail)
                 }
@@ -244,8 +245,7 @@ private struct PullUpIndicator: View {
             .phaseAnimator([0.0, -6.0]) { view, offset in
                 view.offset(y: offset)
             } animation: { _ in
-                .easeInOut(duration: 1.1)
+                .easeInOut(duration: 1)
             }
-            .padding(.bottom, 8)
     }
 }

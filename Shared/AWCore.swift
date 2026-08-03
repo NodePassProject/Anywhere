@@ -80,6 +80,7 @@ nonisolated final class AWCore {
         static let mitmEnabled = "mitmEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let preventDNSLeak = "preventDNSLeak"
+        static let proxiesPageProxyType = "proxiesPageProxyType"
         static let proxyDNSDoHURL = "proxyDNSDoHURL"
         static let proxyDNSMode = "proxyDNSMode"
         static let proxyDNSPlainServer = "proxyDNSPlainServer"
@@ -130,6 +131,14 @@ nonisolated final class AWCore {
 
     static func setOnboardingCompleted(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.onboardingCompleted)
+    }
+
+    static func getProxiesPageProxyType() -> String? {
+        userDefaults.string(forKey: UserDefaultsKey.proxiesPageProxyType)
+    }
+
+    static func setProxiesPageProxyType(_ rawValue: String) {
+        userDefaults.set(rawValue, forKey: UserDefaultsKey.proxiesPageProxyType)
     }
     
     static func getICloudSyncEnabled() -> Bool {

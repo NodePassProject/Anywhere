@@ -8,7 +8,7 @@
 import SwiftUI
 import NetworkExtension
 
-private enum ProxyType {
+private enum ProxyType: String {
     case servers, chains
 }
 
@@ -20,7 +20,7 @@ struct ProxiesPageView: View {
     private let coordinator = ProxyRowCoordinator.shared
     private let chainCoordinator = ChainRowCoordinator.shared
 
-    @State private var proxyType: ProxyType = .servers
+    @State private var proxyType: ProxyType = AWCore.getProxiesPageProxyType().flatMap(ProxyType.init(rawValue:)) ?? .servers
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var showingChainAddSheet = false
@@ -184,6 +184,9 @@ struct ProxiesPageView: View {
                 }
             }
             Button("Cancel", role: .cancel) { }
+        }
+        .onChange(of: proxyType) { _, newValue in
+            AWCore.setProxiesPageProxyType(newValue.rawValue)
         }
         .onAppear {
             collapsedSubscriptions = Set(subscriptionStore.subscriptions.filter(\.collapsed).map(\.id))
