@@ -220,7 +220,12 @@ class TVAddProxyViewController: UITableViewController {
     }
 
     private func importFromString(_ string: String) {
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // The Link field may carry anywhere:// deep link; unwrap to the embedded link.
+        if let embedded = DeepLinkManager.extractAddProxyLink(from: trimmed) {
+            trimmed = embedded
+        }
 
         // Only schemes the parser knows take the proxy-link path;
         // everything else is treated as a subscription URL.

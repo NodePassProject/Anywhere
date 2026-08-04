@@ -444,6 +444,7 @@
 		CB8632442FB83C1600059EFE /* Exceptions for "Anywhere" folder in "Anywhere TV" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				DeepLinkManager.swift,
 				Views/Settings/MITM/MITMRuleSetParser.swift,
 				Views/Settings/RuleSets/RoutingRuleParser.swift,
 			);

@@ -234,7 +234,6 @@ struct AddProxyView: View {
 
     private func checkClipboard() {
         guard let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        // http/https accepted as subscription URLs since those schemes are never a single proxy.
         if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
             linkURL = clip
         }
@@ -255,7 +254,12 @@ struct AddProxyView: View {
     }
 
     private func importFromString(_ string: String) {
-        let trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // QR codes may carry anywhere:// deep link; unwrap to the embedded link.
+        if let embedded = DeepLinkManager.extractAddProxyLink(from: trimmedURL) {
+            trimmedURL = embedded
+        }
 
         // Only schemes the parser knows take the proxy-link path; everything else is a subscription URL.
         if ProxyConfiguration.canParseURL(trimmedURL) {

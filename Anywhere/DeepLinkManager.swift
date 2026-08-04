@@ -37,13 +37,16 @@ final class DeepLinkManager {
     }
 
     private func handleAddProxy(_ url: URL) {
-        // Take everything after "?link=" verbatim so the inner proxy/subscription
-        // URL — which may itself carry "?", "&", "=" — survives unescaped.
-        let string = url.absoluteString
-        guard let range = string.range(of: "?link=") else { return }
+        guard let link = Self.extractAddProxyLink(from: url.absoluteString) else { return }
+        self.url = link
+    }
+    
+    nonisolated static func extractAddProxyLink(from string: String) -> String? {
+        guard string.lowercased().hasPrefix("anywhere://add-proxy") else { return nil }
+        guard let range = string.range(of: "?link=") else { return nil }
         let rawLink = String(string[range.upperBound...])
-        guard !rawLink.isEmpty else { return }
-        self.url = rawLink.removingPercentEncoding ?? rawLink
+        guard !rawLink.isEmpty else { return nil }
+        return rawLink.removingPercentEncoding ?? rawLink
     }
     
     private func handleAddRuleSet(_ url: URL) {
