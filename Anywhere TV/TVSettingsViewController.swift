@@ -9,7 +9,18 @@ import UIKit
 
 class TVSettingsViewController: UIViewController {
 
-    private let viewModel = VPNViewModel.shared
+    private let container: AppContainer
+    private var tunnel: TunnelController { container.tunnel }
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     private let iconView = UIImageView()
     private let descriptionLabel = UILabel()
@@ -30,7 +41,7 @@ class TVSettingsViewController: UIViewController {
         get { AWCore.getAlwaysOnEnabled() }
         set {
             AWCore.setAlwaysOnEnabled(newValue)
-            viewModel.reconnectVPN()
+            tunnel.reconnect()
             updateAppearance()
         }
     }

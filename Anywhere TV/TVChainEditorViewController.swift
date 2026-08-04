@@ -9,7 +9,7 @@ import UIKit
 
 class TVChainEditorViewController: UITableViewController {
 
-    private let viewModel = VPNViewModel.shared
+    private let container: AppContainer
     private let existingChain: ProxyChain?
     private let onSave: (ProxyChain) -> Void
 
@@ -18,7 +18,7 @@ class TVChainEditorViewController: UITableViewController {
 
     private var selectedProxies: [ProxyConfiguration] {
         selectedProxyIds.compactMap { id in
-            ConfigurationStore.shared.configurations.first(where: { $0.id == id })
+            container.configurationStore.configurations.first(where: { $0.id == id })
         }
     }
 
@@ -28,7 +28,8 @@ class TVChainEditorViewController: UITableViewController {
 
     // MARK: - Init
 
-    init(chain: ProxyChain? = nil, onSave: @escaping (ProxyChain) -> Void) {
+    init(container: AppContainer, chain: ProxyChain? = nil, onSave: @escaping (ProxyChain) -> Void) {
+        self.container = container
         self.existingChain = chain
         self.onSave = onSave
         super.init(style: .grouped)
@@ -277,7 +278,7 @@ class TVChainEditorViewController: UITableViewController {
 
     private func presentProxyPicker() {
         let picker = TVProxyPickerViewController(
-            configurations: ConfigurationStore.shared.configurations,
+            configurations: container.configurationStore.configurations,
             excludedIds: Set(selectedProxyIds)
         ) { [weak self] selected in
             self?.selectedProxyIds.append(selected.id)

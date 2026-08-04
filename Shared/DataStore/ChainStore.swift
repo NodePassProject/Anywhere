@@ -14,21 +14,26 @@ nonisolated private let logger = AnywhereLogger(category: "ChainStore")
 @MainActor
 @Observable
 class ChainStore {
-    static let shared = ChainStore()
-
     private(set) var chains: [ProxyChain] = []
     private var tombstones: [ProxyChain] = []
-    
+
+    @ObservationIgnored private let blobStore: JSONBlobStore
+    @ObservationIgnored private let configurationStore: ConfigurationStore
     @ObservationIgnored private var loadedBlob: Data?
     @ObservationIgnored private var mutationEpoch = 0
 
-    private init() {
-        let data = JSONBlobStore.shared.load(.chains)
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
+    
+    @ObservationIgnored var onDidMutate: (() -> Void)?
+
+    init(blobStore: JSONBlobStore, configurationStore: ConfigurationStore) {
+        self.blobStore = blobStore
+        self.configurationStore = configurationStore
+        let data = blobStore.load(.chains)
         loadedBlob = data
         let split = Self.decodeSplit(from: data)
         chains = split.live
         tombstones = split.tombstones
-        Task { @MainActor in self.coordinate() }
     }
 
     // MARK: - CRUD
@@ -40,7 +45,7 @@ class ChainStore {
         stamped.updatedAt = SyncStamp.after(tombstone)
         chains.append(stamped)
         save()
-        coordinate()
+        onDidMutate?()
     }
 
     func update(_ chain: ProxyChain) {
@@ -49,7 +54,7 @@ class ChainStore {
             stamped.updatedAt = SyncStamp.after(chains[index])
             chains[index] = stamped
             save()
-            coordinate()
+            onDidMutate?()
         }
     }
 
@@ -57,7 +62,7 @@ class ChainStore {
         chains.removeAll { $0.id == chain.id }
         recordTombstone(chain)
         save()
-        coordinate()
+        onDidMutate?()
     }
 
     func move(fromOffsets source: IndexSet, toOffset destination: Int) {
@@ -65,24 +70,15 @@ class ChainStore {
         save()
     }
 
-    // MARK: - Coordination
-    
-    private func coordinate() {
-        VPNViewModel.shared.pruneChainLatencyState(liveChainIds: Set(chains.map(\.id)))
-        guard ConfigurationStore.shared.isLoaded else { return }
-        let configurations = ConfigurationStore.shared.configurations
-        VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
-        RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
-        RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
-    }
-    
     func reload() async {
         while true {
             let previous = loadedBlob
             let epoch = mutationEpoch
+            await saveTask?.value
+            guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
-                let data = JSONBlobStore.shared.load(.chains)
+                [blobStore] () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
+                let data = blobStore.load(.chains)
                 guard data != previous else { return nil }
                 let split = Self.decodeSplit(from: data)
                 return (data, split.live, split.tombstones)
@@ -92,13 +88,13 @@ class ChainStore {
             loadedBlob = outcome.data
             chains = outcome.live
             tombstones = outcome.tombstones
-            coordinate()
+            onDidMutate?()
             return
         }
     }
 
     // MARK: - Persistence
-    
+
     nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
         guard let data else { return ([], []) }
         guard let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) else {
@@ -107,7 +103,7 @@ class ChainStore {
         }
         return Tombstone.split(all)
     }
-    
+
     private func recordTombstone(_ chain: ProxyChain) {
         var tomb = chain
         tomb.deletedAt = .now
@@ -118,20 +114,25 @@ class ChainStore {
 
     private func save() {
         mutationEpoch += 1
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(chains + tombstones)
-            JSONBlobStore.shared.save(.chains, data: data)
-        } catch {
-            logger.report(AnywhereError.store(.saveFailed(.chains, underlying: error)))
+        let snapshot = chains + tombstones
+        let previous = saveTask
+        saveTask = Task.detached { [blobStore] in
+            await previous?.value
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let data = try encoder.encode(snapshot)
+                blobStore.save(.chains, data: data)
+            } catch {
+                logger.report(AnywhereError.store(.saveFailed(.chains, underlying: error)))
+            }
         }
     }
 }
 
 extension ChainStore {
     var pickerItems: [PickerItem] {
-        let configurations = ConfigurationStore.shared.configurations
+        let configurations = configurationStore.configurations
         return chains.compactMap { chain in
             let proxies = chain.resolveProxies(from: configurations)
             guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { return nil }

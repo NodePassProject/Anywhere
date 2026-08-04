@@ -12,8 +12,6 @@ import Observation
 @MainActor
 @Observable
 class LogsModel {
-    static let shared = LogsModel()
-
     enum LogLevel: String {
         case info
         case warning

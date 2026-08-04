@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct VoyagerNotice: View {
-    @Environment(VoyagerStore.self) private var voyagerStore
+    @Environment(AppState.self) private var appState
 
     let description: LocalizedStringKey
 
@@ -29,7 +29,7 @@ struct VoyagerNotice: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 JoinVoyagerButton {
-                    voyagerStore.isPresentingVoyagerView = true
+                    appState.isPresentingVoyagerView = true
                 }
             }
             .padding(.vertical, 4)

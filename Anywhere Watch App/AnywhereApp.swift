@@ -9,14 +9,18 @@ import SwiftUI
 
 @main
 struct AnywhereApp: App {
+    @State private var session: PhoneSession
+
     init() {
-        PhoneSession.shared.start()
+        let session = PhoneSession()
+        session.start()
+        _session = State(initialValue: session)
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(PhoneSession.shared)
+                .environment(session)
         }
     }
 }

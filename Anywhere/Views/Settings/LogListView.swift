@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct LogListView: View {
-    @Environment(LogsModel.self) private var logsModel
+    @State private var logsModel = LogsModel()
     @State private var selection = Set<UUID>()
     @State private var editMode: EditMode = .inactive
     

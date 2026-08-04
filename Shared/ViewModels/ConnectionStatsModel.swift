@@ -12,8 +12,6 @@ import Observation
 @MainActor
 @Observable
 class ConnectionStatsModel {
-    static let shared = ConnectionStatsModel()
-    
     private(set) var bytesIn: Int64 = 0
     private(set) var bytesOut: Int64 = 0
     
@@ -37,11 +35,11 @@ class ConnectionStatsModel {
     private(set) var downloadBytesPerSecond: Int64?
 
     @ObservationIgnored private var statsTask: Task<Void, Never>?
-    @ObservationIgnored private weak var session: NETunnelProviderSession?
+    @ObservationIgnored private var send: (@Sendable (Data) async -> Data?)?
     @ObservationIgnored private var lastRateSample: (bytesIn: Int64, bytesOut: Int64, at: ContinuousClock.Instant)?
-
-    func startPolling(session: NETunnelProviderSession) {
-        self.session = session
+    
+    func startPolling(send: @escaping @Sendable (Data) async -> Data?) {
+        self.send = send
         guard statsTask == nil else { return }
         statsTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -55,7 +53,7 @@ class ConnectionStatsModel {
     func stopPolling() {
         statsTask?.cancel()
         statsTask = nil
-        session = nil
+        send = nil
         lastRateSample = nil
     }
 
@@ -78,10 +76,10 @@ class ConnectionStatsModel {
     }
 
     private func pollStats() async {
-        guard let session else { return }
+        guard let send else { return }
         guard let data = try? JSONEncoder().encode(TunnelMessage.fetchStats) else { return }
 
-        let response = await ProviderMessageConcurrencyBridge.send(data, over: session)
+        let response = await send(data)
 
         guard !Task.isCancelled else { return }
 

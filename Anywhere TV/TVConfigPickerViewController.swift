@@ -9,13 +9,24 @@ import UIKit
 
 class TVConfigPickerViewController: UITableViewController {
 
-    private let viewModel = VPNViewModel.shared
+    private let container: AppContainer
+    private var selection: ProxySelection { container.selection }
     private var sections: [(header: String?, items: [PickerItem])] = []
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = String(localized: "Select Proxy")
-        sections = Self.buildSections(viewModel: viewModel)
+        sections = buildSections()
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
@@ -29,17 +40,17 @@ class TVConfigPickerViewController: UITableViewController {
         dismiss(animated: true)
     }
 
-    private static func buildSections(viewModel: VPNViewModel) -> [(header: String?, items: [PickerItem])] {
+    private func buildSections() -> [(header: String?, items: [PickerItem])] {
         var sections: [(header: String?, items: [PickerItem])] = []
-        let standalone = ConfigurationStore.shared.standalonePickerItems
+        let standalone = container.configurationStore.standalonePickerItems
         if !standalone.isEmpty {
             sections.append((nil, standalone))
         }
-        let chains = ChainStore.shared.pickerItems
+        let chains = container.chainStore.pickerItems
         if !chains.isEmpty {
             sections.append((String(localized: "Chains"), chains))
         }
-        for sub in SubscriptionStore.shared.pickerSections {
+        for sub in container.subscriptionStore.pickerSections {
             sections.append((sub.header, sub.items))
         }
         return sections
@@ -69,10 +80,10 @@ class TVConfigPickerViewController: UITableViewController {
         cell.contentConfiguration = content
 
         let isSelected: Bool
-        if let chainId = viewModel.selectedChainId {
+        if let chainId = selection.selectedChainId {
             isSelected = item.id == chainId
         } else {
-            isSelected = item.id == viewModel.selectedConfiguration?.id
+            isSelected = item.id == selection.selectedConfiguration?.id
         }
         cell.accessoryType = isSelected ? .checkmark : .none
 
@@ -97,10 +108,10 @@ class TVConfigPickerViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let item = sections[indexPath.section].items[indexPath.row]
-        if let configuration = ConfigurationStore.shared.configurations.first(where: { $0.id == item.id }) {
-            viewModel.selectedConfiguration = configuration
-        } else if let chain = ChainStore.shared.chains.first(where: { $0.id == item.id }) {
-            viewModel.selectChain(chain, configurations: ConfigurationStore.shared.configurations)
+        if let configuration = container.configurationStore.configurations.first(where: { $0.id == item.id }) {
+            selection.selectedConfiguration = configuration
+        } else if let chain = container.chainStore.chains.first(where: { $0.id == item.id }) {
+            selection.selectChain(chain, configurations: container.configurationStore.configurations)
         }
         dismiss(animated: true)
     }

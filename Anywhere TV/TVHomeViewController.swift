@@ -12,8 +12,20 @@ class TVHomeViewController: UIViewController {
 
     // MARK: - Properties
 
-    private let viewModel = VPNViewModel.shared
+    private let container: AppContainer
+    private var tunnel: TunnelController { container.tunnel }
+    private var selection: ProxySelection { container.selection }
     private var lastRenderedConnectedState: Bool?
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     private let gradientLayer = CAGradientLayer()
 
@@ -38,8 +50,8 @@ class TVHomeViewController: UIViewController {
 
     private let emptyButton = UIButton(type: .custom)
 
-    private var isConnected: Bool { viewModel.vpnStatus == .connected }
-    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
+    private var isConnected: Bool { tunnel.rawStatus == .connected }
+    private var isTransitioning: Bool { tunnel.rawStatus.isTransitioning }
 
     // MARK: - Lifecycle
 
@@ -340,8 +352,8 @@ class TVHomeViewController: UIViewController {
             updateGradientColors(animated: true)
         }
         
-        if let startError = viewModel.startError {
-            viewModel.startError = nil
+        if let startError = tunnel.startError {
+            tunnel.startError = nil
             presentStartError(startError)
         }
     }
@@ -363,7 +375,7 @@ class TVHomeViewController: UIViewController {
     }
 
     private func updatePowerButton() {
-        let disabled = ConfigurationStore.shared.hasConfigurations && (!viewModel.isManagerReady || viewModel.vpnStatus.isTransitioning)
+        let disabled = container.configurationStore.hasConfigurations && (!tunnel.isManagerReady || tunnel.rawStatus.isTransitioning)
         powerButton.isEnabled = !disabled
         powerButton.alpha = disabled ? 0.5 : 1.0
 
@@ -381,7 +393,7 @@ class TVHomeViewController: UIViewController {
     }
 
     private func updateStatusLabel() {
-        statusLabel.text = viewModel.statusText
+        statusLabel.text = tunnel.status.localizedText
         UIView.animate(withDuration: 0.3) {
             self.statusLabel.textColor = self.isConnected ? .white : .secondaryLabel
         }
@@ -395,16 +407,16 @@ class TVHomeViewController: UIViewController {
                 self.statsButton.alpha = shouldShow ? 1 : 0
             }
         }
-        uploadLabel.text = Self.formatBytes(ConnectionStatsModel.shared.bytesOut)
-        downloadLabel.text = Self.formatBytes(ConnectionStatsModel.shared.bytesIn)
+        uploadLabel.text = Self.formatBytes(container.stats.bytesOut)
+        downloadLabel.text = Self.formatBytes(container.stats.bytesIn)
     }
 
     private func updateConfigCard() {
-        let hasConfig = viewModel.selectedConfiguration != nil
+        let hasConfig = selection.selectedConfiguration != nil
         configButton.isHidden = !hasConfig
         emptyButton.isHidden = hasConfig
 
-        if let configuration = viewModel.selectedConfiguration {
+        if let configuration = selection.selectedConfiguration {
             configNameLabel.text = configuration.name
             UIView.animate(withDuration: 0.3) {
                 self.configIcon.tintColor = self.isConnected ? UIColor.white.withAlphaComponent(0.7) : .secondaryLabel
@@ -416,22 +428,22 @@ class TVHomeViewController: UIViewController {
     // MARK: - Actions
 
     @objc private func powerButtonTapped() {
-        guard ConfigurationStore.shared.hasConfigurations else {
+        guard container.configurationStore.hasConfigurations else {
             addConfigTapped()
             return
         }
-        viewModel.toggleVPN()
+        tunnel.toggle()
     }
 
     @objc private func configCardTapped() {
-        let picker = TVConfigPickerViewController()
+        let picker = TVConfigPickerViewController(container: container)
         let nav = UINavigationController(rootViewController: picker)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
     }
 
     @objc private func addConfigTapped() {
-        let addVC = TVAddProxyViewController()
+        let addVC = TVAddProxyViewController(container: container)
         let nav = UINavigationController(rootViewController: addVC)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)

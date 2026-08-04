@@ -15,7 +15,8 @@ private struct TrustedSSIDDraft: Identifiable, Equatable {
 
 struct TrustedNetworkSettingsView: View {
     @Environment(\.editMode) private var editMode
-    
+    @Environment(AppSettings.self) private var settings
+
     @State private var ssidDrafts: [TrustedSSIDDraft] = []
     @State private var currentSSID: String?
     
@@ -28,7 +29,7 @@ struct TrustedNetworkSettingsView: View {
     }
     
     var body: some View {
-        @Bindable var settings = AppSettings.shared
+        @Bindable var settings = settings
         Form {
             Section {
                 Toggle("Always Trust Cellular", isOn: $settings.alwaysTrustCellular)
@@ -107,7 +108,7 @@ struct TrustedNetworkSettingsView: View {
     }
 
     private func loadInitial() {
-        ssidDrafts = AppSettings.shared.trustedSSIDs.map { TrustedSSIDDraft(value: $0) }
+        ssidDrafts = settings.trustedSSIDs.map { TrustedSSIDDraft(value: $0) }
     }
 
     // While editing, keep a blank row at the end so a new entry can always be typed.
@@ -129,7 +130,7 @@ struct TrustedNetworkSettingsView: View {
             return normalized
         }
         ssidDrafts = reconciled
-        AppSettings.shared.trustedSSIDs = reconciled.map(\.value)
+        settings.trustedSSIDs = reconciled.map(\.value)
     }
     
     private func refreshCurrentSSID() {

@@ -10,13 +10,21 @@ import WidgetKit
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(TunnelController.self) private var tunnel
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
 
-    @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
-    
     @State private var showICloudRestartAlert = false
     @State private var showInsecureAlert = false
+
+    private var adBlockEnabled: Binding<Bool> {
+        Binding(
+            get: { ruleSetStore.adBlockRuleSet?.assignedConfigurationId == "REJECT" },
+            set: { enabled in
+                guard let adBlockRuleSet = ruleSetStore.adBlockRuleSet else { return }
+                ruleSetStore.updateAssignment(adBlockRuleSet, configurationId: enabled ? "REJECT" : nil)
+            }
+        )
+    }
 
     var body: some View {
         Form {
@@ -36,16 +44,8 @@ struct SettingsView: View {
             aboutSection
         }
         .navigationTitle("Settings")
-        .onChange(of: adBlockEnabled) { _, newValue in
-            if let adBlockRuleSet = RoutingRuleSetStore.shared.adBlockRuleSet {
-                RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
-            }
-        }
         .onChange(of: settings.iCloudSyncEnabled) { _, newValue in
             showICloudRestartAlert = newValue != JSONBlobStore.shared.usesCloudKit
-        }
-        .onAppear {
-            adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
         .alert("Restart Required", isPresented: $showICloudRestartAlert) {
             Button("OK", role: .cancel) {}
@@ -84,7 +84,7 @@ struct SettingsView: View {
             Toggle(isOn: $settings.alwaysOnEnabled) {
                 SettingsItem.alwaysOn.label
             }
-            .disabled(viewModel.pendingReconnect)
+            .disabled(tunnel.pendingReconnect)
             NavigationLink {
                 TunnelScopeSettingsView()
             } label: {
@@ -104,12 +104,12 @@ struct SettingsView: View {
                 ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
             }
             if !settings.isGlobalMode {
-                Toggle(isOn: $adBlockEnabled) {
+                Toggle(isOn: adBlockEnabled) {
                     SettingsItem.adBlocking.label
                 }
                 countryBypassPicker
                 NavigationLink {
-                    RuleSetListView()
+                    RuleSetListView(ruleSetStore: ruleSetStore)
                 } label: {
                     SettingsItem.routingRules.label
                 }

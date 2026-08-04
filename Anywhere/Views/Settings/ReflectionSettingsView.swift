@@ -14,6 +14,7 @@ private struct ReflectionAddressDraft: Identifiable, Equatable {
 
 struct ReflectionSettingsView: View {
     @Environment(\.editMode) private var editMode
+    @Environment(AppSettings.self) private var settings
 
     @State private var addressDrafts: [ReflectionAddressDraft] = []
 
@@ -22,7 +23,7 @@ struct ReflectionSettingsView: View {
     }
 
     var body: some View {
-        @Bindable var settings = AppSettings.shared
+        @Bindable var settings = settings
         Form {
             Section {
                 Toggle("Reflection", isOn: $settings.reflectionEnabled)
@@ -88,7 +89,7 @@ struct ReflectionSettingsView: View {
     }
 
     private func loadInitial() {
-        addressDrafts = AppSettings.shared.reflectionAddresses.map { ReflectionAddressDraft(value: $0) }
+        addressDrafts = settings.reflectionAddresses.map { ReflectionAddressDraft(value: $0) }
     }
     
     private func ensureTrailingBlankDraft() {
@@ -100,7 +101,7 @@ struct ReflectionSettingsView: View {
     private func save() {
         addressDrafts = addressDrafts
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        AppSettings.shared.reflectionAddresses = addressDrafts
+        settings.reflectionAddresses = addressDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

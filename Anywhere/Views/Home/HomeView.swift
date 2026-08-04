@@ -10,7 +10,8 @@ import NetworkExtension
 
 struct HomeView: View {
     @Environment(AppSettings.self) private var settings
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(TunnelController.self) private var tunnel
+    @Environment(ProxySelection.self) private var selection
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
@@ -34,10 +35,10 @@ struct HomeView: View {
     private var isLoading: Bool { !configStore.isLoaded }
 
     private var isConnected: Bool {
-        viewModel.vpnStatus == .connected
+        tunnel.rawStatus == .connected
     }
 
-    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
+    private var isTransitioning: Bool { tunnel.rawStatus.isTransitioning }
 
     var body: some View {
         ZStack {
@@ -75,7 +76,7 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
-                configStore.add(configuration); viewModel.selectIfNone(configuration)
+                configStore.add(configuration); selection.selectIfNone(configuration)
             }
         }
         .sheet(isPresented: $showingSettingsSheet) {
@@ -84,14 +85,14 @@ struct HomeView: View {
             }
         }
         .alert("VPN Error", isPresented: Binding(
-            get: { viewModel.startError != nil },
-            set: { if !$0 { viewModel.startError = nil } }
+            get: { tunnel.startError != nil },
+            set: { if !$0 { tunnel.startError = nil } }
         )) {
-            Button("OK") { viewModel.startError = nil }
+            Button("OK") { tunnel.startError = nil }
         } message: {
-            Text(viewModel.startError ?? "")
+            Text(tunnel.startError ?? "")
         }
-        .onChange(of: viewModel.isManagerReady, initial: true) { _, ready in
+        .onChange(of: tunnel.isManagerReady, initial: true) { _, ready in
             guard ready, !connectionEffectsEnabled else { return }
             Task { @MainActor in connectionEffectsEnabled = true }
         }
@@ -173,14 +174,14 @@ struct HomeView: View {
             isTransitioning: isTransitioning,
             isLoading: isLoading,
             isDisabled: isLoading
-                || (viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations)
+                || ((!tunnel.isManagerReady || isTransitioning)
                     && configStore.hasConfigurations),
             animatesChanges: connectionEffectsEnabled
         ) {
             guard !isLoading else { return }
             if configStore.hasConfigurations {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    viewModel.toggleVPN()
+                    tunnel.toggle()
                 }
             } else {
                 showingAddSheet = true
@@ -197,7 +198,7 @@ struct HomeView: View {
     }
     
     private var statusLabel: some View {
-        Text(viewModel.statusText)
+        Text(tunnel.status.localizedText)
             .font(.headline)
             .foregroundStyle(.secondary)
     }
@@ -301,7 +302,7 @@ private struct PowerButton: View {
 // MARK: - Configuration Capsule
 
 private struct ConfigurationCapsule: View {
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ProxySelection.self) private var selection
     @Environment(ConfigurationStore.self) private var configStore
 
     let isConnected: Bool
@@ -309,7 +310,7 @@ private struct ConfigurationCapsule: View {
     @Binding var showingAddSheet: Bool
 
     var body: some View {
-        if let configuration = viewModel.selectedConfiguration {
+        if let configuration = selection.selectedConfiguration {
             selectedCapsule(configuration)
         } else if configStore.isLoaded {
             emptyCapsule
@@ -438,23 +439,23 @@ private struct ProminentCircle<Content: View>: View {
 
 #if DEBUG
 #Preview("Connected") {
-    let settings = AppSettings.shared
-    
-    let viewModel = VPNViewModel()
-    viewModel.selectedConfiguration = ProxyConfiguration(
+    let container = AppContainer.preview()
+    container.selection.selectedConfiguration = ProxyConfiguration(
         name: "🇺🇸 Los Angeles",
         serverAddress: "203.0.113.10",
         serverPort: 443,
         outbound: .socks5(username: nil, password: nil)
     )
-    viewModel.vpnStatus = .connected
+    container.tunnel.setStatusForPreview(.connected)
 
     return HomeView()
-        .environment(settings)
-        .environment(viewModel)
-        .environment(ConfigurationStore.shared)
-        .environment(ChainStore.shared)
-        .environment(SubscriptionStore.shared)
+        .environment(AppSettings())
+        .environment(container.tunnel)
+        .environment(container.selection)
+        .environment(container.latency)
+        .environment(container.configurationStore)
+        .environment(container.chainStore)
+        .environment(container.subscriptionStore)
         .environment(ConnectionStatsModel.previewSeeded())
         .colorScheme(.dark)
 }

@@ -9,9 +9,21 @@ import UIKit
 
 class TVChainListViewController: UITableViewController {
 
-    private let viewModel = VPNViewModel.shared
-    private let coordinator = ChainRowCoordinator.shared
+    private let container: AppContainer
+    private var selection: ProxySelection { container.selection }
+    private var latency: LatencyCenter { container.latency }
+    private var coordinator: ChainRowCoordinator { container.chainRows }
     private var dataSource: UITableViewDiffableDataSource<Int, UUID>!
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     // MARK: - Lifecycle
 
@@ -40,9 +52,9 @@ class TVChainListViewController: UITableViewController {
     }
 
     private func configureDataSource() {
-        dataSource = UITableViewDiffableDataSource<Int, UUID>(tableView: tableView) { tableView, indexPath, id in
+        dataSource = UITableViewDiffableDataSource<Int, UUID>(tableView: tableView) { [container] tableView, indexPath, id in
             let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
-            guard let model = ChainRowCoordinator.shared.model(for: id) else { return cell }
+            guard let model = container.chainRows.model(for: id) else { return cell }
             cell.configurationUpdateHandler = { cell, _ in
                 (cell as? TVChainCell)?.configure(model)
             }
@@ -79,10 +91,10 @@ class TVChainListViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         defer { tableView.deselectRow(at: indexPath, animated: true) }
         guard let id = dataSource.itemIdentifier(for: indexPath), let chain = chain(id) else { return }
-        let configurations = ConfigurationStore.shared.configurations
+        let configurations = container.configurationStore.configurations
         let proxies = chain.resolveProxies(from: configurations)
         if proxies.count == chain.proxyIds.count && proxies.count >= 2 {
-            viewModel.selectChain(chain, configurations: configurations)
+            selection.selectChain(chain, configurations: configurations)
         }
     }
 
@@ -90,7 +102,7 @@ class TVChainListViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath), let chain = chain(id) else { return nil }
-        let configurations = ConfigurationStore.shared.configurations
+        let configurations = container.configurationStore.configurations
         let proxies = chain.resolveProxies(from: configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
 
@@ -100,7 +112,7 @@ class TVChainListViewController: UITableViewController {
 
             if isValid {
                 actions.append(UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                    self.viewModel.testChainLatency(for: chain, configurations: configurations)
+                    self.latency.testChainLatency(for: chain, configurations: configurations)
                 })
             }
 
@@ -109,7 +121,7 @@ class TVChainListViewController: UITableViewController {
             })
 
             actions.append(UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                ChainStore.shared.delete(chain)
+                self.container.chainStore.delete(chain)
             })
 
             return UIMenu(children: actions)
@@ -119,7 +131,7 @@ class TVChainListViewController: UITableViewController {
     // MARK: - Actions
 
     @objc private func addTapped() {
-        if ConfigurationStore.shared.configurations.count < 2 {
+        if container.configurationStore.configurations.count < 2 {
             let alert = UIAlertController(
                 title: String(localized: "Not Enough Proxies"),
                 message: String(localized: "A proxy chain needs at least 2 proxies."),
@@ -133,15 +145,15 @@ class TVChainListViewController: UITableViewController {
     }
 
     @objc private func testAllTapped() {
-        viewModel.testAllChainLatencies(chains: ChainStore.shared.chains, configurations: ConfigurationStore.shared.configurations)
+        latency.testAllChainLatencies(chains: container.chainStore.chains, configurations: container.configurationStore.configurations)
     }
 
     private func presentEditor(for chain: ProxyChain?) {
-        let editor = TVChainEditorViewController(chain: chain) { newChain in
+        let editor = TVChainEditorViewController(container: container, chain: chain) { [container] newChain in
             if chain != nil {
-                ChainStore.shared.update(newChain)
+                container.chainStore.update(newChain)
             } else {
-                ChainStore.shared.add(newChain)
+                container.chainStore.add(newChain)
             }
         }
         let nav = UINavigationController(rootViewController: editor)
@@ -150,7 +162,7 @@ class TVChainListViewController: UITableViewController {
     }
 
     private func chain(_ id: UUID) -> ProxyChain? {
-        ChainStore.shared.chains.first { $0.id == id }
+        container.chainStore.chains.first { $0.id == id }
     }
 
     // MARK: - Empty State

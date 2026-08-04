@@ -14,13 +14,25 @@ private nonisolated enum ProxySectionID: Hashable {
 
 class TVProxyListViewController: UITableViewController {
 
-    private let viewModel = VPNViewModel.shared
-    private let coordinator = ProxyRowCoordinator.shared
+    private let container: AppContainer
+    private var selection: ProxySelection { container.selection }
+    private var latency: LatencyCenter { container.latency }
+    private var coordinator: ProxyRowCoordinator { container.proxyRows }
     private var dataSource: UITableViewDiffableDataSource<ProxySectionID, UUID>!
     private var hasApplied = false
 
     private var collapsedSubscriptions = Set<UUID>()
     private var updatingSubscription: Subscription?
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     // MARK: - Lifecycle
 
@@ -41,7 +53,7 @@ class TVProxyListViewController: UITableViewController {
 
         navigationItem.rightBarButtonItems = [addButton, testAllButton]
 
-        collapsedSubscriptions = Set(SubscriptionStore.shared.subscriptions.filter(\.collapsed).map(\.id))
+        collapsedSubscriptions = Set(container.subscriptionStore.subscriptions.filter(\.collapsed).map(\.id))
         configureDataSource()
     }
     
@@ -51,9 +63,9 @@ class TVProxyListViewController: UITableViewController {
     }
 
     private func configureDataSource() {
-        dataSource = UITableViewDiffableDataSource<ProxySectionID, UUID>(tableView: tableView) { tableView, indexPath, id in
+        dataSource = UITableViewDiffableDataSource<ProxySectionID, UUID>(tableView: tableView) { [container] tableView, indexPath, id in
             let cell = tableView.dequeueReusableCell(withIdentifier: TVProxyCell.reuseIdentifier, for: indexPath) as! TVProxyCell
-            guard let model = ProxyRowCoordinator.shared.model(for: id) else { return cell }
+            guard let model = container.proxyRows.model(for: id) else { return cell }
             cell.configurationUpdateHandler = { cell, _ in
                 (cell as? TVProxyCell)?.configure(model)
             }
@@ -71,7 +83,7 @@ class TVProxyListViewController: UITableViewController {
             snapshot.appendSections([.standalone])
             snapshot.appendItems(standalone.map(\.id), toSection: .standalone)
         }
-        for subscription in SubscriptionStore.shared.subscriptions {
+        for subscription in container.subscriptionStore.subscriptions {
             let items = models.filter { $0.subscriptionId == subscription.id }
             guard !items.isEmpty else { continue }
             snapshot.appendSections([.subscription(subscription.id)])
@@ -123,7 +135,7 @@ class TVProxyListViewController: UITableViewController {
     }
 
     private func subscription(_ id: UUID) -> Subscription? {
-        SubscriptionStore.shared.subscriptions.first { $0.id == id }
+        container.subscriptionStore.subscriptions.first { $0.id == id }
     }
 
     // MARK: - Focus
@@ -145,15 +157,15 @@ class TVProxyListViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         defer { tableView.deselectRow(at: indexPath, animated: true) }
         guard let id = dataSource.itemIdentifier(for: indexPath),
-              let configuration = ConfigurationStore.shared.configurations.first(where: { $0.id == id }) else { return }
-        viewModel.selectedConfiguration = configuration
+              let configuration = container.configurationStore.configurations.first(where: { $0.id == id }) else { return }
+        selection.selectedConfiguration = configuration
     }
 
     // MARK: - Context Menu
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath),
-              let configuration = ConfigurationStore.shared.configurations.first(where: { $0.id == id }) else { return nil }
+              let configuration = container.configurationStore.configurations.first(where: { $0.id == id }) else { return nil }
 
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
@@ -161,7 +173,7 @@ class TVProxyListViewController: UITableViewController {
             var actions: [UIAction] = []
 
             actions.append(UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                self.viewModel.testLatency(for: configuration)
+                self.latency.testLatency(for: configuration)
             })
 
             actions.append(UIAction(title: String(localized: "Edit"), image: UIImage(systemName: "pencil")) { _ in
@@ -169,7 +181,7 @@ class TVProxyListViewController: UITableViewController {
             })
 
             actions.append(UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                ConfigurationStore.shared.delete(configuration)
+                self.container.configurationStore.delete(configuration)
             })
 
             return UIMenu(children: actions)
@@ -179,7 +191,8 @@ class TVProxyListViewController: UITableViewController {
     private func subscriptionMenu(for subscription: Subscription) -> UIMenu {
         UIMenu(children: [
             UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { [weak self] _ in
-                self?.viewModel.testLatencies(for: ConfigurationStore.shared.configurations(for: subscription))
+                guard let self else { return }
+                self.latency.testLatencies(for: self.container.configurationStore.configurations(for: subscription))
             },
             UIAction(title: String(localized: "Rename"), image: UIImage(systemName: "pencil")) { [weak self] _ in
                 self?.presentRenameAlert(for: subscription)
@@ -187,8 +200,8 @@ class TVProxyListViewController: UITableViewController {
             UIAction(title: String(localized: "Update"), image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                 self?.updateSubscription(subscription)
             },
-            UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                SubscriptionStore.shared.delete(subscription)
+            UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { [container] _ in
+                container.subscriptionStore.delete(subscription)
             },
         ])
     }
@@ -196,19 +209,19 @@ class TVProxyListViewController: UITableViewController {
     // MARK: - Actions
 
     @objc private func addTapped() {
-        let addVC = TVAddProxyViewController()
+        let addVC = TVAddProxyViewController(container: container)
         let nav = UINavigationController(rootViewController: addVC)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
     }
 
     @objc private func testAllTapped() {
-        let liveSubscriptionIds = Set(SubscriptionStore.shared.subscriptions.map(\.id))
-        let visible = ConfigurationStore.shared.configurations.filter { configuration in
+        let liveSubscriptionIds = Set(container.subscriptionStore.subscriptions.map(\.id))
+        let visible = container.configurationStore.configurations.filter { configuration in
             guard let subId = configuration.subscriptionId else { return true }
             return liveSubscriptionIds.contains(subId) && !collapsedSubscriptions.contains(subId)
         }
-        viewModel.testLatencies(for: visible)
+        latency.testLatencies(for: visible)
     }
 
     private func toggleCollapse(_ subscription: Subscription) {
@@ -218,14 +231,14 @@ class TVProxyListViewController: UITableViewController {
         } else {
             collapsedSubscriptions.insert(id)
         }
-        SubscriptionStore.shared.toggleCollapsed(subscription)
+        container.subscriptionStore.toggleCollapsed(subscription)
         applySnapshot()
         refreshVisibleHeaders()
     }
 
     private func presentEditor(for configuration: ProxyConfiguration) {
-        let editor = TVProxyEditorViewController(configuration: configuration) { updated in
-            ConfigurationStore.shared.update(updated)
+        let editor = TVProxyEditorViewController(configuration: configuration) { [container] updated in
+            container.configurationStore.update(updated)
         }
         let nav = UINavigationController(rootViewController: editor)
         nav.modalPresentationStyle = .fullScreen
@@ -238,7 +251,7 @@ class TVProxyListViewController: UITableViewController {
         refreshVisibleHeaders()
         Task {
             do {
-                try await SubscriptionStore.shared.refresh(subscription)
+                try await container.subscriptionRefresher.refresh(subscription)
             } catch {
                 let alert = UIAlertController(title: String(localized: "Update Failed"), message: error.localizedDescription, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
@@ -253,9 +266,9 @@ class TVProxyListViewController: UITableViewController {
         let alert = UIAlertController(title: String(localized: "Rename"), message: nil, preferredStyle: .alert)
         alert.addTextField { $0.text = subscription.name }
         alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
-        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { _ in
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { [container] _ in
             if let name = alert.textFields?.first?.text, !name.isEmpty {
-                SubscriptionStore.shared.rename(subscription, to: name)
+                container.subscriptionStore.rename(subscription, to: name)
             }
         })
         present(alert, animated: true)

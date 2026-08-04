@@ -13,18 +13,31 @@ nonisolated private let logger = AnywhereLogger(category: "WatchSessionManager")
 
 @MainActor
 final class WatchSessionManager: NSObject {
-    static let shared = WatchSessionManager()
+    private let tunnel: TunnelController
+    private let selection: ProxySelection
+    private let configurationStore: ConfigurationStore
+    private let chainStore: ChainStore
+    private let subscriptionStore: SubscriptionStore
 
     private var session: WCSession?
-    /// Last pushed snapshot encoding, to skip redundant context updates.
+    
     private var lastPushedSnapshotData: Data?
 
-    private override init() {
+    init(
+        tunnel: TunnelController,
+        selection: ProxySelection,
+        configurationStore: ConfigurationStore,
+        chainStore: ChainStore,
+        subscriptionStore: SubscriptionStore
+    ) {
+        self.tunnel = tunnel
+        self.selection = selection
+        self.configurationStore = configurationStore
+        self.chainStore = chainStore
+        self.subscriptionStore = subscriptionStore
         super.init()
     }
-
-    /// Activates the session and starts mirroring state changes to the watch.
-    /// No-op where WatchConnectivity is unsupported (e.g. iPad).
+    
     func start() {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
@@ -35,9 +48,7 @@ final class WatchSessionManager: NSObject {
     }
 
     // MARK: - State Mirroring
-
-    /// Pushes on every change of anything `buildSnapshot()` reads, re-arming
-    /// Observation tracking each round.
+    
     private func observeAndPush() {
         withObservationTracking {
             _ = buildSnapshot()
@@ -51,10 +62,8 @@ final class WatchSessionManager: NSObject {
     }
 
     private func buildSnapshot() -> WatchBridge.Snapshot {
-        let viewModel = VPNViewModel.shared
-
         var sections: [WatchBridge.Section] = []
-        let standalone = ConfigurationStore.shared.standalonePickerItems
+        let standalone = configurationStore.standalonePickerItems
         if !standalone.isEmpty {
             sections.append(WatchBridge.Section(
                 id: WatchBridge.standaloneSectionId,
@@ -62,7 +71,7 @@ final class WatchSessionManager: NSObject {
                 items: standalone.map { WatchBridge.Item(id: $0.id, name: $0.name) }
             ))
         }
-        let chains = ChainStore.shared.pickerItems
+        let chains = chainStore.pickerItems
         if !chains.isEmpty {
             sections.append(WatchBridge.Section(
                 id: WatchBridge.chainsSectionId,
@@ -70,7 +79,7 @@ final class WatchSessionManager: NSObject {
                 items: chains.map { WatchBridge.Item(id: $0.id, name: $0.name) }
             ))
         }
-        for section in SubscriptionStore.shared.pickerSections {
+        for section in subscriptionStore.pickerSections {
             sections.append(WatchBridge.Section(
                 id: section.id,
                 header: section.header,
@@ -79,9 +88,9 @@ final class WatchSessionManager: NSObject {
         }
 
         return WatchBridge.Snapshot(
-            status: viewModel.status,
-            selectedId: viewModel.selectedChainId ?? viewModel.selectedConfiguration?.id,
-            selectedName: viewModel.selectedConfiguration?.name,
+            status: tunnel.status,
+            selectedId: selection.selectedChainId ?? selection.selectedConfiguration?.id,
+            selectedName: selection.selectedConfiguration?.name,
             sections: sections
         )
     }
@@ -102,8 +111,7 @@ final class WatchSessionManager: NSObject {
             logger.warning("Failed to push watch context: \(error.localizedDescription)")
         }
     }
-
-    /// Sorted keys so identical snapshots encode identically for deduping.
+    
     nonisolated private static func encodeSnapshot(_ snapshot: WatchBridge.Snapshot) -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
@@ -115,37 +123,31 @@ final class WatchSessionManager: NSObject {
     private func handle(_ request: WatchBridge.Request) async -> [String: Any] {
         switch request {
         case .state:
-            // A state request right after a background launch should report
-            // the real tunnel status, not the not-yet-loaded default.
             await waitUntilReady()
         case .toggleVPN:
             await waitUntilReady()
-            VPNViewModel.shared.toggleVPN()
+            tunnel.toggle()
         case .select(let id):
             await waitUntilReady()
             select(id: id)
         }
         return buildSnapshot().payload ?? [:]
     }
-
-    /// Same resolution as the home screen picker: chains win over configurations.
+    
     private func select(id: UUID) {
-        let configurations = ConfigurationStore.shared.configurations
-        if let chain = ChainStore.shared.chains.first(where: { $0.id == id }) {
-            VPNViewModel.shared.selectChain(chain, configurations: configurations)
+        let configurations = configurationStore.configurations
+        if let chain = chainStore.chains.first(where: { $0.id == id }) {
+            selection.selectChain(chain, configurations: configurations)
         } else if let configuration = configurations.first(where: { $0.id == id }) {
-            VPNViewModel.shared.selectedConfiguration = configuration
+            selection.selectedConfiguration = configuration
         }
     }
-
-    /// Waits (bounded) for the VPN manager and configuration store to finish
-    /// their initial load, so requests arriving right after the system wakes
-    /// the app in the background act on real data.
+    
     private func waitUntilReady(timeout: Duration = .seconds(5)) async {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while clock.now < deadline {
-            if VPNViewModel.shared.isManagerReady, ConfigurationStore.shared.isLoaded { return }
+            if tunnel.isManagerReady, configurationStore.isLoaded { return }
             try? await Task.sleep(for: .milliseconds(50))
         }
         logger.warning("Timed out waiting for stores before serving watch request")

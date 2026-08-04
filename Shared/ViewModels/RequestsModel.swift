@@ -12,8 +12,6 @@ import Observation
 @MainActor
 @Observable
 class RequestsModel {
-    static let shared = RequestsModel()
-
     struct Entry: Identifiable, Equatable {
         enum `Protocol`: String {
             case tcp

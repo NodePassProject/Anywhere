@@ -13,12 +13,14 @@ private enum ProxyType: String {
 }
 
 struct ProxiesPageView: View {
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(AppContainer.self) private var container
+    @Environment(ProxySelection.self) private var selection
+    @Environment(LatencyCenter.self) private var latency
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(ChainStore.self) private var chainStore
-    private let coordinator = ProxyRowCoordinator.shared
-    private let chainCoordinator = ChainRowCoordinator.shared
+    private var coordinator: ProxyRowCoordinator { container.proxyRows }
+    private var chainCoordinator: ChainRowCoordinator { container.chainRows }
 
     @State private var proxyType: ProxyType = AWCore.getProxiesPageProxyType().flatMap(ProxyType.init(rawValue:)) ?? .servers
     @State private var showingAddSheet = false
@@ -113,9 +115,9 @@ struct ProxiesPageView: View {
                                     guard let subscriptionId = configuration.subscriptionId else { return true }
                                     return liveSubscriptionIds.contains(subscriptionId) && !collapsedSubscriptions.contains(subscriptionId)
                                 }
-                                viewModel.testLatencies(for: visible)
+                                latency.testLatencies(for: visible)
                             case .chains:
-                                viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
+                                latency.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
                             }
                         } label: {
                             Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
@@ -148,7 +150,7 @@ struct ProxiesPageView: View {
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
-                configStore.add(configuration); viewModel.selectIfNone(configuration)
+                configStore.add(configuration); selection.selectIfNone(configuration)
             }
         }
         .sheet(isPresented: $showingChainAddSheet) {
@@ -254,7 +256,7 @@ struct ProxiesPageView: View {
         .contextMenu {
             Section {
                 Button {
-                    viewModel.testLatencies(for: configStore.configurations(for: subscription))
+                    latency.testLatencies(for: configStore.configurations(for: subscription))
                 } label: {
                     Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
                 }
@@ -287,7 +289,7 @@ struct ProxiesPageView: View {
         updatingSubscription = subscription
         Task {
             do {
-                try await subscriptionStore.refresh(subscription)
+                try await container.subscriptionRefresher.refresh(subscription)
             } catch {
                 subscriptionErrorMessage = error.localizedDescription
                 showingSubscriptionError = true
@@ -304,7 +306,7 @@ struct ProxiesPageView: View {
                 guard let subscription = subscriptionStore.subscriptions.first(where: { $0.id == id }) else { continue }
                 updatingSubscription = subscription
                 do {
-                    try await subscriptionStore.refresh(subscription)
+                    try await container.subscriptionRefresher.refresh(subscription)
                 } catch {
                     failures.append("\(subscription.name): \(error.localizedDescription)")
                 }
@@ -328,8 +330,8 @@ struct ProxiesPageView: View {
         ProxyRowView(
             item: item,
             editingDisabled: editingDisabled,
-            onSelect: { if let configuration = config(item.id) { viewModel.selectedConfiguration = configuration } },
-            onTestLatency: { if let configuration = config(item.id) { viewModel.testLatency(for: configuration) } },
+            onSelect: { if let configuration = config(item.id) { selection.selectedConfiguration = configuration } },
+            onTestLatency: { if let configuration = config(item.id) { latency.testLatency(for: configuration) } },
             onCopyLink: { if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() } },
             onEdit: { configurationToEdit = config(item.id) },
             onDelete: { if let configuration = config(item.id) { configStore.delete(configuration) } }
@@ -346,11 +348,11 @@ struct ProxiesPageView: View {
             item: item,
             onSelect: {
                 guard item.isValid, let chain = chain(item.id) else { return }
-                viewModel.selectChain(chain, configurations: configStore.configurations)
+                selection.selectChain(chain, configurations: configStore.configurations)
             },
             onTestLatency: {
                 guard let chain = chain(item.id) else { return }
-                viewModel.testChainLatency(for: chain, configurations: configStore.configurations)
+                latency.testChainLatency(for: chain, configurations: configStore.configurations)
             },
             onEdit: { chainToEdit = chain(item.id) },
             onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }

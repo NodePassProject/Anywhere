@@ -14,9 +14,20 @@ class TVProxiesPageViewController: UIViewController {
         String(localized: "Chains"),
     ])
     private let containerView = UIView()
-    private let proxiesViewController = TVProxyListViewController()
-    private let chainsViewController = TVChainListViewController()
+    private let proxiesViewController: TVProxyListViewController
+    private let chainsViewController: TVChainListViewController
     private weak var currentChild: UIViewController?
+
+    init(container: AppContainer) {
+        self.proxiesViewController = TVProxyListViewController(container: container)
+        self.chainsViewController = TVChainListViewController(container: container)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()

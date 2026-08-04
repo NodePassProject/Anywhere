@@ -32,7 +32,7 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
 }
 
 struct AddProxyView: View {
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ProxySelection.self) private var selection
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) var dismiss
@@ -261,7 +261,7 @@ struct AddProxyView: View {
         if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL)
-                configStore.add(configuration); viewModel.selectIfNone(configuration)
+                configStore.add(configuration); selection.selectIfNone(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

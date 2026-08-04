@@ -13,14 +13,13 @@ import UniformTypeIdentifiers
 @MainActor
 @Observable
 final class MITMCertificateController {
-    static let shared = MITMCertificateController()
 
     @ObservationIgnored private let store = MITMCertificateStore()
 
     private(set) var hasCA: Bool = false
     private(set) var trusted: Bool = false
 
-    private init() {
+    init() {
         refresh()
     }
 

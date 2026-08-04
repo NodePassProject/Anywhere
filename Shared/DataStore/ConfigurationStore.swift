@@ -14,19 +14,24 @@ nonisolated private let logger = AnywhereLogger(category: "ConfigurationStore")
 @MainActor
 @Observable
 class ConfigurationStore {
-    static let shared = ConfigurationStore()
-
     private(set) var configurations: [ProxyConfiguration] = []
     private var tombstones: [ProxyConfiguration] = []
 
     private(set) var isLoaded = false
 
+    @ObservationIgnored private let blobStore: JSONBlobStore
     @ObservationIgnored private var loadedBlob: Data?
     @ObservationIgnored private var mutationEpoch = 0
-    
+
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    private init() {
+    /// Runs after every mutation or reload; `StoreCoordinator` wires the
+    /// cross-store reactions (selection revalidation, latency pruning,
+    /// routing export) here.
+    @ObservationIgnored var onDidMutate: (() -> Void)?
+
+    init(blobStore: JSONBlobStore) {
+        self.blobStore = blobStore
         Task { @MainActor in await self.loadInitial() }
     }
 
@@ -36,8 +41,8 @@ class ConfigurationStore {
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .userInitiated) {
-                () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
-                let data = JSONBlobStore.shared.load(.configurations)
+                [blobStore] () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
+                let data = blobStore.load(.configurations)
                 let split = Self.decodeSplit(from: data)
                 return (data, split.live, split.tombstones)
             }.value
@@ -46,7 +51,7 @@ class ConfigurationStore {
             configurations = outcome.live
             tombstones = outcome.tombstones
             isLoaded = true
-            coordinate()
+            onDidMutate?()
             return
         }
     }
@@ -58,8 +63,8 @@ class ConfigurationStore {
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
-                let data = JSONBlobStore.shared.load(.configurations)
+                [blobStore] () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
+                let data = blobStore.load(.configurations)
                 guard data != previous else { return nil }
                 let split = Self.decodeSplit(from: data)
                 return (data, split.live, split.tombstones)
@@ -69,7 +74,7 @@ class ConfigurationStore {
             loadedBlob = outcome.data
             configurations = outcome.live
             tombstones = outcome.tombstones
-            coordinate()
+            onDidMutate?()
             return
         }
     }
@@ -83,7 +88,7 @@ class ConfigurationStore {
         stamped.updatedAt = SyncStamp.after(tombstone)
         configurations.append(stamped)
         save()
-        coordinate()
+        onDidMutate?()
     }
 
     func update(_ configuration: ProxyConfiguration) {
@@ -92,7 +97,7 @@ class ConfigurationStore {
             stamped.updatedAt = SyncStamp.after(configurations[index])
             configurations[index] = stamped
             save()
-            coordinate()
+            onDidMutate?()
         }
     }
 
@@ -100,7 +105,7 @@ class ConfigurationStore {
         configurations.removeAll { $0.id == configuration.id }
         recordTombstones([configuration])
         save()
-        coordinate()
+        onDidMutate?()
     }
 
     func deleteConfigurations(for subscriptionId: UUID) {
@@ -108,7 +113,7 @@ class ConfigurationStore {
         configurations.removeAll { $0.subscriptionId == subscriptionId }
         recordTombstones(removed)
         save()
-        coordinate()
+        onDidMutate?()
     }
     
     func replaceConfigurations(for subscriptionId: UUID, with newConfigurations: [ProxyConfiguration]) {
@@ -140,7 +145,7 @@ class ConfigurationStore {
         recordTombstones(removed)
         tombstones.removeAll { newIds.contains($0.id) }
         save()
-        coordinate()
+        onDidMutate?()
     }
     
     func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
@@ -153,17 +158,7 @@ class ConfigurationStore {
         }
         configurations = updated
         save()
-        coordinate()
-    }
-
-    // MARK: - Coordination
-    
-    private func coordinate() {
-        let chains = ChainStore.shared.chains
-        VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
-        VPNViewModel.shared.pruneLatencyState(liveConfigurationIds: Set(configurations.map(\.id)))
-        RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
-        RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
+        onDidMutate?()
     }
 
     // MARK: - Persistence
@@ -200,13 +195,13 @@ class ConfigurationStore {
         mutationEpoch += 1
         let snapshot = configurations + tombstones
         let previous = saveTask
-        saveTask = Task.detached {
+        saveTask = Task.detached { [blobStore] in
             await previous?.value
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 let data = try encoder.encode(snapshot)
-                JSONBlobStore.shared.save(.configurations, data: data)
+                blobStore.save(.configurations, data: data)
             } catch {
                 logger.report(AnywhereError.store(.saveFailed(.configurations, underlying: error)))
             }

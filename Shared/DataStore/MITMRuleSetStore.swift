@@ -12,8 +12,6 @@ import SwiftUI
 @MainActor
 @Observable
 final class MITMRuleSetStore {
-    static let shared = MITMRuleSetStore()
-    
     var enabled: Bool {
         didSet {
             guard enabled != oldValue else { return }
@@ -26,15 +24,15 @@ final class MITMRuleSetStore {
     private(set) var ruleSets: [MITMRuleSet]
     private var tombstones: [MITMRuleSet] = []
     
+    @ObservationIgnored private let blobStore: JSONBlobStore
     @ObservationIgnored private var loadedBlob: Data?
     @ObservationIgnored private var mutationEpoch = 0
 
-    private init() {
-        let data = JSONBlobStore.shared.load(.mitm)
+    init(blobStore: JSONBlobStore) {
+        self.blobStore = blobStore
+        let data = blobStore.load(.mitm)
         loadedBlob = data
         let snapshot = MITMSnapshot.decode(from: data)
-        // One-time migration: older builds kept the master toggle inside the synced blob.
-        // Seed the device-local default from it so upgrading doesn't silently turn MITM off.
         if !AWCore.hasMITMEnabled() {
             AWCore.setMITMEnabled(MITMSnapshot.legacyEnabled(in: data))
         }
@@ -42,8 +40,6 @@ final class MITMRuleSetStore {
         let split = Tombstone.split(snapshot.ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
-        // Ensure the NE-facing binary exists on first launch and post-migration,
-        // before any edit. Diff-guarded, so a no-op when already current.
         MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
     }
     
@@ -52,8 +48,8 @@ final class MITMRuleSetStore {
             let previous = loadedBlob
             let epoch = mutationEpoch
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, snapshot: MITMSnapshot)? in
-                let data = JSONBlobStore.shared.load(.mitm)
+                [blobStore] () -> (data: Data?, snapshot: MITMSnapshot)? in
+                let data = blobStore.load(.mitm)
                 guard data != previous else { return nil }
                 return (data, MITMSnapshot.decode(from: data))
             }.value
@@ -175,33 +171,21 @@ final class MITMRuleSetStore {
     // MARK: - Subscription
     
     @discardableResult
-    func refreshRuleSet(id: UUID) async throws -> MITMRuleSet {
-        guard let index = ruleSets.firstIndex(where: { $0.id == id }),
-              let url = ruleSets[index].subscriptionURL else {
-            throw MITMRuleSetRefreshError.missingSubscriptionURL
-        }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw MITMRuleSetRefreshError.invalidStatusCode(http.statusCode)
-        }
-        guard let body = String(data: data, encoding: .utf8) else {
-            throw MITMRuleSetRefreshError.undecodableBody
-        }
-
-        let parsed = MITMRuleSetParser.parse(body)
-        guard parsed.rules.count <= MITMRuleSet.maxRuleCount else {
-            throw MITMRuleSetRefreshError.tooManyRules
-        }
+    func applyRefreshedContent(
+        domainSuffixes: [String],
+        rules: [MITMRule],
+        parameters: [MITMParameter],
+        to id: UUID
+    ) -> MITMRuleSet? {
         guard let writeIndex = ruleSets.firstIndex(where: { $0.id == id }) else {
-            throw MITMRuleSetRefreshError.ruleSetRemoved
+            return nil
         }
         let previousValues = ruleSets[writeIndex].parameterValues
-        ruleSets[writeIndex].domainSuffixes = parsed.domainSuffixes
-        ruleSets[writeIndex].rules = parsed.rules
-        ruleSets[writeIndex].parameters = parsed.parameters
+        ruleSets[writeIndex].domainSuffixes = domainSuffixes
+        ruleSets[writeIndex].rules = rules
+        ruleSets[writeIndex].parameters = parameters
         ruleSets[writeIndex].parameterValues = Self.mergedParameterValues(
-            definitions: parsed.parameters,
+            definitions: parameters,
             previousValues: previousValues
         )
         ruleSets[writeIndex].updatedAt = SyncStamp.after(ruleSets[writeIndex])
@@ -242,7 +226,7 @@ final class MITMRuleSetStore {
 
     private func save() {
         mutationEpoch += 1
-        MITMSnapshot(ruleSets: ruleSets + tombstones).save()
+        MITMSnapshot(ruleSets: ruleSets + tombstones).save(to: blobStore)
     }
 }
 

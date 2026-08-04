@@ -14,18 +14,20 @@ nonisolated private let logger = AnywhereLogger(category: "SubscriptionStore")
 @MainActor
 @Observable
 class SubscriptionStore {
-    static let shared = SubscriptionStore()
-
     private(set) var subscriptions: [Subscription] = []
     private var tombstones: [Subscription] = []
-    
+
+    @ObservationIgnored private let blobStore: JSONBlobStore
+    @ObservationIgnored private let configurationStore: ConfigurationStore
     @ObservationIgnored private var loadedBlob: Data?
     @ObservationIgnored private var mutationEpoch = 0
-    
+
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    private init() {
-        let data = JSONBlobStore.shared.load(.subscriptions)
+    init(blobStore: JSONBlobStore, configurationStore: ConfigurationStore) {
+        self.blobStore = blobStore
+        self.configurationStore = configurationStore
+        let data = blobStore.load(.subscriptions)
         loadedBlob = data
         let split = Self.decodeSplit(from: data)
         subscriptions = split.live
@@ -39,8 +41,8 @@ class SubscriptionStore {
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
-                let data = JSONBlobStore.shared.load(.subscriptions)
+                [blobStore] () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
+                let data = blobStore.load(.subscriptions)
                 guard data != previous else { return nil }
                 let split = Self.decodeSplit(from: data)
                 return (data, split.live, split.tombstones)
@@ -74,8 +76,7 @@ class SubscriptionStore {
         save()
     }
     
-    func delete(_ subscription: Subscription, configurationStore: ConfigurationStore? = nil) {
-        let configurationStore = configurationStore ?? .shared
+    func delete(_ subscription: Subscription) {
         configurationStore.deleteConfigurations(for: subscription.id)
         subscriptions.removeAll { $0.id == subscription.id }
         recordTombstone(subscription)
@@ -114,13 +115,13 @@ class SubscriptionStore {
         mutationEpoch += 1
         let snapshot = subscriptions + tombstones
         let previous = saveTask
-        saveTask = Task.detached {
+        saveTask = Task.detached { [blobStore] in
             await previous?.value
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 let data = try encoder.encode(snapshot)
-                JSONBlobStore.shared.save(.subscriptions, data: data)
+                blobStore.save(.subscriptions, data: data)
             } catch {
                 logger.report(AnywhereError.store(.saveFailed(.subscriptions, underlying: error)))
             }
@@ -135,7 +136,7 @@ extension SubscriptionStore {
     }
     
     var pickerSections: [PickerSection] {
-        let configStore = ConfigurationStore.shared
+        let configStore = configurationStore
         return subscriptions.compactMap { subscription in
             let configs = configStore.configurations(for: subscription)
             guard !configs.isEmpty else { return nil }
@@ -168,44 +169,10 @@ extension SubscriptionStore {
                 outbound: configuration.outbound
             )
         }
-        ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: tagged)
+        configurationStore.replaceConfigurations(for: subscription.id, with: tagged)
     }
     
-    func refresh(_ subscription: Subscription) async throws {
-        let subscriptionId = subscription.id
-        let url = subscriptions.first { $0.id == subscriptionId }?.url ?? subscription.url
-        let result = try await SubscriptionFetcher.fetch(url: url)
-        
-        guard let current = subscriptions.first(where: { $0.id == subscriptionId }) else { return }
-
-        let oldConfigurations = ConfigurationStore.shared.configurations(for: current)
-        var oldByName: [String: [ProxyConfiguration]] = [:]
-        for old in oldConfigurations {
-            oldByName[old.name, default: []].append(old)
-        }
-        var oldNameCursor: [String: Int] = [:]
-
-        var newConfigurations: [ProxyConfiguration] = []
-        for configuration in result.configurations {
-            let name = configuration.name
-            let cursor = oldNameCursor[name, default: 0]
-            let id: UUID
-            if let group = oldByName[name], cursor < group.count {
-                id = group[cursor].id
-                oldNameCursor[name] = cursor + 1
-            } else {
-                id = configuration.id
-            }
-            newConfigurations.append(ProxyConfiguration(
-                id: id, name: configuration.name,
-                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscriptionId,
-                outbound: configuration.outbound
-            ))
-        }
-
-        ConfigurationStore.shared.replaceConfigurations(for: subscriptionId, with: newConfigurations)
-
+    func applyRefreshResult(_ result: SubscriptionFetcher.Result, to subscriptionId: UUID) {
         mutate(id: subscriptionId) { record in
             record.lastUpdate = Date()
             record.upload = result.upload ?? record.upload

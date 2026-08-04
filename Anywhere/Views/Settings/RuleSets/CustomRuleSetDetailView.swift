@@ -10,6 +10,7 @@ import SwiftUI
 struct CustomRuleSetDetailView: View {
     let customRuleSetId: UUID
     @Environment(\.editMode) private var editMode
+    @Environment(AppContainer.self) private var container
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
@@ -162,7 +163,7 @@ struct CustomRuleSetDetailView: View {
         isUpdating = true
         Task {
             do {
-                try await ruleSetStore.refreshCustomRuleSet(customRuleSetId)
+                try await container.customRuleSetRefresher.refresh(customRuleSetId)
                 loadInitial()
                 isUpdating = false
                 updateSucceeded = true

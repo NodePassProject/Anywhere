@@ -11,10 +11,12 @@ import UIKit
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
+    private lazy var container = AppContainer()
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        CloudBlobSync.start()
-        window?.rootViewController = TVTabBarController()
+        let coordinator = container.coordinator
+        CloudBlobSync.start { await coordinator.reloadAll() }
+        window?.rootViewController = TVTabBarController(container: container)
         return true
     }
 }

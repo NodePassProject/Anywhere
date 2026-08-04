@@ -12,8 +12,6 @@ import StoreKit
 @MainActor
 @Observable
 final class VoyagerStore {
-    static let shared = VoyagerStore()
-    
     static let productID = "nonconsumable.voyager"
 
     private(set) var product: Product?
@@ -24,9 +22,8 @@ final class VoyagerStore {
     var displayPrice: String? { product?.displayPrice }
     var productName: String? { product?.displayName }
 
-    var isPresentingVoyagerView = false
 
-    private init() {
+    init() {
         isMember = AWCore.getVoyagerMembership()
         listenForTransactions()
         Task {

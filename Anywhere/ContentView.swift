@@ -8,11 +8,10 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(VoyagerStore.self) private var voyagerStore
+    @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var settings
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ProxySelection.self) private var selection
     @Environment(ConfigurationStore.self) private var configStore
-    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(DeepLinkManager.self) private var deepLinkManager
     @State private var onboardingCompleted = AWCore.getOnboardingCompleted()
     @State private var showingDeepLinkAddSheet = false
@@ -23,28 +22,14 @@ struct ContentView: View {
     
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
-            get: { !ruleSetStore.orphanedRuleSetNames.isEmpty },
-            set: { if !$0 { ruleSetStore.acknowledgeOrphans() } }
+            get: { !appState.orphanedRuleSetNames.isEmpty },
+            set: { if !$0 { appState.orphanedRuleSetNames = [] } }
         )
     }
     
     var body: some View {
         if onboardingCompleted {
             HomeView()
-                .environment(VoyagerStore.shared)
-                .environment(AppSettings.shared)
-                .environment(VPNViewModel.shared)
-                .environment(ConfigurationStore.shared)
-                .environment(SubscriptionStore.shared)
-                .environment(ChainStore.shared)
-                .environment(ConnectionStatsModel.shared)
-                .environment(RequestsModel.shared)
-                .environment(LogsModel.shared)
-                .environment(RoutingRuleSetStore.shared)
-                .environment(CertificateStore.shared)
-                .environment(MITMRuleSetStore.shared)
-                .environment(MITMCertificateController.shared)
-                .environment(deepLinkManager)
                 .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
                     DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                         AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
@@ -53,23 +38,22 @@ struct ContentView: View {
                 .sheet(isPresented: $showingManualAddSheet) {
                     ProxyEditorView { configuration in
                         configStore.add(configuration)
-                        viewModel.selectIfNone(configuration)
+                        selection.selectIfNone(configuration)
                     }
                 }
                 .sheet(isPresented: $showingImportRuleSetsSheet, onDismiss: { pendingRuleSetLinks = [] }) {
                     ImportRuleSetsView(links: pendingRuleSetLinks)
                 }
                 .fullScreenCover(isPresented: Binding(
-                    get: { voyagerStore.isPresentingVoyagerView },
-                    set: { voyagerStore.isPresentingVoyagerView = $0 }
+                    get: { appState.isPresentingVoyagerView },
+                    set: { appState.isPresentingVoyagerView = $0 }
                 )) {
                     AnywhereVoyagerView()
-                        .environment(voyagerStore)
                 }
                 .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
                     Button(String(localized: "OK")) {}
                 } message: {
-                    let names = ruleSetStore.orphanedRuleSetNames.joined(separator: ", ")
+                    let names = appState.orphanedRuleSetNames.joined(separator: ", ")
                     Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
                 }
                 .onOpenURL { url in
@@ -91,7 +75,6 @@ struct ContentView: View {
                 }
         } else {
             OnboardingView(onboardingCompleted: $onboardingCompleted)
-                .environment(RoutingRuleSetStore.shared)
         }
     }
 }

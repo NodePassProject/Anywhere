@@ -9,10 +9,11 @@ import SwiftUI
 
 struct CustomizeThemeView: View {
     @Environment(VoyagerStore.self) private var voyagerStore
-    @Bindable private var settings = AppSettings.shared
+    @Environment(AppSettings.self) private var settings
     @State private var screenAspectRatio: CGFloat = 393 / 852
 
     var body: some View {
+        @Bindable var settings = settings
         Form {
             if !voyagerStore.isMember {
                 VoyagerNotice("Custom themes are available to Anywhere Voyager members.")
@@ -178,6 +179,6 @@ struct CustomizeThemeView: View {
     NavigationStack {
         CustomizeThemeView()
     }
-    .environment(VoyagerStore.shared)
-    .environment(AppSettings.shared)
+    .environment(VoyagerStore())
+    .environment(AppSettings())
 }

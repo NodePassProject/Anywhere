@@ -164,7 +164,6 @@ struct DNSSettingsView: View {
     // MARK: - Persistence
 
     private func loadInitial() {
-        let settings = AppSettings.shared
         drafts = ServerDrafts(
             subscriptionPlain: settings.subscriptionDNSPlainServer,
             subscriptionDoH: settings.subscriptionDNSDoHURL,
@@ -190,9 +189,7 @@ struct DNSSettingsView: View {
             echDoH: Self.normalized(drafts.echDoH, empty: DNSUpstream.defaultDoHURL),
             fallback: Self.normalized(drafts.fallback, empty: DNSUpstream.defaultPlainServer)
         )
-
-        let settings = AppSettings.shared
-        // Each write notifies the tunnel, so only changed fields are written back.
+        
         if settings.subscriptionDNSPlainServer != drafts.subscriptionPlain {
             settings.subscriptionDNSPlainServer = drafts.subscriptionPlain
         }

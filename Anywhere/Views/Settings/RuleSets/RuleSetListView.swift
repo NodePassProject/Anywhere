@@ -19,8 +19,13 @@ struct RuleSetListView: View {
 
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "arrs") ?? .data]
 
-    @State var builtInServiceRuleSets: [RoutingRuleSet] = RoutingRuleSetStore.shared.builtInServiceRuleSets
-    @State var customRuleSets: [CustomRoutingRuleSet] = RoutingRuleSetStore.shared.customRuleSets
+    @State var builtInServiceRuleSets: [RoutingRuleSet]
+    @State var customRuleSets: [CustomRoutingRuleSet]
+
+    init(ruleSetStore: RoutingRuleSetStore) {
+        _builtInServiceRuleSets = State(initialValue: ruleSetStore.builtInServiceRuleSets)
+        _customRuleSets = State(initialValue: ruleSetStore.customRuleSets)
+    }
 
     @State private var showAddSheet = false
     @State private var newRuleSetName = ""
@@ -102,7 +107,7 @@ struct RuleSetListView: View {
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
-                    RoutingRuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
+                    ruleSetStore.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
                 }
             }
         }
@@ -112,8 +117,8 @@ struct RuleSetListView: View {
             }
         }
         .onAppear {
-            builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
-            customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+            builtInServiceRuleSets = ruleSetStore.builtInServiceRuleSets
+            customRuleSets = ruleSetStore.customRuleSets
         }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -126,8 +131,8 @@ struct RuleSetListView: View {
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                _ = RoutingRuleSetStore.shared.addCustomRuleSet(name: name)
-                customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+                _ = ruleSetStore.addCustomRuleSet(name: name)
+                customRuleSets = ruleSetStore.customRuleSets
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
@@ -162,8 +167,8 @@ struct RuleSetListView: View {
         }
         .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
             Button("Reset", role: .destructive) {
-                RoutingRuleSetStore.shared.resetAssignments()
-                builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
+                ruleSetStore.resetAssignments()
+                builtInServiceRuleSets = ruleSetStore.builtInServiceRuleSets
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -172,7 +177,7 @@ struct RuleSetListView: View {
     }
     
     private func save() {
-        let store = RoutingRuleSetStore.shared
+        let store = ruleSetStore
         let localIds = customRuleSets.map(\.id)
         guard localIds != store.customRuleSets.map(\.id) else { return }
         
@@ -235,8 +240,8 @@ struct RuleSetListView: View {
                 ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
                 : parsed.name
             let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules)
-            RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
-            customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+            ruleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
+            customRuleSets = ruleSetStore.customRuleSets
         } catch {
             importError = error.localizedDescription
         }
@@ -267,8 +272,8 @@ struct RuleSetListView: View {
                     ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
                     : parsed.name
                 let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
-                RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
-                customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+                ruleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
+                customRuleSets = ruleSetStore.customRuleSets
             } catch {
                 subscribeError = error.localizedDescription
             }

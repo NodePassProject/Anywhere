@@ -11,12 +11,17 @@ import Observation
 @MainActor
 @Observable
 final class ProxyRowCoordinator {
-    static let shared = ProxyRowCoordinator()
-
     private(set) var models: [ProxyListItem] = []
     @ObservationIgnored private var byID: [UUID: ProxyListItem] = [:]
 
-    private init() {
+    @ObservationIgnored private let configurationStore: ConfigurationStore
+    @ObservationIgnored private let selection: ProxySelection
+    @ObservationIgnored private let latency: LatencyCenter
+
+    init(configurationStore: ConfigurationStore, selection: ProxySelection, latency: LatencyCenter) {
+        self.configurationStore = configurationStore
+        self.selection = selection
+        self.latency = latency
         reconcile()
         observe()
     }
@@ -25,10 +30,10 @@ final class ProxyRowCoordinator {
 
     private func observe() {
         withObservationTracking {
-            _ = ConfigurationStore.shared.configurations
-            _ = VPNViewModel.shared.selectedConfiguration
-            _ = VPNViewModel.shared.selectedChainId
-            _ = VPNViewModel.shared.latencyResults
+            _ = configurationStore.configurations
+            _ = selection.selectedConfiguration
+            _ = selection.selectedChainId
+            _ = latency.latencyResults
         } onChange: { [weak self] in
             guard let self else { return }
             Task { @MainActor in
@@ -39,10 +44,10 @@ final class ProxyRowCoordinator {
     }
 
     private func reconcile() {
-        let configurations = ConfigurationStore.shared.configurations
-        let selectedId = VPNViewModel.shared.selectedConfiguration?.id
-        let selectedChainId = VPNViewModel.shared.selectedChainId
-        let latency = VPNViewModel.shared.latencyResults
+        let configurations = configurationStore.configurations
+        let selectedId = selection.selectedConfiguration?.id
+        let selectedChainId = selection.selectedChainId
+        let latency = latency.latencyResults
 
         var ordered: [ProxyListItem] = []
         var updated: [UUID: ProxyListItem] = [:]

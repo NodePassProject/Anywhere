@@ -13,7 +13,8 @@ private struct RouteDraft: Identifiable, Equatable {
 }
 
 struct TunnelScopeSettingsView: View {
-    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(TunnelController.self) private var tunnel
+    @Environment(AppSettings.self) private var settings
     @Environment(\.editMode) private var editMode
 
     @State private var includedRouteDrafts: [RouteDraft] = []
@@ -24,7 +25,7 @@ struct TunnelScopeSettingsView: View {
     }
 
     var body: some View {
-        @Bindable var settings = AppSettings.shared
+        @Bindable var settings = settings
         Form {
             Section {
                 Toggle("Include All Networks", isOn: $settings.includeAllNetworks)
@@ -74,7 +75,7 @@ struct TunnelScopeSettingsView: View {
                 ensureTrailingBlankDraft(&excludedRouteDrafts)
             }
         }
-        .disabled(viewModel.pendingReconnect)
+        .disabled(tunnel.pendingReconnect)
     }
     
     private func ensureTrailingBlankDraft(_ drafts: inout [RouteDraft]) {
@@ -115,8 +116,8 @@ struct TunnelScopeSettingsView: View {
     }
 
     private func loadInitial() {
-        includedRouteDrafts = AppSettings.shared.tunnelIncludedRoutes.map { RouteDraft(value: $0) }
-        excludedRouteDrafts = AppSettings.shared.tunnelExcludedRoutes.map { RouteDraft(value: $0) }
+        includedRouteDrafts = settings.tunnelIncludedRoutes.map { RouteDraft(value: $0) }
+        excludedRouteDrafts = settings.tunnelExcludedRoutes.map { RouteDraft(value: $0) }
     }
 
     private func save() {
@@ -124,9 +125,9 @@ struct TunnelScopeSettingsView: View {
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         excludedRouteDrafts = excludedRouteDrafts
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        AppSettings.shared.tunnelIncludedRoutes = includedRouteDrafts
+        settings.tunnelIncludedRoutes = includedRouteDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-        AppSettings.shared.tunnelExcludedRoutes = excludedRouteDrafts
+        settings.tunnelExcludedRoutes = excludedRouteDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

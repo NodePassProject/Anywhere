@@ -644,7 +644,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
 
     private static let legacyMITMDefaultsKey = "mitmData"
     
-    func save() {
+    func save(to blobStore: JSONBlobStore) {
         let data: Data
         do {
             data = try JSONEncoder().encode(self)
@@ -652,7 +652,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
             logger.report(AnywhereError.store(.saveFailed(.mitmRuleSets, underlying: error)))
             return
         }
-        JSONBlobStore.shared.save(.mitm, data: data)
+        blobStore.save(.mitm, data: data)
         exportBinaryToAppGroup()
         AWNotificationCenter.notifyMITMChanged()
     }

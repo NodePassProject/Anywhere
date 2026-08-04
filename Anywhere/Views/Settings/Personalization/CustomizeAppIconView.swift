@@ -121,5 +121,5 @@ struct CustomizeAppIconView: View {
     NavigationStack {
         CustomizeAppIconView()
     }
-    .environment(VoyagerStore.shared)
+    .environment(VoyagerStore())
 }

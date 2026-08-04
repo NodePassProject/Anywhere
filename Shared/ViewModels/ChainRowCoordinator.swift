@@ -11,12 +11,19 @@ import Observation
 @MainActor
 @Observable
 final class ChainRowCoordinator {
-    static let shared = ChainRowCoordinator()
-
     private(set) var models: [ChainListItem] = []
     @ObservationIgnored private var byID: [UUID: ChainListItem] = [:]
 
-    private init() {
+    @ObservationIgnored private let chainStore: ChainStore
+    @ObservationIgnored private let configurationStore: ConfigurationStore
+    @ObservationIgnored private let selection: ProxySelection
+    @ObservationIgnored private let latency: LatencyCenter
+
+    init(chainStore: ChainStore, configurationStore: ConfigurationStore, selection: ProxySelection, latency: LatencyCenter) {
+        self.chainStore = chainStore
+        self.configurationStore = configurationStore
+        self.selection = selection
+        self.latency = latency
         reconcile()
         observe()
     }
@@ -25,10 +32,10 @@ final class ChainRowCoordinator {
 
     private func observe() {
         withObservationTracking {
-            _ = ChainStore.shared.chains
-            _ = ConfigurationStore.shared.configurations
-            _ = VPNViewModel.shared.selectedChainId
-            _ = VPNViewModel.shared.chainLatencyResults
+            _ = chainStore.chains
+            _ = configurationStore.configurations
+            _ = selection.selectedChainId
+            _ = latency.chainLatencyResults
         } onChange: { [weak self] in
             guard let self else { return }
             Task { @MainActor in
@@ -39,10 +46,10 @@ final class ChainRowCoordinator {
     }
 
     private func reconcile() {
-        let chains = ChainStore.shared.chains
-        let configurations = ConfigurationStore.shared.configurations
-        let selectedId = VPNViewModel.shared.selectedChainId
-        let latency = VPNViewModel.shared.chainLatencyResults
+        let chains = chainStore.chains
+        let configurations = configurationStore.configurations
+        let selectedId = selection.selectedChainId
+        let latency = latency.chainLatencyResults
 
         var ordered: [ChainListItem] = []
         var updated: [UUID: ChainListItem] = [:]

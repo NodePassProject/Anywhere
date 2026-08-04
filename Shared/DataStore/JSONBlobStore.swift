@@ -69,16 +69,27 @@ nonisolated final class JSONBlobStore: Sendable {
         decodeProbe.withLock { $0 = probe }
     }
 
-    private init() {
+    private init(container: ModelContainer?, usesCloudKit: Bool) {
+        self.container = container
+        self.usesCloudKit = usesCloudKit
+        context = Mutex(container.map { ModelContext($0) })
+    }
+
+    private convenience init() {
         let wantsCloudKit = AWCore.isHostApp && AWCore.getICloudSyncEnabled()
         if wantsCloudKit, let cloudContainer = Self.makeContainer(cloudKit: true) {
-            container = cloudContainer
-            usesCloudKit = true
+            self.init(container: cloudContainer, usesCloudKit: true)
         } else {
-            container = Self.makeContainer(cloudKit: false)
-            usesCloudKit = false
+            self.init(container: Self.makeContainer(cloudKit: false), usesCloudKit: false)
         }
-        context = Mutex(container.map { ModelContext($0) })
+    }
+    
+    static func ephemeral() -> JSONBlobStore {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("JSONBlobStore-\(UUID().uuidString).store")
+        let config = ModelConfiguration(url: url, cloudKitDatabase: .none)
+        let container = try? ModelContainer(for: JSONBlob.self, configurations: config)
+        return JSONBlobStore(container: container, usesCloudKit: false)
     }
 
     private static func makeContainer(cloudKit: Bool) -> ModelContainer? {

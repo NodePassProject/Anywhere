@@ -14,11 +14,10 @@ import SwiftUI
 @MainActor
 @Observable
 final class CertificateStore {
-    static let shared = CertificateStore()
 
     private(set) var fingerprints: [String] = []
 
-    private init() {
+    init() {
         fingerprints = AWCore.getTrustedCertificateFingerprints()
     }
 

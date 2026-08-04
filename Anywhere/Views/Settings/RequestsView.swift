@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct RequestsView: View {
-    @Environment(RequestsModel.self) private var requestsModel
+    @State private var requestsModel = RequestsModel()
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @State private var selection = Set<UUID>()

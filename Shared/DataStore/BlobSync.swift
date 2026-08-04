@@ -117,10 +117,12 @@ nonisolated enum BlobMerge {
 nonisolated enum CloudBlobSync {
     @MainActor private static var remoteChangeObserver: (any NSObjectProtocol)?
     @MainActor private static var debounce: Task<Void, Never>?
-
+    @MainActor private static var onRemoteChange: (@MainActor () async -> Void)?
+    
     @MainActor
-    static func start() {
+    static func start(onRemoteChange: @escaping @MainActor () async -> Void) {
         BlobMerge.register()
+        Self.onRemoteChange = onRemoteChange
         guard remoteChangeObserver == nil else { return }
         remoteChangeObserver = NotificationCenter.default.addObserver(
             forName: .NSPersistentStoreRemoteChange, object: nil, queue: nil
@@ -138,17 +140,8 @@ nonisolated enum CloudBlobSync {
         debounce = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            await refresh()
+            await onRemoteChange?()
+            Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
         }
-    }
-
-    @MainActor
-    private static func refresh() async {
-        await SubscriptionStore.shared.reload()
-        await ChainStore.shared.reload()
-        await ConfigurationStore.shared.reload()   // after chains: coordinate() reads configs + chains
-        await RoutingRuleSetStore.shared.reload()
-        await MITMRuleSetStore.shared.reload()
-        Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
     }
 }

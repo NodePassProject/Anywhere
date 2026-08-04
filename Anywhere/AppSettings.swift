@@ -11,7 +11,7 @@ import Observation
 @MainActor
 @Observable
 final class AppSettings {
-    static let shared = AppSettings()
+    @ObservationIgnored var onTunnelBehaviorChange: (() -> Void)?
 
     // MARK: - Persist only
 
@@ -278,39 +278,39 @@ final class AppSettings {
     var alwaysOnEnabled: Bool {
         didSet {
             AWCore.setAlwaysOnEnabled(alwaysOnEnabled)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
         }
     }
 
     var includeAllNetworks: Bool {
         didSet {
             AWCore.setTunnelIncludeAllNetworks(includeAllNetworks)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
         }
     }
 
     var includeAPNs: Bool {
         didSet {
             AWCore.setTunnelIncludeAPNs(includeAPNs)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
         }
     }
 
     var includeCellularServices: Bool {
         didSet {
             AWCore.setTunnelIncludeCellularServices(includeCellularServices)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
         }
     }
 
     var includeLocalNetworks: Bool {
         didSet {
             AWCore.setTunnelIncludeLocalNetworks(includeLocalNetworks)
-            VPNViewModel.shared.reconnectVPN()
+            onTunnelBehaviorChange?()
         }
     }
 
-    private init() {
+    init() {
         experimentalEnabled = AWCore.getExperimentalEnabled()
         iCloudSyncEnabled = AWCore.getICloudSyncEnabled()
         homeColorScheme = AWCore.getHomeColorScheme().flatMap(HomeColorScheme.init(rawValue:)) ?? .dark

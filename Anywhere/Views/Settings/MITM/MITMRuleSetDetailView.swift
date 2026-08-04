@@ -15,6 +15,7 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
 
+    @Environment(AppContainer.self) private var container
     @Environment(MITMRuleSetStore.self) private var store
 
     let ruleSet: MITMRuleSet?
@@ -295,7 +296,7 @@ struct MITMRuleSetDetailView: View {
         isUpdating = true
         Task {
             do {
-                let updated = try await store.refreshRuleSet(id: id)
+                let updated = try await container.mitmRuleSetRefresher.refresh(id: id)
                 loadState(from: updated)
                 isUpdating = false
                 updateSucceeded = true

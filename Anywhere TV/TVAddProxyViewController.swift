@@ -9,7 +9,18 @@ import UIKit
 
 class TVAddProxyViewController: UITableViewController {
 
-    private let viewModel = VPNViewModel.shared
+    private let container: AppContainer
+    private var selection: ProxySelection { container.selection }
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
 
     private enum Method: Int, CaseIterable {
         case link = 0
@@ -146,7 +157,7 @@ class TVAddProxyViewController: UITableViewController {
                 dismiss(animated: true) { [weak self] in
                     guard let self else { return }
                     let editor = TVProxyEditorViewController { config in
-                        ConfigurationStore.shared.add(config); self.viewModel.selectIfNone(config)
+                        self.container.configurationStore.add(config); self.selection.selectIfNone(config)
                     }
                     let nav = UINavigationController(rootViewController: editor)
                     nav.modalPresentationStyle = .fullScreen
@@ -216,7 +227,7 @@ class TVAddProxyViewController: UITableViewController {
         if ProxyConfiguration.canParseURL(trimmed) {
             do {
                 let config = try ProxyConfiguration.parse(url: trimmed)
-                ConfigurationStore.shared.add(config); self.viewModel.selectIfNone(config)
+                container.configurationStore.add(config); self.selection.selectIfNone(config)
                 dismiss(animated: true)
             } catch {
                 showError(error.localizedDescription)
@@ -236,7 +247,7 @@ class TVAddProxyViewController: UITableViewController {
                         total: fetchedSubscription.total,
                         expire: fetchedSubscription.expire
                     )
-                    SubscriptionStore.shared.add(subscription, configurations: fetchedSubscription.configurations)
+                    container.subscriptionStore.add(subscription, configurations: fetchedSubscription.configurations)
                     dismiss(animated: true)
                 } catch {
                     showError(error.localizedDescription)

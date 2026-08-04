@@ -11,33 +11,21 @@ import WatchConnectivity
 
 nonisolated private let logger = AnywhereLogger(category: "PhoneSession")
 
-/// Watch side of the bridge: holds the latest snapshot received from the
-/// iPhone and sends state/toggle/select requests. `sendMessage` wakes the
-/// iOS app in the background, so commands work even when it is not running.
 @MainActor
 @Observable
 final class PhoneSession: NSObject {
-    static let shared = PhoneSession()
-
     private(set) var snapshot: WatchBridge.Snapshot?
-    /// When the iPhone took `snapshot` — survives cold starts because the
-    /// stamp travels with the payload, not the delivery.
     private(set) var snapshotDate: Date?
+    
     private(set) var isActivated = false
-    /// Set when the last command failed (e.g. iPhone out of range); cleared
-    /// by the next successful exchange.
     private(set) var lastError: String?
-
-    /// Optimistic status shown between sending a toggle and the iPhone
-    /// reporting a matching transition, so the button reacts instantly.
+    
     private var pendingStatus: VPNStatus?
     @ObservationIgnored private var pendingExpiryTask: Task<Void, Never>?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
-    /// Pending deadline after a refresh found the session unreachable; if
-    /// reachability does not arrive before it fires, staleness is surfaced.
     @ObservationIgnored private var unreachableGraceTask: Task<Void, Never>?
 
-    private override init() {
+    override init() {
         super.init()
     }
 
@@ -59,22 +47,16 @@ final class PhoneSession: NSObject {
     var isTransitioning: Bool { status.isTransitioning }
 
     // MARK: - Commands
-
-    /// Asks the iPhone for a fresh snapshot.
+    
     func refresh() {
         guard isActivated else { return }
-        // Right after foregrounding, reachability lands a beat after
-        // activation — sending now is a guaranteed failure and would flash
-        // the staleness indicator. Let sessionReachabilityDidChange deliver
-        // the refresh, and only surface staleness if it never comes.
         guard WCSession.default.isReachable else {
             scheduleUnreachableGrace()
             return
         }
         send(.state)
     }
-
-    /// Marks the data stale unless reachability arrives within the grace window.
+    
     private func scheduleUnreachableGrace() {
         guard unreachableGraceTask == nil else { return }
         unreachableGraceTask = Task { [weak self] in
@@ -99,8 +81,6 @@ final class PhoneSession: NSObject {
     }
 
     func select(_ id: UUID) {
-        // Update locally so the picker reflects the tap immediately; the
-        // reply overwrites with the authoritative state.
         if var snapshot, snapshot.selectedId != id {
             snapshot.selectedId = id
             snapshot.selectedName = snapshot.sections.flatMap(\.items).first { $0.id == id }?.name
@@ -128,8 +108,7 @@ final class PhoneSession: NSObject {
     }
 
     // MARK: - Snapshot Intake
-
-    /// Decodes and applies a snapshot payload, recording when the iPhone took it.
+    
     private func apply(payload: [String: Any]) {
         guard let snapshot = WatchBridge.Snapshot(payload: payload) else { return }
         apply(snapshot, taken: payload[WatchBridge.snapshotDateKey] as? Date ?? .now)
@@ -139,9 +118,7 @@ final class PhoneSession: NSObject {
         cancelUnreachableGrace()
         snapshotDate = date
         self.snapshot = snapshot
-
-        // Drop the optimistic status once the iPhone reports the transition
-        // (or its end state) for the pending direction.
+        
         if let pending = pendingStatus {
             switch pending {
             case .connecting:
@@ -155,9 +132,7 @@ final class PhoneSession: NSObject {
 
         scheduleRefreshIfTransitioning()
     }
-
-    /// The iPhone may be suspended before it can push the final status of a
-    /// transition, so poll while one is in flight.
+    
     private func scheduleRefreshIfTransitioning() {
         refreshTask?.cancel()
         guard isTransitioning else { return }
@@ -196,15 +171,11 @@ extension PhoneSession: WCSessionDelegate {
         if let error {
             logger.warning("Session activation failed: \(error.localizedDescription)")
         }
-        // Decode here so only Sendable values hop to the main actor; the
-        // context dictionary itself stays in the delegate's region.
         let cachedContext = session.receivedApplicationContext
         let cached = WatchBridge.Snapshot(payload: cachedContext)
         let cachedDate = cachedContext[WatchBridge.snapshotDateKey] as? Date ?? .now
         Task { @MainActor in
             self.isActivated = activationState == .activated
-            // Seed from the last pushed context so the UI has data instantly
-            // on cold start, then ask for fresh state.
             if self.snapshot == nil, let cached {
                 self.apply(cached, taken: cachedDate)
             }
