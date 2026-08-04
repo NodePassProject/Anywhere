@@ -13,6 +13,7 @@ private enum ProxyType: String {
 }
 
 struct ProxiesPageView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(AppContainer.self) private var container
     @Environment(ProxySelection.self) private var selection
     @Environment(LatencyCenter.self) private var latency
@@ -79,6 +80,12 @@ struct ProxiesPageView: View {
         }
         .navigationTitle("Proxies")
         .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                CancelButton("Close") {
+                    dismiss()
+                }
+            }
+            
             ToolbarItem {
                 Button {
                     switch proxyType {

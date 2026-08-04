@@ -9,6 +9,7 @@ import SwiftUI
 import WidgetKit
 
 struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(AppSettings.self) private var settings
     @Environment(TunnelController.self) private var tunnel
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
@@ -44,6 +45,13 @@ struct SettingsView: View {
             aboutSection
         }
         .navigationTitle("Settings")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                CancelButton("Close") {
+                    dismiss()
+                }
+            }
+        }
         .onChange(of: settings.iCloudSyncEnabled) { _, newValue in
             showICloudRestartAlert = newValue != JSONBlobStore.shared.usesCloudKit
         }
