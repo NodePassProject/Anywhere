@@ -17,6 +17,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
     @State private var scrollPosition = ScrollPosition()
     @State private var snapFeedbackCount = 0
     @State private var isSettledOnDetail = false
+    @State private var hasRevealedDetail = AWCore.getDetailRevealed()
 
     init(
         revealsDetail: Bool,
@@ -34,7 +35,7 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
                 fold
                     .frame(maxWidth: .infinity, minHeight: viewport.height)
                     .overlay(alignment: .bottom) {
-                        if revealsDetail && !isSettledOnDetail {
+                        if revealsDetail && !isSettledOnDetail && !hasRevealedDetail {
                             PullUpIndicator()
                                 .transition(.blurReplace)
                         }
@@ -121,6 +122,10 @@ struct DetailRevealScrollView<Fold: View, Detail: View>: View {
     }
 
     private func snap(to page: DetailRevealPage, playFeedback: Bool) {
+        if page == .detail && !hasRevealedDetail {
+            hasRevealedDetail = true
+            AWCore.setDetailRevealed(true)
+        }
         metrics.snapInFlight = true
         withAnimation(.snappy(duration: 0.25, extraBounce: 0)) {
             isSettledOnDetail = page == .detail

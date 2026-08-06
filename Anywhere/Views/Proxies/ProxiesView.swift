@@ -1,5 +1,5 @@
 //
-//  ProxiesPageView.swift
+//  ProxiesView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -12,8 +12,7 @@ private enum ProxyType: String {
     case servers, chains
 }
 
-struct ProxiesPageView: View {
-    @Environment(\.dismiss) private var dismiss
+struct ProxiesView: View {
     @Environment(AppContainer.self) private var container
     @Environment(ProxySelection.self) private var selection
     @Environment(LatencyCenter.self) private var latency
@@ -80,12 +79,6 @@ struct ProxiesPageView: View {
         }
         .navigationTitle("Proxies")
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                CancelButton("Close") {
-                    dismiss()
-                }
-            }
-            
             ToolbarItem {
                 Button {
                     switch proxyType {

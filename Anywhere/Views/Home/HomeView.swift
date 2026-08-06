@@ -27,10 +27,10 @@ struct HomeView: View {
     
     @State private var connectionEffectsEnabled = false
     
-    @State private var showingProxiesSheet = false
+    @State private var showingProxiesView = false
+    @State private var showingSettingsView = false
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
-    @State private var showingSettingsSheet = false
 
     private var isLoading: Bool { !configStore.isLoaded }
 
@@ -41,60 +41,61 @@ struct HomeView: View {
     private var isTransitioning: Bool { tunnel.rawStatus.isTransitioning }
 
     var body: some View {
-        ZStack {
-            BackgroundGradient(isConnected: isConnected)
-                .ignoresSafeArea()
+        NavigationStack {
+            ZStack {
+                BackgroundGradient(isConnected: isConnected)
+                    .ignoresSafeArea()
 
-            Group {
-                if isConnected && Self.allowsSideBySide(contentWidth: contentWidth) {
-                    sideBySideLayout
-                } else {
-                    stackedLayout
+                Group {
+                    if isConnected && Self.allowsSideBySide(contentWidth: contentWidth) {
+                        sideBySideLayout
+                    } else {
+                        stackedLayout
+                    }
+                }
+                .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
+                .sensoryFeedback(trigger: isConnected) { _, _ in
+                    guard connectionEffectsEnabled else { return nil }
+                    return .impact
                 }
             }
-            .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
-            .sensoryFeedback(trigger: isConnected) { _, _ in
-                guard connectionEffectsEnabled else { return nil }
-                return .impact
+            .toolbar(.hidden, for: .navigationBar)
+            .colorScheme(settings.homeColorScheme.colorSceme)
+            .onGeometryChange(for: CGSize.self) { proxy in
+                proxy.size
+            } action: { size in
+                containerSize = size
             }
-        }
-        .colorScheme(settings.homeColorScheme.colorSceme)
-        .onGeometryChange(for: CGSize.self) { proxy in
-            proxy.size
-        } action: { size in
-            containerSize = size
-        }
-        .sheet(isPresented: $showingProxiesSheet) {
-            NavigationStack {
-                ProxiesPageView()
+            .navigationDestination(isPresented: $showingProxiesView) {
+                ProxiesView()
+                    .navigationTransition(.zoom(sourceID: "proxies", in: namespace))
             }
-        }
-        .sheet(isPresented: $showingAddSheet) {
-            DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
-            }
-        }
-        .sheet(isPresented: $showingManualAddSheet) {
-            ProxyEditorView { configuration in
-                configStore.add(configuration); selection.selectIfNone(configuration)
-            }
-        }
-        .sheet(isPresented: $showingSettingsSheet) {
-            NavigationStack {
+            .navigationDestination(isPresented: $showingSettingsView) {
                 SettingsView()
+                    .navigationTransition(.zoom(sourceID: "settings", in: namespace))
             }
-        }
-        .alert("VPN Error", isPresented: Binding(
-            get: { tunnel.startError != nil },
-            set: { if !$0 { tunnel.startError = nil } }
-        )) {
-            Button("OK") { tunnel.startError = nil }
-        } message: {
-            Text(tunnel.startError ?? "")
-        }
-        .onChange(of: tunnel.isManagerReady, initial: true) { _, ready in
-            guard ready, !connectionEffectsEnabled else { return }
-            Task { @MainActor in connectionEffectsEnabled = true }
+            .sheet(isPresented: $showingAddSheet) {
+                DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                }
+            }
+            .sheet(isPresented: $showingManualAddSheet) {
+                ProxyEditorView { configuration in
+                    configStore.add(configuration); selection.selectIfNone(configuration)
+                }
+            }
+            .alert("VPN Error", isPresented: Binding(
+                get: { tunnel.startError != nil },
+                set: { if !$0 { tunnel.startError = nil } }
+            )) {
+                Button("OK") { tunnel.startError = nil }
+            } message: {
+                Text(tunnel.startError ?? "")
+            }
+            .onChange(of: tunnel.isManagerReady, initial: true) { _, ready in
+                guard ready, !connectionEffectsEnabled else { return }
+                Task { @MainActor in connectionEffectsEnabled = true }
+            }
         }
     }
 
@@ -161,8 +162,10 @@ struct HomeView: View {
             HStack {
                 configurationCard
                     .matchedGeometryEffect(id: "configurationCard", in: namespace)
+                    .matchedTransitionSource(id: "proxies", in: namespace)
                 settingsButton
                     .matchedGeometryEffect(id: "settingsButton", in: namespace)
+                    .matchedTransitionSource(id: "settings", in: namespace)
             }
             .frame(maxWidth: Self.maxControlPaneWidth)
         }
@@ -192,7 +195,7 @@ struct HomeView: View {
     private var configurationCard: some View {
         ConfigurationCapsule(
             isConnected: isConnected,
-            showingProxiesSheet: $showingProxiesSheet,
+            showingProxiesPage: $showingProxiesView,
             showingAddSheet: $showingAddSheet
         )
     }
@@ -205,7 +208,7 @@ struct HomeView: View {
     
     private var settingsButton: some View {
         Button {
-            showingSettingsSheet = true
+            showingSettingsView = true
         } label: {
             ProminentCircle {
                 Image(systemName: "gearshape.fill")
@@ -306,7 +309,7 @@ private struct ConfigurationCapsule: View {
     @Environment(ConfigurationStore.self) private var configStore
 
     let isConnected: Bool
-    @Binding var showingProxiesSheet: Bool
+    @Binding var showingProxiesPage: Bool
     @Binding var showingAddSheet: Bool
 
     var body: some View {
@@ -321,16 +324,17 @@ private struct ConfigurationCapsule: View {
 
     private func selectedCapsule(_ configuration: ProxyConfiguration) -> some View {
         Button {
-            showingProxiesSheet = true
+            showingProxiesPage = true
         } label: {
             ProminentCapsule {
                 HStack {
-                    Image("anywhere")
-                        .foregroundStyle(.primary.opacity(0.7))
-                        .frame(width: 24)
-                    Text(configuration.name)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
+                    HStack {
+                        Image("anywhere")
+                            .font(.body.weight(.medium))
+                        Text(configuration.name)
+                            .font(.body.weight(.medium))
+                            .lineLimit(1)
+                    }
                     Spacer()
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption.weight(.semibold))

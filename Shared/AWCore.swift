@@ -62,6 +62,7 @@ nonisolated final class AWCore {
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let chainLatencyResults = "chainLatencyResults"
+        static let detailRevealed = "detailRevealed"
         static let echDNSDoHURL = "echDNSDoHURL"
         static let echDNSMode = "echDNSMode"
         static let echDNSPlainServer = "echDNSPlainServer"
@@ -131,6 +132,14 @@ nonisolated final class AWCore {
 
     static func setOnboardingCompleted(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.onboardingCompleted)
+    }
+
+    static func getDetailRevealed() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.detailRevealed)
+    }
+
+    static func setDetailRevealed(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.detailRevealed)
     }
 
     static func getProxiesPageProxyType() -> String? {
