@@ -59,7 +59,6 @@ struct HomeView: View {
                     return .impact
                 }
             }
-            .toolbar(.hidden, for: .navigationBar)
             .colorScheme(settings.homeColorScheme.colorSceme)
             .onGeometryChange(for: CGSize.self) { proxy in
                 proxy.size
