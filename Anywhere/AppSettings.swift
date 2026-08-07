@@ -100,33 +100,6 @@ final class AppSettings {
         set { proxyMode = newValue ? .global : .rule }
     }
     
-    var alwaysTrustCellular: Bool {
-        didSet {
-            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
-            if alwaysTrustCellular, alwaysUntrustCellular {
-                alwaysUntrustCellular = false
-            }
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-    
-    var alwaysUntrustCellular: Bool {
-        didSet {
-            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
-            if alwaysUntrustCellular, alwaysTrustCellular {
-                alwaysTrustCellular = false
-            }
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-    
-    var trustedSSIDs: [String] {
-        didSet {
-            AWCore.setTrustedSSIDs(trustedSSIDs)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-    
     var blockUDP: Bool {
         didSet {
             AWCore.setBlockUDP(blockUDP)
@@ -151,6 +124,33 @@ final class AppSettings {
     var preventDNSLeak: Bool {
         didSet {
             AWCore.setPreventDNSLeak(preventDNSLeak)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var alwaysTrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysTrustCellular(alwaysTrustCellular)
+            if alwaysTrustCellular, alwaysUntrustCellular {
+                alwaysUntrustCellular = false
+            }
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var alwaysUntrustCellular: Bool {
+        didSet {
+            AWCore.setAlwaysUntrustCellular(alwaysUntrustCellular)
+            if alwaysUntrustCellular, alwaysTrustCellular {
+                alwaysTrustCellular = false
+            }
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var trustedSSIDs: [String] {
+        didSet {
+            AWCore.setTrustedSSIDs(trustedSSIDs)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
     }

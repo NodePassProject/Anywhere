@@ -280,6 +280,38 @@ nonisolated final class AWCore {
     static func setProxyMode(_ proxyMode: ProxyMode) {
         userDefaults.set(proxyMode.rawValue, forKey: UserDefaultsKey.proxyMode)
     }
+    
+    static func getBlockUDP() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
+    }
+
+    static func setBlockUDP(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
+    }
+
+    static func getQUICPolicy() -> QUICPolicy {
+        userDefaults.string(forKey: UserDefaultsKey.quicPolicy).flatMap(QUICPolicy.init(rawValue:)) ?? .blocked
+    }
+
+    static func setQUICPolicy(_ value: QUICPolicy) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
+    }
+
+    static func getBlockWebRTC() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockWebRTC)
+    }
+
+    static func setBlockWebRTC(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockWebRTC)
+    }
+
+    static func getPreventDNSLeak() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.preventDNSLeak)
+    }
+
+    static func setPreventDNSLeak(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
+    }
 
     static func getBypassCountryCode() -> String {
         userDefaults.string(forKey: UserDefaultsKey.bypassCountryCode)!
@@ -335,38 +367,6 @@ nonisolated final class AWCore {
 
     static func setAlwaysUntrustCellular(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.alwaysUntrustCellular)
-    }
-    
-    static func getBlockUDP() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
-    }
-
-    static func setBlockUDP(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
-    }
-
-    static func getQUICPolicy() -> QUICPolicy {
-        userDefaults.string(forKey: UserDefaultsKey.quicPolicy).flatMap(QUICPolicy.init(rawValue:)) ?? .blocked
-    }
-
-    static func setQUICPolicy(_ value: QUICPolicy) {
-        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
-    }
-
-    static func getBlockWebRTC() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.blockWebRTC)
-    }
-
-    static func setBlockWebRTC(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.blockWebRTC)
-    }
-
-    static func getPreventDNSLeak() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.preventDNSLeak)
-    }
-
-    static func setPreventDNSLeak(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
     }
 
     static func getExperimentalEnabled() -> Bool {

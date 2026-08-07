@@ -12,13 +12,11 @@ enum SettingsItem: String {
     case personalization
     case alwaysOn
     case globalMode
-    case adBlocking
-    case countryBypass
+    case purify
     case routingRules
     case allowInsecure
     case trustedCertificates
     case trustedNetwork
-    case purify
     case mitm
     case logs
     case requests
@@ -29,13 +27,11 @@ enum SettingsItem: String {
         case .personalization: "Personalization"
         case .alwaysOn: "Always On"
         case .globalMode: "Global Mode"
-        case .adBlocking: "AD Blocking"
-        case .countryBypass: "Country Bypass"
+        case .purify: "Purify"
         case .routingRules: "Routing Rules"
         case .allowInsecure: "Allow Insecure"
         case .trustedCertificates: "Trusted Certificates"
         case .trustedNetwork: "Trusted Network"
-        case .purify: "Purify"
         case .mitm: "MITM"
         case .logs: "Logs"
         case .requests: "Requests"
@@ -48,13 +44,11 @@ enum SettingsItem: String {
         case .personalization: "paintpalette.fill"
         case .alwaysOn: "poweron"
         case .globalMode: "arrow.merge"
-        case .adBlocking: "shield.checkered"
-        case .countryBypass: "globe.americas.fill"
+        case .purify: "drop.fill"
         case .routingRules: "arrow.triangle.branch"
         case .allowInsecure: "exclamationmark.shield.fill"
         case .trustedCertificates: "checkmark.seal.fill"
         case .trustedNetwork: "wifi"
-        case .purify: "drop.fill"
         case .mitm: "key.horizontal.fill"
         case .logs:
             if #available(iOS 18.4, *) {
@@ -79,13 +73,11 @@ enum SettingsItem: String {
         case .personalization: .pink
         case .alwaysOn: .green
         case .globalMode: .orange
-        case .adBlocking: .red
-        case .countryBypass: .blue
+        case .purify: .blue
         case .routingRules: .purple
         case .allowInsecure: .red
         case .trustedCertificates: .green
         case .trustedNetwork: .blue
-        case .purify: .blue
         case .mitm: .teal
         case .logs: .blue
         case .requests: .blue

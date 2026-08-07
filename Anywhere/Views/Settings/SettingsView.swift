@@ -14,17 +14,6 @@ struct SettingsView: View {
     @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
 
     @State private var showICloudRestartAlert = false
-    @State private var showInsecureAlert = false
-
-    private var adBlockEnabled: Binding<Bool> {
-        Binding(
-            get: { routingRuleSetStore.adBlockRuleSet?.assignedConfigurationId == "REJECT" },
-            set: { enabled in
-                guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
-                routingRuleSetStore.updateAssignment(adBlockRuleSet, configurationId: enabled ? "REJECT" : nil)
-            }
-        )
-    }
 
     var body: some View {
         @Bindable var appSettings = appSettings
@@ -64,19 +53,13 @@ struct SettingsView: View {
                     ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
                 }
                 if !appSettings.isGlobalMode {
-                    Toggle(isOn: adBlockEnabled) {
-                        SettingsItem.adBlocking.label
-                    }
-                    Picker(selection: $routingRuleSetStore.bypassCountryCode) {
-                        Text("Disable").tag("")
-                        ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
-                            Text(countryLabel(for: code)).tag(code)
-                        }
+                    NavigationLink {
+                        PurifySettingsView()
                     } label: {
-                        SettingsItem.countryBypass.label
+                        SettingsItem.purify.label
                     }
                     NavigationLink {
-                        RuleSetListView(ruleSetStore: routingRuleSetStore)
+                        RuleSetListView()
                     } label: {
                         SettingsItem.routingRules.label
                     }
@@ -84,19 +67,6 @@ struct SettingsView: View {
             }
             
             Section {
-                Toggle(isOn: Binding(
-                    get: { appSettings.allowInsecure },
-                    set: { newValue in
-                        if newValue {
-                            showInsecureAlert = true
-                        } else {
-                            appSettings.allowInsecure = false
-                        }
-                    }
-                )) {
-                    SettingsItem.allowInsecure.label
-                }
-                .tint(.red)
                 NavigationLink {
                     TrustedCertificatesView()
                 } label: {
@@ -110,11 +80,6 @@ struct SettingsView: View {
             }
             
             Section {
-                NavigationLink {
-                    PurifySettingsView()
-                } label: {
-                    SettingsItem.purify.label
-                }
                 NavigationLink {
                     MITMSettingsView()
                 } label: {
@@ -176,24 +141,5 @@ struct SettingsView: View {
         } message: {
             Text("Restart Anywhere for the change to take effect.")
         }
-        .alert("Allow Insecure", isPresented: $showInsecureAlert) {
-            Button("Allow Anyway", role: .destructive) {
-                appSettings.allowInsecure = true
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
-        }
-    }
-
-    private func flag(for countryCode: String) -> String {
-        String(countryCode.unicodeScalars.compactMap {
-            UnicodeScalar(127397 + $0.value)
-        }.map(Character.init))
-    }
-
-    private func countryLabel(for code: String) -> String {
-        let name = Locale.current.localizedString(forRegionCode: code) ?? code
-        return "\(flag(for: code)) \(name)"
     }
 }

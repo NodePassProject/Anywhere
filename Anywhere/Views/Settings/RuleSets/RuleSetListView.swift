@@ -17,15 +17,8 @@ struct RuleSetListView: View {
 
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
-    private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "arrs") ?? .data]
-
-    @State var builtInServiceRuleSets: [RoutingRuleSet]
-    @State var customRuleSets: [CustomRoutingRuleSet]
-
-    init(ruleSetStore: RoutingRuleSetStore) {
-        _builtInServiceRuleSets = State(initialValue: ruleSetStore.builtInServiceRuleSets)
-        _customRuleSets = State(initialValue: ruleSetStore.customRuleSets)
-    }
+    @State var builtInServiceRuleSets: [RoutingRuleSet] = []
+    @State var customRuleSets: [CustomRoutingRuleSet] = []
 
     @State private var showAddSheet = false
     @State private var newRuleSetName = ""
@@ -40,7 +33,18 @@ struct RuleSetListView: View {
     @State private var showResetConfirmAlert = false
 
     var body: some View {
+        @Bindable var ruleSetStore = ruleSetStore
         List {
+            Section {
+                Picker(selection: $ruleSetStore.bypassCountryCode) {
+                    Text("Disable").tag("")
+                    ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
+                        Text(countryLabel(for: code)).tag(code)
+                    }
+                } label: {
+                    TextWithColorfulIcon(title: "Country Bypass", comment: nil, systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                }
+            }
             Section {
                 ForEach($builtInServiceRuleSets) { $ruleSet in
                     if !ruleSet.isCustom {
@@ -49,7 +53,7 @@ struct RuleSetListView: View {
                 }
             }
             if !customRuleSets.isEmpty {
-                Section("Custom") {
+                Section {
                     ForEach(customRuleSets) { customRuleSet in
                         customRuleSetLink(for: customRuleSet)
                     }
@@ -122,7 +126,7 @@ struct RuleSetListView: View {
         }
         .fileImporter(
             isPresented: $showFileImporter,
-            allowedContentTypes: Self.importAllowedContentTypes
+            allowedContentTypes: [UTType(filenameExtension: "arrs") ?? .data]
         ) { result in
             handleFileImport(result)
         }
@@ -278,6 +282,17 @@ struct RuleSetListView: View {
                 subscribeError = error.localizedDescription
             }
         }
+    }
+    
+    private func flag(for countryCode: String) -> String {
+        String(countryCode.unicodeScalars.compactMap {
+            UnicodeScalar(127397 + $0.value)
+        }.map(Character.init))
+    }
+
+    private func countryLabel(for code: String) -> String {
+        let name = Locale.current.localizedString(forRegionCode: code) ?? code
+        return "\(flag(for: code)) \(name)"
     }
     
     @ViewBuilder

@@ -8,16 +8,34 @@
 import SwiftUI
 
 struct TrustedCertificatesView: View {
-    @Environment(CertificateStore.self) private var store
-
+    @Environment(AppSettings.self) private var appSettings
+    @Environment(CertificateStore.self) private var certificateStore
+    
     @State private var showAddAlert = false
     @State private var newFingerprint = ""
     @State private var showError = false
     @State private var errorMessage = ""
-
+    @State private var showInsecureAlert = false
+    
     var body: some View {
         List {
-            if store.fingerprints.isEmpty {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { appSettings.allowInsecure },
+                    set: { newValue in
+                        if newValue {
+                            showInsecureAlert = true
+                        } else {
+                            appSettings.allowInsecure = false
+                        }
+                    }
+                )) {
+                    TextWithColorfulIcon(title: "Allow Insecure", comment: nil, systemName: "exclamationmark.shield.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                }
+                .tint(.red)
+            }
+            
+            if certificateStore.fingerprints.isEmpty {
                 Section {
                     Text("No trusted certificates")
                         .foregroundStyle(.secondary)
@@ -25,7 +43,7 @@ struct TrustedCertificatesView: View {
             }
 
             Section {
-                ForEach(store.fingerprints, id: \.self) { fingerprint in
+                ForEach(certificateStore.fingerprints, id: \.self) { fingerprint in
                     Text(fingerprint)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -36,14 +54,14 @@ struct TrustedCertificatesView: View {
                                 Label("Copy", systemImage: "doc.on.doc")
                             }
                             Button(role: .destructive) {
-                                store.remove(fingerprint)
+                                certificateStore.remove(fingerprint)
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
                 }
                 .onDelete { offsets in
-                    store.remove(atOffsets: offsets)
+                    certificateStore.remove(atOffsets: offsets)
                 }
             }
         }
@@ -58,13 +76,21 @@ struct TrustedCertificatesView: View {
                 }
             }
         }
+        .alert("Allow Insecure", isPresented: $showInsecureAlert) {
+            Button("Allow Anyway", role: .destructive) {
+                appSettings.allowInsecure = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
+        }
         .alert(String(localized: "Add Certificate"), isPresented: $showAddAlert) {
             TextField("SHA-256 Fingerprint", text: $newFingerprint)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
             Button("Add") {
                 let trimmed = newFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !store.add(trimmed) {
+                if !certificateStore.add(trimmed) {
                     errorMessage = String(localized: "Invalid fingerprint. Must be a 64-character hex string, or it already exists.")
                     showError = true
                 }

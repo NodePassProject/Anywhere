@@ -172,7 +172,7 @@ struct OnboardingView: View {
                 .foregroundStyle(.white.opacity(0.9))
 
             VStack(spacing: 8) {
-                Text("AD Blocking")
+                Text("Block Advertisements")
                     .font(.title.bold())
                     .foregroundStyle(.white)
                 Text("Block ads and trackers at the network level for a cleaner browsing experience.")
@@ -192,7 +192,7 @@ struct OnboardingView: View {
                         .font(.title2)
                         .foregroundStyle(adBlockEnabled ? .green : .white.opacity(0.5))
                         .contentTransition(.symbolEffect(.replace))
-                    Text("Enable AD Blocking")
+                    Text("Block Advertisements")
                         .font(.body.weight(.medium))
                         .foregroundStyle(.white)
                     Spacer()
