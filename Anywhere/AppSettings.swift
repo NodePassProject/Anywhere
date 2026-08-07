@@ -155,6 +155,17 @@ final class AppSettings {
         }
     }
     
+    var hideVPNIcon: Bool {
+        didSet {
+            AWCore.setHideVPNIcon(hideVPNIcon)
+            if hideVPNIcon, advertiseIPv6ToApps {
+                advertiseIPv6ToApps = false
+            } else {
+                AWNotificationCenter.notifyTunnelSettingsChanged()
+            }
+        }
+    }
+    
     var reflectionAddresses: [String] {
         didSet {
             AWCore.setReflectionAddresses(reflectionAddresses)
@@ -166,17 +177,6 @@ final class AppSettings {
         didSet {
             AWCore.setReflectionEnabled(reflectionEnabled)
             AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-    
-    var hideVPNIcon: Bool {
-        didSet {
-            AWCore.setHideVPNIcon(hideVPNIcon)
-            if hideVPNIcon, advertiseIPv6ToApps {
-                advertiseIPv6ToApps = false
-            } else {
-                AWNotificationCenter.notifyTunnelSettingsChanged()
-            }
         }
     }
 

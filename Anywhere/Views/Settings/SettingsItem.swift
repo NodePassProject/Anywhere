@@ -11,7 +11,6 @@ enum SettingsItem: String {
     case iCloudSync
     case personalization
     case alwaysOn
-    case tunnelScope
     case globalMode
     case adBlocking
     case countryBypass
@@ -20,7 +19,6 @@ enum SettingsItem: String {
     case trustedCertificates
     case trustedNetwork
     case purify
-    case reflection
     case mitm
     case logs
     case requests
@@ -30,7 +28,6 @@ enum SettingsItem: String {
         case .iCloudSync: "iCloud Sync"
         case .personalization: "Personalization"
         case .alwaysOn: "Always On"
-        case .tunnelScope: "Tunnel Scope"
         case .globalMode: "Global Mode"
         case .adBlocking: "AD Blocking"
         case .countryBypass: "Country Bypass"
@@ -39,7 +36,6 @@ enum SettingsItem: String {
         case .trustedCertificates: "Trusted Certificates"
         case .trustedNetwork: "Trusted Network"
         case .purify: "Purify"
-        case .reflection: "Reflection"
         case .mitm: "MITM"
         case .logs: "Logs"
         case .requests: "Requests"
@@ -51,7 +47,6 @@ enum SettingsItem: String {
         case .iCloudSync: "icloud.fill"
         case .personalization: "paintpalette.fill"
         case .alwaysOn: "poweron"
-        case .tunnelScope: "scope"
         case .globalMode: "arrow.merge"
         case .adBlocking: "shield.checkered"
         case .countryBypass: "globe.americas.fill"
@@ -60,7 +55,6 @@ enum SettingsItem: String {
         case .trustedCertificates: "checkmark.seal.fill"
         case .trustedNetwork: "wifi"
         case .purify: "drop.fill"
-        case .reflection: "arrow.turn.up.left"
         case .mitm: "key.horizontal.fill"
         case .logs:
             if #available(iOS 18.4, *) {
@@ -84,7 +78,6 @@ enum SettingsItem: String {
         case .iCloudSync: .white
         case .personalization: .pink
         case .alwaysOn: .green
-        case .tunnelScope: .blue
         case .globalMode: .orange
         case .adBlocking: .red
         case .countryBypass: .blue
@@ -93,8 +86,7 @@ enum SettingsItem: String {
         case .trustedCertificates: .green
         case .trustedNetwork: .blue
         case .purify: .blue
-        case .reflection: .pink
-        case .mitm: .mint
+        case .mitm: .teal
         case .logs: .blue
         case .requests: .blue
         }

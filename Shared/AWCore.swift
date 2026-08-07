@@ -273,54 +273,6 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
     }
     
-    static func getTunnelIncludeAllNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
-    }
-
-    static func setTunnelIncludeAllNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
-    }
-
-    static func getTunnelIncludeLocalNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
-    }
-
-    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
-    }
-
-    static func getTunnelIncludeAPNs() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
-    }
-
-    static func setTunnelIncludeAPNs(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
-    }
-
-    static func getTunnelIncludeCellularServices() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
-    }
-
-    static func setTunnelIncludeCellularServices(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
-    }
-
-    static func getTunnelIncludedRoutes() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
-    }
-
-    static func setTunnelIncludedRoutes(_ routes: [String]) {
-        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
-    }
-
-    static func getTunnelExcludedRoutes() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
-    }
-
-    static func setTunnelExcludedRoutes(_ routes: [String]) {
-        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
-    }
-    
     static func getProxyMode() -> ProxyMode {
         ProxyMode(rawValue: userDefaults.string(forKey: UserDefaultsKey.proxyMode)!) ?? .rule
     }
@@ -384,37 +336,13 @@ nonisolated final class AWCore {
     static func setAlwaysUntrustCellular(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.alwaysUntrustCellular)
     }
-
-    static func getExperimentalEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.experimentalEnabled)
+    
+    static func getBlockUDP() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
     }
 
-    static func setExperimentalEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.experimentalEnabled)
-    }
-
-    static func getHideVPNIcon() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.hideVPNIcon)
-    }
-
-    static func setHideVPNIcon(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
-    }
-
-    static func getReflectionEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.reflectionEnabled)
-    }
-
-    static func setReflectionEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.reflectionEnabled)
-    }
-
-    static func getReflectionAddresses() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.reflectionAddresses) ?? []
-    }
-
-    static func setReflectionAddresses(_ addresses: [String]) {
-        userDefaults.set(addresses, forKey: UserDefaultsKey.reflectionAddresses)
+    static func setBlockUDP(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
     }
 
     static func getQUICPolicy() -> QUICPolicy {
@@ -423,14 +351,6 @@ nonisolated final class AWCore {
 
     static func setQUICPolicy(_ value: QUICPolicy) {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
-    }
-    
-    static func getBlockUDP() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.blockUDP)
-    }
-
-    static func setBlockUDP(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.blockUDP)
     }
 
     static func getBlockWebRTC() -> Bool {
@@ -447,6 +367,86 @@ nonisolated final class AWCore {
 
     static func setPreventDNSLeak(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.preventDNSLeak)
+    }
+
+    static func getExperimentalEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.experimentalEnabled)
+    }
+
+    static func setExperimentalEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.experimentalEnabled)
+    }
+
+    static func getHideVPNIcon() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.hideVPNIcon)
+    }
+
+    static func setHideVPNIcon(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
+    }
+    
+    static func getTunnelIncludeAllNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func setTunnelIncludeAllNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func getTunnelIncludeLocalNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    }
+
+    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    }
+
+    static func getTunnelIncludeAPNs() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    }
+
+    static func setTunnelIncludeAPNs(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    }
+
+    static func getTunnelIncludeCellularServices() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    }
+
+    static func setTunnelIncludeCellularServices(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    }
+
+    static func getTunnelIncludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelIncludedRoutes) ?? []
+    }
+
+    static func setTunnelIncludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelIncludedRoutes)
+    }
+
+    static func getTunnelExcludedRoutes() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.tunnelExcludedRoutes) ?? []
+    }
+
+    static func setTunnelExcludedRoutes(_ routes: [String]) {
+        userDefaults.set(routes, forKey: UserDefaultsKey.tunnelExcludedRoutes)
+    }
+
+    static func getReflectionEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.reflectionEnabled)
+    }
+
+    static func setReflectionEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.reflectionEnabled)
+    }
+
+    static func getReflectionAddresses() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.reflectionAddresses) ?? []
+    }
+
+    static func setReflectionAddresses(_ addresses: [String]) {
+        userDefaults.set(addresses, forKey: UserDefaultsKey.reflectionAddresses)
     }
 
     static func getSubscriptionDNSMode() -> DNSMode {

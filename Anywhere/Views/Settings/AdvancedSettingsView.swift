@@ -15,14 +15,14 @@ struct AdvancedSettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         List {
-            Section("App") {
+            Section {
                 Toggle("Experimental Features", isOn: $settings.experimentalEnabled)
                 NavigationLink("Public Beta") {
                     JoinBetaView()
                 }
             }
 
-            Section("VPN") {
+            Section {
                 Toggle("Hide VPN Icon", isOn: Binding(
                     get: { settings.hideVPNIcon },
                     set: { newValue in
@@ -33,9 +33,18 @@ struct AdvancedSettingsView: View {
                         }
                     }
                 ))
+                NavigationLink("Tunnel Scope") {
+                    TunnelScopeSettingsView()
+                }
+            }
+            
+            Section {
+                NavigationLink("Reflection") {
+                    ReflectionSettingsView()
+                }
             }
 
-            Section("Network") {
+            Section {
                 NavigationLink("DNS") {
                     DNSSettingsView()
                 }
@@ -44,7 +53,7 @@ struct AdvancedSettingsView: View {
                 }
             }
 
-            Section("Other") {
+            Section {
                 // Remnawave is a self-hosting proxy panel
                 Toggle("Remnawave HWID", isOn: $settings.remnawaveHWIDEnabled)
             }
