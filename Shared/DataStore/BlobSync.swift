@@ -127,7 +127,6 @@ nonisolated enum CloudBlobSync {
         remoteChangeObserver = NotificationCenter.default.addObserver(
             forName: .NSPersistentStoreRemoteChange, object: nil, queue: nil
         ) { _ in
-            logger.info("[iCloud] Store changed remotely; reloading synced stores")
             Task { @MainActor in scheduleRefresh() }
         }
         Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
@@ -140,6 +139,7 @@ nonisolated enum CloudBlobSync {
         debounce = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
+            logger.info("[iCloud] Store changed remotely; reloading synced stores")
             await onRemoteChange?()
             Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
         }

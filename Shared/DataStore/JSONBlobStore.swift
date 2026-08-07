@@ -39,10 +39,9 @@ nonisolated final class JSONBlobStore: Sendable {
     }
 
     let usesCloudKit: Bool
-
-    private let context: Mutex<ModelContext?>
-    private let container: ModelContainer?
     
+    private let store: Mutex<ModelContainer?>
+
     private let deviceID = AWCore.getSyncDeviceID()
     
     private struct Known {
@@ -70,9 +69,8 @@ nonisolated final class JSONBlobStore: Sendable {
     }
 
     private init(container: ModelContainer?, usesCloudKit: Bool) {
-        self.container = container
         self.usesCloudKit = usesCloudKit
-        context = Mutex(container.map { ModelContext($0) })
+        store = Mutex(container)
     }
 
     private convenience init() {
@@ -95,10 +93,22 @@ nonisolated final class JSONBlobStore: Sendable {
     private static func makeContainer(cloudKit: Bool) -> ModelContainer? {
         let database: ModelConfiguration.CloudKitDatabase =
             cloudKit ? .private(AWCore.Identifier.iCloudContainer) : .none
-        let config = ModelConfiguration(
+        let config: ModelConfiguration
+        #if os(tvOS)
+        config = ModelConfiguration(
             groupContainer: .identifier(AWCore.Identifier.appGroupSuite),
             cloudKitDatabase: database
         )
+        #else
+        if let url = relocatedStoreURL() {
+            config = ModelConfiguration(url: url, cloudKitDatabase: database)
+        } else {
+            config = ModelConfiguration(
+                groupContainer: .identifier(AWCore.Identifier.appGroupSuite),
+                cloudKitDatabase: database
+            )
+        }
+        #endif
         do {
             return try ModelContainer(for: JSONBlob.self, configurations: config)
         } catch {
@@ -106,6 +116,54 @@ nonisolated final class JSONBlobStore: Sendable {
             return nil
         }
     }
+
+    #if !os(tvOS)
+    private static func relocatedStoreURL() -> URL? {
+        let fileManager = FileManager.default
+        let directory = URL.applicationSupportDirectory
+        let storeURL = directory.appendingPathComponent("default.store")
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try migrateLegacyStoreIfNeeded(to: storeURL, in: directory, fileManager: fileManager)
+            return storeURL
+        } catch {
+            try? fileManager.removeItem(at: storeURL)
+            logger.report("Failed to migrate JSONBlob store", error: error)
+            return nil
+        }
+    }
+
+    // MARK: - Legacy group-container store migration
+
+    private static func migrateLegacyStoreIfNeeded(to storeURL: URL, in directory: URL, fileManager: FileManager) throws {
+        guard !fileManager.fileExists(atPath: storeURL.path),
+              let oldDirectory = legacyStoreDirectory(fileManager) else { return }
+        let related = try fileManager.contentsOfDirectory(at: oldDirectory, includingPropertiesForKeys: nil)
+            .filter { item in
+                let name = item.lastPathComponent
+                return name.hasPrefix("default.store") || name.hasPrefix("default_") || name == ".default_SUPPORT"
+            }
+            .sorted { ($0.lastPathComponent == "default.store" ? 1 : 0) < ($1.lastPathComponent == "default.store" ? 1 : 0) }
+        for item in related {
+            let destination = directory.appendingPathComponent(item.lastPathComponent)
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+            try fileManager.copyItem(at: item, to: destination)
+        }
+        logger.info("Migrated JSONBlob store out of the app group container")
+    }
+
+    private static func legacyStoreDirectory(_ fileManager: FileManager) -> URL? {
+        guard let group = fileManager.containerURL(
+            forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite
+        ) else { return nil }
+        return [
+            group.appendingPathComponent("Library/Application Support", isDirectory: true),
+            group,
+        ].first { fileManager.fileExists(atPath: $0.appendingPathComponent("default.store").path) }
+    }
+    #endif
 
     // MARK: - Public API
     
@@ -128,8 +186,9 @@ nonisolated final class JSONBlobStore: Sendable {
     }
 
     func load(_ key: Key) -> Data? {
-        context.withLock { context in
-            guard let context else { return nil }
+        store.withLock { container in
+            guard let container else { return nil }
+            let context = ModelContext(container)
             let raw = key.rawValue
             let predicate = #Predicate<JSONBlob> { $0.key == raw }
             let rows = (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
@@ -153,8 +212,9 @@ nonisolated final class JSONBlobStore: Sendable {
     func reconcile() {
         guard let resolver = Self.mergeResolver.withLock({ $0 }),
               let probe = Self.decodeProbe.withLock({ $0 }) else { return }
-        context.withLock { context in
-            guard let context else { return }
+        store.withLock { container in
+            guard let container else { return }
+            let context = ModelContext(container)
             var didChange = false
             for key in Key.allCases {
                 let raw = key.rawValue
@@ -190,8 +250,9 @@ nonisolated final class JSONBlobStore: Sendable {
     }
 
     func save(_ key: Key, data: Data) {
-        context.withLock { context in
-            guard let context else { return }
+        store.withLock { container in
+            guard let container else { return }
+            let context = ModelContext(container)
             let raw = key.rawValue
             let predicate = #Predicate<JSONBlob> { $0.key == raw }
             let descriptor = FetchDescriptor<JSONBlob>(
