@@ -91,13 +91,17 @@ final class PhoneSession: NSObject {
 
     private func send(_ request: WatchBridge.Request) {
         guard let payload = request.payload else { return }
-        WCSession.default.sendMessage(payload) { [weak self] reply in
+        WCSession.default.sendMessage(payload) { @Sendable [weak self] reply in
+            let snapshot = WatchBridge.Snapshot(payload: reply)
+            let date = reply[WatchBridge.snapshotDateKey] as? Date ?? .now
             Task { @MainActor in
                 guard let self else { return }
                 self.lastError = nil
-                self.apply(payload: reply)
+                if let snapshot {
+                    self.apply(snapshot, taken: date)
+                }
             }
-        } errorHandler: { [weak self] error in
+        } errorHandler: { @Sendable [weak self] error in
             logger.warning("Watch request failed: \(error.localizedDescription)")
             Task { @MainActor in
                 guard let self else { return }
@@ -108,11 +112,6 @@ final class PhoneSession: NSObject {
     }
 
     // MARK: - Snapshot Intake
-    
-    private func apply(payload: [String: Any]) {
-        guard let snapshot = WatchBridge.Snapshot(payload: payload) else { return }
-        apply(snapshot, taken: payload[WatchBridge.snapshotDateKey] as? Date ?? .now)
-    }
 
     private func apply(_ snapshot: WatchBridge.Snapshot, taken date: Date) {
         cancelUnreachableGrace()
