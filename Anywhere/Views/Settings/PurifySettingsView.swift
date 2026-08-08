@@ -9,17 +9,6 @@ import SwiftUI
 
 struct PurifySettingsView: View {
     @Environment(AppSettings.self) private var appSettings
-    @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
-    
-    private var adBlockEnabled: Binding<Bool> {
-        Binding(
-            get: { routingRuleSetStore.adBlockRuleSet?.assignedConfigurationId == "REJECT" },
-            set: { enabled in
-                guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
-                routingRuleSetStore.updateAssignment(adBlockRuleSet, configurationId: enabled ? "REJECT" : nil)
-            }
-        )
-    }
     
     var body: some View {
         @Bindable var appSettings = appSettings
@@ -38,9 +27,6 @@ struct PurifySettingsView: View {
             } footer: {
                 Text("QUIC connections through proxies may cause instability and increased wait time.")
             }
-            
-            Toggle("Block Advertisements", isOn: adBlockEnabled)
-            
             Section {
                 Toggle("Block WebRTC", isOn: $appSettings.blockWebRTC)
                     .disabled(appSettings.blockUDP)

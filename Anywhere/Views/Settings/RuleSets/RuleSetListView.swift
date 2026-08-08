@@ -10,13 +10,12 @@ import UniformTypeIdentifiers
 
 struct RuleSetListView: View {
     @Environment(\.editMode) private var editMode
-    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
-    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
+    @Environment(ConfigurationStore.self) private var configurationStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
-    private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
-
+    @State var adBlockEnabled = false
     @State var builtInServiceRuleSets: [RoutingRuleSet] = []
     @State var customRuleSets: [CustomRoutingRuleSet] = []
 
@@ -31,18 +30,29 @@ struct RuleSetListView: View {
     @State private var subscribeError: String?
 
     @State private var showResetConfirmAlert = false
+    
+    private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
     var body: some View {
-        @Bindable var ruleSetStore = ruleSetStore
+        @Bindable var routingRuleSetStore = routingRuleSetStore
         List {
             Section {
-                Picker(selection: $ruleSetStore.bypassCountryCode) {
+                Picker(selection: $routingRuleSetStore.bypassCountryCode) {
                     Text("Disable").tag("")
                     ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
                         Text(countryLabel(for: code)).tag(code)
                     }
                 } label: {
                     TextWithColorfulIcon(title: "Country Bypass", comment: nil, systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                }
+            }
+            Section {
+                Toggle(isOn: $adBlockEnabled) {
+                    TextWithColorfulIcon(title: "Block Advertisements", comment: nil, systemName: "horn.blast.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                }
+                .onChange(of: adBlockEnabled) { _, newValue in
+                    guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
+                    routingRuleSetStore.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
                 }
             }
             Section {
@@ -111,7 +121,7 @@ struct RuleSetListView: View {
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
-                    ruleSetStore.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
+                    routingRuleSetStore.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
                 }
             }
         }
@@ -121,8 +131,9 @@ struct RuleSetListView: View {
             }
         }
         .onAppear {
-            builtInServiceRuleSets = ruleSetStore.builtInServiceRuleSets
-            customRuleSets = ruleSetStore.customRuleSets
+            adBlockEnabled = routingRuleSetStore.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+            builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
+            customRuleSets = routingRuleSetStore.customRuleSets
         }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -135,8 +146,8 @@ struct RuleSetListView: View {
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                _ = ruleSetStore.addCustomRuleSet(name: name)
-                customRuleSets = ruleSetStore.customRuleSets
+                _ = routingRuleSetStore.addCustomRuleSet(name: name)
+                customRuleSets = routingRuleSetStore.customRuleSets
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
@@ -171,8 +182,8 @@ struct RuleSetListView: View {
         }
         .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
             Button("Reset", role: .destructive) {
-                ruleSetStore.resetAssignments()
-                builtInServiceRuleSets = ruleSetStore.builtInServiceRuleSets
+                routingRuleSetStore.resetAssignments()
+                builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -181,7 +192,7 @@ struct RuleSetListView: View {
     }
     
     private func save() {
-        let store = ruleSetStore
+        let store = routingRuleSetStore
         let localIds = customRuleSets.map(\.id)
         guard localIds != store.customRuleSets.map(\.id) else { return }
         
@@ -244,8 +255,8 @@ struct RuleSetListView: View {
                 ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
                 : parsed.name
             let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules)
-            ruleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
-            customRuleSets = ruleSetStore.customRuleSets
+            routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
+            customRuleSets = routingRuleSetStore.customRuleSets
         } catch {
             importError = error.localizedDescription
         }
@@ -276,8 +287,8 @@ struct RuleSetListView: View {
                     ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
                     : parsed.name
                 let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
-                ruleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
-                customRuleSets = ruleSetStore.customRuleSets
+                routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
+                customRuleSets = routingRuleSetStore.customRuleSets
             } catch {
                 subscribeError = error.localizedDescription
             }
@@ -301,7 +312,7 @@ struct RuleSetListView: View {
             Text("Default").tag(nil as String?)
             Text("DIRECT").tag("DIRECT" as String?)
             Text("REJECT").tag("REJECT" as String?)
-            ForEach(configStore.standalonePickerItems) { item in
+            ForEach(configurationStore.standalonePickerItems) { item in
                 Text(item.name).tag(item.id.uuidString as String?)
             }
             if !chainStore.pickerItems.isEmpty {
@@ -338,7 +349,7 @@ struct RuleSetListView: View {
                     Text("DIRECT")
                 } else if assignedId == "REJECT" {
                     Text("REJECT")
-                } else if let config = configStore.configurations.first(where: { $0.id.uuidString == assignedId }) {
+                } else if let config = configurationStore.configurations.first(where: { $0.id.uuidString == assignedId }) {
                     Text(config.name)
                 } else if let chain = chainStore.chains.first(where: { $0.id.uuidString == assignedId }) {
                     Text(chain.name)
