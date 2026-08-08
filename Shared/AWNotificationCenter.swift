@@ -8,6 +8,7 @@
 import Foundation
 
 actor AWNotificationCenter {
+    
     // MARK: - Darwin Notification Names
 
     enum Notification {

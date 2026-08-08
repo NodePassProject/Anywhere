@@ -11,6 +11,7 @@ import Foundation
 final class StoreCoordinator {
     private let configurationStore: ConfigurationStore
     private let chainStore: ChainStore
+    private let groupStore: GroupStore
     private let subscriptionStore: SubscriptionStore
     private let routingRuleSetStore: RoutingRuleSetStore
     private let mitmRuleSetStore: MITMRuleSetStore
@@ -22,6 +23,7 @@ final class StoreCoordinator {
     init(
         configurationStore: ConfigurationStore,
         chainStore: ChainStore,
+        groupStore: GroupStore,
         subscriptionStore: SubscriptionStore,
         routingRuleSetStore: RoutingRuleSetStore,
         mitmRuleSetStore: MITMRuleSetStore,
@@ -32,6 +34,7 @@ final class StoreCoordinator {
     ) {
         self.configurationStore = configurationStore
         self.chainStore = chainStore
+        self.groupStore = groupStore
         self.subscriptionStore = subscriptionStore
         self.routingRuleSetStore = routingRuleSetStore
         self.mitmRuleSetStore = mitmRuleSetStore
@@ -77,6 +80,7 @@ final class StoreCoordinator {
     // MARK: - Remote Reload
     
     func reloadAll() async {
+        await groupStore.reload()
         await subscriptionStore.reload()
         await chainStore.reload()
         await configurationStore.reload()

@@ -52,6 +52,7 @@ struct AnywhereApp: App {
                 .environment(container.stats)
                 .environment(container.configurationStore)
                 .environment(container.chainStore)
+                .environment(container.groupStore)
                 .environment(container.subscriptionStore)
                 .environment(container.routingRuleSetStore)
                 .environment(container.mitmRuleSetStore)

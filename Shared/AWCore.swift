@@ -265,20 +265,20 @@ nonisolated final class AWCore {
     }
 
     // Settings
-    static func getAlwaysOnEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
-    }
-
-    static func setAlwaysOnEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
-    }
-    
     static func getProxyMode() -> ProxyMode {
         ProxyMode(rawValue: userDefaults.string(forKey: UserDefaultsKey.proxyMode)!) ?? .rule
     }
     
     static func setProxyMode(_ proxyMode: ProxyMode) {
         userDefaults.set(proxyMode.rawValue, forKey: UserDefaultsKey.proxyMode)
+    }
+    
+    static func getAlwaysOnEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
+    }
+
+    static func setAlwaysOnEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
     }
     
     static func getBlockUDP() -> Bool {

@@ -15,16 +15,18 @@ nonisolated enum BlobMerge {
         JSONBlobStore.installMergeResolver({ key, rows in
             switch key {
             case .configurations: return mergeArray(ProxyConfiguration.self, key, rows)
-            case .subscriptions:  return mergeArray(Subscription.self, key, rows)
             case .chains:         return mergeArray(ProxyChain.self, key, rows)
+            case .groups:         return mergeArray(ProxyGroup.self, key, rows)
+            case .subscriptions:  return mergeArray(Subscription.self, key, rows)
             case .customRuleSets: return mergeArray(CustomRoutingRuleSet.self, key, rows)
             case .mitm:           return mergeMITM(key, rows)
             }
         }, canFullyDecode: { key, data in
             switch key {
             case .configurations: return decodesFully([ProxyConfiguration].self, data)
-            case .subscriptions:  return decodesFully([Subscription].self, data)
             case .chains:         return decodesFully([ProxyChain].self, data)
+            case .groups:         return decodesFully([ProxyGroup].self, data)
+            case .subscriptions:  return decodesFully([Subscription].self, data)
             case .customRuleSets: return decodesFully([CustomRoutingRuleSet].self, data)
             case .mitm:           return decodesFully(MITMSnapshot.self, data)
             }

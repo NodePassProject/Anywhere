@@ -24,10 +24,7 @@ class ConfigurationStore {
     @ObservationIgnored private var mutationEpoch = 0
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
-
-    /// Runs after every mutation or reload; `StoreCoordinator` wires the
-    /// cross-store reactions (selection revalidation, latency pruning,
-    /// routing export) here.
+    
     @ObservationIgnored var onDidMutate: (() -> Void)?
 
     init(blobStore: JSONBlobStore) {
@@ -148,15 +145,9 @@ class ConfigurationStore {
         onDidMutate?()
     }
     
-    func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
-        let standaloneIndices = configurations.indices.filter { configurations[$0].subscriptionId == nil }
-        var standalone = standaloneIndices.map { configurations[$0] }
-        standalone.move(fromOffsets: source, toOffset: destination)
-        var updated = configurations
-        for (i, idx) in standaloneIndices.enumerated() {
-            updated[idx] = standalone[i]
-        }
-        configurations = updated
+    func moveConfigurations(withIds ids: [UUID], fromOffsets source: IndexSet, toOffset destination: Int) {
+        let idSet = Set(ids)
+        configurations.moveSubsequence(where: { idSet.contains($0.id) }, fromOffsets: source, toOffset: destination)
         save()
         onDidMutate?()
     }

@@ -11,8 +11,8 @@ enum SettingsItem: String {
     case iCloudSync
     case personalization
     case alwaysOn
-    case globalMode
     case purify
+    case globalMode
     case routingRules
     case allowInsecure
     case trustedCertificates
@@ -26,8 +26,8 @@ enum SettingsItem: String {
         case .iCloudSync: "iCloud Sync"
         case .personalization: "Personalization"
         case .alwaysOn: "Always On"
-        case .globalMode: "Global Mode"
         case .purify: "Purify"
+        case .globalMode: "Global Mode"
         case .routingRules: "Routing Rules"
         case .allowInsecure: "Allow Insecure"
         case .trustedCertificates: "Trusted Certificates"
@@ -43,8 +43,8 @@ enum SettingsItem: String {
         case .iCloudSync: "icloud.fill"
         case .personalization: "paintpalette.fill"
         case .alwaysOn: "poweron"
-        case .globalMode: "arrow.merge"
         case .purify: "drop.fill"
+        case .globalMode: "arrow.merge"
         case .routingRules: "arrow.triangle.branch"
         case .allowInsecure: "exclamationmark.shield.fill"
         case .trustedCertificates: "checkmark.seal.fill"
@@ -72,8 +72,8 @@ enum SettingsItem: String {
         case .iCloudSync: .white
         case .personalization: .pink
         case .alwaysOn: .green
-        case .globalMode: .orange
         case .purify: .blue
+        case .globalMode: .orange
         case .routingRules: .purple
         case .allowInsecure: .red
         case .trustedCertificates: .green

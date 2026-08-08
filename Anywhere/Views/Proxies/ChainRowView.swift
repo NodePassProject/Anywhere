@@ -9,9 +9,13 @@ import SwiftUI
 
 struct ChainRowView: View {
     let item: ChainListItem
+    
     let onSelect: () -> Void
     let onTestLatency: () -> Void
     let onEdit: () -> Void
+    var onAddToGroup: ((UUID) -> Void)? = nil
+    var groupOptions: [PickerItem] = []
+    var onRemoveFromGroup: (() -> Void)? = nil
     let onDelete: () -> Void
 
     var body: some View {
@@ -78,6 +82,20 @@ struct ChainRowView: View {
             }
             Button(action: onEdit) {
                 Label("Edit", systemImage: "pencil")
+            }
+            if let onAddToGroup, !groupOptions.isEmpty {
+                Menu {
+                    ForEach(groupOptions) { option in
+                        Button(option.name) { onAddToGroup(option.id) }
+                    }
+                } label: {
+                    Label("Add to Group", systemImage: "folder.badge.plus")
+                }
+            }
+            if let onRemoveFromGroup {
+                Button(action: onRemoveFromGroup) {
+                    Label("Remove from Group", systemImage: "folder.badge.minus")
+                }
             }
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")

@@ -64,9 +64,10 @@ class ChainStore {
         save()
         onDidMutate?()
     }
-
-    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
-        chains.move(fromOffsets: source, toOffset: destination)
+    
+    func moveChains(withIds ids: [UUID], fromOffsets source: IndexSet, toOffset destination: Int) {
+        let idSet = Set(ids)
+        chains.moveSubsequence(where: { idSet.contains($0.id) }, fromOffsets: source, toOffset: destination)
         save()
     }
 

@@ -46,16 +46,16 @@ struct SettingsView: View {
             }
             
             Section {
+                NavigationLink {
+                    PurifySettingsView()
+                } label: {
+                    SettingsItem.purify.label
+                }
                 Toggle(isOn: $appSettings.isGlobalMode) {
                     SettingsItem.globalMode.label
                 }
                 .onChange(of: appSettings.isGlobalMode) {
                     ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
-                }
-                NavigationLink {
-                    PurifySettingsView()
-                } label: {
-                    SettingsItem.purify.label
                 }
                 if !appSettings.isGlobalMode {
                     NavigationLink {

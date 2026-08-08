@@ -32,8 +32,9 @@ nonisolated final class JSONBlobStore: Sendable {
 
     enum Key: String, CaseIterable {
         case configurations
-        case subscriptions
         case chains
+        case groups
+        case subscriptions
         case customRuleSets
         case mitm
     }

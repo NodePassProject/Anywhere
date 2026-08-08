@@ -73,6 +73,18 @@ final class AppSettings {
     }
 
     // MARK: - Persist + notify the tunnel
+    
+    var proxyMode: ProxyMode {
+        didSet {
+            AWCore.setProxyMode(proxyMode)
+            AWNotificationCenter.notifyTunnelSettingsChanged()
+        }
+    }
+    
+    var isGlobalMode: Bool {
+        get { proxyMode == .global }
+        set { proxyMode = newValue ? .global : .rule }
+    }
 
     var tunnelExcludedRoutes: [String] {
         didSet {
@@ -86,18 +98,6 @@ final class AppSettings {
             AWCore.setTunnelIncludedRoutes(tunnelIncludedRoutes)
             AWNotificationCenter.notifyTunnelSettingsChanged()
         }
-    }
-    
-    var proxyMode: ProxyMode {
-        didSet {
-            AWCore.setProxyMode(proxyMode)
-            AWNotificationCenter.notifyTunnelSettingsChanged()
-        }
-    }
-    
-    var isGlobalMode: Bool {
-        get { proxyMode == .global }
-        set { proxyMode = newValue ? .global : .rule }
     }
     
     var blockUDP: Bool {

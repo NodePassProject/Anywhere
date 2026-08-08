@@ -21,6 +21,7 @@ final class AppContainer {
 
     let configurationStore: ConfigurationStore
     let chainStore: ChainStore
+    let groupStore: GroupStore
     let subscriptionStore: SubscriptionStore
     let routingRuleSetStore: RoutingRuleSetStore
     let mitmRuleSetStore: MITMRuleSetStore
@@ -46,6 +47,7 @@ final class AppContainer {
 
         let configurationStore = ConfigurationStore(blobStore: blobStore)
         let chainStore = ChainStore(blobStore: blobStore, configurationStore: configurationStore)
+        let groupStore = GroupStore(blobStore: blobStore)
         let subscriptionStore = SubscriptionStore(blobStore: blobStore, configurationStore: configurationStore)
         let routingRuleSetStore = RoutingRuleSetStore(blobStore: blobStore)
         let mitmRuleSetStore = MITMRuleSetStore(blobStore: blobStore)
@@ -107,6 +109,7 @@ final class AppContainer {
         self.stats = stats
         self.configurationStore = configurationStore
         self.chainStore = chainStore
+        self.groupStore = groupStore
         self.subscriptionStore = subscriptionStore
         self.routingRuleSetStore = routingRuleSetStore
         self.mitmRuleSetStore = mitmRuleSetStore
@@ -127,6 +130,7 @@ final class AppContainer {
         coordinator = StoreCoordinator(
             configurationStore: configurationStore,
             chainStore: chainStore,
+            groupStore: groupStore,
             subscriptionStore: subscriptionStore,
             routingRuleSetStore: routingRuleSetStore,
             mitmRuleSetStore: mitmRuleSetStore,

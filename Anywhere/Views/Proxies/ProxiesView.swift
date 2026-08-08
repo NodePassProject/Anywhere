@@ -17,18 +17,27 @@ struct ProxiesView: View {
     @Environment(ProxySelection.self) private var selection
     @Environment(LatencyCenter.self) private var latency
     @Environment(ConfigurationStore.self) private var configStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(ChainStore.self) private var chainStore
+    @Environment(GroupStore.self) private var groupStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
     private var coordinator: ProxyRowCoordinator { container.proxyRows }
     private var chainCoordinator: ChainRowCoordinator { container.chainRows }
-
-    @State private var proxyType: ProxyType = AWCore.getProxiesPageProxyType().flatMap(ProxyType.init(rawValue:)) ?? .servers
+    
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var showingChainAddSheet = false
     @State private var showingNotEnoughProxiesAlert = false
+    
+    @State private var proxyType: ProxyType = AWCore.getProxiesPageProxyType().flatMap(ProxyType.init(rawValue:)) ?? .servers
+    @State private var showingGroupAddSheet = false
+    @State private var reorderScope: ReorderScope?
+    
     @State private var configurationToEdit: ProxyConfiguration?
     @State private var chainToEdit: ProxyChain?
+    
+    @State private var groupToEdit: ProxyGroup?
+    @State private var collapsedGroups: Set<UUID> = []
+    
     @State private var updatingSubscription: Subscription?
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
@@ -36,12 +45,37 @@ struct ProxiesView: View {
     @State private var renamingSubscription: Subscription?
     @State private var renameText = ""
 
+    private var serverGroups: [ProxyGroup] { groupStore.groups(of: .servers) }
+    private var chainGroups: [ProxyGroup] { groupStore.groups(of: .chains) }
+
+    private var groupedServerIds: Set<UUID> {
+        Set(serverGroups.flatMap(\.memberIds))
+    }
+
+    private var groupedChainIds: Set<UUID> {
+        Set(chainGroups.flatMap(\.memberIds))
+    }
+
     private var standaloneItems: [ProxyListItem] {
-        coordinator.models.filter { $0.subscriptionId == nil }
+        let grouped = groupedServerIds
+        return coordinator.models.filter { $0.subscriptionId == nil && !grouped.contains($0.id) }
+    }
+
+    private var ungroupedChainItems: [ChainListItem] {
+        let grouped = groupedChainIds
+        return chainCoordinator.models.filter { !grouped.contains($0.id) }
     }
 
     private func items(for subscription: Subscription) -> [ProxyListItem] {
         coordinator.models.filter { $0.subscriptionId == subscription.id }
+    }
+
+    private func serverMembers(of group: ProxyGroup) -> [ProxyListItem] {
+        group.memberIds.compactMap { coordinator.model(for: $0) }
+    }
+
+    private func chainMembers(of group: ProxyGroup) -> [ChainListItem] {
+        group.memberIds.compactMap { chainCoordinator.model(for: $0) }
     }
 
     var body: some View {
@@ -50,6 +84,17 @@ struct ProxiesView: View {
                 Section {
                     ForEach(standaloneItems) { item in
                         proxyRow(item, editingDisabled: false)
+                    }
+                }
+                ForEach(serverGroups) { group in
+                    Section {
+                        DisclosureGroup(isExpanded: expansionBinding(for: group)) {
+                            ForEach(serverMembers(of: group)) { item in
+                                proxyRow(item, editingDisabled: false, group: group)
+                            }
+                        } label: {
+                            groupLabel(group)
+                        }
                     }
                 }
                 ForEach(subscriptionStore.subscriptions) { subscription in
@@ -65,15 +110,28 @@ struct ProxiesView: View {
                     }
                 }
             } else {
-                ForEach(chainCoordinator.models) { item in
-                    chainRow(item)
+                Section {
+                    ForEach(ungroupedChainItems) { item in
+                        chainRow(item)
+                    }
+                }
+                ForEach(chainGroups) { group in
+                    Section {
+                        DisclosureGroup(isExpanded: expansionBinding(for: group)) {
+                            ForEach(chainMembers(of: group)) { item in
+                                chainRow(item, group: group)
+                            }
+                        } label: {
+                            groupLabel(group)
+                        }
+                    }
                 }
             }
         }
         .overlay {
-            if proxyType == .servers, configStore.configurations.isEmpty {
+            if proxyType == .servers, configStore.configurations.isEmpty, serverGroups.isEmpty {
                 ContentUnavailableView("No Proxies", systemImage: "network")
-            } else if proxyType == .chains, chainCoordinator.models.isEmpty {
+            } else if proxyType == .chains, chainCoordinator.models.isEmpty, chainGroups.isEmpty {
                 ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
             }
         }
@@ -108,27 +166,38 @@ struct ProxiesView: View {
                     }
                     Section {
                         Button {
+                            showingGroupAddSheet = true
+                        } label: {
+                            Label("New Group", systemImage: "folder.badge.plus")
+                        }
+                        if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 || serverGroups.count > 1 || chainGroups.count > 1 {
+                            NavigationLink {
+                                ReorderView()
+                            } label: {
+                                Label("Reorder", systemImage: "arrow.up.arrow.down")
+                            }
+                        }
+                    }
+                    Section {
+                        Button {
                             switch proxyType {
                             case .servers:
                                 let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
+                                let hiddenGroupMemberIds = Set(serverGroups.filter { collapsedGroups.contains($0.id) }.flatMap(\.memberIds))
                                 let visible = configStore.configurations.filter { configuration in
-                                    guard let subscriptionId = configuration.subscriptionId else { return true }
+                                    guard let subscriptionId = configuration.subscriptionId else {
+                                        return !hiddenGroupMemberIds.contains(configuration.id)
+                                    }
                                     return liveSubscriptionIds.contains(subscriptionId) && !collapsedSubscriptions.contains(subscriptionId)
                                 }
                                 latency.testLatencies(for: visible)
                             case .chains:
-                                latency.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
+                                let hiddenChainIds = Set(chainGroups.filter { collapsedGroups.contains($0.id) }.flatMap(\.memberIds))
+                                let visibleChains = chainStore.chains.filter { !hiddenChainIds.contains($0.id) }
+                                latency.testAllChainLatencies(chains: visibleChains, configurations: configStore.configurations)
                             }
                         } label: {
                             Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                        }
-                        
-                        if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 {
-                            NavigationLink {
-                                ReorderProxiesView()
-                            } label: {
-                                Label("Reorder", systemImage: "arrow.up.arrow.down")
-                            }
                         }
                     }
                     if !subscriptionStore.subscriptions.isEmpty {
@@ -136,12 +205,15 @@ struct ProxiesView: View {
                             Button {
                                 updateAllSubscriptions()
                             } label: {
-                                Label("Update", systemImage: "arrow.clockwise")
+                                Label("Update All", systemImage: "arrow.clockwise")
                             }
                         }
                     }
                 }
             }
+        }
+        .navigationDestination(item: $reorderScope) { scope in
+            ReorderView(scope: scope)
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -158,6 +230,11 @@ struct ProxiesView: View {
                 chainStore.add(chain)
             }
         }
+        .sheet(isPresented: $showingGroupAddSheet) {
+            GroupEditorView(kind: proxyType == .servers ? .servers : .chains) { group in
+                groupStore.add(group)
+            }
+        }
         .sheet(item: $configurationToEdit) { configuration in
             ProxyEditorView(configuration: configuration) { updated in
                 configStore.update(updated)
@@ -166,6 +243,11 @@ struct ProxiesView: View {
         .sheet(item: $chainToEdit) { chain in
             ChainEditorView(chain: chain) { updated in
                 chainStore.update(updated)
+            }
+        }
+        .sheet(item: $groupToEdit) { group in
+            GroupEditorView(kind: group.kind, group: group) { updated in
+                groupStore.update(updated)
             }
         }
         .alert("Update Failed", isPresented: $showingSubscriptionError) {
@@ -192,10 +274,99 @@ struct ProxiesView: View {
         }
         .onAppear {
             collapsedSubscriptions = Set(subscriptionStore.subscriptions.filter(\.collapsed).map(\.id))
+            collapsedGroups = Set(groupStore.groups.filter(\.collapsed).map(\.id))
+        }
+    }
+    
+    // MARK: - Groups
+
+    private func expansionBinding(for group: ProxyGroup) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedGroups.contains(group.id) },
+            set: { expanded in
+                if expanded {
+                    collapsedGroups.remove(group.id)
+                } else {
+                    collapsedGroups.insert(group.id)
+                }
+                if group.collapsed == expanded {
+                    groupStore.toggleCollapsed(group)
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func groupLabel(_ group: ProxyGroup) -> some View {
+        let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
+        VStack(alignment: .leading, spacing: 5) {
+            Text(group.name)
+                .font(.body.weight(.medium))
+        }
+        .padding(.trailing, 10)
+        .swipeActions {
+            Button(role: .destructive) {
+                groupStore.delete(group)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                groupToEdit = group
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.orange)
+        }
+        .contextMenu {
+            if memberCount > 1 {
+                Section {
+                    Button {
+                        reorderScope = .group(group.id)
+                    } label: {
+                        Label("Reorder", systemImage: "arrow.up.arrow.down")
+                    }
+                }
+            }
+            if memberCount > 0 {
+                Section {
+                    Button {
+                        testGroupLatency(group)
+                    } label: {
+                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+            }
+            Section {
+                Button {
+                    groupToEdit = group
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    groupStore.delete(group)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
         }
     }
 
-    // MARK: - Subscription Header
+    private func testGroupLatency(_ group: ProxyGroup) {
+        switch group.kind {
+        case .servers:
+            let members = group.memberIds.compactMap { id in
+                configStore.configurations.first { $0.id == id }
+            }
+            latency.testLatencies(for: members)
+        case .chains:
+            let members = group.memberIds.compactMap { id in
+                chainStore.chains.first { $0.id == id }
+            }
+            latency.testAllChainLatencies(chains: members, configurations: configStore.configurations)
+        }
+    }
+
+    // MARK: - Subscriptions
     
     private func expansionBinding(for subscription: Subscription) -> Binding<Bool> {
         Binding(
@@ -215,6 +386,7 @@ struct ProxiesView: View {
 
     @ViewBuilder
     private func subscriptionLabel(_ subscription: Subscription) -> some View {
+        let configurationCount = configStore.configurations(for: subscription).count
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(subscription.name)
@@ -254,11 +426,20 @@ struct ProxiesView: View {
             }
         }
         .contextMenu {
-            Section {
+            if configurationCount > 1 {
                 Button {
-                    latency.testLatencies(for: configStore.configurations(for: subscription))
+                    reorderScope = .subscription(subscription.id)
                 } label: {
-                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    Label("Reorder", systemImage: "arrow.up.arrow.down")
+                }
+            }
+            if configurationCount > 0 {
+                Section {
+                    Button {
+                        latency.testLatencies(for: configStore.configurations(for: subscription))
+                    } label: {
+                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    }
                 }
             }
             Section {
@@ -326,7 +507,8 @@ struct ProxiesView: View {
     }
 
     @ViewBuilder
-    private func proxyRow(_ item: ProxyListItem, editingDisabled: Bool) -> some View {
+    private func proxyRow(_ item: ProxyListItem, editingDisabled: Bool, group: ProxyGroup? = nil) -> some View {
+        let isGroupable = item.subscriptionId == nil
         ProxyRowView(
             item: item,
             editingDisabled: editingDisabled,
@@ -334,6 +516,9 @@ struct ProxiesView: View {
             onTestLatency: { if let configuration = config(item.id) { latency.testLatency(for: configuration) } },
             onCopyLink: { if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() } },
             onEdit: { configurationToEdit = config(item.id) },
+            onAddToGroup: isGroupable && group == nil ? { groupStore.addMember(item.id, to: $0) } : nil,
+            groupOptions: isGroupable && group == nil ? serverGroups.map { PickerItem(id: $0.id, name: $0.name) } : [],
+            onRemoveFromGroup: group.map { group in { groupStore.removeMember(item.id, from: group.id) } },
             onDelete: { if let configuration = config(item.id) { configStore.delete(configuration) } }
         )
     }
@@ -343,7 +528,7 @@ struct ProxiesView: View {
     }
 
     @ViewBuilder
-    private func chainRow(_ item: ChainListItem) -> some View {
+    private func chainRow(_ item: ChainListItem, group: ProxyGroup? = nil) -> some View {
         ChainRowView(
             item: item,
             onSelect: {
@@ -355,6 +540,9 @@ struct ProxiesView: View {
                 latency.testChainLatency(for: chain, configurations: configStore.configurations)
             },
             onEdit: { chainToEdit = chain(item.id) },
+            onAddToGroup: group == nil ? { groupStore.addMember(item.id, to: $0) } : nil,
+            groupOptions: group == nil ? chainGroups.map { PickerItem(id: $0.id, name: $0.name) } : [],
+            onRemoveFromGroup: group.map { group in { groupStore.removeMember(item.id, from: group.id) } },
             onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }
         )
     }

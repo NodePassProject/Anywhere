@@ -231,7 +231,7 @@ nonisolated enum AnywhereError: Error {
     
     enum Store: Sendable {
         enum Resource: String, Sendable {
-            case configurations, chains, subscriptions, certificates
+            case configurations, chains, groups, subscriptions, certificates
             case routingRuleSets, mitmRuleSets, routingDatabase
             case routingPayload, mitmPayload, scripts
         }

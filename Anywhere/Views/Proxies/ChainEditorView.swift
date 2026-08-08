@@ -8,9 +8,10 @@
 import SwiftUI
 
 struct ChainEditorView: View {
-    @Environment(ConfigurationStore.self) private var configStore
     @Environment(\.dismiss) private var dismiss
-    
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
+
     var chain: ProxyChain?
     var onSave: (ProxyChain) -> Void
 
@@ -28,6 +29,29 @@ struct ChainEditorView: View {
 
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty && selectedProxies.count >= 2
+    }
+    
+    private var pickerSections: [MultiSelectPickerView.ItemSection] {
+        let excluded = Set(selectedProxyIds)
+        var sections: [MultiSelectPickerView.ItemSection] = []
+        let standalone = configStore.configurations.filter { $0.subscriptionId == nil && !excluded.contains($0.id) }
+        if !standalone.isEmpty {
+            sections.append(MultiSelectPickerView.ItemSection(id: "standalone", header: nil, items: standalone.map(pickerItem)))
+        }
+        for subscription in subscriptionStore.subscriptions {
+            let configurations = configStore.configurations(for: subscription).filter { !excluded.contains($0.id) }
+            if !configurations.isEmpty {
+                sections.append(MultiSelectPickerView.ItemSection(id: subscription.id.uuidString, header: subscription.name, items: configurations.map(pickerItem)))
+            }
+        }
+        return sections
+    }
+
+    private func pickerItem(_ configuration: ProxyConfiguration) -> MultiSelectPickerView.Item {
+        MultiSelectPickerView.Item(
+            id: configuration.id,
+            title: configuration.name
+        )
     }
 
     var body: some View {
@@ -85,6 +109,7 @@ struct ChainEditorView: View {
                     } label: {
                         Label("Add Proxy", systemImage: "plus")
                     }
+                    .disabled(pickerSections.isEmpty)
                 } header: {
                     Text("Proxies")
                 } footer: {
@@ -152,10 +177,8 @@ struct ChainEditorView: View {
             }
             .environment(\.editMode, .constant(.active))
             .sheet(isPresented: $showingProxyPicker) {
-                ProxyPickerView(
-                    excludedIds: Set(selectedProxyIds)
-                ) { selected in
-                    selectedProxyIds.append(selected.id)
+                MultiSelectPickerView(sections: pickerSections) { selected in
+                    selectedProxyIds.append(contentsOf: selected)
                 }
             }
             .onAppear {
@@ -181,90 +204,5 @@ struct ChainEditorView: View {
         result.proxyIds = selectedProxyIds
         onSave(result)
         dismiss()
-    }
-}
-
-// MARK: - Proxy Picker
-
-private struct ProxyPickerView: View {
-    @Environment(ConfigurationStore.self) private var configStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
-    @Environment(\.dismiss) private var dismiss
-    
-    let excludedIds: Set<UUID>
-    let onSelect: (ProxyConfiguration) -> Void
-
-    private var standaloneConfigurations: [ProxyConfiguration] {
-        configStore.configurations.filter { $0.subscriptionId == nil && !excludedIds.contains($0.id) }
-    }
-    
-    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
-        subscriptionStore.subscriptions.compactMap { subscription in
-            let configurations = configStore.configurations(for: subscription).filter { !excludedIds.contains($0.id) }
-            return configurations.isEmpty ? nil : (subscription, configurations)
-        }
-    }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if !standaloneConfigurations.isEmpty {
-                    Section {
-                        ForEach(standaloneConfigurations) { configuration in
-                            configurationRow(configuration)
-                        }
-                    }
-                }
-                ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
-                    Section {
-                        ForEach(configurations) { configuration in
-                            configurationRow(configuration)
-                        }
-                    } header: {
-                        Text(subscription.name)
-                    }
-                }
-            }
-            .overlay {
-                if configStore.configurations.isEmpty {
-                    ContentUnavailableView("No Proxies", systemImage: "network")
-                }
-            }
-            .navigationTitle("Select Proxy")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    if #available(iOS 26.0, *) {
-                        Button(role: .cancel) {
-                            dismiss()
-                        } label: {
-                            Label("Cancel", systemImage: "xmark")
-                        }
-                    } else {
-                        Button("Cancel") { dismiss() }
-                    }
-                }
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func configurationRow(_ configuration: ProxyConfiguration) -> some View {
-        Button {
-            onSelect(configuration)
-            dismiss()
-        } label: {
-            VStack(alignment: .leading) {
-                Text(configuration.name)
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                Text("\(configuration.serverAddress):\(configuration.serverPort, format: .number.grouping(.never))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
     }
 }
