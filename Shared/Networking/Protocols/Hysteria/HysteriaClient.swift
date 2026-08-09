@@ -251,11 +251,23 @@ nonisolated final class HysteriaClient: Sendable {
     }
     
     private static func isStaleSessionError(_ error: Error) -> Bool {
-        guard case AnywhereError.proxy(.hysteria, let failure) = error else { return false }
-        switch failure {
-        case .notReady, .streamClosed: return true
-        default: return false
+        if case AnywhereError.quic(let quicError) = error {
+            switch quicError {
+            case .closed, .timedOut, .streamReset, .streamClosedWithError, .streamFailed:
+                return true
+            case .connectionFailed, .handshakeFailed, .datagramTooLarge, .datagramQueueFull:
+                return false
+            }
         }
+        if case AnywhereError.proxy(.hysteria, let failure) = error {
+            switch failure {
+            case .notReady, .streamClosed, .connectionClosed:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
     }
     
     private func invalidateSession() {
