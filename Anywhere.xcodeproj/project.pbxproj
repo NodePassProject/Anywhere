@@ -413,7 +413,6 @@
 				Utilities/DeviceCensorship.swift,
 				Utilities/MonotonicClock.swift,
 				"Utilities/String+init.swift",
-				Utilities/SubscriptionDomainHelper.swift,
 				"Utilities/UUID+VLESSString.swift",
 				Utilities/VPNStatus.swift,
 			);

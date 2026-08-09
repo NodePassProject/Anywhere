@@ -255,13 +255,11 @@ struct AddProxyView: View {
 
     private func importFromString(_ string: String) {
         var trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // QR codes may carry anywhere:// deep link; unwrap to the embedded link.
+        
         if let embedded = DeepLinkManager.extractAddProxyLink(from: trimmedURL) {
             trimmedURL = embedded
         }
-
-        // Only schemes the parser knows take the proxy-link path; everything else is a subscription URL.
+        
         if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL)
@@ -272,7 +270,7 @@ struct AddProxyView: View {
                 showingError = true
             }
         } else {
-            let requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(for: trimmedURL)
+            let requiresRemnawaveHWID = false
             if requiresRemnawaveHWID && !AWCore.getRemnawaveHWIDEnabled() {
                 pendingSubscriptionURL = trimmedURL
                 showingRemnawaveHWIDAlert = true

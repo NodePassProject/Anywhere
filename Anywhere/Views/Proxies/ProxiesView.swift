@@ -83,14 +83,14 @@ struct ProxiesView: View {
             if proxyType == .servers {
                 Section {
                     ForEach(standaloneItems) { item in
-                        proxyRow(item, editingDisabled: false)
+                        proxyRow(item)
                     }
                 }
                 ForEach(serverGroups) { group in
                     Section {
                         DisclosureGroup(isExpanded: expansionBinding(for: group)) {
                             ForEach(serverMembers(of: group)) { item in
-                                proxyRow(item, editingDisabled: false, group: group)
+                                proxyRow(item, group: group)
                             }
                         } label: {
                             groupLabel(group)
@@ -98,11 +98,10 @@ struct ProxiesView: View {
                     }
                 }
                 ForEach(subscriptionStore.subscriptions) { subscription in
-                    let editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(for: subscription.url)
                     Section {
                         DisclosureGroup(isExpanded: expansionBinding(for: subscription)) {
                             ForEach(items(for: subscription)) { item in
-                                proxyRow(item, editingDisabled: editingDisabled)
+                                proxyRow(item)
                             }
                         } label: {
                             subscriptionLabel(subscription)
@@ -507,11 +506,10 @@ struct ProxiesView: View {
     }
 
     @ViewBuilder
-    private func proxyRow(_ item: ProxyListItem, editingDisabled: Bool, group: ProxyGroup? = nil) -> some View {
+    private func proxyRow(_ item: ProxyListItem, group: ProxyGroup? = nil) -> some View {
         let isGroupable = item.subscriptionId == nil
         ProxyRowView(
             item: item,
-            editingDisabled: editingDisabled,
             onSelect: { if let configuration = config(item.id) { selection.selectedConfiguration = configuration } },
             onTestLatency: { if let configuration = config(item.id) { latency.testLatency(for: configuration) } },
             onCopyLink: { if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() } },

@@ -10,8 +10,6 @@ import SwiftUI
 struct ProxyRowView: View {
     let item: ProxyListItem
     
-    let editingDisabled: Bool
-    
     let onSelect: () -> Void
     let onTestLatency: () -> Void
     let onCopyLink: () -> Void
@@ -60,16 +58,7 @@ struct ProxyRowView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button(action: onTestLatency) {
-                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-            }
-            if !editingDisabled {
-                Button(action: onCopyLink) {
-                    Label("Copy Link", systemImage: "doc.on.doc")
-                }
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
-                }
+            Section {
                 if let onAddToGroup, !groupOptions.isEmpty {
                     Menu {
                         ForEach(groupOptions) { option in
@@ -84,21 +73,35 @@ struct ProxyRowView: View {
                         Label("Remove from Group", systemImage: "folder.badge.minus")
                     }
                 }
+            }
+            Section {
+                Section {
+                    Button(action: onTestLatency) {
+                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+                Button(action: onCopyLink) {
+                    Label("Copy Link", systemImage: "doc.on.doc")
+                }
+            }
+            Section {
+                Button(action: onEdit) {
+                    Label("Edit", systemImage: "pencil")
+                }
+                
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
             }
         }
         .swipeActions(edge: .trailing) {
-            if !editingDisabled {
-                Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
-                }
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .tint(.orange)
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete", systemImage: "trash")
             }
+            Button(action: onEdit) {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.orange)
         }
     }
 }
