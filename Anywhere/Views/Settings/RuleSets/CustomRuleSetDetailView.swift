@@ -12,9 +12,6 @@ struct CustomRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
     @Environment(AppContainer.self) private var container
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
-    @Environment(ConfigurationStore.self) private var configStore
-    @Environment(ChainStore.self) private var chainStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
 
     @State private var rules: [RoutingRule] = []
 
@@ -42,7 +39,7 @@ struct CustomRuleSetDetailView: View {
         List {
             if let ruleSet {
                 Section {
-                    assignmentPicker(for: ruleSet)
+                    assignmentMenu(for: ruleSet)
                 }
             }
 
@@ -193,37 +190,17 @@ struct CustomRuleSetDetailView: View {
         }
     }
 
-    private func assignmentPicker(for ruleSet: RoutingRuleSet) -> some View {
-        Picker("Route To", selection: Binding(
-            get: { ruleSet.assignedConfigurationId },
-            set: { newValue in
-                ruleSetStore.updateAssignment(ruleSet, configurationId: newValue)
-            }
-        )) {
-            Text("Default").tag(nil as String?)
-            Text("DIRECT").tag("DIRECT" as String?)
-            Text("REJECT").tag("REJECT" as String?)
-            ForEach(configStore.standalonePickerItems) { item in
-                Text(item.name).tag(item.id.uuidString as String?)
-            }
-            if !chainStore.pickerItems.isEmpty {
-                Section {
-                    ForEach(chainStore.pickerItems) { item in
-                        Text(item.name).tag(item.id.uuidString as String?)
-                    }
-                } header: {
-                    Text("Chains")
+    @ViewBuilder
+    private func assignmentMenu(for ruleSet: RoutingRuleSet) -> some View {
+        HStack {
+            Text("Route To")
+            Spacer()
+            AssignmentMenuButton(selection: Binding(
+                get: { ruleSet.assignedConfigurationId },
+                set: { newValue in
+                    ruleSetStore.updateAssignment(ruleSet, configurationId: newValue)
                 }
-            }
-            ForEach(subscriptionStore.pickerSections) { section in
-                Section {
-                    ForEach(section.items) { item in
-                        Text(item.name).tag(item.id.uuidString as String?)
-                    }
-                } header: {
-                    Text(section.header ?? "")
-                }
-            }
+            ))
         }
     }
 }

@@ -11,9 +11,6 @@ import UniformTypeIdentifiers
 struct RuleSetListView: View {
     @Environment(\.editMode) private var editMode
     @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
-    @Environment(ConfigurationStore.self) private var configurationStore
-    @Environment(ChainStore.self) private var chainStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
 
     @State var adBlockEnabled = false
     @State var builtInServiceRuleSets: [RoutingRuleSet] = []
@@ -58,7 +55,7 @@ struct RuleSetListView: View {
             Section {
                 ForEach($builtInServiceRuleSets) { $ruleSet in
                     if !ruleSet.isCustom {
-                        assignmentPicker(for: $ruleSet)
+                        assignmentMenu(for: $ruleSet)
                     }
                 }
             }
@@ -227,7 +224,7 @@ struct RuleSetListView: View {
             }
             Spacer()
             if let ruleSet = builtInServiceRuleSets.first(where: { $0.id == ruleSet.id.uuidString }) {
-                assignmentLabel(for: ruleSet)
+                AssignmentLabel(assignedConfigurationId: ruleSet.assignedConfigurationId)
             }
         }
     }
@@ -307,59 +304,12 @@ struct RuleSetListView: View {
     }
     
     @ViewBuilder
-    private func assignmentPicker(for ruleSet: Binding<RoutingRuleSet>) -> some View {
-        Picker(selection: ruleSet.assignedConfigurationId) {
-            Text("Default").tag(nil as String?)
-            Text("DIRECT").tag("DIRECT" as String?)
-            Text("REJECT").tag("REJECT" as String?)
-            ForEach(configurationStore.standalonePickerItems) { item in
-                Text(item.name).tag(item.id.uuidString as String?)
-            }
-            if !chainStore.pickerItems.isEmpty {
-                Section {
-                    ForEach(chainStore.pickerItems) { item in
-                        Text(item.name).tag(item.id.uuidString as String?)
-                    }
-                } header: {
-                    Text("Chains")
-                }
-            }
-            ForEach(subscriptionStore.pickerSections) { section in
-                Section {
-                    ForEach(section.items) { item in
-                        Text(item.name).tag(item.id.uuidString as String?)
-                    }
-                } header: {
-                    Text(section.header ?? "")
-                }
-            }
-        } label: {
-            HStack {
-                AppIconView(ruleSet.wrappedValue.name)
-                Text(ruleSet.wrappedValue.name)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func assignmentLabel(for ruleSet: RoutingRuleSet) -> some View {
+    private func assignmentMenu(for ruleSet: Binding<RoutingRuleSet>) -> some View {
         HStack {
-            if let assignedId = ruleSet.assignedConfigurationId {
-                if assignedId == "DIRECT" {
-                    Text("DIRECT")
-                } else if assignedId == "REJECT" {
-                    Text("REJECT")
-                } else if let config = configurationStore.configurations.first(where: { $0.id.uuidString == assignedId }) {
-                    Text(config.name)
-                } else if let chain = chainStore.chains.first(where: { $0.id.uuidString == assignedId }) {
-                    Text(chain.name)
-                } else {
-                    Text("Default")
-                }
-            } else {
-                Text("Default")
-            }
+            AppIconView(ruleSet.wrappedValue.name)
+            Text(ruleSet.wrappedValue.name)
+            Spacer()
+            AssignmentMenuButton(selection: ruleSet.assignedConfigurationId)
         }
-        .foregroundStyle(.secondary)
     }
 }
