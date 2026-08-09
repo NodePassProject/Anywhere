@@ -36,6 +36,9 @@ struct ProxyRowView: View {
                     }
                     HStack(spacing: 5) {
                         TagBadge(text: item.protocolName, color: .blue)
+                        if let networkTag = item.networkTag {
+                            TagBadge(text: networkTag, color: .green)
+                        }
                         if let transportLayerTag = item.transportLayerTag {
                             TagBadge(text: transportLayerTag, color: .teal)
                         }

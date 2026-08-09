@@ -21,7 +21,7 @@ struct SettingsView: View {
         Form {
             if appSettings.showVoyagerCard {
                 Section {
-                    VoyagerSettingsCard()
+                    VoyagerMemberCard()
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(VoyagerCardBackground())
                 }

@@ -67,11 +67,9 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $showingProxiesView) {
                 ProxiesView()
-                    .navigationTransition(.zoom(sourceID: "proxies", in: namespace))
             }
             .navigationDestination(isPresented: $showingSettingsView) {
                 SettingsView()
-                    .navigationTransition(.zoom(sourceID: "settings", in: namespace))
             }
             .sheet(isPresented: $showingAddSheet) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -120,8 +118,6 @@ struct HomeView: View {
     }
     
     private var sideBySideLayout: some View {
-        // Give the stats pane what a fully grown grid needs, but never squeeze
-        // the controls pane below its minimum width.
         let detailWidth = min(
             StatCardSize.gridWidth(
                 columns: ConnectionStatsView.maxColumnCount,
@@ -161,10 +157,8 @@ struct HomeView: View {
             HStack {
                 configurationCard
                     .matchedGeometryEffect(id: "configurationCard", in: namespace)
-                    .matchedTransitionSource(id: "proxies", in: namespace)
                 settingsButton
                     .matchedGeometryEffect(id: "settingsButton", in: namespace)
-                    .matchedTransitionSource(id: "settings", in: namespace)
             }
             .frame(maxWidth: Self.maxControlPaneWidth)
         }

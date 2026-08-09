@@ -19,8 +19,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
     case http11
     case http2
     case http3
-
-    /// Whether this protocol uses a CONNECT tunnel.
+    
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
 
     enum InitialDataPolicy: Equatable {
@@ -36,8 +35,7 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
             }
         }
     }
-
-    /// Amount of the caller's first TCP payload that may ride in the protocol opening write.
+    
     var initialDataPolicy: InitialDataPolicy {
         switch self {
         case .nowhere:
@@ -48,14 +46,11 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
             return .none
         }
     }
-
-    /// Whether the protocol supports mux.cool multiplexing.
+    
     var supportsMux: Bool {
         self == .vless
     }
-
-    /// Transport needed from the chain hop below to service `downstreamCommand`;
-    /// `nil` when the protocol can't carry the command.
+    
     func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
         switch self {
         case .nowhere:
@@ -106,7 +101,6 @@ nonisolated enum OutboundProtocol: String, Codable, CaseIterable {
 // MARK: - Outbound Protocol Configuration
 
 nonisolated enum Outbound: Hashable, Sendable {
-    /// Nowhere runs over QUIC/UDP or TLS/TCP with a shared-key auth frame.
     case nowhere(
         key: String,
         uplink: NowhereNetwork,
@@ -114,7 +108,6 @@ nonisolated enum Outbound: Hashable, Sendable {
         pool: Int,
         securityLayer: GenericSecurityLayer
     )
-    /// The only outbound with a user-selectable transport and TLS/Reality security layer.
     case vless(
         uuid: UUID,
         encryption: String,
@@ -122,7 +115,6 @@ nonisolated enum Outbound: Hashable, Sendable {
         transport: XrayTransportLayer,
         security: XraySecurityLayer
     )
-    /// Hysteria2 over QUIC.
     case hysteria(
         password: String,
         congestionControl: HysteriaCongestionControl,
@@ -131,10 +123,7 @@ nonisolated enum Outbound: Hashable, Sendable {
         obfuscation: HysteriaObfuscation?,
         sni: String
     )
-    /// Trojan: SHA224(password)+CRLF+request over mandatory TLS. No plaintext variant.
     case trojan(password: String, securityLayer: GenericSecurityLayer)
-    /// AnyTLS: stream multiplexer over pooled TLS sessions, authenticated with SHA256(password);
-    /// `idleCheckInterval`/`idleTimeout` (seconds) and `minIdleSession` tune the warm pool.
     case anytls(
         password: String,
         idleCheckInterval: Int,
@@ -142,17 +131,11 @@ nonisolated enum Outbound: Hashable, Sendable {
         minIdleSession: Int,
         securityLayer: GenericSecurityLayer
     )
-    /// Shadowsocks runs over bare TCP with AEAD / 2022 wire encryption.
     case shadowsocks(password: String, method: String)
-    /// SOCKS5 runs over bare TCP in the clear.
     case socks5(username: String?, password: String?)
-    /// Sudoku runs over TCP with protocol-native obfuscation, KIP, and optional HTTPMask tunneling.
     case sudoku(SudokuConfiguration)
-    /// Naive over HTTP/1.1-over-TLS. TLS is managed internally by the Naive stack.
     case http11(username: String, password: String)
-    /// Naive over HTTP/2-over-TLS.
     case http2(username: String, password: String)
-    /// Naive over HTTP/3-over-QUIC.
     case http3(username: String, password: String)
 }
 
@@ -164,8 +147,7 @@ nonisolated enum XrayTransportLayer: Hashable, Sendable {
     case httpUpgrade(HTTPUpgradeConfiguration)
     case grpc(GRPCConfiguration)
     case xhttp(XHTTPConfiguration)
-
-    /// Wire tag used in the flat JSON schema and `vless://` query params.
+    
     var tag: String {
         switch self {
         case .raw:          "raw"
@@ -213,8 +195,7 @@ nonisolated enum GenericSecurityLayer: Hashable, Sendable {
         case .none: "none"
         }
     }
-
-    /// The TLS configuration when secured; `nil` for `.none`.
+    
     var tlsConfiguration: TLSConfiguration? {
         if case .tls(let tls) = self { return tls }
         return nil
@@ -264,12 +245,41 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         default:                                 .none
         }
     }
+    
+    var displayNetworkTag: String? {
+        let tag: String?
+        switch outboundProtocol {
+        case .nowhere:
+            switch (nowhereUplink, nowhereDownlink) {
+            case (.tcp, .tcp):  tag = "TCP"
+            case (.udp, .udp):  tag = "UDP"
+            case (.tcp, .udp):  tag = "↑ TCP ↓ UDP"
+            case (.udp, .tcp):  tag = "↑ UDP ↓ TCP"
+            }
+        case .vless:
+            switch xrayTransportLayer {
+            case .raw:          tag = "TCP"
+            case .ws:           tag = "TCP"
+            case .httpUpgrade:  tag = "TCP"
+            case .grpc:         tag = "TCP"
+            case .xhttp:        tag = nil
+            }
+        case .hysteria:         tag = "UDP"
+        case .trojan:           tag = "TCP"
+        case .anytls:           tag = "TCP"
+        case .shadowsocks:      tag = nil
+        case .socks5:           tag = nil
+        case .sudoku:           tag = "TCP"
+        case .http11:           tag = "TCP"
+        case .http2:            tag = "TCP"
+        case .http3:            tag = "UDP"
+        }
+        return tag
+    }
 
     var displayTransportLayerTag: String? {
         let tag: String?
         switch outboundProtocol {
-        case .nowhere:
-            tag = nowhereUplink == .udp || nowhereDownlink == .udp ? "QUIC" : nil
         case .vless:
             switch xrayTransportLayer {
             case .raw:          tag = nil
@@ -278,7 +288,6 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
             case .grpc:         tag = "gRPC"
             case .xhttp:        tag = "XHTTP"
             }
-        case .hysteria:         tag = "QUIC"
         default:                tag = nil
         }
         return tag

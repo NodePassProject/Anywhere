@@ -8,7 +8,6 @@
 import Foundation
 import Observation
 
-/// Mutated in place so a single-field change re-renders just the affected row.
 @MainActor
 @Observable
 final class ProxyListItem: Identifiable {
@@ -16,6 +15,7 @@ final class ProxyListItem: Identifiable {
     nonisolated let subscriptionId: UUID?
     var name: String
     var protocolName: String
+    var networkTag: String?
     var transportLayerTag: String?
     var securityLayerTag: String?
     var isVision: Bool
@@ -35,17 +35,18 @@ final class ProxyListItem: Identifiable {
         subscriptionId = configuration.subscriptionId
         name = configuration.name
         protocolName = configuration.outboundProtocol.name
+        networkTag = configuration.displayNetworkTag
         transportLayerTag = configuration.displayTransportLayerTag
         securityLayerTag = configuration.displaySecurityLayerTag
         isVision = configuration.hasVisionFlow
         self.isSelected = isSelected
         self.latency = latency
     }
-
-    /// Assigns only changed fields so observation fires for exactly what moved.
+    
     func update(_ configuration: ProxyConfiguration, isSelected: Bool, latency: LatencyResult?) {
         if name != configuration.name { name = configuration.name }
         if protocolName != configuration.outboundProtocol.name { protocolName = configuration.outboundProtocol.name }
+        if networkTag != configuration.displayNetworkTag { networkTag = configuration.displayNetworkTag }
         if transportLayerTag != configuration.displayTransportLayerTag { transportLayerTag = configuration.displayTransportLayerTag }
         if securityLayerTag != configuration.displaySecurityLayerTag { securityLayerTag = configuration.displaySecurityLayerTag }
         if isVision != configuration.hasVisionFlow { isVision = configuration.hasVisionFlow }
@@ -54,7 +55,6 @@ final class ProxyListItem: Identifiable {
     }
 }
 
-/// Mutated in place so a single-field change re-renders just the affected row.
 @MainActor
 @Observable
 final class ChainListItem: Identifiable {
@@ -86,8 +86,7 @@ final class ChainListItem: Identifiable {
         self.isSelected = isSelected
         self.latency = latency
     }
-
-    /// Assigns only changed fields so observation fires for exactly what moved.
+    
     func update(_ chain: ProxyChain, configurations: [ProxyConfiguration], isSelected: Bool, latency: LatencyResult?) {
         let d = chain.listDisplayInfo(configurations: configurations)
         if name != chain.name { name = chain.name }
@@ -98,5 +97,4 @@ final class ChainListItem: Identifiable {
         if self.isSelected != isSelected { self.isSelected = isSelected }
         if self.latency != latency { self.latency = latency }
     }
-
 }

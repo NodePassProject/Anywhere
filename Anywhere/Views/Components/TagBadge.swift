@@ -18,5 +18,6 @@ struct TagBadge: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
             .background(color.opacity(0.15), in: .capsule)
+            .dynamicTypeSize(.medium)
     }
 }
