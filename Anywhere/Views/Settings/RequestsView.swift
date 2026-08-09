@@ -70,7 +70,9 @@ struct RequestsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         HStack(spacing: 4) {
-                            TagBadge(text: label(for: entry.protocol), color: labelColor(for: entry.protocol))
+                            if let protocolLabel = label(for: entry.protocol) {
+                                TagBadge(text: protocolLabel, color: .green)
+                            }
                             TagBadge(text: label(for: entry), color: labelColor(for: entry))
                         }
                         if let detail = detailLine(for: entry) {
@@ -111,12 +113,12 @@ struct RequestsView: View {
         }
     }
     
-    private func label(for protocol: RequestsModel.Entry.`Protocol`) -> String {
+    private func label(for protocol: RequestsModel.Entry.`Protocol`) -> String? {
         switch `protocol` {
         case .tcp: String(localized: "TCP")
         case .udp: String(localized: "UDP")
         case .quic: String(localized: "QUIC")
-        case .unknown: String(localized: "Unknown")
+        case .unknown: nil
         }
     }
 
@@ -132,26 +134,16 @@ struct RequestsView: View {
         guard case .proxy = entry.routeTarget else { return nil }
         return entry.routeTarget.displayName(configStore: configStore, chainStore: chainStore)
     }
-    
-    private func labelColor(for protocol: RequestsModel.Entry.`Protocol`) -> Color {
-        switch `protocol` {
-        case .tcp: .blue
-        case .udp: .pink
-        case .quic: .mint
-        case .unknown: .gray
-        }
-    }
 
     private func labelColor(for entry: RequestsModel.Entry) -> Color {
         switch entry.routeTarget {
         case .direct: .green
         case .reject: .red
-        case .proxy: entry.viaDefault ? .gray : .purple
+        case .proxy: entry.viaDefault ? .blue : .purple
         }
     }
     
     private func detailLine(for entry: RequestsModel.Entry) -> String? {
-        // Default-routed entries carry no rule by definition.
         let ruleSetName = entry.viaDefault ? nil : entry.ruleSetName
         let parts = [routeName(for: entry), ruleSetName].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
