@@ -154,13 +154,13 @@ struct CustomizeThemeView: View {
             ? CGSize(width: maxDimension * screenAspectRatio, height: maxDimension)
             : CGSize(width: maxDimension, height: maxDimension / screenAspectRatio)
         return VStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 16)
                 .fill(
                     LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
                 )
                 .frame(width: size.width, height: size.height)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    RoundedRectangle(cornerRadius: 16)
                         .strokeBorder(.quaternary, lineWidth: 0.5)
                 }
                 .overlay {

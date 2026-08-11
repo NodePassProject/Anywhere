@@ -79,49 +79,41 @@ struct ProxiesView: View {
     }
 
     var body: some View {
-        List {
-            if proxyType == .servers {
-                Section {
-                    ForEach(standaloneItems) { item in
-                        proxyRow(item)
-                    }
-                }
-                ForEach(serverGroups) { group in
-                    Section {
-                        DisclosureGroup(isExpanded: expansionBinding(for: group)) {
-                            ForEach(serverMembers(of: group)) { item in
-                                proxyRow(item, group: group)
-                            }
-                        } label: {
-                            groupLabel(group)
+        ZStack {
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    if proxyType == .servers {
+                        ForEach(standaloneItems) { item in
+                            proxyRow(item)
+                                .padding(.horizontal, 12)
                         }
-                    }
-                }
-                ForEach(subscriptionStore.subscriptions) { subscription in
-                    Section {
-                        DisclosureGroup(isExpanded: expansionBinding(for: subscription)) {
-                            ForEach(items(for: subscription)) { item in
-                                proxyRow(item)
+                        ForEach(serverGroups) { group in
+                            groupView(group) {
+                                ForEach(serverMembers(of: group)) { item in
+                                    proxyRow(item, group: group)
+                                }
                             }
-                        } label: {
-                            subscriptionLabel(subscription)
                         }
-                    }
-                }
-            } else {
-                Section {
-                    ForEach(ungroupedChainItems) { item in
-                        chainRow(item)
-                    }
-                }
-                ForEach(chainGroups) { group in
-                    Section {
-                        DisclosureGroup(isExpanded: expansionBinding(for: group)) {
-                            ForEach(chainMembers(of: group)) { item in
-                                chainRow(item, group: group)
+                        ForEach(subscriptionStore.subscriptions) { subscription in
+                            subscriptionView(subscription) {
+                                ForEach(items(for: subscription)) { item in
+                                    proxyRow(item)
+                                }
                             }
-                        } label: {
-                            groupLabel(group)
+                        }
+                    } else {
+                        ForEach(ungroupedChainItems) { item in
+                            chainRow(item)
+                                .padding(.horizontal, 12)
+                        }
+                        ForEach(chainGroups) { group in
+                            groupView(group) {
+                                ForEach(chainMembers(of: group)) { item in
+                                    chainRow(item, group: group)
+                                }
+                            }
                         }
                     }
                 }
@@ -296,58 +288,17 @@ struct ProxiesView: View {
     }
 
     @ViewBuilder
-    private func groupLabel(_ group: ProxyGroup) -> some View {
-        let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
-        VStack(alignment: .leading, spacing: 5) {
-            Text(group.name)
-                .font(.body.weight(.medium))
-        }
-        .padding(.trailing, 10)
-        .swipeActions {
-            Button(role: .destructive) {
-                groupStore.delete(group)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-            Button {
-                groupToEdit = group
-            } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            .tint(.orange)
-        }
-        .contextMenu {
-            if memberCount > 1 {
-                Section {
-                    Button {
-                        reorderScope = .group(group.id)
-                    } label: {
-                        Label("Reorder", systemImage: "arrow.up.arrow.down")
-                    }
-                }
-            }
-            if memberCount > 0 {
-                Section {
-                    Button {
-                        testGroupLatency(group)
-                    } label: {
-                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                    }
-                }
-            }
-            Section {
-                Button {
-                    groupToEdit = group
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-                Button(role: .destructive) {
-                    groupStore.delete(group)
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-        }
+    private func groupView(_ group: ProxyGroup, @ViewBuilder content: () -> some View) -> some View {
+        GroupView(
+            group: group,
+            memberCount: group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count,
+            isExpanded: expansionBinding(for: group),
+            onReorder: { reorderScope = .group(group.id) },
+            onTestLatency: { testGroupLatency(group) },
+            onEdit: { groupToEdit = group },
+            onDelete: { groupStore.delete(group) },
+            content: content
+        )
     }
 
     private func testGroupLatency(_ group: ProxyGroup) {
@@ -384,85 +335,23 @@ struct ProxiesView: View {
     }
 
     @ViewBuilder
-    private func subscriptionLabel(_ subscription: Subscription) -> some View {
-        let configurationCount = configStore.configurations(for: subscription).count
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(subscription.name)
-                    .font(.body.weight(.medium))
-                if updatingSubscription?.id == subscription.id {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Button {
-                        updateSubscription(subscription)
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            SubscriptionUsageView(subscription: subscription)
-        }
-        .padding(.trailing, 10)
-        .swipeActions {
-            Button(role: .destructive) {
-                subscriptionStore.delete(subscription)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-            Button {
-                updateSubscription(subscription)
-            } label: {
-                Label("Update", systemImage: "arrow.clockwise")
-            }
-            .tint(.blue)
-            Button {
+    private func subscriptionView(_ subscription: Subscription, @ViewBuilder content: () -> some View) -> some View {
+        SubscriptionView(
+            subscription: subscription,
+            configurationCount: configStore.configurations(for: subscription).count,
+            isExpanded: expansionBinding(for: subscription),
+            isUpdating: updatingSubscription?.id == subscription.id,
+            onUpdate: { updateSubscription(subscription) },
+            onReorder: { reorderScope = .subscription(subscription.id) },
+            onTestLatency: { latency.testLatencies(for: configStore.configurations(for: subscription)) },
+            onRename: {
                 renameText = subscription.name
                 renamingSubscription = subscription
-            } label: {
-                Label("Rename", systemImage: "pencil")
-            }
-        }
-        .contextMenu {
-            if configurationCount > 1 {
-                Button {
-                    reorderScope = .subscription(subscription.id)
-                } label: {
-                    Label("Reorder", systemImage: "arrow.up.arrow.down")
-                }
-            }
-            if configurationCount > 0 {
-                Section {
-                    Button {
-                        latency.testLatencies(for: configStore.configurations(for: subscription))
-                    } label: {
-                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                    }
-                }
-            }
-            Section {
-                Button {
-                    renameText = subscription.name
-                    renamingSubscription = subscription
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
-                Button {
-                    updateSubscription(subscription)
-                } label: {
-                    Label("Update", systemImage: "arrow.clockwise")
-                }
-                Button(role: .destructive) {
-                    subscriptionStore.delete(subscription)
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-        }
+            },
+            onDelete: { subscriptionStore.delete(subscription) },
+            content: content
+        )
     }
-
-    // MARK: - Formatting
 
     private func updateSubscription(_ subscription: Subscription) {
         guard updatingSubscription == nil else { return }
@@ -543,106 +432,5 @@ struct ProxiesView: View {
             onRemoveFromGroup: group.map { group in { groupStore.removeMember(item.id, from: group.id) } },
             onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }
         )
-    }
-}
-
-private struct SubscriptionUsageView: View {
-    let subscription: Subscription
-
-    private static let byteFormatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .binary
-        formatter.allowsNonnumericFormatting = false
-        return formatter
-    }()
-    
-    private var totalBytes: Int64? {
-        guard let total = subscription.total, total > 0 else { return nil }
-        return total
-    }
-
-    private var usedBytes: Int64? {
-        guard subscription.upload != nil || subscription.download != nil else { return nil }
-        return (subscription.upload ?? 0) + (subscription.download ?? 0)
-    }
-
-    private var usedFraction: Double? {
-        guard let usedBytes, let totalBytes else { return nil }
-        return Double(usedBytes) / Double(totalBytes)
-    }
-
-    var body: some View {
-        if usageDescription != nil || subscription.expire != nil {
-            HStack(spacing: 5) {
-                if let usedFraction {
-                    UsageRing(fraction: usedFraction)
-                }
-                if let usageDescription, let expire = subscription.expire {
-                    Text([usageDescription, expireDescription(expire)].joined(separator: " · "))
-                } else if let usageDescription {
-                    Text(usageDescription)
-                } else if let expire = subscription.expire {
-                    Text(expireDescription(expire))
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-    }
-    
-    private struct UsageRing: View {
-        let fraction: Double
-
-        var body: some View {
-            ZStack {
-                Circle()
-                    .inset(by: 1)
-                    .stroke(.quaternary, lineWidth: 2)
-                Circle()
-                    .inset(by: 1)
-                    .trim(from: 0, to: max(0.03, min(fraction, 1)))
-                    .stroke(usageWarningColor(for: fraction), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-            }
-            .frame(width: 12, height: 12)
-            .animation(.snappy(duration: 0.3, extraBounce: 0), value: fraction)
-        }
-        
-        private func usageWarningColor(for fraction: Double) -> Color {
-            if fraction >= 0.95 {
-                .red
-            } else if fraction >= 0.8 {
-                .orange
-            } else {
-                .blue
-            }
-        }
-    }
-    
-    private var usageDescription: String? {
-        switch (usedBytes, totalBytes) {
-        case let (used?, total?):
-            String(localized: "\(Self.byteFormatter.string(fromByteCount: used)) of \(Self.byteFormatter.string(fromByteCount: total)) used")
-        case let (used?, nil):
-            String(localized: "\(Self.byteFormatter.string(fromByteCount: used)) used")
-        case let (nil, total?):
-            String(localized: "\(Self.byteFormatter.string(fromByteCount: total)) total")
-        case (nil, nil):
-            nil
-        }
-    }
-    
-    private func expireDescription(_ expire: Date) -> String {
-        let calendar = Calendar.current
-        let days = calendar.dateComponents(
-            [.day],
-            from: calendar.startOfDay(for: .now),
-            to: calendar.startOfDay(for: expire)
-        ).day ?? 0
-        if expire < .now {
-            return String(localized: "Expired")
-        } else {
-            return String(localized: "Expires in \(days) day(s)")
-        }
     }
 }

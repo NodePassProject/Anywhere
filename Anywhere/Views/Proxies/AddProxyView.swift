@@ -292,7 +292,9 @@ struct AddProxyView: View {
                     upload: result.upload,
                     download: result.download,
                     total: result.total,
-                    expire: result.expire
+                    expire: result.expire,
+                    iconLight: result.iconLight,
+                    iconDark: result.iconDark
                 )
                 subscriptionStore.add(subscription, configurations: result.configurations)
                 dismiss()

@@ -17,6 +17,8 @@ nonisolated struct SubscriptionFetcher {
         let download: Int64?
         let total: Int64?
         let expire: Date?
+        let iconLight: Data?
+        let iconDark: Data?
     }
 
     static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
@@ -54,6 +56,8 @@ nonisolated struct SubscriptionFetcher {
 
         let profileTitle = parseProfileTitle(from: httpResponse)
         let userInfo = parseSubscriptionUserInfo(from: httpResponse)
+        let iconLight = parseIcon(from: httpResponse, field: "aw-icon-light")
+        let iconDark = parseIcon(from: httpResponse, field: "aw-icon-dark")
 
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
@@ -77,7 +81,9 @@ nonisolated struct SubscriptionFetcher {
                 upload: userInfo.upload,
                 download: userInfo.download,
                 total: userInfo.total,
-                expire: userInfo.expire
+                expire: userInfo.expire,
+                iconLight: iconLight,
+                iconDark: iconDark
             )
         }
 
@@ -97,7 +103,9 @@ nonisolated struct SubscriptionFetcher {
             upload: userInfo.upload,
             download: userInfo.download,
             total: userInfo.total,
-            expire: userInfo.expire
+            expire: userInfo.expire,
+            iconLight: iconLight,
+            iconDark: iconDark
         )
     }
 
@@ -131,6 +139,15 @@ nonisolated struct SubscriptionFetcher {
         }
         let trimmed = decoded.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? nil : decoded
+    }
+
+    private static func parseIcon(from response: HTTPURLResponse?, field: String) -> Data? {
+        guard let value = response?.value(forHTTPHeaderField: field),
+              let data = Data(base64Encoded: value, options: .ignoreUnknownCharacters),
+              !data.isEmpty,
+              data.count <= 256 * 1024 // persisted into the subscriptions blob on every save
+        else { return nil }
+        return data
     }
 
     private static func parseSubscriptionUserInfo(from response: HTTPURLResponse?) -> (upload: Int64?, download: Int64?, total: Int64?, expire: Date?) {

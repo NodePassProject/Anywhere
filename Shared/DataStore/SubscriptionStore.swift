@@ -179,6 +179,8 @@ extension SubscriptionStore {
             record.download = result.download ?? record.download
             record.total = result.total ?? record.total
             record.expire = result.expire ?? record.expire
+            record.iconLight = result.iconLight ?? record.iconLight
+            record.iconDark = result.iconDark ?? record.iconDark
             if let name = result.name, !record.isNameCustomized {
                 record.name = name
             }

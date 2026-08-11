@@ -133,7 +133,7 @@ struct OnboardingView: View {
                             }
                         }
                     }
-                    .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16))
                     .padding(.horizontal, 24)
                 }
             }
@@ -200,7 +200,7 @@ struct OnboardingView: View {
                         .labelsHidden()
                 }
                 .padding(16)
-                .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16))
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 24)

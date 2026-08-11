@@ -177,7 +177,7 @@ fileprivate struct DIQRScannerView: View {
 
     @ViewBuilder
     private func ScannerView(_ size: CGSize) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 40, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 40)
         
         ZStack {
             if let permissionState = camera.permissionState {

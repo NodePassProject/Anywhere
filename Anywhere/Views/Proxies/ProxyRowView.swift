@@ -22,7 +22,7 @@ struct ProxyRowView: View {
     var body: some View {
         Button(action: onSelect) {
             HStack {
-                VStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 5) {
                     HStack {
                         Text(item.name)
                             .font(.body.weight(.medium))
@@ -54,7 +54,12 @@ struct ProxyRowView: View {
                 LatencyLabel(latency: item.latency)
                     .onTapGesture(perform: onTestLatency)
             }
-            .contentShape(Rectangle())
+            .padding()
+            .background {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 24))
         }
         .buttonStyle(.plain)
         .contextMenu {

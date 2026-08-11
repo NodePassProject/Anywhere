@@ -250,7 +250,9 @@ class TVAddProxyViewController: UITableViewController {
                         upload: fetchedSubscription.upload,
                         download: fetchedSubscription.download,
                         total: fetchedSubscription.total,
-                        expire: fetchedSubscription.expire
+                        expire: fetchedSubscription.expire,
+                        iconLight: fetchedSubscription.iconLight,
+                        iconDark: fetchedSubscription.iconDark
                     )
                     container.subscriptionStore.add(subscription, configurations: fetchedSubscription.configurations)
                     dismiss(animated: true)

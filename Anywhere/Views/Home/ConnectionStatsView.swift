@@ -321,9 +321,9 @@ private struct PressureGauge: View {
 private struct StatCardChrome: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 16))
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: 16)
                     .fill(.primary.opacity(0.1))
             )
     }

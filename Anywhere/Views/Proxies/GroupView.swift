@@ -1,0 +1,115 @@
+//
+//  GroupView.swift
+//  Anywhere
+//
+//  Created by NodePassProject on 8/11/26.
+//
+
+import SwiftUI
+
+struct GroupView<Content: View>: View {
+    let group: ProxyGroup
+    let memberCount: Int
+    @Binding var isExpanded: Bool
+
+    let onReorder: () -> Void
+    let onTestLatency: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    @ViewBuilder let content: Content
+
+    private let animation: Animation = .spring(response: 0.5, dampingFraction: 0.82)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(animation) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                header
+                    .contentShape(RoundedRectangle(cornerRadius: 24))
+                    .padding(.horizontal, isExpanded ? 0 : 12)
+            }
+            .buttonStyle(.plain)
+
+            VStack(spacing: 10) {
+                content
+            }
+            .padding(.top, 12)
+            .rotation3DEffect(
+                .degrees(isExpanded ? 0 : -85),
+                axis: (x: 1, y: 0, z: 0),
+                anchor: .top,
+                perspective: 0.4
+            )
+            .opacity(isExpanded ? 1 : 0)
+            .frame(height: isExpanded ? nil : 0, alignment: .top)
+            .clipped()
+            .allowsHitTesting(isExpanded)
+            .accessibilityHidden(!isExpanded)
+        }
+        .padding(.horizontal, isExpanded ? 12 : 0)
+        .padding(.vertical, isExpanded ? 12 : 0)
+        .background {
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color(.systemGroupedBackground))
+                .shadow(color: .primary.opacity(0.2), radius: 6)
+                .opacity(isExpanded ? 1 : 0)
+        }
+        .padding(.vertical, isExpanded ? 12 : 0)
+        .geometryGroup()
+    }
+
+    private var header: some View {
+        HStack {
+            Image(systemName: "folder")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(group.name)
+                .font(.body.weight(.medium))
+            Spacer()
+            TagBadge(text: memberCount.description, color: .accentColor)
+        }
+        .padding()
+        .background {
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .swipeActions {
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete", systemImage: "trash")
+            }
+            Button(action: onEdit) {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.orange)
+        }
+        .contextMenu {
+            if memberCount > 1 {
+                Section {
+                    Button(action: onReorder) {
+                        Label("Reorder", systemImage: "arrow.up.arrow.down")
+                    }
+                }
+            }
+            if memberCount > 0 {
+                Section {
+                    Button(action: onTestLatency) {
+                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+            }
+            Section {
+                Button(action: onEdit) {
+                    Label("Edit", systemImage: "pencil")
+                }
+                Button(role: .destructive, action: onDelete) {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
+    }
+}

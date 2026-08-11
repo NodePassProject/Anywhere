@@ -94,9 +94,9 @@ struct CustomizeAppIconView: View {
             .resizable()
             .scaledToFit()
             .frame(width: 58, height: 58)
-            .clipShape(.rect(cornerRadius: 13, style: .continuous))
+            .clipShape(.rect(cornerRadius: 13))
             .overlay {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                RoundedRectangle(cornerRadius: 13)
                     .strokeBorder(.quaternary, lineWidth: 0.5)
             }
             .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
