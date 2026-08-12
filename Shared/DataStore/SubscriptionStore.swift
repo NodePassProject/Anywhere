@@ -148,10 +148,6 @@ extension SubscriptionStore {
         }
     }
 
-    func toggleCollapsed(_ subscription: Subscription) {
-        mutate(id: subscription.id) { $0.collapsed.toggle() }
-    }
-
     func rename(_ subscription: Subscription, to newName: String) {
         mutate(id: subscription.id) {
             $0.name = newName

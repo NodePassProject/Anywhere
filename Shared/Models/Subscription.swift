@@ -18,12 +18,11 @@ nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
     var expire: Date?
     var iconLight: Data?
     var iconDark: Data?
-    var collapsed: Bool
     var isNameCustomized: Bool
     var updatedAt: Date
     var deletedAt: Date? = nil
 
-    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, iconLight: Data? = nil, iconDark: Data? = nil, collapsed: Bool = false, isNameCustomized: Bool = false, updatedAt: Date = .now) {
+    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, iconLight: Data? = nil, iconDark: Data? = nil, isNameCustomized: Bool = false, updatedAt: Date = .now) {
         self.id = id
         self.name = name
         self.url = url
@@ -34,7 +33,6 @@ nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
         self.expire = expire
         self.iconLight = iconLight
         self.iconDark = iconDark
-        self.collapsed = collapsed
         self.isNameCustomized = isNameCustomized
         self.updatedAt = updatedAt
     }
@@ -51,7 +49,6 @@ nonisolated struct Subscription: Identifiable, Codable, SoftDeletable {
         expire = try container.decodeIfPresent(Date.self, forKey: .expire)
         iconLight = try container.decodeIfPresent(Data.self, forKey: .iconLight)
         iconDark = try container.decodeIfPresent(Data.self, forKey: .iconDark)
-        collapsed = (try? container.decode(Bool.self, forKey: .collapsed)) ?? false
         isNameCustomized = (try? container.decode(Bool.self, forKey: .isNameCustomized)) ?? false
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)

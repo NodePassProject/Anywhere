@@ -36,48 +36,56 @@ struct ProxiesView: View {
     @State private var chainToEdit: ProxyChain?
     
     @State private var groupToEdit: ProxyGroup?
-    @State private var collapsedGroups: Set<UUID> = []
+    @State private var expandedContainerId: UUID?
     
     @State private var updatingSubscription: Subscription?
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
-    @State private var collapsedSubscriptions: Set<UUID> = []
     @State private var renamingSubscription: Subscription?
     @State private var renameText = ""
-
+    
     private var serverGroups: [ProxyGroup] { groupStore.groups(of: .servers) }
     private var chainGroups: [ProxyGroup] { groupStore.groups(of: .chains) }
-
+    
+    private var expandedSubscription: Subscription? {
+        guard proxyType == .servers else { return nil }
+        return subscriptionStore.subscriptions.first { $0.id == expandedContainerId }
+    }
+    
+    private var expandedGroup: ProxyGroup? {
+        (proxyType == .servers ? serverGroups : chainGroups).first { $0.id == expandedContainerId }
+    }
+    
     private var groupedServerIds: Set<UUID> {
         Set(serverGroups.flatMap(\.memberIds))
     }
-
+    
     private var groupedChainIds: Set<UUID> {
         Set(chainGroups.flatMap(\.memberIds))
     }
-
+    
     private var standaloneItems: [ProxyListItem] {
         let grouped = groupedServerIds
         return coordinator.models.filter { $0.subscriptionId == nil && !grouped.contains($0.id) }
     }
-
+    
     private var ungroupedChainItems: [ChainListItem] {
         let grouped = groupedChainIds
         return chainCoordinator.models.filter { !grouped.contains($0.id) }
     }
-
+    
     private func items(for subscription: Subscription) -> [ProxyListItem] {
         coordinator.models.filter { $0.subscriptionId == subscription.id }
     }
-
+    
     private func serverMembers(of group: ProxyGroup) -> [ProxyListItem] {
         group.memberIds.compactMap { coordinator.model(for: $0) }
     }
-
+    
     private func chainMembers(of group: ProxyGroup) -> [ChainListItem] {
         group.memberIds.compactMap { chainCoordinator.model(for: $0) }
     }
-
+    
     var body: some View {
         ZStack {
             Color(.systemGroupedBackground)
@@ -128,6 +136,104 @@ struct ProxiesView: View {
         }
         .navigationTitle("Proxies")
         .toolbar {
+            if let subscription = expandedSubscription {
+                ToolbarItem(placement: .bottomBar) {
+                    if updatingSubscription?.id == subscription.id {
+                        ProgressView()
+                    } else {
+                        Button {
+                            updateSubscription(subscription)
+                        } label: {
+                            Label("Update", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
+                
+                ToolbarItem(placement: .bottomBar) {
+                    Menu("More", systemImage: "ellipsis") {
+                        let configurationCount = configStore.configurations(for: subscription).count
+                        if configurationCount > 1 {
+                            Button {
+                                reorderScope = .subscription(subscription.id)
+                            } label: {
+                                Label("Reorder", systemImage: "arrow.up.arrow.down")
+                            }
+                        }
+                        if configurationCount > 0 {
+                            Section {
+                                Button {
+                                    latency.testLatencies(for: configStore.configurations(for: subscription))
+                                } label: {
+                                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                                }
+                            }
+                        }
+                        Section {
+                            Button {
+                                renameText = subscription.name
+                                renamingSubscription = subscription
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            Button {
+                                updateSubscription(subscription)
+                            } label: {
+                                Label("Update", systemImage: "arrow.clockwise")
+                            }
+                            Button(role: .destructive) {
+                                subscriptionStore.delete(subscription)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            } else if let group = expandedGroup {
+                ToolbarItem(placement: .bottomBar) {
+                    Button{
+                        groupToEdit = group
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                }
+                
+                ToolbarItem(placement: .bottomBar) {
+                    Menu("More", systemImage: "ellipsis") {
+                        let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
+                        if memberCount > 1 {
+                            Section {
+                                Button {
+                                    reorderScope = .group(group.id)
+                                } label: {
+                                    Label("Reorder", systemImage: "arrow.up.arrow.down")
+                                }
+                            }
+                        }
+                        if memberCount > 0 {
+                            Section {
+                                Button {
+                                    testGroupLatency(group)
+                                } label: {
+                                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                                }
+                            }
+                        }
+                        Section {
+                            Button {
+                                groupToEdit = group
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                groupStore.delete(group)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+            
             ToolbarItem {
                 Button {
                     switch proxyType {
@@ -174,16 +280,16 @@ struct ProxiesView: View {
                             switch proxyType {
                             case .servers:
                                 let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
-                                let hiddenGroupMemberIds = Set(serverGroups.filter { collapsedGroups.contains($0.id) }.flatMap(\.memberIds))
+                                let hiddenGroupMemberIds = Set(serverGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
                                 let visible = configStore.configurations.filter { configuration in
                                     guard let subscriptionId = configuration.subscriptionId else {
                                         return !hiddenGroupMemberIds.contains(configuration.id)
                                     }
-                                    return liveSubscriptionIds.contains(subscriptionId) && !collapsedSubscriptions.contains(subscriptionId)
+                                    return liveSubscriptionIds.contains(subscriptionId) && subscriptionId == expandedContainerId
                                 }
                                 latency.testLatencies(for: visible)
                             case .chains:
-                                let hiddenChainIds = Set(chainGroups.filter { collapsedGroups.contains($0.id) }.flatMap(\.memberIds))
+                                let hiddenChainIds = Set(chainGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
                                 let visibleChains = chainStore.chains.filter { !hiddenChainIds.contains($0.id) }
                                 latency.testAllChainLatencies(chains: visibleChains, configurations: configStore.configurations)
                             }
@@ -264,35 +370,43 @@ struct ProxiesView: View {
             AWCore.setProxiesPageProxyType(newValue.rawValue)
         }
         .onAppear {
-            collapsedSubscriptions = Set(subscriptionStore.subscriptions.filter(\.collapsed).map(\.id))
-            collapsedGroups = Set(groupStore.groups.filter(\.collapsed).map(\.id))
+            unfoldSelectedProxyContainer()
+        }
+    }
+    
+    // MARK: - Expansion
+    
+    private func expansionBinding(for id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { expandedContainerId == id },
+            set: { expanded in
+                expandedContainerId = expanded ? id : nil
+            }
+        )
+    }
+    
+    private func unfoldSelectedProxyContainer() {
+        if let chainId = selection.selectedChainId {
+            if let group = groupStore.group(containing: chainId, kind: .chains) {
+                expandedContainerId = group.id
+            }
+        } else if let configuration = selection.selectedConfiguration {
+            if let subscriptionId = configuration.subscriptionId {
+                expandedContainerId = subscriptionId
+            } else if let group = groupStore.group(containing: configuration.id, kind: .servers) {
+                expandedContainerId = group.id
+            }
         }
     }
     
     // MARK: - Groups
-
-    private func expansionBinding(for group: ProxyGroup) -> Binding<Bool> {
-        Binding(
-            get: { !collapsedGroups.contains(group.id) },
-            set: { expanded in
-                if expanded {
-                    collapsedGroups.remove(group.id)
-                } else {
-                    collapsedGroups.insert(group.id)
-                }
-                if group.collapsed == expanded {
-                    groupStore.toggleCollapsed(group)
-                }
-            }
-        )
-    }
-
+    
     @ViewBuilder
     private func groupView(_ group: ProxyGroup, @ViewBuilder content: () -> some View) -> some View {
         GroupView(
             group: group,
             memberCount: group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count,
-            isExpanded: expansionBinding(for: group),
+            isExpanded: expansionBinding(for: group.id),
             onReorder: { reorderScope = .group(group.id) },
             onTestLatency: { testGroupLatency(group) },
             onEdit: { groupToEdit = group },
@@ -300,7 +414,7 @@ struct ProxiesView: View {
             content: content
         )
     }
-
+    
     private func testGroupLatency(_ group: ProxyGroup) {
         switch group.kind {
         case .servers:
@@ -315,35 +429,16 @@ struct ProxiesView: View {
             latency.testAllChainLatencies(chains: members, configurations: configStore.configurations)
         }
     }
-
+    
     // MARK: - Subscriptions
     
-    private func expansionBinding(for subscription: Subscription) -> Binding<Bool> {
-        Binding(
-            get: { !collapsedSubscriptions.contains(subscription.id) },
-            set: { expanded in
-                if expanded {
-                    collapsedSubscriptions.remove(subscription.id)
-                } else {
-                    collapsedSubscriptions.insert(subscription.id)
-                }
-                if subscription.collapsed == expanded {
-                    subscriptionStore.toggleCollapsed(subscription)
-                }
-            }
-        )
-    }
-
     @ViewBuilder
     private func subscriptionView(_ subscription: Subscription, @ViewBuilder content: () -> some View) -> some View {
         SubscriptionView(
             subscription: subscription,
             configurationCount: configStore.configurations(for: subscription).count,
-            isExpanded: expansionBinding(for: subscription),
+            isExpanded: expansionBinding(for: subscription.id),
             isUpdating: updatingSubscription?.id == subscription.id,
-            onUpdate: { updateSubscription(subscription) },
-            onReorder: { reorderScope = .subscription(subscription.id) },
-            onTestLatency: { latency.testLatencies(for: configStore.configurations(for: subscription)) },
             onRename: {
                 renameText = subscription.name
                 renamingSubscription = subscription
@@ -352,7 +447,7 @@ struct ProxiesView: View {
             content: content
         )
     }
-
+    
     private func updateSubscription(_ subscription: Subscription) {
         guard updatingSubscription == nil else { return }
         updatingSubscription = subscription
@@ -366,7 +461,7 @@ struct ProxiesView: View {
             updatingSubscription = nil
         }
     }
-
+    
     private func updateAllSubscriptions() {
         guard updatingSubscription == nil else { return }
         Task {
@@ -387,13 +482,13 @@ struct ProxiesView: View {
             }
         }
     }
-
+    
     // MARK: - Rows
-
+    
     private func config(_ id: UUID) -> ProxyConfiguration? {
         configStore.configurations.first { $0.id == id }
     }
-
+    
     @ViewBuilder
     private func proxyRow(_ item: ProxyListItem, group: ProxyGroup? = nil) -> some View {
         let isGroupable = item.subscriptionId == nil
@@ -409,11 +504,11 @@ struct ProxiesView: View {
             onDelete: { if let configuration = config(item.id) { configStore.delete(configuration) } }
         )
     }
-
+    
     private func chain(_ id: UUID) -> ProxyChain? {
         chainStore.chains.first { $0.id == id }
     }
-
+    
     @ViewBuilder
     private func chainRow(_ item: ChainListItem, group: ProxyGroup? = nil) -> some View {
         ChainRowView(

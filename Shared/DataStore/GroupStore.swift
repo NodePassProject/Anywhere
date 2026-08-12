@@ -116,12 +116,6 @@ class GroupStore {
         update(group)
     }
 
-    func toggleCollapsed(_ group: ProxyGroup) {
-        guard var current = groups.first(where: { $0.id == group.id }) else { return }
-        current.collapsed.toggle()
-        update(current)
-    }
-
     // MARK: - Persistence
 
     nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyGroup], tombstones: [ProxyGroup]) {

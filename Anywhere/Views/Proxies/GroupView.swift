@@ -50,7 +50,7 @@ struct GroupView<Content: View>: View {
             .allowsHitTesting(isExpanded)
             .accessibilityHidden(!isExpanded)
         }
-        .padding(.horizontal, isExpanded ? 12 : 0)
+        .padding(.horizontal, isExpanded ? 7 : 0)
         .padding(.vertical, isExpanded ? 12 : 0)
         .background {
             RoundedRectangle(cornerRadius: 24)
@@ -58,15 +58,24 @@ struct GroupView<Content: View>: View {
                 .shadow(color: .primary.opacity(0.2), radius: 6)
                 .opacity(isExpanded ? 1 : 0)
         }
+        .padding(.horizontal, isExpanded ? 5 : 0)
         .padding(.vertical, isExpanded ? 12 : 0)
         .geometryGroup()
     }
+    
+    @ViewBuilder
+    private var iconView: some View {
+        let imageSize: CGFloat = isExpanded ? 32 : 16
+        Image(systemName: "folder")
+            .resizable()
+            .scaledToFit()
+            .frame(width: imageSize, height: imageSize)
+            .foregroundStyle(.secondary)
+    }
 
     private var header: some View {
-        HStack {
-            Image(systemName: "folder")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
+        HStack(spacing: isExpanded ? 20 : 10) {
+            iconView
             Text(group.name)
                 .font(.body.weight(.medium))
             Spacer()
@@ -88,20 +97,6 @@ struct GroupView<Content: View>: View {
             .tint(.orange)
         }
         .contextMenu {
-            if memberCount > 1 {
-                Section {
-                    Button(action: onReorder) {
-                        Label("Reorder", systemImage: "arrow.up.arrow.down")
-                    }
-                }
-            }
-            if memberCount > 0 {
-                Section {
-                    Button(action: onTestLatency) {
-                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                    }
-                }
-            }
             Section {
                 Button(action: onEdit) {
                     Label("Edit", systemImage: "pencil")

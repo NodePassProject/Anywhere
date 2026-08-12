@@ -13,9 +13,6 @@ struct SubscriptionView<Content: View>: View {
     @Binding var isExpanded: Bool
     let isUpdating: Bool
 
-    let onUpdate: () -> Void
-    let onReorder: () -> Void
-    let onTestLatency: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
 
@@ -54,7 +51,7 @@ struct SubscriptionView<Content: View>: View {
             .allowsHitTesting(isExpanded)
             .accessibilityHidden(!isExpanded)
         }
-        .padding(.horizontal, isExpanded ? 12 : 0)
+        .padding(.horizontal, isExpanded ? 7 : 0)
         .padding(.vertical, isExpanded ? 12 : 0)
         .background {
             RoundedRectangle(cornerRadius: 24)
@@ -62,6 +59,7 @@ struct SubscriptionView<Content: View>: View {
                 .shadow(color: .primary.opacity(0.2), radius: 6)
                 .opacity(isExpanded ? 1 : 0)
         }
+        .padding(.horizontal, isExpanded ? 5 : 0)
         .padding(.vertical, isExpanded ? 12 : 0)
         .geometryGroup()
     }
@@ -75,40 +73,39 @@ struct SubscriptionView<Content: View>: View {
 
     @ViewBuilder
     private var iconView: some View {
+        let imageSize: CGFloat = isExpanded ? 32 : 16
         if let icon = iconData, let image = UIImage(data: icon) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 20, height: 20)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .frame(width: imageSize, height: imageSize)
         } else {
             Image(systemName: "globe")
-                .font(.subheadline.weight(.medium))
+                .resizable()
+                .scaledToFit()
+                .frame(width: imageSize, height: imageSize)
                 .foregroundStyle(.secondary)
         }
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: isExpanded ? 20 : 10) {
             iconView
             VStack(alignment: .leading, spacing: 5) {
-                HStack {
+                HStack(spacing: 10) {
                     Text(subscription.name)
                         .font(.body.weight(.medium))
                         .lineLimit(1)
                     if isUpdating {
                         ProgressView()
                             .controlSize(.small)
-                    } else {
-                        Button(action: onUpdate) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
                     }
                     Spacer()
                     TagBadge(text: configurationCount.description, color: .accentColor)
                 }
-                SubscriptionUsageView(subscription: subscription)
+                if isExpanded {
+                    SubscriptionUsageView(subscription: subscription)
+                }
             }
         }
         .padding()
@@ -121,37 +118,17 @@ struct SubscriptionView<Content: View>: View {
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
-            Button(action: onUpdate) {
-                Label("Update", systemImage: "arrow.clockwise")
-            }
-            .tint(.blue)
             Button(action: onRename) {
                 Label("Rename", systemImage: "pencil")
             }
+            .tint(.gray)
         }
         .contextMenu {
-            if configurationCount > 1 {
-                Button(action: onReorder) {
-                    Label("Reorder", systemImage: "arrow.up.arrow.down")
-                }
+            Button(action: onRename) {
+                Label("Rename", systemImage: "pencil")
             }
-            if configurationCount > 0 {
-                Section {
-                    Button(action: onTestLatency) {
-                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                    }
-                }
-            }
-            Section {
-                Button(action: onRename) {
-                    Label("Rename", systemImage: "pencil")
-                }
-                Button(action: onUpdate) {
-                    Label("Update", systemImage: "arrow.clockwise")
-                }
-                Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
-                }
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -184,15 +161,14 @@ private struct SubscriptionUsageView: View {
 
     var body: some View {
         if usageDescription != nil || subscription.expire != nil {
-            HStack(spacing: 5) {
-                if let usedFraction {
-                    UsageRing(fraction: usedFraction)
+            VStack(alignment: .leading, spacing: 5) {
+                if let usedFraction, let usageDescription {
+                    HStack(spacing: 5) {
+                        UsageRing(fraction: usedFraction)
+                        Text(usageDescription)
+                    }
                 }
-                if let usageDescription, let expire = subscription.expire {
-                    Text([usageDescription, expireDescription(expire)].joined(separator: " · "))
-                } else if let usageDescription {
-                    Text(usageDescription)
-                } else if let expire = subscription.expire {
+                if let expire = subscription.expire {
                     Text(expireDescription(expire))
                 }
             }

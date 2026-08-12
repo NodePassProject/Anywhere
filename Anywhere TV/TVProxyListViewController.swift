@@ -53,7 +53,6 @@ class TVProxyListViewController: UITableViewController {
 
         navigationItem.rightBarButtonItems = [addButton, testAllButton]
 
-        collapsedSubscriptions = Set(container.subscriptionStore.subscriptions.filter(\.collapsed).map(\.id))
         configureDataSource()
     }
     
@@ -231,7 +230,6 @@ class TVProxyListViewController: UITableViewController {
         } else {
             collapsedSubscriptions.insert(id)
         }
-        container.subscriptionStore.toggleCollapsed(subscription)
         applySnapshot()
         refreshVisibleHeaders()
     }
