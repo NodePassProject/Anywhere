@@ -32,8 +32,8 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
 }
 
 struct AddProxyView: View {
-    @Environment(ProxySelection.self) private var selection
-    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ProxySelection.self) private var proxySelection
+    @Environment(ConfigurationStore.self) private var configurationStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
@@ -263,7 +263,7 @@ struct AddProxyView: View {
         if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL)
-                configStore.add(configuration); selection.selectIfNone(configuration)
+                configurationStore.add(configuration); proxySelection.selectIfNone(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
