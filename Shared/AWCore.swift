@@ -101,12 +101,12 @@ nonisolated final class AWCore {
         static let syncDeviceID = "syncDeviceID"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let trustedSSIDs = "trustedSSIDs"
+        static let tunnelExcludeAPNs = "tunnelExcludeAPNs"
+        static let tunnelExcludeCellularServices = "tunnelExcludeCellularServices"
         static let tunnelExcludedRoutes = "tunnelExcludedRoutes"
+        static let tunnelExcludeLocalNetworks = "tunnelExcludeLocalNetworks"
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
-        static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
-        static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
         static let tunnelIncludedRoutes = "tunnelIncludedRoutes"
-        static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
         static let voyagerMembership = "voyagerMembership"
     }
 
@@ -393,28 +393,37 @@ nonisolated final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
     }
 
-    static func getTunnelIncludeLocalNetworks() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    static func getTunnelExcludeLocalNetworks() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeLocalNetworks) as? Bool {
+            return value
+        }
+        return true
     }
 
-    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    static func setTunnelExcludeLocalNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeLocalNetworks)
     }
 
-    static func getTunnelIncludeAPNs() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    static func getTunnelExcludeAPNs() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeAPNs) as? Bool {
+            return value
+        }
+        return true
     }
 
-    static func setTunnelIncludeAPNs(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    static func setTunnelExcludeAPNs(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeAPNs)
     }
 
-    static func getTunnelIncludeCellularServices() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    static func getTunnelExcludeCellularServices() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeCellularServices) as? Bool {
+            return value
+        }
+        return true
     }
 
-    static func setTunnelIncludeCellularServices(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    static func setTunnelExcludeCellularServices(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeCellularServices)
     }
 
     static func getTunnelIncludedRoutes() -> [String] {

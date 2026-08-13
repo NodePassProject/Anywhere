@@ -282,30 +282,30 @@ final class AppSettings {
         }
     }
 
+    var excludeAPNs: Bool {
+        didSet {
+            AWCore.setTunnelExcludeAPNs(excludeAPNs)
+            onTunnelBehaviorChange?()
+        }
+    }
+
+    var excludeCellularServices: Bool {
+        didSet {
+            AWCore.setTunnelExcludeCellularServices(excludeCellularServices)
+            onTunnelBehaviorChange?()
+        }
+    }
+
+    var excludeLocalNetworks: Bool {
+        didSet {
+            AWCore.setTunnelExcludeLocalNetworks(excludeLocalNetworks)
+            onTunnelBehaviorChange?()
+        }
+    }
+
     var includeAllNetworks: Bool {
         didSet {
             AWCore.setTunnelIncludeAllNetworks(includeAllNetworks)
-            onTunnelBehaviorChange?()
-        }
-    }
-
-    var includeAPNs: Bool {
-        didSet {
-            AWCore.setTunnelIncludeAPNs(includeAPNs)
-            onTunnelBehaviorChange?()
-        }
-    }
-
-    var includeCellularServices: Bool {
-        didSet {
-            AWCore.setTunnelIncludeCellularServices(includeCellularServices)
-            onTunnelBehaviorChange?()
-        }
-    }
-
-    var includeLocalNetworks: Bool {
-        didSet {
-            AWCore.setTunnelIncludeLocalNetworks(includeLocalNetworks)
             onTunnelBehaviorChange?()
         }
     }
@@ -353,9 +353,9 @@ final class AppSettings {
         allowInsecure = AWCore.getAllowInsecure()
 
         alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
+        excludeAPNs = AWCore.getTunnelExcludeAPNs()
+        excludeCellularServices = AWCore.getTunnelExcludeCellularServices()
+        excludeLocalNetworks = AWCore.getTunnelExcludeLocalNetworks()
         includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
-        includeAPNs = AWCore.getTunnelIncludeAPNs()
-        includeCellularServices = AWCore.getTunnelIncludeCellularServices()
-        includeLocalNetworks = AWCore.getTunnelIncludeLocalNetworks()
     }
 }

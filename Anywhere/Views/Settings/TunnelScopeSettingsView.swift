@@ -32,9 +32,9 @@ struct TunnelScopeSettingsView: View {
             }
 
             Section {
-                Toggle("Include Local Networks", isOn: $settings.includeLocalNetworks)
-                Toggle("Include APNs", isOn: $settings.includeAPNs)
-                Toggle("Include Cellular Services", isOn: $settings.includeCellularServices)
+                Toggle("Exclude Local Networks", isOn: $settings.excludeLocalNetworks)
+                Toggle("Exclude APNs", isOn: $settings.excludeAPNs)
+                Toggle("Exclude Cellular Services", isOn: $settings.excludeCellularServices)
             }
             .disabled(!settings.includeAllNetworks)
 

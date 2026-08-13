@@ -81,9 +81,9 @@ final class TunnelController {
                 var request = TunnelStartRequest(startMessage: messageData)
                 #if !os(tvOS)
                 request.includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
-                request.excludeLocalNetworks = !AWCore.getTunnelIncludeLocalNetworks()
-                request.excludeAPNs = !AWCore.getTunnelIncludeAPNs()
-                request.excludeCellularServices = !AWCore.getTunnelIncludeCellularServices()
+                request.excludeLocalNetworks = AWCore.getTunnelExcludeLocalNetworks()
+                request.excludeAPNs = AWCore.getTunnelExcludeAPNs()
+                request.excludeCellularServices = AWCore.getTunnelExcludeCellularServices()
                 #endif
                 request.alwaysOn = AWCore.getAlwaysOnEnabled()
                 try await provider.start(request)
