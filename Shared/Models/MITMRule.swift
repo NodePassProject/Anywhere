@@ -607,16 +607,12 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
         try c.encode(ruleSets, forKey: .ruleSets)
     }
     
-    static func load() -> MITMSnapshot {
-        decode(from: JSONBlobStore.shared.load(.mitm))
-    }
-    
     nonisolated static func decode(from data: Data?) -> MITMSnapshot {
         if let data {
             if let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
                 return snapshot
             }
-            JSONBlobStore.quarantine(.mitm, data)
+            SyncStore.quarantine(.mitm, data)
         }
         if let data = legacyDefaultsBlob(),
            let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
@@ -643,20 +639,7 @@ nonisolated struct MITMSnapshot: Codable, Equatable {
     }
 
     private static let legacyMITMDefaultsKey = "mitmData"
-    
-    func save(to blobStore: JSONBlobStore) {
-        let data: Data
-        do {
-            data = try JSONEncoder().encode(self)
-        } catch {
-            logger.report(AnywhereError.store(.saveFailed(.mitmRuleSets, underlying: error)))
-            return
-        }
-        blobStore.save(.mitm, data: data)
-        exportBinaryToAppGroup()
-        AWNotificationCenter.notifyMITMChanged()
-    }
-    
+
     func exportBinaryToAppGroup() {
         let data = MITMBinaryWriter.encode(enabled: AWCore.getMITMEnabled(), ruleSets: liveRuleSets)
         if data != AWCore.getMITMData() {

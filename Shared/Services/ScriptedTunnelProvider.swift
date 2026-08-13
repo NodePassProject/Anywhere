@@ -63,7 +63,7 @@ final class ScriptedTunnelProvider: TunnelProviding {
 
 extension AppContainer {
     static func preview(tunnel: ScriptedTunnelProvider = ScriptedTunnelProvider()) -> AppContainer {
-        AppContainer(blobStore: .ephemeral(), tunnelProvider: tunnel)
+        AppContainer(syncStore: .ephemeral(), tunnelProvider: tunnel)
     }
 }
 #endif

@@ -7,18 +7,10 @@
 
 import Foundation
 
-nonisolated final class DecodeLossTally: @unchecked Sendable {
-    static let key = CodingUserInfoKey(rawValue: "AnywhereDecodeLossTally")!
-    var dropped = 0
-}
-
 nonisolated struct FailableDecodable<T: Decodable>: Decodable {
     let value: T?
     init(from decoder: Decoder) throws {
         value = try? T(from: decoder)
-        if value == nil, let tally = decoder.userInfo[DecodeLossTally.key] as? DecodeLossTally {
-            tally.dropped += 1
-        }
     }
 }
 

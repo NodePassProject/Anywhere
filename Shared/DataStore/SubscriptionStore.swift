@@ -9,47 +9,45 @@ import Foundation
 import Observation
 import SwiftUI
 
-nonisolated private let logger = AnywhereLogger(category: "SubscriptionStore")
-
 @MainActor
 @Observable
 class SubscriptionStore {
     private(set) var subscriptions: [Subscription] = []
     private var tombstones: [Subscription] = []
 
-    @ObservationIgnored private let blobStore: JSONBlobStore
+    @ObservationIgnored private let syncStore: SyncStore
     @ObservationIgnored private let configurationStore: ConfigurationStore
-    @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    init(blobStore: JSONBlobStore, configurationStore: ConfigurationStore) {
-        self.blobStore = blobStore
+    init(syncStore: SyncStore, configurationStore: ConfigurationStore) {
+        self.syncStore = syncStore
         self.configurationStore = configurationStore
-        let data = blobStore.load(.subscriptions)
-        loadedBlob = data
-        let split = Self.decodeSplit(from: data)
+        let items = syncStore.loadItems(.subscriptions)
+        loadedItems = items
+        let split = Self.decodeSplit(from: items)
         subscriptions = split.live
         tombstones = split.tombstones
     }
 
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                [blobStore] () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
-                let data = blobStore.load(.subscriptions)
-                guard data != previous else { return nil }
-                let split = Self.decodeSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [Subscription], tombstones: [Subscription])? in
+                let items = syncStore.loadItems(.subscriptions)
+                guard items != previous else { return nil }
+                let split = Self.decodeSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             subscriptions = outcome.live
             tombstones = outcome.tombstones
             return
@@ -90,13 +88,8 @@ class SubscriptionStore {
 
     // MARK: - Persistence
     
-    nonisolated private static func decodeSplit(from data: Data?) -> (live: [Subscription], tombstones: [Subscription]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) else {
-            JSONBlobStore.quarantine(.subscriptions, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+    nonisolated private static func decodeSplit(from items: [Data]) -> (live: [Subscription], tombstones: [Subscription]) {
+        Tombstone.split(SyncCodec.decodeItems(Subscription.self, key: .subscriptions, payloads: items))
     }
     
     private func recordTombstone(_ subscription: Subscription) {
@@ -113,18 +106,12 @@ class SubscriptionStore {
 
     private func save() {
         mutationEpoch += 1
-        let snapshot = subscriptions + tombstones
+        let live = subscriptions
+        let snapshot = live + tombstones
         let previous = saveTask
-        saveTask = Task.detached { [blobStore] in
+        saveTask = Task.detached { [syncStore] in
             await previous?.value
-            do {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                let data = try encoder.encode(snapshot)
-                blobStore.save(.subscriptions, data: data)
-            } catch {
-                logger.report(AnywhereError.store(.saveFailed(.subscriptions, underlying: error)))
-            }
+            syncStore.save(.subscriptions, items: SyncCodec.encodeItems(snapshot), order: SyncCodec.order(of: live))
         }
     }
 }

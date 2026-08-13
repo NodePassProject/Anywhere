@@ -8,8 +8,6 @@
 import Foundation
 import Observation
 
-nonisolated private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
-
 nonisolated struct RoutingRuleSet: Identifiable, Equatable {
     let id: String   // built-in: name, custom: UUID string
     let name: String
@@ -97,20 +95,20 @@ class RoutingRuleSetStore {
 
     nonisolated private static let serviceCatalog = ServiceCatalog.load()
 
-    @ObservationIgnored private let blobStore: JSONBlobStore
-    @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private let syncStore: SyncStore
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
-    
+
     @ObservationIgnored var onNeedsExport: (() -> Void)?
 
-    init(blobStore: JSONBlobStore) {
-        self.blobStore = blobStore
+    init(syncStore: SyncStore) {
+        self.syncStore = syncStore
         bypassCountryCode = AWCore.getBypassCountryCode()
         let assignments = AWCore.getRuleSetAssignments()
 
-        let data = blobStore.load(.customRuleSets)
-        loadedBlob = data
-        let split = Self.decodeCustomSplit(from: data)
+        let items = syncStore.loadItems(.customRuleSets)
+        loadedItems = items
+        let split = Self.decodeCustomSplit(from: items)
         customRuleSets = split.live
         customTombstones = split.tombstones
 
@@ -119,18 +117,18 @@ class RoutingRuleSetStore {
     
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             let outcome = await Task.detached(priority: .utility) {
-                [blobStore] () -> (data: Data?, live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet])? in
-                let data = blobStore.load(.customRuleSets)
-                guard data != previous else { return nil }
-                let split = Self.decodeCustomSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet])? in
+                let items = syncStore.loadItems(.customRuleSets)
+                guard items != previous else { return nil }
+                let split = Self.decodeCustomSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             customRuleSets = outcome.live
             customTombstones = outcome.tombstones
             rebuildRuleSets()
@@ -274,13 +272,8 @@ class RoutingRuleSetStore {
         AWCore.setRuleSetAssignments(dictionary)
     }
     
-    nonisolated private static func decodeCustomSplit(from data: Data?) -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) else {
-            JSONBlobStore.quarantine(.customRuleSets, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+    nonisolated private static func decodeCustomSplit(from items: [Data]) -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
+        Tombstone.split(SyncCodec.decodeItems(CustomRoutingRuleSet.self, key: .customRuleSets, payloads: items))
     }
 
     private func recordTombstone(_ ruleSet: CustomRoutingRuleSet) {
@@ -293,12 +286,11 @@ class RoutingRuleSetStore {
 
     private func saveCustomRuleSets() {
         mutationEpoch += 1
-        do {
-            let data = try JSONEncoder().encode(customRuleSets + customTombstones)
-            blobStore.save(.customRuleSets, data: data)
-        } catch {
-            logger.report(AnywhereError.store(.saveFailed(.routingRuleSets, underlying: error)))
-        }
+        syncStore.save(
+            .customRuleSets,
+            items: SyncCodec.encodeItems(customRuleSets + customTombstones),
+            order: SyncCodec.order(of: customRuleSets)
+        )
         onNeedsExport?()
     }
 }

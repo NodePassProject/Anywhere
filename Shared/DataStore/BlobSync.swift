@@ -11,36 +11,6 @@ import CoreData
 nonisolated private let logger = AnywhereLogger(category: "BlobSync")
 
 nonisolated enum BlobMerge {
-    static func register() {
-        JSONBlobStore.installMergeResolver({ key, rows in
-            switch key {
-            case .configurations: return mergeArray(ProxyConfiguration.self, key, rows)
-            case .chains:         return mergeArray(ProxyChain.self, key, rows)
-            case .groups:         return mergeArray(ProxyGroup.self, key, rows)
-            case .subscriptions:  return mergeArray(Subscription.self, key, rows)
-            case .customRuleSets: return mergeArray(CustomRoutingRuleSet.self, key, rows)
-            case .mitm:           return mergeMITM(key, rows)
-            }
-        }, canFullyDecode: { key, data in
-            switch key {
-            case .configurations: return decodesFully([ProxyConfiguration].self, data)
-            case .chains:         return decodesFully([ProxyChain].self, data)
-            case .groups:         return decodesFully([ProxyGroup].self, data)
-            case .subscriptions:  return decodesFully([Subscription].self, data)
-            case .customRuleSets: return decodesFully([CustomRoutingRuleSet].self, data)
-            case .mitm:           return decodesFully(MITMSnapshot.self, data)
-            }
-        })
-    }
-    
-    private static func decodesFully<T: Decodable>(_ type: T.Type, _ data: Data) -> Bool {
-        let tally = DecodeLossTally()
-        let decoder = JSONDecoder()
-        decoder.userInfo[DecodeLossTally.key] = tally
-        guard (try? decoder.decode(T.self, from: data)) != nil else { return false }
-        return tally.dropped == 0
-    }
-
     static func prevails<T: Codable & SoftDeletable>(_ challenger: T, over incumbent: T) -> Bool {
         let challengerStamp = challenger.syncStamp, incumbentStamp = incumbent.syncStamp
         if challengerStamp != incumbentStamp { return challengerStamp > incumbentStamp }
@@ -56,7 +26,7 @@ nonisolated enum BlobMerge {
         }
         return incumbentData.lexicographicallyPrecedes(challengerData)
     }
-    
+
     static func mergeItems<T: Codable & Identifiable & SoftDeletable>(_ blobs: [[T]]) -> [T] {
         var byId: [T.ID: T] = [:]
         for items in blobs {
@@ -76,43 +46,67 @@ nonisolated enum BlobMerge {
 
         return Tombstone.collected(order.compactMap { byId[$0] })
     }
-
-    private static func mergeArray<T: Codable & Identifiable & SoftDeletable>(
-        _ type: T.Type, _ key: JSONBlobStore.Key, _ rows: [(data: Data, updatedAt: Date)]
-    ) -> Data {
-        let decoder = JSONDecoder()
-        let blobs: [[T]] = rows
-            .sorted { $0.updatedAt < $1.updatedAt }
-            .compactMap { row in
-                if let items = decoder.decodeSkippingInvalid([T].self, from: row.data) { return items }
-                JSONBlobStore.quarantine(key, row.data)
-                return nil
-            }
-        return encode(mergeItems(blobs)) ?? newest(rows)
-    }
-
-    private static func mergeMITM(_ key: JSONBlobStore.Key, _ rows: [(data: Data, updatedAt: Date)]) -> Data {
-        let decoder = JSONDecoder()
-        let snapshots: [MITMSnapshot] = rows
-            .sorted { $0.updatedAt < $1.updatedAt }
-            .compactMap { row in
-                if let snapshot = try? decoder.decode(MITMSnapshot.self, from: row.data) { return snapshot }
-                JSONBlobStore.quarantine(key, row.data)
-                return nil
-            }
-
-        let merged = MITMSnapshot(ruleSets: mergeItems(snapshots.map(\.ruleSets)))
-        return encode(merged) ?? newest(rows)
-    }
-
+    
     private static func encode<T: Encodable>(_ value: T) -> Data? {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try? encoder.encode(value)
     }
+}
 
-    private static func newest(_ rows: [(data: Data, updatedAt: Date)]) -> Data {
-        rows.max { $0.updatedAt < $1.updatedAt }?.data ?? Data()
+nonisolated enum LegacyBlobBridge {
+    static func importAll(into store: SyncStore) {
+        importArray(ProxyConfiguration.self, .configurations, store)
+        importArray(ProxyChain.self, .chains, store)
+        importArray(ProxyGroup.self, .groups, store)
+        importArray(Subscription.self, .subscriptions, store)
+        importArray(CustomRoutingRuleSet.self, .customRuleSets, store)
+        importMITM(store)
+    }
+    
+    private static func rowsNeedingImport(_ key: SyncStore.Key, _ store: SyncStore) -> [SyncStore.LegacyBlobRow]? {
+        let fingerprint = store.legacyBlobFingerprint(key)
+        guard !fingerprint.isEmpty, store.lastImportFingerprint(key) != fingerprint else { return nil }
+        let rows = store.legacyBlobRows(key)
+        guard !rows.isEmpty else { return nil }
+        return rows
+    }
+
+    private static func importArray<T: Codable & Identifiable & SoftDeletable>(
+        _ type: T.Type, _ key: SyncStore.Key, _ store: SyncStore
+    ) where T.ID == UUID {
+        guard let rows = rowsNeedingImport(key, store) else { return }
+        let decoder = JSONDecoder()
+        let sorted = rows.sorted { $0.updatedAt < $1.updatedAt }
+        let blobs: [[T]] = sorted.compactMap { row in
+            if let items = decoder.decodeSkippingInvalid([T].self, from: row.data) { return items }
+            SyncStore.quarantine(key, row.data)
+            return nil
+        }
+        guard !blobs.isEmpty else { return }
+        apply(BlobMerge.mergeItems(blobs), key, stamp: sorted.last?.updatedAt ?? .distantPast, store)
+        store.setLastImportFingerprint(key, SyncStore.legacyFingerprint(of: rows))
+    }
+
+    private static func importMITM(_ store: SyncStore) {
+        guard let rows = rowsNeedingImport(.mitm, store) else { return }
+        let decoder = JSONDecoder()
+        let sorted = rows.sorted { $0.updatedAt < $1.updatedAt }
+        let snapshots: [MITMSnapshot] = sorted.compactMap { row in
+            if let snapshot = try? decoder.decode(MITMSnapshot.self, from: row.data) { return snapshot }
+            SyncStore.quarantine(.mitm, row.data)
+            return nil
+        }
+        guard !snapshots.isEmpty else { return }
+        apply(BlobMerge.mergeItems(snapshots.map(\.ruleSets)), .mitm, stamp: sorted.last?.updatedAt ?? .distantPast, store)
+        store.setLastImportFingerprint(.mitm, SyncStore.legacyFingerprint(of: rows))
+    }
+
+    private static func apply<T: Codable & Identifiable & SoftDeletable>(
+        _ merged: [T], _ key: SyncStore.Key, stamp: Date, _ store: SyncStore
+    ) where T.ID == UUID {
+        let order = SyncCodec.order(of: merged.filter { $0.deletedAt == nil })
+        store.applyImported(key, items: SyncCodec.encodeItems(merged), order: order, orderStamp: stamp)
     }
 }
 
@@ -120,10 +114,9 @@ nonisolated enum CloudBlobSync {
     @MainActor private static var remoteChangeObserver: (any NSObjectProtocol)?
     @MainActor private static var debounce: Task<Void, Never>?
     @MainActor private static var onRemoteChange: (@MainActor () async -> Void)?
-    
+
     @MainActor
     static func start(onRemoteChange: @escaping @MainActor () async -> Void) {
-        BlobMerge.register()
         Self.onRemoteChange = onRemoteChange
         guard remoteChangeObserver == nil else { return }
         remoteChangeObserver = NotificationCenter.default.addObserver(
@@ -131,7 +124,10 @@ nonisolated enum CloudBlobSync {
         ) { _ in
             Task { @MainActor in scheduleRefresh() }
         }
-        Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
+        Task.detached(priority: .utility) {
+            SyncStore.shared.reconcile()
+            SyncStore.shared.resumeLegacyExports()
+        }
     }
 
     @MainActor
@@ -142,8 +138,12 @@ nonisolated enum CloudBlobSync {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             logger.info("[iCloud] Store changed remotely; reloading synced stores")
+            await Task.detached(priority: .utility) {
+                LegacyBlobBridge.importAll(into: .shared)
+                SyncStore.shared.reconcile()
+            }.value
+            guard !Task.isCancelled else { return }
             await onRemoteChange?()
-            Task.detached(priority: .utility) { JSONBlobStore.shared.reconcile() }
         }
     }
 }

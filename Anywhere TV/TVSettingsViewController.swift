@@ -235,7 +235,7 @@ class TVSettingsViewController: UIViewController {
 
     @objc private func iCloudSyncTapped() {
         iCloudSyncEnabled.toggle()
-        if iCloudSyncEnabled != JSONBlobStore.shared.usesCloudKit {
+        if iCloudSyncEnabled != SyncStore.shared.usesCloudKit {
             let alert = UIAlertController(
                 title: String(localized: "Restart Required"),
                 message: String(localized: "Restart Anywhere for the change to take effect."),

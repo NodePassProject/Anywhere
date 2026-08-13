@@ -134,7 +134,7 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .onChange(of: appSettings.iCloudSyncEnabled) { _, newValue in
-            showICloudRestartAlert = newValue != JSONBlobStore.shared.usesCloudKit
+            showICloudRestartAlert = newValue != SyncStore.shared.usesCloudKit
         }
         .alert("Restart Required", isPresented: $showICloudRestartAlert) {
             Button("OK", role: .cancel) {}

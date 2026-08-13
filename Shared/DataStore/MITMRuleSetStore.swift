@@ -23,40 +23,46 @@ final class MITMRuleSetStore {
 
     private(set) var ruleSets: [MITMRuleSet]
     private var tombstones: [MITMRuleSet] = []
-    
-    @ObservationIgnored private let blobStore: JSONBlobStore
-    @ObservationIgnored private var loadedBlob: Data?
+
+    @ObservationIgnored private let syncStore: SyncStore
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
-    init(blobStore: JSONBlobStore) {
-        self.blobStore = blobStore
-        let data = blobStore.load(.mitm)
-        loadedBlob = data
-        let snapshot = MITMSnapshot.decode(from: data)
-        if !AWCore.hasMITMEnabled() {
-            AWCore.setMITMEnabled(MITMSnapshot.legacyEnabled(in: data))
+    init(syncStore: SyncStore) {
+        self.syncStore = syncStore
+        let items = syncStore.loadItems(.mitm)
+        loadedItems = items
+        var ruleSets = SyncCodec.decodeItems(MITMRuleSet.self, key: .mitm, payloads: items)
+        if items.isEmpty || !AWCore.hasMITMEnabled() {
+            let legacyBlob = syncStore.legacyNewestBlobData(.mitm)
+            if items.isEmpty {
+                ruleSets = MITMSnapshot.decode(from: legacyBlob).ruleSets
+            }
+            if !AWCore.hasMITMEnabled() {
+                AWCore.setMITMEnabled(MITMSnapshot.legacyEnabled(in: legacyBlob))
+            }
         }
         self.enabled = AWCore.getMITMEnabled()
-        let split = Tombstone.split(snapshot.ruleSets)
+        let split = Tombstone.split(ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
         MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
     }
-    
+
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             let outcome = await Task.detached(priority: .utility) {
-                [blobStore] () -> (data: Data?, snapshot: MITMSnapshot)? in
-                let data = blobStore.load(.mitm)
-                guard data != previous else { return nil }
-                return (data, MITMSnapshot.decode(from: data))
+                [syncStore] () -> (items: [Data], ruleSets: [MITMRuleSet])? in
+                let items = syncStore.loadItems(.mitm)
+                guard items != previous else { return nil }
+                return (items, SyncCodec.decodeItems(MITMRuleSet.self, key: .mitm, payloads: items))
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
-            let split = Tombstone.split(outcome.snapshot.ruleSets)
+            loadedItems = outcome.items
+            let split = Tombstone.split(outcome.ruleSets)
             ruleSets = split.live
             tombstones = split.tombstones
             MITMSnapshot(ruleSets: split.live).exportBinaryToAppGroup()
@@ -226,7 +232,10 @@ final class MITMRuleSetStore {
 
     private func save() {
         mutationEpoch += 1
-        MITMSnapshot(ruleSets: ruleSets + tombstones).save(to: blobStore)
+        let live = ruleSets
+        syncStore.save(.mitm, items: SyncCodec.encodeItems(live + tombstones), order: SyncCodec.order(of: live))
+        MITMSnapshot(ruleSets: live).exportBinaryToAppGroup()
+        AWNotificationCenter.notifyMITMChanged()
     }
 }
 

@@ -9,8 +9,6 @@ import Foundation
 import Observation
 import SwiftUI
 
-nonisolated private let logger = AnywhereLogger(category: "ConfigurationStore")
-
 @MainActor
 @Observable
 class ConfigurationStore {
@@ -19,16 +17,16 @@ class ConfigurationStore {
 
     private(set) var isLoaded = false
 
-    @ObservationIgnored private let blobStore: JSONBlobStore
-    @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private let syncStore: SyncStore
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
-    
+
     @ObservationIgnored var onDidMutate: (() -> Void)?
 
-    init(blobStore: JSONBlobStore) {
-        self.blobStore = blobStore
+    init(syncStore: SyncStore) {
+        self.syncStore = syncStore
         Task { @MainActor in await self.loadInitial() }
     }
 
@@ -38,13 +36,13 @@ class ConfigurationStore {
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .userInitiated) {
-                [blobStore] () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
-                let data = blobStore.load(.configurations)
-                let split = Self.decodeSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) in
+                let items = syncStore.loadItems(.configurations)
+                let split = Self.decodeSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             configurations = outcome.live
             tombstones = outcome.tombstones
             isLoaded = true
@@ -55,20 +53,20 @@ class ConfigurationStore {
 
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                [blobStore] () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
-                let data = blobStore.load(.configurations)
-                guard data != previous else { return nil }
-                let split = Self.decodeSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
+                let items = syncStore.loadItems(.configurations)
+                guard items != previous else { return nil }
+                let split = Self.decodeSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             configurations = outcome.live
             tombstones = outcome.tombstones
             onDidMutate?()
@@ -154,13 +152,8 @@ class ConfigurationStore {
 
     // MARK: - Persistence
     
-    nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([ProxyConfiguration].self, from: data) else {
-            JSONBlobStore.quarantine(.configurations, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+    nonisolated private static func decodeSplit(from items: [Data]) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {
+        Tombstone.split(SyncCodec.decodeItems(ProxyConfiguration.self, key: .configurations, payloads: items))
     }
     
     private func recordTombstones(_ removed: [ProxyConfiguration]) {
@@ -184,18 +177,12 @@ class ConfigurationStore {
 
     private func save() {
         mutationEpoch += 1
-        let snapshot = configurations + tombstones
+        let live = configurations
+        let snapshot = live + tombstones
         let previous = saveTask
-        saveTask = Task.detached { [blobStore] in
+        saveTask = Task.detached { [syncStore] in
             await previous?.value
-            do {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                let data = try encoder.encode(snapshot)
-                blobStore.save(.configurations, data: data)
-            } catch {
-                logger.report(AnywhereError.store(.saveFailed(.configurations, underlying: error)))
-            }
+            syncStore.save(.configurations, items: SyncCodec.encodeItems(snapshot), order: SyncCodec.order(of: live))
         }
     }
 }

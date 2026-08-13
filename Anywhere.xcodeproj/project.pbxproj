@@ -144,7 +144,7 @@
 				AWCore.swift,
 				AWNotificationCenter.swift,
 				DataStore/FailableDecodable.swift,
-				DataStore/JSONBlobStore.swift,
+				DataStore/SyncStore.swift,
 				MITM/MITMCertificateStore.swift,
 				MITM/X509Builder.swift,
 				Models/DNSMode.swift,

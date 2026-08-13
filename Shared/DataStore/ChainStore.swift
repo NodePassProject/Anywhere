@@ -9,29 +9,27 @@ import Foundation
 import Observation
 import SwiftUI
 
-nonisolated private let logger = AnywhereLogger(category: "ChainStore")
-
 @MainActor
 @Observable
 class ChainStore {
     private(set) var chains: [ProxyChain] = []
     private var tombstones: [ProxyChain] = []
 
-    @ObservationIgnored private let blobStore: JSONBlobStore
+    @ObservationIgnored private let syncStore: SyncStore
     @ObservationIgnored private let configurationStore: ConfigurationStore
-    @ObservationIgnored private var loadedBlob: Data?
+    @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
-    
+
     @ObservationIgnored var onDidMutate: (() -> Void)?
 
-    init(blobStore: JSONBlobStore, configurationStore: ConfigurationStore) {
-        self.blobStore = blobStore
+    init(syncStore: SyncStore, configurationStore: ConfigurationStore) {
+        self.syncStore = syncStore
         self.configurationStore = configurationStore
-        let data = blobStore.load(.chains)
-        loadedBlob = data
-        let split = Self.decodeSplit(from: data)
+        let items = syncStore.loadItems(.chains)
+        loadedItems = items
+        let split = Self.decodeSplit(from: items)
         chains = split.live
         tombstones = split.tombstones
     }
@@ -73,20 +71,20 @@ class ChainStore {
 
     func reload() async {
         while true {
-            let previous = loadedBlob
+            let previous = loadedItems
             let epoch = mutationEpoch
             await saveTask?.value
             guard epoch == mutationEpoch else { continue }
             let outcome = await Task.detached(priority: .utility) {
-                [blobStore] () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
-                let data = blobStore.load(.chains)
-                guard data != previous else { return nil }
-                let split = Self.decodeSplit(from: data)
-                return (data, split.live, split.tombstones)
+                [syncStore] () -> (items: [Data], live: [ProxyChain], tombstones: [ProxyChain])? in
+                let items = syncStore.loadItems(.chains)
+                guard items != previous else { return nil }
+                let split = Self.decodeSplit(from: items)
+                return (items, split.live, split.tombstones)
             }.value
             guard let outcome else { return }
             guard epoch == mutationEpoch else { continue }
-            loadedBlob = outcome.data
+            loadedItems = outcome.items
             chains = outcome.live
             tombstones = outcome.tombstones
             onDidMutate?()
@@ -96,13 +94,8 @@ class ChainStore {
 
     // MARK: - Persistence
 
-    nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
-        guard let data else { return ([], []) }
-        guard let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) else {
-            JSONBlobStore.quarantine(.chains, data)
-            return ([], [])
-        }
-        return Tombstone.split(all)
+    nonisolated private static func decodeSplit(from items: [Data]) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
+        Tombstone.split(SyncCodec.decodeItems(ProxyChain.self, key: .chains, payloads: items))
     }
 
     private func recordTombstone(_ chain: ProxyChain) {
@@ -115,18 +108,12 @@ class ChainStore {
 
     private func save() {
         mutationEpoch += 1
-        let snapshot = chains + tombstones
+        let live = chains
+        let snapshot = live + tombstones
         let previous = saveTask
-        saveTask = Task.detached { [blobStore] in
+        saveTask = Task.detached { [syncStore] in
             await previous?.value
-            do {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                let data = try encoder.encode(snapshot)
-                blobStore.save(.chains, data: data)
-            } catch {
-                logger.report(AnywhereError.store(.saveFailed(.chains, underlying: error)))
-            }
+            syncStore.save(.chains, items: SyncCodec.encodeItems(snapshot), order: SyncCodec.order(of: live))
         }
     }
 }

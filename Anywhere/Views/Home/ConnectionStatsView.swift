@@ -551,11 +551,11 @@ struct AnywhereRingGaugeStyle: GaugeStyle {
         )
         .ignoresSafeArea()
         ScrollView {
-            let configurationStore = ConfigurationStore(blobStore: .shared)
+            let configurationStore = ConfigurationStore(syncStore: .shared)
             ConnectionStatsView()
                 .environment(ConnectionStatsModel.previewSeeded())
                 .environment(configurationStore)
-                .environment(ChainStore(blobStore: .shared, configurationStore: configurationStore))
+                .environment(ChainStore(syncStore: .shared, configurationStore: configurationStore))
                 .padding(24)
         }
     }

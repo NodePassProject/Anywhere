@@ -12,7 +12,7 @@ import Observation
 @MainActor
 @Observable
 final class AppContainer {
-    let blobStore: JSONBlobStore
+    let syncStore: SyncStore
 
     let tunnel: TunnelController
     let selection: ProxySelection
@@ -37,20 +37,22 @@ final class AppContainer {
     let customRuleSetRefresher: CustomRuleSetRefresher
     let mitmRuleSetRefresher: MITMRuleSetRefresher
 
-    init(blobStore: JSONBlobStore = .shared, tunnelProvider: TunnelProviding? = nil) {
-        self.blobStore = blobStore
+    init(syncStore: SyncStore = .shared, tunnelProvider: TunnelProviding? = nil) {
+        self.syncStore = syncStore
+        
+        LegacyBlobBridge.importAll(into: syncStore)
 
         let tunnel = TunnelController(provider: tunnelProvider ?? LiveTunnelProvider())
         let selection = ProxySelection()
         let latency = LatencyCenter(tunnel: tunnel)
         let stats = ConnectionStatsModel()
 
-        let configurationStore = ConfigurationStore(blobStore: blobStore)
-        let chainStore = ChainStore(blobStore: blobStore, configurationStore: configurationStore)
-        let groupStore = GroupStore(blobStore: blobStore)
-        let subscriptionStore = SubscriptionStore(blobStore: blobStore, configurationStore: configurationStore)
-        let routingRuleSetStore = RoutingRuleSetStore(blobStore: blobStore)
-        let mitmRuleSetStore = MITMRuleSetStore(blobStore: blobStore)
+        let configurationStore = ConfigurationStore(syncStore: syncStore)
+        let chainStore = ChainStore(syncStore: syncStore, configurationStore: configurationStore)
+        let groupStore = GroupStore(syncStore: syncStore)
+        let subscriptionStore = SubscriptionStore(syncStore: syncStore, configurationStore: configurationStore)
+        let routingRuleSetStore = RoutingRuleSetStore(syncStore: syncStore)
+        let mitmRuleSetStore = MITMRuleSetStore(syncStore: syncStore)
         let certificateStore = CertificateStore()
 
         let routingExporter = RoutingExporter(
