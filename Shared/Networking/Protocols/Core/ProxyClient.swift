@@ -14,29 +14,47 @@ nonisolated final class ProxyClient: Sendable {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
 
-    private struct State {
-        var cancelled = false
-        var delivered: ProxyConnection?
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case delivered(ProxyConnection)
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .delivered),
+                 (.idle, .cancelled),
+                 (.delivered, .cancelled):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
         var tunnel: ProxyConnection?
     }
 
     private let state: Mutex<State>
-    
+
     var tunnel: ProxyConnection? { state.withLock { $0.tunnel } }
-    
+
     func setChainTunnel(_ tunnel: ProxyConnection?) {
         state.withLock { $0.tunnel = tunnel }
     }
     let parentChain: [ProxyConfiguration]
-    
+
     let isDefaultProxy: Bool
-    
+
     var directDialHost: String {
         useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
     }
-    
-    var isCancelled: Bool { state.withLock { $0.cancelled } }
-    
+
+    var isCancelled: Bool {
+        state.withLock { if case .cancelled = $0.phase { true } else { false } }
+    }
+
     init(
         configuration: ProxyConfiguration,
         tunnel: ProxyConnection? = nil,
@@ -52,29 +70,44 @@ nonisolated final class ProxyClient: Sendable {
     }
 
     // MARK: - Delivery / teardown
-    
+
     private func deliver(_ dial: () async throws -> ProxyConnection) async throws -> ProxyConnection {
         let connection = try await dial()
-        let tornDown = state.withLock { s -> Bool in
-            if s.cancelled { return true }
-            s.delivered = connection
-            return false
+        enum Publication { case published, cancelled, alreadyDelivered }
+        let publication: Publication = state.withLock { s in
+            switch s.phase {
+            case .idle:
+                s.transition(to: .delivered(connection))
+                return .published
+            case .delivered:
+                return .alreadyDelivered
+            case .cancelled:
+                return .cancelled
+            }
         }
-        if tornDown {
+        switch publication {
+        case .published:
+            return connection
+        case .cancelled:
             connection.cancel()
             throw AnywhereError.transport(.terminated)
+        case .alreadyDelivered:
+            connection.cancel()
+            throw AnywhereError.transport(.connectionFailed(
+                endpoint: configuration.serverAddress,
+                detail: "proxy client already delivered a connection"
+            ))
         }
-        return connection
     }
 
     // MARK: - Public API
-    
+
     var isQUICTransport: Bool {
         (configuration.outboundProtocol == .nowhere && configuration.nowhereUplink == .udp)
             || configuration.outboundProtocol == .hysteria
             || configuration.isXHTTPOverHTTP3
     }
-    
+
     private func withOutboundMetrics(
         _ dial: () async throws -> ProxyConnection
     ) async throws -> ProxyConnection {
@@ -86,7 +119,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         return MeteredProxyConnection(connection, attempt: attempt)
     }
-    
+
     func connect(
         to destinationHost: String,
         port destinationPort: UInt16,
@@ -103,7 +136,7 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-    
+
     func connectUDP(
         to destinationHost: String,
         port destinationPort: UInt16
@@ -119,7 +152,7 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-    
+
     func connectMultiplexer() async throws -> ProxyConnection {
         try await withOutboundMetrics {
             try await self.deliver {
@@ -181,7 +214,7 @@ nonisolated final class ProxyClient: Sendable {
             initialData: initialData
         )
     }
-    
+
     static func computeChainHopCommands(
         chain: [ProxyConfiguration],
         outerProtocol: OutboundProtocol,
@@ -197,7 +230,7 @@ nonisolated final class ProxyClient: Sendable {
 
         return computeChainHopCommands(chain: chain, lastDeliver: lastDeliver)
     }
-    
+
     static func computeChainHopCommands(
         chain: [ProxyConfiguration],
         lastDeliver: ProxyCommand
@@ -222,7 +255,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         return .success(commands)
     }
-    
+
     @discardableResult
     func buildChainTunnel(
         chain: [ProxyConfiguration],
@@ -245,7 +278,7 @@ nonisolated final class ProxyClient: Sendable {
             track: resolvedTrack
         )
     }
-    
+
     static func buildDetachedChainTunnel(
         chain: [ProxyConfiguration],
         hopCommands: [ProxyCommand],
@@ -263,7 +296,7 @@ nonisolated final class ProxyClient: Sendable {
             track: track
         )
     }
-    
+
     private static func dialChain(
         chain: [ProxyConfiguration],
         index: Int,
@@ -311,20 +344,24 @@ nonisolated final class ProxyClient: Sendable {
         }
         return tunnel
     }
-    
+
     func cancel() {
         tearDown()
     }
-    
+
     func cancel() async {
         tearDown()
     }
-    
+
     private func tearDown() {
         let (delivered, tunnel) = state.withLock { s -> (ProxyConnection?, ProxyConnection?) in
-            s.cancelled = true
-            let pair = (s.delivered, s.tunnel)
-            s.delivered = nil
+            let delivered: ProxyConnection? = if case .delivered(let connection) = s.phase {
+                connection
+            } else {
+                nil
+            }
+            s.transition(to: .cancelled)
+            let pair = (delivered, s.tunnel)
             s.tunnel = nil
             return pair
         }
@@ -333,7 +370,7 @@ nonisolated final class ProxyClient: Sendable {
     }
 
     // MARK: - Protocol Handshake
-    
+
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -490,7 +527,7 @@ nonisolated final class ProxyClient: Sendable {
             destinationPort: destinationPort, initialData: initialData, supportsVision: true
         )
     }
-    
+
     private func connectTLSRecord(_ tlsClient: TLSClient) async throws -> TLSRecordConnection {
         if let tunnel = self.tunnel {
             return try await tlsClient.connect(overTunnel: tunnel)
@@ -498,7 +535,7 @@ nonisolated final class ProxyClient: Sendable {
             return try await tlsClient.connect(host: self.directDialHost, port: self.configuration.serverPort)
         }
     }
-    
+
     private func connectRealityRecord(_ realityClient: RealityClient) async throws -> TLSRecordConnection {
         if let tunnel = self.tunnel {
             return try await realityClient.connect(overTunnel: tunnel)
@@ -703,7 +740,7 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-    
+
     private func decideXHTTPHTTPVersion(for xraySecurityLayer: XraySecurityLayer? = nil) -> XHTTPHTTPVersion {
         let security = xraySecurityLayer ?? configuration.xraySecurityLayer
         if case .reality = security {
@@ -728,7 +765,7 @@ nonisolated final class ProxyClient: Sendable {
             return .http2
         }
     }
-    
+
     private func sanitizedXHTTPTLSConfiguration(
         from base: TLSConfiguration,
         httpVersion: XHTTPHTTPVersion
@@ -811,7 +848,7 @@ nonisolated final class ProxyClient: Sendable {
     }
 
     // MARK: Combined XHTTP
-    
+
     private func connectXHTTPCombined(
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
@@ -860,7 +897,7 @@ nonisolated final class ProxyClient: Sendable {
     }
 
     // MARK: XHTTP up/download detach
-    
+
     private func connectXHTTPDetached(
         xhttpConfig: XHTTPConfiguration,
         downloadSettings: XHTTPDownloadSettings,
@@ -942,7 +979,7 @@ nonisolated final class ProxyClient: Sendable {
             security: downloadSettings.xraySecurityLayer
         )
     }
-    
+
     private func consumeMainXHTTPRoute() -> XHTTPLegRoute {
         let takenTunnel: ProxyConnection? = state.withLock { state in
             let tunnel = state.tunnel
@@ -957,7 +994,7 @@ nonisolated final class ProxyClient: Sendable {
         }
         return .direct
     }
-    
+
     private func dialXHTTPLeg(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
@@ -998,7 +1035,7 @@ nonisolated final class ProxyClient: Sendable {
         connection.configureRole(role)
         return connection
     }
-    
+
     private func acquirePooledH3(
         endpoint: XHTTPEndpoint,
         xmux: XHTTPXMUXMultiplexerConfiguration,
@@ -1027,7 +1064,7 @@ nonisolated final class ProxyClient: Sendable {
         connection.configureXMUXLease(lease)
         return connection
     }
-    
+
     private func acquirePooledH2(
         endpoint: XHTTPEndpoint,
         xmux: XHTTPXMUXMultiplexerConfiguration,
@@ -1054,7 +1091,7 @@ nonisolated final class ProxyClient: Sendable {
         connection.configureXMUXLease(lease)
         return connection
     }
-    
+
     private static func dialSharedH2(
         host: String,
         port: UInt16,
@@ -1107,7 +1144,7 @@ nonisolated final class ProxyClient: Sendable {
             return try await bringUp(TLSByteTransport(connection), retaining: client)
         }
     }
-    
+
     private func dialXHTTPTransport(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
@@ -1167,7 +1204,7 @@ nonisolated final class ProxyClient: Sendable {
             return .byteStream(TLSByteTransport(connection))
         }
     }
-    
+
     private func dialXHTTPHTTP3Session(
         endpoint: XHTTPEndpoint,
         route: XHTTPLegRoute
@@ -1186,7 +1223,7 @@ nonisolated final class ProxyClient: Sendable {
             return makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))
         }
     }
-    
+
     private func makeXHTTPUploadFactory(
         security: XraySecurityLayer,
         httpVersion: XHTTPHTTPVersion,
@@ -1240,7 +1277,7 @@ nonisolated final class ProxyClient: Sendable {
             }
         }
     }
-    
+
     private static func dialH1UploadConnection(
         host: String,
         port: UInt16,

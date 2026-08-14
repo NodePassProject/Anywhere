@@ -8,26 +8,30 @@
 import Foundation
 import CryptoKit
 
-/// One context corresponds to one ClientHelloOuter.
 nonisolated final class ECHClientContext {
     let config: ECHConfig
     let cipherSuite: ECHCipherSuite
     let encapsulatedKey: Data
 
-    /// CryptoKit's sender is a value type whose `seal` mutates the sequence
-    /// number, so it lives in a `var`.
     private var sender: HPKE.Sender
 
-    /// Inner ClientHello with the outer's session_id spliced in; feeds the inner transcript when accepted.
     var innerTranscriptMessage = Data()
 
-    /// 32-byte inner ClientHello random, used as IKM for the ECH accept-confirmation derivation.
     var innerRandom = Data()
 
-    var rejected = false
+    enum Outcome {
+        case undetermined
+        case accepted
+        case rejected(retryConfigList: Data?)
+    }
+    var outcome: Outcome = .undetermined
 
-    /// Retry configs the server may offer in EncryptedExtensions on rejection.
-    var retryConfigList: Data?
+    var isRejected: Bool {
+        if case .rejected = outcome { return true }
+        return false
+    }
+
+    private let sealClaim = OneShotLatch()
 
     init(config: ECHConfig, cipherSuite: ECHCipherSuite) throws {
         self.config = config
@@ -52,7 +56,6 @@ nonisolated final class ECHClientContext {
 
         let suite = HPKE.Ciphersuite(kem: .Curve25519_HKDF_SHA256, kdf: kdf, aead: aead)
 
-        // info = "tls ech" || 0x00 || ECHConfig (including its version+length header).
         var info = Data("tls ech".utf8)
         info.append(0x00)
         info.append(config.raw)
@@ -67,10 +70,10 @@ nonisolated final class ECHClientContext {
         self.encapsulatedKey = createdSender.encapsulatedKey
     }
 
-    /// Seal the encoded inner ClientHello. `aad` is the serialized
-    /// ClientHelloOuter (without its 4-byte handshake header) carrying a
-    /// zero-filled payload of the resulting ciphertext length.
     func seal(plaintext: Data, aad: Data) throws -> Data {
+        guard sealClaim.claim() else {
+            throw AnywhereError.tls(.ech(.sealFailed))
+        }
         do {
             return try sender.seal(plaintext, authenticating: aad)
         } catch {
@@ -80,8 +83,6 @@ nonisolated final class ECHClientContext {
 }
 
 nonisolated enum ECHEncryption {
-
-    /// All ECH AEADs in use share a 16-byte authentication tag.
     static let aeadTagLength = 16
 
     // MARK: - HPKE identifier mapping
@@ -106,12 +107,6 @@ nonisolated enum ECHEncryption {
 
     // MARK: - EncodedClientHelloInner
 
-    /// Strip the handshake header from an inner ClientHello message and pad the
-    /// remaining body to a multiple of 32 (the EncodedClientHelloInner form).
-    ///
-    /// `innerMessage` must be a ClientHello *handshake message* (type + 3-byte
-    /// length + body) whose `legacy_session_id` is empty, with no
-    /// ech_outer_extensions compression (we send the inner extensions in full).
     static func encodeInnerClientHello(_ innerMessage: Data, serverName: String, maxNameLength: Int) throws -> Data {
         guard innerMessage.count >= 4 else { throw AnywhereError.tls(.ech(.malformedInnerHello)) }
 
@@ -133,19 +128,6 @@ nonisolated enum ECHEncryption {
 
     // MARK: - Outer extension serialization
 
-    /// Build the body of the outer `encrypted_client_hello` extension:
-    ///
-    ///     struct {
-    ///       ECHClientHelloType type = 0;     // outer
-    ///       HpkeKdfId    kdf_id;
-    ///       HpkeAeadId   aead_id;
-    ///       uint8        config_id;
-    ///       opaque enc<0..2^16-1>;           // empty on HRR
-    ///       opaque payload<1..2^16-1>;
-    ///     }
-    ///
-    /// This returns the extension *data*; the caller wraps it with the 0xFE0D
-    /// extension type and length.
     static func outerExtensionData(configID: UInt8, kdfID: UInt16, aeadID: UInt16, enc: Data, payload: Data) -> Data {
         var data = Data()
         data.append(0x00) // outer ClientHello

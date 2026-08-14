@@ -15,43 +15,91 @@ actor HysteriaConnection {
     private let session: HysteriaSession
     private let destination: String
 
-    /// Readiness mirror, so the nonisolated `isConnected`/send-guard read it without hopping.
-    private nonisolated let _isReady = Atomic<Bool>(false)
-    /// Assigned once in `open()`, read from the send/receive/cancel paths.
-    private nonisolated let _streamID = Atomic<Int64>(-1)
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case opening
+        case open(sid: Int64, ready: Bool)
+        case closed(sid: Int64?)
 
-    /// Inbound stream bytes from the demux. The producer (`yield`/`finish`) is `Sendable` and driven
-    /// on the ngtcp2 queue via `feedStreamData`; a single consumer pulls via `open()` (header) then
-    /// `receiveRaw()` (data), never concurrently.
+        var isClosed: Bool {
+            if case .closed = self { true } else { false }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .opening),
+                 (.opening, .open),
+                 (.open(_, false), .open(_, true)):
+                return true
+            case (_, .closed):
+                return !old.isClosed
+            default:
+                return false
+            }
+        }
+    }
+    private nonisolated let phase = Mutex<Phase>(.idle)
+
     private let rawInbox = AsyncInbox<Data>()
-    /// Post-header bytes left over from `open()`'s parse, handed to the app first by `receiveRaw()`.
     private var pendingData = Data()
-
-    /// Guards `teardown()` so the stream is shut down and released exactly once.
-    private var closed = false
 
     init(session: HysteriaSession, destination: String) {
         self.session = session
         self.destination = destination
     }
 
-    nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
-    nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
-
-    private var streamID: Int64 {
-        get { _streamID.load(ordering: .relaxed) }
-        set { _streamID.store(newValue, ordering: .relaxed) }
+    nonisolated var isConnected: Bool {
+        phase.withLock { if case .open(_, true) = $0 { true } else { false } }
     }
 
-    // MARK: - Open (called by ProxyClient after the session is ready)
+    nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
+
+    private nonisolated var currentSID: Int64? {
+        phase.withLock { state in
+            switch state {
+            case .open(let sid, _): sid
+            case .closed(let sid): sid
+            case .idle, .opening: nil
+            }
+        }
+    }
+
+    private nonisolated func closeLifecycle() -> Int64? {
+        phase.withLock { state in
+            let sid: Int64?
+            switch state {
+            case .closed: return nil
+            case .open(let s, _): sid = s
+            case .idle, .opening: sid = nil
+            }
+            Phase.transition(&state, to: .closed(sid: sid))
+            return sid
+        }
+    }
+
+    // MARK: - Open
 
     func open() async throws {
-        let sid = try await session.openTCPStream(for: self)
-        streamID = sid
+        let begin = phase.withLock { Phase.transition(&$0, to: .opening) }
+        guard begin else { throw AnywhereError.proxy(.hysteria, .streamClosed) }
+
+        let sid: Int64
+        do {
+            sid = try await session.openTCPStream(for: self)
+        } catch {
+            _ = closeLifecycle()
+            throw error
+        }
+        let adopted = phase.withLock { Phase.transition(&$0, to: .open(sid: sid, ready: false)) }
+        guard adopted else {
+            session.shutdownStream(sid)
+            session.releaseTCPStream(sid)
+            throw AnywhereError.proxy(.hysteria, .streamClosed)
+        }
+
         let frame = HysteriaProtocol.encodeTCPRequest(address: destination)
         try await session.writeStream(sid, data: frame)
 
-        // Read inbound bytes until the Hysteria TCP response header parses (or the stream ends/fails).
         var buffer = Data()
         while true {
             guard let chunk = try await nextChunk() else {
@@ -59,70 +107,69 @@ actor HysteriaConnection {
             }
             buffer.append(chunk)
             guard let parsed = HysteriaProtocol.parseTCPResponse(from: buffer) else { continue }
-            // Credit the consumed header now (small, bounded); post-header bytes are credited
-            // lazily in `receiveRaw` as the app consumes them.
             if parsed.consumed > 0 { session.extendStreamOffset(sid, count: parsed.consumed) }
             guard parsed.status == HysteriaProtocol.tcpResponseStatusOK else {
                 throw AnywhereError.proxy(.hysteria, .tunnelRejected(detail: parsed.message))
             }
             buffer.removeFirst(parsed.consumed)
             pendingData = buffer
-            _isReady.store(true, ordering: .relaxed)
+            let becameReady = phase.withLock { state -> Bool in
+                guard case .open(let s, false) = state else { return false }
+                return Phase.transition(&state, to: .open(sid: s, ready: true))
+            }
+            guard becameReady else { throw AnywhereError.proxy(.hysteria, .streamClosed) }
             return
         }
     }
 
-    // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
+    // MARK: - Demux feed
 
-    /// New inbound bytes / FIN from the session's demux loop. `data` is a zero-copy view into
-    /// ngtcp2's buffer — detach with `Data(...)` before buffering it.
     nonisolated func feedStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty { rawInbox.yield(Data(data)) }
         if fin { rawInbox.finish() }
     }
 
-    /// QUIC stream termination (RESET_STREAM or stream_close). Idempotent — finishing an
-    /// already-finished stream is a no-op, so both callbacks firing is harmless.
-    nonisolated func handleStreamTermination(error: Error?) {
+    nonisolated func handleStreamTermination(error: Error?, cause: QUICConnection.StreamTerminationCause) {
         if let error { rawInbox.finish(throwing: error) } else { rawInbox.finish() }
+        guard cause == .closed || error != nil else { return }
+        if let sid = closeLifecycle() {
+            session.shutdownStream(sid)
+        }
     }
 
     nonisolated func handleSessionError(_ error: Error) {
-        _isReady.store(false, ordering: .relaxed)
         if case AnywhereError.quic(.closed(graceful: true)) = error {
             rawInbox.finish()
         } else {
             rawInbox.finish(throwing: error)
         }
+        _ = closeLifecycle()
     }
 
     // MARK: - ProxyConnection overrides
 
     func sendRaw(_ data: Data) async throws {
-        guard _isReady.load(ordering: .relaxed) else {
+        let sid: Int64? = phase.withLock { if case .open(let s, true) = $0 { s } else { nil } }
+        guard let sid else {
             throw AnywhereError.proxy(.hysteria, .streamClosed)
         }
-        try await session.writeStream(streamID, data: data)
+        try await session.writeStream(sid, data: data)
     }
 
     func receiveRaw() async throws -> Data? {
         if !pendingData.isEmpty {
             let out = pendingData
             pendingData = Data()
-            session.extendStreamOffset(streamID, count: out.count)
+            if let sid = currentSID { session.extendStreamOffset(sid, count: out.count) }
             return out
         }
         guard let chunk = try await nextChunk() else { return nil }
-        if !chunk.isEmpty {
-            // Return stream flow-control credit only now the app has taken the bytes.
-            session.extendStreamOffset(streamID, count: chunk.count)
+        if !chunk.isEmpty, let sid = currentSID {
+            session.extendStreamOffset(sid, count: chunk.count)
         }
         return chunk
     }
 
-    /// Single-consumer pull over `rawInbox`. Drains the whole backlog per call and hands the
-    /// app one merged chunk — one wake-up and one flow-control credit per burst, and bigger
-    /// chunks for the downstream relay, instead of a full cycle per QUIC stream frame.
     private func nextChunk() async throws -> Data? {
         guard let batch = try await rawInbox.nextBatch() else { return nil }
         guard batch.count > 1 else { return batch.first }
@@ -133,16 +180,8 @@ actor HysteriaConnection {
     }
 
     nonisolated func cancel() {
-        _isReady.store(false, ordering: .relaxed)
         rawInbox.finish()
-        Task { await self.teardown() }
-    }
-
-    private func teardown() {
-        guard !closed else { return }
-        closed = true
-        let sid = _streamID.load(ordering: .relaxed)
-        if sid >= 0 {
+        if let sid = closeLifecycle() {
             session.shutdownStream(sid)
             session.releaseTCPStream(sid)
         }

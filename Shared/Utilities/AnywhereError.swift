@@ -24,7 +24,7 @@ nonisolated enum AnywhereError: Error {
     case wrapped(context: String, underlying: any Error)
 
     // MARK: Wire
-    
+
     enum Wire: String, Sendable {
         case direct = "Direct"
         case socks5 = "SOCKS5"
@@ -57,12 +57,12 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Transport
-    
+
     enum Transport: Sendable, Equatable {
         enum Operation: String, Sendable {
             case connect, send, receive, close
         }
-        
+
         case posix(Operation, errno: Int32)
         case lwip(Operation, code: Int32)
         case notConnected
@@ -86,7 +86,7 @@ nonisolated enum AnywhereError: Error {
         case clientHello(ClientHello)
         case ech(ECH)
         case reality(Reality)
-        
+
         enum Record: Sendable, Equatable {
             case ciphertextTooShort
             case emptyPlaintext
@@ -99,7 +99,7 @@ nonisolated enum AnywhereError: Error {
             case malformed(detail: String)
             case connectionUnavailable
         }
-        
+
         enum ClientHello: Sendable, Equatable {
             case truncated
             case notHandshake
@@ -145,7 +145,7 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Proxy
-    
+
     enum Proxy: Sendable, Equatable {
         case invalidConfiguration(detail: String)
         case notReady
@@ -168,7 +168,7 @@ nonisolated enum AnywhereError: Error {
         case datagramTooLarge(maxFrame: Int, headerSize: Int)
         case packetTooLarge
         case cipher(Cipher)
-        
+
         enum Cipher: Sendable, Equatable {
             case unsupportedMethod(String)
             case invalidKey
@@ -188,7 +188,7 @@ nonisolated enum AnywhereError: Error {
         case payloadCorrupted(BinaryPayload)
         case configurationMissing(host: String)
     }
-    
+
     enum BinaryPayload: Sendable, Equatable {
         case badMagic
         case unsupportedVersion
@@ -214,7 +214,7 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Certificate
-    
+
     enum Certificate: Sendable {
         case keyGenerationFailed(detail: String)
         case keychainWriteFailed(status: OSStatus)
@@ -228,7 +228,7 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Store
-    
+
     enum Store: Sendable {
         enum Resource: String, Sendable {
             case configurations, chains, groups, subscriptions, certificates
@@ -245,7 +245,7 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Parse
-    
+
     enum Parse: Sendable, Equatable {
         case yaml(detail: String)
         case clashConfigMissingProxies
@@ -261,7 +261,7 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Subscription
-    
+
     enum Subscription: Sendable {
         case invalidURL
         case noConfigurations
@@ -269,7 +269,7 @@ nonisolated enum AnywhereError: Error {
     }
 
     // MARK: Tunnel
-    
+
     enum Tunnel: Sendable {
         case invalidConfiguration
         case settingsApplyFailed(underlying: any Error)
@@ -290,7 +290,7 @@ nonisolated extension AnywhereError: LocalizedError {
     var errorDescription: String? {
         domainTag.isEmpty ? conciseDescription : "\(domainTag): \(conciseDescription)"
     }
-    
+
     var conciseDescription: String {
         switch self {
         case .dns(let f): f.failureDescription
@@ -356,7 +356,7 @@ nonisolated extension AnywhereError.Transport {
             "downlink write failed (pending \(pending), send buffer \(sndbuf))"
         }
     }
-    
+
     static func lwipName(_ err: Int32) -> String {
         switch err {
         case 0:   "ERR_OK"
@@ -688,6 +688,7 @@ nonisolated extension AnywhereError {
     var suggestedLogLevel: AnywhereLogger.Level {
         switch self {
         case .transport(.posix(_, errno: EPIPE)),
+             .transport(.terminated),
              .quic(.closed(graceful: true)),
              .tls(.helloRetryRequest),
              .mitm(.needsHTTP1Fallback),
@@ -715,7 +716,7 @@ nonisolated extension AnywhereError {
         default: AnywhereError.wrapped(context: context(), underlying: error)
         }
     }
-    
+
     static func describe(_ error: any Error) -> String {
         switch error {
         case let error as AnywhereError: error.conciseDescription
@@ -730,6 +731,12 @@ nonisolated extension AnywhereError {
         default: .error
         }
     }
+
+    static func isTermination(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        if case AnywhereError.transport(.terminated) = error { return true }
+        return false
+    }
 }
 
 // MARK: - AnywhereLogger Coordination
@@ -738,7 +745,7 @@ nonisolated extension AnywhereLogger {
     func report(_ message: @autoclosure () -> String, error: any Error) {
         emit("\(message()): \(AnywhereError.describe(error))", at: AnywhereError.severity(of: error))
     }
-    
+
     func report(_ error: any Error) {
         emit((error as? AnywhereError)?.errorDescription ?? AnywhereError.describe(error),
              at: AnywhereError.severity(of: error))

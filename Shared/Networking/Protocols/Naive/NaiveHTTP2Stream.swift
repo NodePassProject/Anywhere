@@ -14,13 +14,25 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     // MARK: - Phase
 
-    enum Phase {
+    enum Phase: PhaseTransitionable {
         case idle
         /// CONNECT HEADERS sent, waiting for response.
         case connectSent
         /// 200 received, data can flow.
         case open
         case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connectSent),
+                 (.connectSent, .open):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Properties
@@ -32,15 +44,16 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     private struct WeakMultiplexer { weak var value: NaiveHTTP2Multiplexer? }
     private let multiplexerBox: Mutex<WeakMultiplexer>
 
-    /// Receive/response state, guarded by ``lock``. The *send* flow window lives on the multiplexer
+    /// Receive/response state, guarded by ``state``. The *send* flow window lives on the multiplexer
     /// (folded there for atomic build passes), so this stream never manages it.
-    private struct State {
+    private struct State: PhaseHolding {
         var phase: Phase = .idle
+
         var recvConsumed: Int = 0
         /// CONNECT response headers exposed for proxy-layer negotiation.
         var responseHeaders: [(name: String, value: String)] = []
     }
-    private let lock = Mutex(State())
+    private let state = Mutex(State())
 
     /// Advertised per-stream receive window; constant.
     private let recvWindowSize = NaiveHTTP2FlowControl.naiveInitialWindowSize
@@ -67,9 +80,9 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     private let connectTask: Task<Void, Error>
 
     /// CONNECT response headers exposed for proxy-layer negotiation.
-    var responseHeaders: [(name: String, value: String)] { lock.withLock { $0.responseHeaders } }
+    var responseHeaders: [(name: String, value: String)] { state.withLock { $0.responseHeaders } }
 
-    var isConnected: Bool { lock.withLock { $0.phase == .open } }
+    var isConnected: Bool { state.withLock { $0.phase == .open } }
 
     // MARK: - Init
 
@@ -99,7 +112,10 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         // reseed the multiplexer-held send window and mark the stream, then fire CONNECT HEADERS.
         // `connectSignal` resolves later in `handleHeaders` (200) or `handleStreamError` (failure).
         multiplexer.reseedStreamSendWindow(streamID)
-        lock.withLock { $0.phase = .connectSent }
+        guard state.withLock({ $0.transition(to: .connectSent) }) else {
+            try await connectTask.value
+            return
+        }
 
         Task { [weak self] in
             guard let self, let multiplexer = self.multiplexerBox.withLock({ $0.value }) else { return }
@@ -114,7 +130,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     func sendData(_ data: Data) async throws {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else { throw AnywhereError.proxy(.naive, .notReady) }
-        let open = lock.withLock { $0.phase == .open }
+        let open = state.withLock { $0.phase == .open }
         guard open else { throw AnywhereError.proxy(.naive, .notReady) }
         try await multiplexer.sendData(data, on: self)
     }
@@ -131,10 +147,9 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     func close() {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else { return }
         enum Action { case none; case teardown(needsRst: Bool) }
-        let action: Action = lock.withLock { state in
-            guard state.phase != .closed else { return .none }
+        let action: Action = state.withLock { state in
             let needsRst = (state.phase == .open || state.phase == .connectSent)
-            state.phase = .closed
+            guard state.transition(to: .closed) else { return .none }
             return .teardown(needsRst: needsRst)
         }
         guard case .teardown(let needsRst) = action else { return }
@@ -154,13 +169,13 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
 
     func handleHeaders(fields: [(name: String, value: String)]) {
         enum Outcome { case ignore; case success; case authRequired; case tunnelFailed(String); case missingStatus }
-        let outcome: Outcome = lock.withLock { state in
+        let outcome: Outcome = state.withLock { state in
             guard let statusHeader = fields.first(where: { $0.name == ":status" }) else { return .missingStatus }
             let status = statusHeader.value
             guard state.phase == .connectSent else { return .ignore }
             if status == "200" {
+                guard state.transition(to: .open) else { return .ignore }
                 state.responseHeaders = fields
-                state.phase = .open
                 return .success
             } else if status == "407" {
                 return .authRequired
@@ -191,11 +206,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
         if endStream {
             // END_STREAM: free the multiplexer slot now even if buffered data remains unread.
             // The inbox still delivers every queued chunk before its EOF, so ordering is preserved.
-            let removed: Bool = lock.withLock { state in
-                guard state.phase != .closed else { return false }
-                state.phase = .closed
-                return true
-            }
+            let removed: Bool = state.withLock { $0.transition(to: .closed) }
             if removed { multiplexerBox.withLock { $0.value }?.removeStream(self) }
             inbox.finish()
         }
@@ -214,11 +225,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     }
 
     func handleStreamError(_ error: Error) {
-        let proceed: Bool = lock.withLock { state in
-            guard state.phase != .closed else { return false }
-            state.phase = .closed
-            return true
-        }
+        let proceed: Bool = state.withLock { $0.transition(to: .closed) }
         guard proceed else { return }
 
         multiplexerBox.withLock { $0.value }?.removeStream(self)
@@ -229,7 +236,7 @@ nonisolated final class NaiveHTTP2Stream: HTTPTunnel, Sendable {
     // MARK: - Flow Control
 
     private func acknowledgeConsumedData(count: Int) {
-        let update: NaiveHTTP2Frame? = lock.withLock { state in
+        let update: NaiveHTTP2Frame? = state.withLock { state in
             state.recvConsumed += count
             guard state.recvConsumed >= recvWindowSize / 2 else { return nil }
             let increment = UInt32(state.recvConsumed)

@@ -14,7 +14,6 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
 
     struct Extra {
         var sessionCounter: UInt64 = 0
-        var closed = false
     }
 
     private typealias Base = MultiplexerPool<AnyTLSMultiplexer, Extra>
@@ -44,12 +43,12 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
         ))
     }
 
-    func reclaim() { closeAll() }
+    func reclaim() { pool.drainAll() }
 
     /// The opened stream expects a destination address as its first cmdPSH payload.
     func acquireStream() async throws -> AnyTLSStream {
         let reused: AnyTLSMultiplexer? = try pool.state.withLock { st throws -> AnyTLSMultiplexer? in
-            if st.extra.closed {
+            if st.phase == .closed {
                 logger.debug("[AnyTLSMultiplexerPool] acquireStream rejected — client closed")
                 throw AnywhereError.transport(.terminated)
             }
@@ -66,12 +65,8 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
         logger.debug("[AnyTLSMultiplexerPool] acquireStream — no idle multiplexer, dialing fresh TLS multiplexer")
 
         let connection = try await dialOut()
-        let multiplexer: AnyTLSMultiplexer = try pool.state.withLock { st throws -> AnyTLSMultiplexer in
-            if st.extra.closed {
-                connection.cancel()
-                logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
-                throw AnywhereError.transport(.terminated)
-            }
+        let adopted: AnyTLSMultiplexer? = pool.state.withLock { st -> AnyTLSMultiplexer? in
+            guard st.phase == .open else { return nil }
             st.extra.sessionCounter &+= 1
             let multiplexer = AnyTLSMultiplexer(
                 inner: connection,
@@ -88,15 +83,18 @@ nonisolated final class AnyTLSMultiplexerPool: TransportPool {
             st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return multiplexer
         }
+        guard let multiplexer = adopted else {
+            connection.cancel()
+            logger.debug("[AnyTLSMultiplexerPool] dial succeeded but client closed in flight — discarding")
+            throw AnywhereError.transport(.terminated)
+        }
         logger.debug("[AnyTLSMultiplexerPool] new multiplexer seq=\(multiplexer.seq) — running handshake")
         await multiplexer.start()
         return try await dispatchOpenStream(on: multiplexer)
     }
 
-    /// Sets `closed` to reject new acquires, then defers to the pool engine.
     func closeAll() {
-        pool.state.withLock { $0.extra.closed = true }
-        pool.closeAll()
+        pool.retire()
     }
 
     // MARK: - Private

@@ -13,28 +13,29 @@ nonisolated private let logger = AnywhereLogger(category: "DomainRouter")
 nonisolated final class DomainRouter: Sendable {
 
     // MARK: - Tier model
-    
+
     fileprivate enum Tier: Int, CaseIterable {
         case user = 0
         case adBlock = 1
         case builtIn = 2
         case bypass = 3
     }
-    
+
     fileprivate struct RulePayload: Hashable, Sendable {
         var action: RouteTarget
         var entryIndex: UInt16
     }
-    
+
     struct Match: Sendable {
         let action: RouteTarget
         let ruleSetName: String?
     }
-    
+
     fileprivate struct RoutingState: Sendable {
         var matcher = TieredRouteMatcher<RulePayload>(tierCount: Tier.allCases.count)
         var configurationMap: [UUID: ProxyConfiguration] = [:]
         var ruleSetNames: [String] = []
+        var version: UInt64 = 1
 
         func match(resolving payload: RulePayload?) -> Match? {
             guard let payload else { return nil }
@@ -44,7 +45,7 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         // MARK: Streaming ingestion
-        
+
         mutating func ingestConfigurations(_ slice: Data) throws(AnywhereError) {
             guard let configurations = try? JSONDecoder().decode([String: ProxyConfiguration].self, from: slice) else {
                 throw AnywhereError.routing(.payloadCorrupted(.malformed))
@@ -83,36 +84,43 @@ nonisolated final class DomainRouter: Sendable {
     }
 
     private let routingState = Mutex(RoutingState())
-    
-    private let rulesVersion = Atomic<UInt64>(1)
 
-    var currentRulesVersion: UInt64 { rulesVersion.load(ordering: .relaxed) }
+    var currentRulesVersion: UInt64 { routingState.withLock { $0.version } }
 
     // MARK: - Loading
 
     func reset() {
-        routingState.withLock { $0 = RoutingState() }
-        rulesVersion.wrappingAdd(1, ordering: .relaxed)
+        routingState.withLock { state in
+            let next = state.version &+ 1
+            state = RoutingState()
+            state.version = next
+        }
     }
 
     func loadRoutingConfiguration() {
         let newState = Self.makeRoutingState()
-        routingState.withLock { $0 = newState }
-        rulesVersion.wrappingAdd(1, ordering: .relaxed)
+        routingState.withLock { state in
+            let next = state.version &+ 1
+            state = newState
+            state.version = next
+        }
     }
-    
+
     struct CompiledRouting: Sendable {
         fileprivate let state: RoutingState
     }
-    
+
     @concurrent
     func compileRoutingConfiguration() async -> CompiledRouting {
         CompiledRouting(state: Self.makeRoutingState())
     }
-    
+
     func install(_ compiled: CompiledRouting) {
-        routingState.withLock { $0 = compiled.state }
-        rulesVersion.wrappingAdd(1, ordering: .relaxed)
+        routingState.withLock { state in
+            let next = state.version &+ 1
+            state = compiled.state
+            state.version = next
+        }
     }
 
     private static func makeRoutingState() -> RoutingState {
@@ -275,24 +283,28 @@ nonisolated final class DomainRouter: Sendable {
     var hasRules: Bool {
         routingState.withLock { $0.matcher.hasRules }
     }
-    
+
     func matchDomain(_ domain: String) -> Match? {
-        guard !domain.isEmpty else { return nil }
+        matchDomainVersioned(domain).match
+    }
+
+    func matchDomainVersioned(_ domain: String) -> (match: Match?, version: UInt64) {
+        guard !domain.isEmpty else { return (nil, currentRulesVersion) }
         // Lowercase once, outside the lock, and share the UTF-8 bytes across tiers.
         var lowered = RouteMatching.asciiLowercasedIfNeeded(domain)
         return routingState.withLock { state in
             let payload = lowered.withUTF8 { state.matcher.matchDomain(bytes: $0) }
-            return state.match(resolving: payload)
+            return (state.match(resolving: payload), state.version)
         }
     }
-    
+
     func matchIP(_ ip: String) -> Match? {
         routingState.withLock { state in
             let payload = state.matcher.matchIP(ip)
             return state.match(resolving: payload)
         }
     }
-    
+
     func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
         case .direct, .reject:

@@ -28,8 +28,25 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
 
     // MARK: State
 
-    private struct State {
-        var haveFinalHead = false
+    private enum Phase: PhaseTransitionable {
+        case awaitingHead
+        case receivingBody
+        case finished
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.awaitingHead, .receivingBody):
+                return true
+            case (_, .finished):
+                return old != .finished
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .awaitingHead
         var status = 0
         var headers: [(name: String, value: String)] = []
         var body = Data()
@@ -37,11 +54,9 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         var endStreamReceived = false
         var streamReceiveConsumed = 0
 
-        var finished = false
-        
         var idleGeneration = 0
     }
-    private let lock = Mutex(State())
+    private let state = Mutex(State())
 
     // MARK: Timer pokes
     
@@ -71,7 +86,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     // MARK: - Jobs
     
     func runSend() async {
-        guard !lock.withLock({ $0.finished }) else { return }
+        guard state.withLock({ $0.phase != .finished }) else { return }
         await sendRequest()
     }
     
@@ -96,7 +111,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         let interval = request.timeoutInterval
         guard interval > 0 else { return }
         while true {
-            let generation = lock.withLock { $0.idleGeneration }
+            let generation = state.withLock { $0.idleGeneration }
             let finished = await withTaskGroup(of: Bool.self) { group in
                 group.addTask {
                     do { try await Task.sleep(for: .seconds(interval)); return false }
@@ -110,7 +125,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
                 return first
             }
             if finished { return }
-            let expired = lock.withLock { !$0.finished && $0.idleGeneration == generation }
+            let expired = state.withLock { $0.phase != .finished && $0.idleGeneration == generation }
             guard expired else { continue }
             fail(AnywhereError.transport(.timedOut(.receive, endpoint: nil, detail: "request idle for \(Int(interval))s")))
             return
@@ -118,7 +133,7 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     }
     
     private func rearmIdleTimer() {
-        lock.withLock { $0.idleGeneration += 1 }
+        state.withLock { $0.idleGeneration += 1 }
     }
 
     // MARK: - Request
@@ -181,16 +196,16 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         rearmIdleTimer()
 
         enum Outcome { case ignore; case failStatus; case finishOK }
-        let outcome: Outcome = lock.withLock { state in
-            guard !state.finished else { return .ignore }
+        let outcome: Outcome = state.withLock { state in
+            guard state.phase != .finished else { return .ignore }
 
-            if !state.haveFinalHead {
+            if state.phase == .awaitingHead {
                 guard let statusValue = HTTPHeader.firstValue(in: fields, named: ":status"),
                       let code = HTTPHeader.parseStatusCode(statusValue) else {
                     return .failStatus
                 }
                 if (100..<200).contains(code) { return .ignore }
-                state.haveFinalHead = true
+                state.transition(to: .receivingBody)
                 state.status = code
                 state.headers = fields.filter { !$0.name.hasPrefix(":") }
             }
@@ -220,10 +235,13 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
             case fail(Error)
             case ok(windowUpdate: NaiveHTTP2Frame?, finish: Bool)
         }
-        let outcome: Outcome = lock.withLock { state in
-            guard !state.finished else { return .ignore }
-            guard state.haveFinalHead else { return .failNoHead }
-            
+        let outcome: Outcome = state.withLock { state in
+            switch state.phase {
+            case .finished: return .ignore
+            case .awaitingHead: return .failNoHead
+            case .receivingBody: break
+            }
+
             if !body.isEmpty {
                 if state.body.count + body.count > maxBytes {
                     return .fail(AnywhereError.mitm(.responseTooLarge(limit: maxBytes)))
@@ -274,8 +292,8 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
     }
 
     private func finishSuccess() {
-        let snapshot: (body: Data, headers: [(name: String, value: String)], status: Int)? = lock.withLock { state in
-            guard !state.finished else { return nil }
+        let snapshot: (body: Data, headers: [(name: String, value: String)], status: Int)? = state.withLock { state in
+            guard state.phase != .finished else { return nil }
             return (state.body, state.headers, state.status)
         }
         guard let snapshot else { return }
@@ -310,9 +328,8 @@ nonisolated final class MITMScriptHTTP2Stream: Sendable {
         removeFromConnection: Bool,
         sendRST: Bool
     ) {
-        let captured: (reservedBytes: Int, endStreamReceived: Bool)? = lock.withLock { state in
-            guard !state.finished else { return nil }
-            state.finished = true
+        let captured: (reservedBytes: Int, endStreamReceived: Bool)? = state.withLock { state in
+            guard state.transition(to: .finished) else { return nil }
             let c = (state.reservedBytes, state.endStreamReceived)
             state.reservedBytes = 0
             return c

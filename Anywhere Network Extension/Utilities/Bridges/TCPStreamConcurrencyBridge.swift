@@ -16,9 +16,44 @@ actor TCPStreamConcurrencyBridge {
 
     private let bridge: LWIPConcurrencyBridge
     private let pcb: UnsafeMutableRawPointer
-    
-    private var terminated = false
-    
+
+    private enum Phase: PhaseTransitionable {
+        case open
+        case draining
+        case drained
+        case failed(AnywhereError)
+        case terminated(writeError: AnywhereError?)
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .draining),
+                 (.draining, .drained),
+                 (.drained, .open),
+                 (.open, .failed),
+                 (.draining, .failed),
+                 (.drained, .failed):
+                return true
+            case (_, .terminated):
+                return !old.isTerminated
+            default:
+                return false
+            }
+        }
+
+        var isTerminated: Bool {
+            if case .terminated = self { true } else { false }
+        }
+
+        var writeFailure: AnywhereError? {
+            switch self {
+            case .failed(let error), .terminated(.some(let error)): error
+            default: nil
+            }
+        }
+    }
+
+    private var phase: Phase = .open
+
     var onFatalWrite: (@Sendable (AnywhereError) -> Void)?
 
     // MARK: Upload (app → upstream)
@@ -31,53 +66,51 @@ actor TCPStreamConcurrencyBridge {
     private var pendingWrite = Data()
     private var pendingWriteOffset = 0
     private var creditWaiter: CheckedContinuation<Void, Never>?
-    private var downloadFinishing = false
-    private var downloadFinished = false
     private var finishWaiter: CheckedContinuation<Void, Never>?
-    private var writeError: AnywhereError?
-    
+
     private let backlogBytesMirror = Atomic<Int>(0)
-    
-    private let downloadNeedsAwaitedSend = Atomic<Bool>(false)
+
+    private let downloadNeedsAwaitedSend = OneShotLatch()
 
     private var pendingWriteCount: Int { pendingWrite.count - pendingWriteOffset }
-    
+
     init(bridge: LWIPConcurrencyBridge, pcb: LWIPPCBHandle) {
         self.bridge = bridge
         self.pcb = pcb.raw
     }
 
     // MARK: - Intake
-    
+
     func deliverUpload(_ bytes: Data) {
-        guard !terminated, !bytes.isEmpty else { return }
+        guard !phase.isTerminated, !bytes.isEmpty else { return }
         uploadBuffer.append(bytes)
         resumeUploadWaiter()
     }
-    
+
     func deliverSendCredit() {
-        guard !terminated else { return }
+        guard !phase.isTerminated else { return }
         drainPendingWrite()
     }
-    
+
     func terminate() {
-        guard !terminated else { return }
-        terminated = true
-        downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
+        let writeFailure = phase.writeFailure
+        guard Phase.transition(&phase, to: .terminated(writeError: writeFailure)) else { return }
+        downloadNeedsAwaitedSend.claim()
         resumeUploadWaiter()
         resumeCreditWaiter()
         resumeFinishWaiter()
     }
 
     // MARK: - Establishment / teardown helpers
-    
+
     func seedUpload(_ data: Data) {
-        guard !terminated, !data.isEmpty else { return }
+        guard !phase.isTerminated, !data.isEmpty else { return }
         uploadBuffer.append(data)
         resumeUploadWaiter()
     }
-    
+
     func flushBestEffort() {
+        guard !phase.isTerminated else { return }
         let live = pendingWriteCount
         guard live > 0 else { return }
         let written = pendingWrite.withUnsafeBytes { buffer -> Int in
@@ -88,11 +121,11 @@ actor TCPStreamConcurrencyBridge {
     }
 
     // MARK: - Upload async surface
-    
+
     func receiveUpload(acking ackedByteCount: Int) async -> Data? {
         ackUpload(ackedByteCount)
         while true {
-            if terminated { return nil }
+            if phase.isTerminated { return nil }
             if !uploadBuffer.isEmpty {
                 let chunk = uploadBuffer
                 uploadBuffer = Data()
@@ -103,9 +136,9 @@ actor TCPStreamConcurrencyBridge {
             }
         }
     }
-    
+
     private func ackUpload(_ byteCount: Int) {
-        guard !terminated, byteCount > 0 else { return }
+        guard !phase.isTerminated, byteCount > 0 else { return }
         var remaining = byteCount
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
@@ -116,60 +149,88 @@ actor TCPStreamConcurrencyBridge {
     }
 
     // MARK: - Download async surface
-    
+
     func deliverDownload(_ data: Data) {
-        guard !terminated, !data.isEmpty else { return }
-        backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
-        pendingWrite.append(data)
+        guard acceptDownload(data) else { return }
         drainPendingWrite()
     }
-    
+
+    private func acceptDownload(_ data: Data) -> Bool {
+        guard !data.isEmpty else { return false }
+        switch phase {
+        case .terminated, .failed:
+            return false
+        case .drained:
+            Phase.transition(&phase, to: .open)
+        case .open, .draining:
+            break
+        }
+        backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
+        pendingWrite.append(data)
+        return true
+    }
+
     nonisolated var canPushDownload: Bool {
-        !downloadNeedsAwaitedSend.load(ordering: .relaxed)
+        !downloadNeedsAwaitedSend.isClaimed
             && backlogBytesMirror.load(ordering: .relaxed) < TunnelConstants.drainLowWaterMark
     }
-    
+
     nonisolated func pushDownload(_ data: Data) {
         backlogBytesMirror.wrappingAdd(data.count, ordering: .relaxed)
         bridge.enqueue { [self] in
             assumeIsolated { $0.acceptPushedDownload(data) }
         }
     }
-    
+
     private func acceptPushedDownload(_ data: Data) {
-        guard !terminated else {
+        switch phase {
+        case .terminated, .failed:
             backlogBytesMirror.wrappingSubtract(data.count, ordering: .relaxed)
             return
+        case .drained:
+            Phase.transition(&phase, to: .open)
+        case .open, .draining:
+            break
         }
         pendingWrite.append(data)
         drainPendingWrite()
     }
-    
+
     func sendDownload(_ data: Data) async throws {
-        guard !terminated else { throw AnywhereError.transport(.terminated) }
+        if let failure = phase.writeFailure { throw failure }
+        guard !phase.isTerminated else { throw AnywhereError.transport(.terminated) }
         deliverDownload(data)
-        while !terminated, writeError == nil, pendingWriteCount >= TunnelConstants.drainLowWaterMark {
+        while !phase.isTerminated, phase.writeFailure == nil,
+              pendingWriteCount >= TunnelConstants.drainLowWaterMark {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 creditWaiter = continuation
             }
         }
-        if let writeError { throw writeError }
-        if terminated { throw AnywhereError.transport(.terminated) }
+        if let failure = phase.writeFailure { throw failure }
+        if phase.isTerminated { throw AnywhereError.transport(.terminated) }
     }
-    
+
     func awaitDownloadDrained() async {
-        guard !terminated, writeError == nil else { return }
-        downloadFinishing = true
-        markDrainedIfComplete()
-        while !terminated, writeError == nil, !downloadFinished {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                finishWaiter = continuation
+        while true {
+            switch phase {
+            case .terminated, .failed, .drained:
+                return
+            case .open:
+                Phase.transition(&phase, to: .draining)
+                markDrainedIfComplete()
+            case .draining:
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    finishWaiter = continuation
+                }
             }
         }
     }
-    
+
     private func drainPendingWrite() {
-        guard !terminated, writeError == nil else { return }
+        switch phase {
+        case .terminated, .failed: return
+        case .open, .draining, .drained: break
+        }
 
         let live = pendingWriteCount
         if live > 0 {
@@ -179,8 +240,8 @@ actor TCPStreamConcurrencyBridge {
             }
             if written < 0 {
                 let error = AnywhereError.transport(.writeFailed(pending: live, sndbuf: Int(lwip_bridge_tcp_sndbuf(pcb))))
-                writeError = error
-                downloadNeedsAwaitedSend.store(true, ordering: .relaxed)
+                Phase.transition(&phase, to: .failed(error))
+                downloadNeedsAwaitedSend.claim()
                 resumeCreditWaiter()
                 resumeFinishWaiter()
                 onFatalWrite?(error)
@@ -210,9 +271,8 @@ actor TCPStreamConcurrencyBridge {
     }
 
     private func markDrainedIfComplete() {
-        guard downloadFinishing, !terminated, pendingWriteCount == 0 else { return }
-        downloadFinishing = false
-        downloadFinished = true
+        guard case .draining = phase, pendingWriteCount == 0,
+              Phase.transition(&phase, to: .drained) else { return }
         resumeFinishWaiter()
     }
 
@@ -223,7 +283,7 @@ actor TCPStreamConcurrencyBridge {
             await self?.drainPendingWrite()
         }
     }
-    
+
     private func feedLWIP(_ base: UnsafeRawPointer, count: Int, retryOnEmpty: Bool) -> Int {
         var offset = 0
         while offset < count {

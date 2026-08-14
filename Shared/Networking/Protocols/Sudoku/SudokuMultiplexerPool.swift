@@ -86,8 +86,8 @@ nonisolated extension SudokuMultiplexerRegistry: TransportPool {
 /// cold-start bursts behind a single KIP handshake.
 nonisolated final class SudokuMultiplexerPool: TransportPool {
 
-    private typealias Base = MultiplexerPool<SudokuMuxClient, Bool>
-    private let pool = Base(extra: false)
+    private typealias Base = MultiplexerPool<SudokuMuxClient, Void>
+    private let pool = Base(extra: ())
 
     /// Single bucket — every session here shares one endpoint + outbound settings.
     private static let bucket = "sudoku"
@@ -109,15 +109,13 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
     /// handshake settles.
     private let inFlightDial = Mutex<Task<SudokuMuxClient, Error>?>(nil)
 
-    // The base `Extra` is a `Bool` `closed` flag, guarded by ``state``.
-
     init(configuration: ProxyConfiguration, directDialHost: String) {
         self.configuration = configuration
         self.directDialHost = directDialHost
         pool.startIdleEviction(Self.poolPolicy)
     }
 
-    func reclaim() { closeAll() }
+    func reclaim() { pool.drainAll() }
 
     // MARK: - Acquire
 
@@ -147,10 +145,8 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
 
     // MARK: - Teardown
 
-    /// Sets `closed` to reject new acquires, then defers to the pool engine.
     func closeAll() {
-        pool.state.withLock { $0.extra = true }
-        pool.closeAll()
+        pool.retire()
     }
 
     // MARK: - Private
@@ -193,7 +189,7 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
     /// (age-based idle eviction is the base's sweep).
     private func reusableMultiplexer() throws -> SudokuMuxClient? {
         try pool.state.withLock { st in
-            if st.extra { throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil)) }
+            if st.phase == .closed { throw AnywhereError.proxy(.sudoku, .connectionClosed(detail: nil)) }
             st.multiplexers[Self.bucket]?.removeAll { multiplexer in
                 guard multiplexer.isClosed else { return false }
                 st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
@@ -225,7 +221,7 @@ nonisolated final class SudokuMultiplexerPool: TransportPool {
         }
         // close() re-enters removeMultiplexer via onClose, so it must run off-lock.
         let wasClosed: Bool = pool.state.withLock { st in
-            if st.extra { return true }
+            if st.phase == .closed { return true }
             st.multiplexers[Self.bucket, default: []].append(multiplexer)
             st.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
             return false

@@ -19,19 +19,19 @@ struct LWIPPCBHandle: @unchecked Sendable { let raw: UnsafeMutableRawPointer }
 struct LWIPReleaseAction: @unchecked Sendable {
     let ctx: UnsafeMutableRawPointer?
     let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
-    
+
     static let noop = LWIPReleaseAction(ctx: nil, fn: { _ in })
-    
+
     func run() { fn(ctx) }
 }
 
 extension TunnelStack {
 
     // MARK: - Callback Installation
-    
+
     func installLwipCallbacks() {
         lwip_bridge_set_host_ctx(BridgeContext.passUnretained(self))
-        
+
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let stack = TunnelStack.lwipHost(), let data, let release else { return }
             let packet = Data(
@@ -44,7 +44,7 @@ extension TunnelStack {
                 $0.lwipDidOutput(packet, isIPv6: isIPv6 != 0, release: releaseAction)
             }
         }
-        
+
         lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, _, isIPv6 in
             guard let stack = TunnelStack.lwipHost() else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
@@ -54,7 +54,7 @@ extension TunnelStack {
             }
             return stack.assumeIsolated { $0.lwipSynVerdict() }
         }
-        
+
         lwip_bridge_set_tcp_stray_filter_fn { _, _, dstIP, _, isIPv6 in
             guard let stack = TunnelStack.lwipHost(), let dstIP,
                   stack.connectionRouter.isRejectMarkedDestination(rawIP: dstIP, isIPv6: isIPv6 != 0) else {
@@ -80,7 +80,7 @@ extension TunnelStack {
                 return nil
             }
         }
-        
+
         lwip_bridge_set_tcp_recv_fn { connection, data, len in
             guard let connection else {
                 logger.debug("[LWIPBridge] tcp_recv: connection is nil")
@@ -95,12 +95,12 @@ extension TunnelStack {
                 }
             }
         }
-        
+
         lwip_bridge_set_tcp_sent_fn { connection, len in
             guard let connection else { return }
             BridgeContext.unretained(connection, as: TCPConnection.self).assumeIsolated { $0.handleSent(len: len) }
         }
-        
+
         lwip_bridge_set_tcp_err_fn { connection, err in
             guard let connection else {
                 logger.debug("[LWIPBridge] tcp_err: connection is nil, err=\(err)")
@@ -109,14 +109,14 @@ extension TunnelStack {
             BridgeContext.consume(connection, as: TCPConnection.self).assumeIsolated { $0.handleError(err: err) }
         }
     }
-    
+
     private static func lwipHost() -> TunnelStack? {
         guard let ctx = lwip_bridge_host_ctx() else { return nil }
         return BridgeContext.unretained(ctx, as: TunnelStack.self)
     }
 
     // MARK: - Callbacks
-    
+
     func lwipDidOutput(_ packet: Data, isIPv6: Bool, release: LWIPReleaseAction) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
         let needsKick: Bool = outputBuffer.withLock { buffer in
@@ -131,18 +131,18 @@ extension TunnelStack {
             kickOutputDrain()
         }
     }
-    
+
     func lwipSynVerdict() -> Int32 {
         let activeTCP = Int(lwip_bridge_active_tcp_count())
         if activeTCP >= TunnelLimits.tcpMaxConnections {
             logger.warning("[TCP] Connection cap reached (\(activeTCP)/\(TunnelLimits.tcpMaxConnections))")
-            isPressureFlushing.store(true, ordering: .relaxed)
+            lwipAbortContext.store(.pressureFlush, ordering: .relaxed)
             lwip_bridge_discard_all_tcp()
-            isPressureFlushing.store(false, ordering: .relaxed)
+            lwipAbortContext.store(.none, ordering: .relaxed)
         }
         return Int32(LWIP_BRIDGE_SYN_PASS)
     }
-    
+
     enum AcceptVerdict {
         case accept(TCPConnection)
         case dropSilently

@@ -14,7 +14,7 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack+IO")
 extension TunnelStack {
 
     // MARK: - Output Batching
-    
+
     nonisolated func drainOutputLoop(packetFlow: NEPacketTunnelFlow) async {
         while true {
             var packets: [Data] = []
@@ -37,7 +37,7 @@ extension TunnelStack {
 
             if packets.isEmpty { return }
             packetFlow.writePackets(packets, withProtocols: protocols)
-            
+
             if !releases.isEmpty {
                 let toRelease = releases
                 lwipBridge.enqueue {
@@ -50,7 +50,7 @@ extension TunnelStack {
             await Task.yield()
         }
     }
-    
+
     nonisolated func enqueueOutbound(_ packet: Data, isIPv6: Bool) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
         let needsKick: Bool = outputBuffer.withLock { buffer in
@@ -67,7 +67,7 @@ extension TunnelStack {
     }
 
     // MARK: - Packet Reading
-    
+
     func runReadLoop(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         let demand = AsyncInbox<Void>(capacity: 1)
         demand.yield(())
@@ -86,7 +86,7 @@ extension TunnelStack {
             await processInboundBatch(packets, udpPlane: udpPlane)
         }
     }
-    
+
     private func processInboundBatch(_ packets: [Data], udpPlane: UDPPlane) async {
         let reflector = reflector()
         var lwipBatch: [Data] = []
@@ -109,7 +109,7 @@ extension TunnelStack {
             group.addTask { [udpBatch] in await udpPlane.feed(udpBatch) }
         }
     }
-    
+
     func feedLwipBatch(_ packets: [Data]) {
         lwip_bridge_input_batch_begin()
         for packet in packets {
@@ -130,7 +130,7 @@ extension TunnelStack {
             intervalMs: TunnelConstants.lwipTimeoutIntervalMs,
             leewayMs: TunnelConstants.lwipTimeoutLeewayMs
         ) { [weak self] in
-            guard let self, self.running.load(ordering: .relaxed) else { return }
+            guard let self, self.publishedPhase.load(ordering: .relaxed).isActive else { return }
             let idle = lwip_bridge_check_timeouts() != 0
             FlowGauge.publishTCPTable(Int(lwip_bridge_active_tcp_count()))
             if idle {
@@ -138,11 +138,7 @@ extension TunnelStack {
             }
         }
     }
-    
-    func resumeLwipTickIfNeeded() {
-        lwipTick?.resume()
-    }
-    
+
     nonisolated func runUDPCleanupLoop(udpPlane: UDPPlane) async {
         let interval = TimeInterval(TunnelConstants.udpCleanupIntervalSec)
         var lastRun = MonotonicClock.now
@@ -152,7 +148,7 @@ extension TunnelStack {
                 try? await Task.sleep(for: .seconds(remaining))
                 continue
             }
-            if self.running.load(ordering: .relaxed) {
+            if self.publishedPhase.load(ordering: .relaxed).isActive {
                 await udpPlane.cleanup()
             }
             lastRun = MonotonicClock.now

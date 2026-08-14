@@ -22,9 +22,26 @@ nonisolated final class WebSocketConnection: Sendable {
 
     private let configuration: WebSocketConfiguration
 
-    private struct ConnectionState {
-        var isConnected = false
-        var upgraded = false
+    private enum Phase: PhaseTransitionable {
+        case upgrading
+        case open
+        case closed
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.upgrading, .open):
+                return true
+            case (_, .closed), (_, .cancelled):
+                return old != .closed && old != .cancelled
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct ConnectionState: PhaseHolding {
+        var phase: Phase = .upgrading
         var receiveBuffer = Data()
         var heartbeatTask: Task<Void, Never>?
     }
@@ -37,7 +54,7 @@ nonisolated final class WebSocketConnection: Sendable {
     static let chromeUserAgent = ProxyUserAgent.chrome
 
     var isConnected: Bool {
-        state.withLock { $0.isConnected }
+        state.withLock { $0.phase == .open }
     }
 
     // MARK: - Initializers
@@ -45,7 +62,7 @@ nonisolated final class WebSocketConnection: Sendable {
     init(transport: any ByteTransport, configuration: WebSocketConfiguration) {
         self.configuration = configuration
         self.transport = transport
-        self.state = Mutex(ConnectionState(isConnected: true))
+        self.state = Mutex(ConnectionState())
     }
 
     convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
@@ -57,7 +74,7 @@ nonisolated final class WebSocketConnection: Sendable {
     }
 
     // MARK: - HTTP Upgrade Handshake
-    
+
     func performUpgrade(earlyData: Data? = nil) async throws {
         try await withDialDeadline(Self.upgradeDeadline, onExpiry: {
             self.cancel()
@@ -150,7 +167,10 @@ nonisolated final class WebSocketConnection: Sendable {
                 throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "Expected HTTP 101, got: \(firstLine)"))
             }
 
-            self.state.withLock { $0.upgraded = true }
+            let opened: Bool = self.state.withLock { $0.transition(to: .open) }
+            guard opened else {
+                throw AnywhereError.proxy(.webSocket, .upgradeFailed(detail: "cancelled during upgrade"))
+            }
             self.startHeartbeat()
             return
         }
@@ -167,6 +187,16 @@ nonisolated final class WebSocketConnection: Sendable {
     /// Receives one application-data frame; `nil` signals a clean close (EOF). Ping/Pong/Close
     /// control frames are handled inline (auto-Pong, Close acknowledgement) without surfacing.
     func receive() async throws -> Data? {
+        switch state.withLock({ $0.phase }) {
+        case .upgrading:
+            throw AnywhereError.proxy(.webSocket, .notReady)
+        case .closed:
+            return nil
+        case .cancelled:
+            throw AnywhereError.transport(.terminated)
+        case .open:
+            break
+        }
         while true {
             if let result = state.withLock({ tryExtractFrame(&$0) }) {
                 switch result {
@@ -185,7 +215,7 @@ nonisolated final class WebSocketConnection: Sendable {
                     closePayload.append(UInt8(code & 0xFF))
                     let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
                     try? await transport.send(closeFrame)
-                    state.withLock { $0.isConnected = false }
+                    _ = state.withLock { $0.transition(to: .closed) }
                     if code == 1000 || code == 1005 {
                         return nil
                     }
@@ -195,6 +225,7 @@ nonisolated final class WebSocketConnection: Sendable {
 
             // No complete frame buffered: read more bytes.
             guard case .bytes(let data) = try await transport.receive(), !data.isEmpty else {
+                _ = state.withLock { $0.transition(to: .closed) }
                 return nil // EOF
             }
 
@@ -214,7 +245,7 @@ nonisolated final class WebSocketConnection: Sendable {
 
     func cancel() {
         state.withLock {
-            $0.isConnected = false
+            $0.transition(to: .cancelled)
             $0.receiveBuffer.removeAll()
             $0.heartbeatTask?.cancel()
             $0.heartbeatTask = nil
@@ -246,7 +277,12 @@ nonisolated final class WebSocketConnection: Sendable {
                 }
             }
         }
-        state.withLock { $0.heartbeatTask = task }
+        let installed: Bool = state.withLock { state in
+            guard state.phase == .open else { return false }
+            state.heartbeatTask = task
+            return true
+        }
+        if !installed { task.cancel() }
     }
 
     // MARK: - Frame Building (Client → Server, MUST be masked)

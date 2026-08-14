@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Synchronization
 
 nonisolated func withDialDeadline<T: Sendable>(
     _ duration: Duration,
@@ -45,9 +44,7 @@ nonisolated func withDialDeadline<T: Sendable>(
 }
 
 nonisolated final class RaceClaim: Sendable {
-    private let claimed = Atomic<Bool>(false)
+    private let claimed = OneShotLatch()
 
-    func claim() -> Bool {
-        !claimed.exchange(true, ordering: .relaxed)
-    }
+    func claim() -> Bool { claimed.claim() }
 }

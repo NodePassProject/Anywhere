@@ -7,16 +7,6 @@
 
 import Foundation
 import Network
-import Synchronization
-
-nonisolated private final class TerminationLatch: Sendable {
-    private let terminated = Atomic<Bool>(false)
-    
-    @discardableResult
-    func trip() -> Bool { !terminated.exchange(true, ordering: .relaxed) }
-
-    var isTripped: Bool { terminated.load(ordering: .relaxed) }
-}
 
 nonisolated final class LegacyQUICDatagramEngine: QUICDatagramEngine, Sendable {
     private static let receiveConcurrency = 16
@@ -25,7 +15,7 @@ nonisolated final class LegacyQUICDatagramEngine: QUICDatagramEngine, Sendable {
     private let obfuscator: QUICPacketObfuscator?
     private let queue = DispatchQueue(label: "com.argsment.Anywhere.QUICDatagramCarrier", qos: .userInitiated)
 
-    private let terminated = TerminationLatch()
+    private let terminated = OneShotLatch()
 
     init(endpoint: NWEndpoint, obfuscator: QUICPacketObfuscator?, sink: QUICDatagramEngineSink) {
         let connection = NWConnection(to: endpoint, using: .udp)
@@ -78,19 +68,19 @@ nonisolated final class LegacyQUICDatagramEngine: QUICDatagramEngine, Sendable {
     }
 
     func close() {
-        terminated.trip()
+        terminated.claim()
         connection.cancel()
     }
-    
+
     private static func armReceive(
         on connection: NWConnection,
         obfuscator: QUICPacketObfuscator?,
         sink: QUICDatagramEngineSink,
-        terminated: TerminationLatch
+        terminated: OneShotLatch
     ) {
         connection.receiveMessage { content, _, _, error in
             if let error {
-                if terminated.trip() {
+                if terminated.claim() {
                     sink.failed(AnywhereError.errnoCode(from: error))
                     sink.finished()
                 }
@@ -105,7 +95,7 @@ nonisolated final class LegacyQUICDatagramEngine: QUICDatagramEngine, Sendable {
                     sink.packet(content)
                 }
             }
-            guard !terminated.isTripped else { return }
+            guard !terminated.isClaimed else { return }
             Self.armReceive(on: connection, obfuscator: obfuscator, sink: sink, terminated: terminated)
         }
     }

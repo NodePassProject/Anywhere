@@ -12,16 +12,11 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Setup
 
-    /// HTTP/2 setup: preface + SETTINGS + WINDOW_UPDATE + HEADERS in one write,
-    /// without waiting for the server's SETTINGS first.
     func performH2Setup() async throws {
         var initData = h2ClientPreface()
 
-        // Setup deliberately does not wait for the 200 response HEADERS: some CDNs
-        // buffer it until the backend sees POST body data, so waiting would deadlock.
         switch role {
         case .uploadOnly:
-            // POST is stream 1; no download stream, so reads are only a flow-control/response drain.
             configureH2StreamIDs(upload: 1, download: .max)
             if mode == .streamUp {
                 let uploadHeaders = encodeH2UploadHeaders(seq: nil)
@@ -66,8 +61,6 @@ extension XHTTPConnection {
         }
     }
 
-    /// Client preface + SETTINGS (ENABLE_PUSH off, 4MB stream window, 10MB max
-    /// header list) + a 1GB connection-level WINDOW_UPDATE.
     private func h2ClientPreface() -> Data {
         var initData = Data()
         initData.append(Self.h2Preface)
@@ -75,11 +68,13 @@ extension XHTTPConnection {
         var settingsPayload = Data()
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
         let winSize = Self.h2StreamWindowSize
-        settingsPayload.append(contentsOf: [
-            0x00, 0x04,
-            UInt8((winSize >> 24) & 0xFF), UInt8((winSize >> 16) & 0xFF),
-            UInt8((winSize >> 8) & 0xFF), UInt8(winSize & 0xFF)
-        ])
+        settingsPayload.append(
+            contentsOf: [
+                0x00, 0x04,
+                UInt8((winSize >> 24) & 0xFF), UInt8((winSize >> 16) & 0xFF),
+                UInt8((winSize >> 8) & 0xFF), UInt8(winSize & 0xFF)
+            ]
+        )
         settingsPayload.append(contentsOf: [0x00, 0x06, 0x00, 0xA0, 0x00, 0x00])
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
@@ -93,8 +88,6 @@ extension XHTTPConnection {
         return initData
     }
 
-    /// Frame pump for an `.uploadOnly` leg: keeps flow control current, ACKs SETTINGS/PING,
-    /// and discards POST responses; never delivers data since `h2DownloadStreamId == .max`.
     func startH2UploadPump() {
         Task { [weak self] in
             while true {
@@ -111,10 +104,7 @@ extension XHTTPConnection {
         }
     }
 
-    /// Reads frames until the server's SETTINGS is received and ACKed; does not
-    /// wait for the 200 OK, and early HEADERS complete the setup.
     private func processInitialServerFrames() async throws {
-        // Fixed after setup; snapshot once rather than re-lock the `state`-backed property per frame.
         let downloadStreamId = h2DownloadStreamId
         while true {
             let frame: H2Framing.Frame
@@ -179,29 +169,23 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Send
 
-    /// Marks the stream closed and wakes sends parked on flow control — a send awaiting a
-    /// WINDOW_UPDATE that will never arrive must observe the close, not hang until cancel().
     func markH2Closed() {
         state.withLock { state in
-            state.h2StreamClosed = true
+            state.transition(to: .halfClosed)
             state.h2FlowGate.wakeAll()
         }
     }
 
-    /// Suspends until a WINDOW_UPDATE re-opens a send window (or the stream closes). `hasWindow`
-    /// is evaluated under the lock so a window re-open racing the caller's check isn't missed.
     private func parkForH2Flow(hasWindow: (inout State) -> Bool) async {
         await H2FlowGate.park {
             state.withLock { state -> AsyncStream<Never>? in
-                if state.h2StreamClosed { return nil }
+                if state.phase != .live { return nil }
                 if hasWindow(&state) { return nil }
                 return state.h2FlowGate.enroll()
             }
         }
     }
 
-    /// Sends DATA frames respecting peer flow control, batching as much as the window allows
-    /// into one transport write; the remainder awaits a WINDOW_UPDATE.
     func sendH2Data(data: Data, streamId: UInt32, offset: Int = 0) async throws {
         enum BuildStep {
             case closed
@@ -211,7 +195,7 @@ extension XHTTPConnection {
         var currentOffset = offset
         while currentOffset < data.count {
             let step: BuildStep = state.withLock { state in
-                if state.h2StreamClosed { return .closed }
+                if state.phase != .live { return .closed }
                 let maxSize = state.h2MaxFrameSize
                 let window = min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow)
                 guard window > 0 else { return .park }
@@ -251,7 +235,6 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends a packet-up batch as a new HTTP/2 stream. Called on the `packetUpChain` serializer.
     func sendH2PacketUp(data: Data) async throws {
         enum Build {
             case closed
@@ -259,17 +242,15 @@ extension XHTTPConnection {
             case withBody(outbound: Data, streamId: UInt32, nextOffset: Int, maxSize: Int, streamWindow: Int)
         }
         let build: Build = state.withLock { state in
-            if state.h2StreamClosed { return .closed }
+            if state.phase != .live { return .closed }
             let streamId = state.h2NextPacketStreamId
             state.h2NextPacketStreamId += 2
             let seq = state.nextSeq
             state.nextSeq += 1
             let maxSize = state.h2MaxFrameSize
-            // Packet-up: each new stream has h2PeerInitialWindowSize; only conn window is shared.
             let streamWindow = state.h2PeerInitialWindowSize
             let connectionWindow = state.h2PeerConnectionWindow
 
-            // Header/cookie placement carries the payload in the HEADERS block; the body stays empty.
             let dataFields = uplinkDataFields(for: data)
             let bodyInHeaders = !dataFields.isEmpty
             let bodyLength = bodyInHeaders ? 0 : data.count
@@ -298,7 +279,6 @@ extension XHTTPConnection {
             }
             let totalSent = window - windowRemaining
             state.h2PeerConnectionWindow -= totalSent
-            // Stream window for this stream is not tracked globally (short-lived).
             let perStreamRemaining = streamWindow - totalSent
             return .withBody(outbound: outbound, streamId: streamId, nextOffset: currentOffset, maxSize: maxSize, streamWindow: perStreamRemaining)
         }
@@ -307,7 +287,6 @@ extension XHTTPConnection {
         case .closed:
             throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))
         case .headersOnly(let outbound):
-            // Rate limiting between POSTs is enforced upstream by `rateLimitPacketUp`.
             do {
                 try await download.send(outbound)
             } catch {
@@ -332,8 +311,6 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends packet-up DATA frames with END_STREAM on the last; `streamWindow` is the
-    /// per-stream remaining window (not stored globally — packet-up streams are short-lived).
     private func sendH2PacketUpData(data: Data, streamId: UInt32, offset: Int = 0, maxSize: Int, streamWindow: Int) async throws {
         enum BuildStep {
             case closed
@@ -344,8 +321,7 @@ extension XHTTPConnection {
         var currentStreamWindow = streamWindow
         while currentOffset < data.count {
             let step: BuildStep = state.withLock { state in
-                if state.h2StreamClosed { return .closed }
-                // Use the window updated by WINDOW_UPDATE if this send was previously blocked.
+                if state.phase != .live { return .closed }
                 let effectiveStreamWindow = state.h2PacketStreamWindows.removeValue(forKey: streamId) ?? currentStreamWindow
                 let window = min(state.h2PeerConnectionWindow, effectiveStreamWindow)
                 guard window > 0 else {
@@ -392,8 +368,6 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Receive
 
-    /// Receives DATA from the download stream; frames for other streams are silently consumed.
-    /// Returns `nil` on EOF. The straight-line `async` loop replaces the callback recursion.
     func receiveH2Data() async throws -> Data? {
         let buffered: Data? = state.withLock { state in
             if !state.h2DataBuffer.isEmpty {
@@ -404,9 +378,8 @@ extension XHTTPConnection {
             return nil
         }
         if let buffered { return buffered }
-        if state.withLock({ $0.h2StreamClosed }) { return nil }
+        if state.withLock({ $0.phase != .live }) { return nil }
 
-        // Fixed after setup; snapshot once rather than re-lock the `state`-backed property per frame.
         let downloadStreamId = h2DownloadStreamId
         while true {
             let frame: H2Framing.Frame
@@ -414,7 +387,6 @@ extension XHTTPConnection {
                 frame = try await h2FrameReader.readFrame()
             } catch {
                 if case AnywhereError.proxy(.xhttp, .streamClosed) = error {
-                    // Graceful end of stream (clean transport FIN) → EOF.
                     markH2Closed()
                     return nil
                 }
@@ -425,9 +397,6 @@ extension XHTTPConnection {
 
             switch frame.type {
             case Self.h2FrameData:
-                // Batch WINDOW_UPDATEs at >= 50% of window consumed. Stream-level updates only
-                // for the download stream — updating a possibly-closed upload stream draws
-                // RST_STREAM (STREAM_CLOSED).
                 if !frame.payload.isEmpty {
                     let updates: Data = state.withLock { state in
                         state.h2ConnectionReceiveConsumed += frame.payload.count
@@ -469,12 +438,10 @@ extension XHTTPConnection {
                     }
                     if frame.payload.isEmpty {
                         if frame.flags & Self.h2FlagEndStream != 0 { return nil }
-                        // else: keep reading
                     } else {
                         return frame.payload
                     }
                 }
-                // non-download stream (or empty non-end frame): keep reading
 
             case Self.h2FrameHeaders:
                 if isDownloadStream {
@@ -487,8 +454,6 @@ extension XHTTPConnection {
                         }
                     }
                 }
-                // Ignore upload responses regardless of status; a non-200 must not tear down the
-                // download. In all cases keep reading.
 
             case Self.h2FrameSettings:
                 if frame.flags & Self.h2FlagAck == 0 {
@@ -528,7 +493,6 @@ extension XHTTPConnection {
                     markH2Closed()
                     return nil
                 }
-                // Upload stream resets are expected after the POST completes; keep reading.
 
             default:
                 break
@@ -538,7 +502,6 @@ extension XHTTPConnection {
 
     // MARK: Shared-H2 (xmux) session setup & send
 
-    /// Setup over a shared multiplexing H2 connection; mirrors the H3 path but with HPACK headers.
     func performSharedH2Setup() async throws {
         guard let shared = sharedH2 else {
             throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "no shared H2 connection"))
@@ -547,14 +510,12 @@ extension XHTTPConnection {
         case .downloadOnly:
             try await setupSharedH2Download(shared)
         case .uploadOnly:
-            // packet-up opens a stream per batch, so only stream-up opens anything at setup.
             if mode == .streamUp {
                 try await openSharedH2Upload(shared)
             }
         case .combined:
             switch mode {
             case .streamOne:
-                // Full-duplex POST on one stream; can't wait for the response (CDN buffering).
                 let stream = shared.openStream()
                 state.withLock { $0.sharedH2Download = stream }
                 xmuxLease?.noteRequest()
@@ -570,7 +531,6 @@ extension XHTTPConnection {
         }
     }
 
-    /// Opens the GET download stream; returns on send (a CDN may withhold the 200 until upload flows).
     private func setupSharedH2Download(_ shared: XHTTPH2Multiplexer) async throws {
         let stream = shared.openStream()
         state.withLock { $0.sharedH2Download = stream }
@@ -579,7 +539,6 @@ extension XHTTPConnection {
         try await stream.sendHeaders(headers, endStream: true)
     }
 
-    /// Opens the persistent stream-up upload POST; its response is drained.
     private func openSharedH2Upload(_ shared: XHTTPH2Multiplexer) async throws {
         let stream = shared.openStream()
         state.withLock { $0.sharedH2Upload = stream }
@@ -589,14 +548,11 @@ extension XHTTPConnection {
         stream.drainResponse()
     }
 
-    /// Sends one packet-up batch as its own shared-H2 stream; the response only acks receipt.
-    /// Called on the `packetUpChain` serializer.
     func sendSharedH2PacketUp(data: Data) async throws {
         guard let shared = sharedH2 else { throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil)) }
         let seq = state.withLock { state -> Int64 in let s = state.nextSeq; state.nextSeq += 1; return s }
         xmuxLease?.noteRequest()
 
-        // Header/cookie placement carries the payload in the HEADERS block; the body stays empty.
         let dataFields = uplinkDataFields(for: data)
         let bodyInHeaders = !dataFields.isEmpty
         let bodyLength = bodyInHeaders ? 0 : data.count

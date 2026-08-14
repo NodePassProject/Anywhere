@@ -319,10 +319,23 @@ nonisolated enum SOCKS5Handshake {
 /// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
 /// The TCP control connection is retained because closing it ends the UDP session.
 nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
+    private enum Phase: PhaseTransitionable {
+        case open, cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .cancelled):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     private let tcpTransport: any ByteTransport
     private let relay: ProxyConnection
     private let udpHeader: Data
-    private let cancelled = Atomic<Bool>(false)
+    private let phase = Mutex<Phase>(.open)
 
     init(
         tcpTransport: any ByteTransport,
@@ -342,11 +355,11 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
 
     }
 
-    var isConnected: Bool { relay.isConnected }
+    var isConnected: Bool { phase.withLock { $0 == .open } && relay.isConnected }
     var deliversDatagrams: Bool { true }
 
     func sendRaw(_ data: Data) async throws {
-        guard !cancelled.load(ordering: .relaxed) else {
+        guard !phase.withLock({ $0 == .cancelled }) else {
             throw AnywhereError.transport(.terminated)
         }
         var packet = udpHeader
@@ -357,7 +370,7 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
 
     func receiveRaw() async throws -> Data? {
         while true {
-            guard !cancelled.load(ordering: .relaxed) else {
+            guard !phase.withLock({ $0 == .cancelled }) else {
                 throw AnywhereError.transport(.terminated)
             }
             guard let data = try await relay.receive(), !data.isEmpty else {
@@ -371,7 +384,7 @@ nonisolated final class SOCKS5UDPProxyConnection: ProxyConnection, Sendable {
     }
 
     func cancel() {
-        guard !cancelled.exchange(true, ordering: .relaxed) else { return }
+        guard phase.withLock({ Phase.transition(&$0, to: .cancelled) }) else { return }
         relay.cancel()
         tcpTransport.cancel()
     }

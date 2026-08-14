@@ -97,7 +97,7 @@ extension XHTTPConnection {
     /// Sends one packet-up batch as its own POST stream; the response only acks receipt and is
     /// discarded. Called under `packetUpMutex`.
     func sendH3PacketUp(data: Data) async throws {
-        guard let multiplexer = h3Multiplexer, !state.withLock({ $0.h3Closed }) else {
+        guard let multiplexer = h3Multiplexer, state.withLock({ $0.phase != .cancelled }) else {
             throw AnywhereError.proxy(.xhttp, .connectionClosed(detail: nil))
         }
         let seq = state.withLock { state -> Int64 in let s = state.nextSeq; state.nextSeq += 1; return s }
@@ -136,7 +136,16 @@ extension XHTTPConnection {
         guard let stream = state.withLock({ $0.h3Download }) else {
             return nil
         }
-        return try await stream.receive()
+        do {
+            guard let data = try await stream.receive() else {
+                state.withLock { _ = $0.transition(to: .halfClosed) }
+                return nil
+            }
+            return data
+        } catch {
+            state.withLock { _ = $0.transition(to: .halfClosed) }
+            throw error
+        }
     }
 
     // MARK: Header construction (QPACK)

@@ -17,34 +17,34 @@ private struct WeakConnectionBox: Sendable {
 extension QUICConnection {
 
     // MARK: Connect
-    
+
     nonisolated func connect() async throws {
         let dialAttempt = ConnectionMetrics.currentAttempt
         let resolvedIPs: [String] = transport == nil ? await DNSResolver.shared.resolveAll(host) : []
         try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.state == .idle else {
+            guard me.phase == .idle else {
                 continuation.resume(throwing: AnywhereError.quic(.connectionFailed(detail: "Invalid state")))
                 return
             }
             QUICCrypto.registerCallbacks()
-            me.state = .connecting
+            me.transition(to: .connecting)
             me.dialAttempt = dialAttempt
             me.connectContinuation = continuation
             me.setupUDP(resolvedIPs: resolvedIPs)
         }
     }
-    
+
     func finishConnect(_ error: Error?) {
         guard let continuation = connectContinuation else { return }
         connectContinuation = nil
         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
-    
+
     nonisolated func exportKeyingMaterial(label: String, context: Data, length: Int) async throws -> Data {
         let result: Result<Data, Error> = await bridge.run { [weak self] in
             guard let self else { return .failure(AnywhereError.quic(.closed(graceful: false))) }
             return self.assumeIsolated { connection in
-                guard connection.state == .connected, let tls = connection.tlsHandler else {
+                guard connection.phase == .connected, let tls = connection.tlsHandler else {
                     return .failure(AnywhereError.quic(.closed(graceful: false)))
                 }
                 return Result { try tls.exportKeyingMaterial(label: label, context: context, length: length) }
@@ -77,14 +77,12 @@ extension QUICConnection {
             localAddr = local
             self.carrier = carrier
             try initializeNgtcp2()
-            state = .handshaking
+            transition(to: .handshaking)
             armActiveCarrier(carrier, localAddr: localAddr)
             writeToUDP()
             rescheduleTimer()
         } catch {
-            state = .closed
-            closeCarrier()
-            finishConnect(error)
+            performTeardown(error: error)
         }
     }
 
@@ -92,17 +90,15 @@ extension QUICConnection {
         do {
             configurePlaceholderAddrs()
             try initializeNgtcp2()
-            state = .handshaking
+            transition(to: .handshaking)
             startTransportIO(transport: transport)
             writeToUDP()
             rescheduleTimer()
         } catch {
-            state = .closed
-            transport.cancel()
-            finishConnect(error)
+            performTeardown(error: error)
         }
     }
-    
+
     func startTransportIO(transport: QUICDatagramTransport) {
         let localAddr = self.localAddr
         let bridge = self.bridge
@@ -192,7 +188,7 @@ extension QUICConnection {
         finishConnect(err)
         close(error: err)
     }
-    
+
     func configurePlaceholderAddrs() {
         addrLen = MemoryLayout<sockaddr_in>.size
         withUnsafeMutablePointer(to: &remoteAddr) { storage in
@@ -217,10 +213,14 @@ extension QUICConnection {
     func closeCarrier() {
         carrier?.assumeIsolated { $0.close() }
         carrier = nil
-        migratingCarrier?.assumeIsolated { $0.close() }
-        clearMigrationState()
+        if case .proactiveProbing(let target, _) = migration {
+            target.assumeIsolated { $0.close() }
+        } else if case .proactiveValidating(let target, _) = migration {
+            target.assumeIsolated { $0.close() }
+        }
+        setMigration(.none)
     }
-    
+
     func populateRemoteAddr(resolvedIPs: [String]) {
         var addr4 = in_addr()
         if inet_pton(AF_INET, host, &addr4) == 1 {
@@ -347,7 +347,7 @@ extension QUICConnection {
             throw AnywhereError.quic(.connectionFailed(detail: "ngtcp2_conn_client_new: \(rv)"))
         }
         self.connectionOpaquePointer = connectionOpaquePointer
-        
+
         setKeepAliveTimeout(connectionOpaquePointer, tuning.keepAliveTimeout)
 
         setTLSNativeHandle(
@@ -370,7 +370,7 @@ extension QUICConnection {
             self?.assumeIsolated { $0.brutalCC?.setTargetBandwidth(bps) }
         }
     }
-    
+
     nonisolated func uninstallBrutalCC() {
         bridge.enqueue { [weak self] in
             self?.assumeIsolated { me in

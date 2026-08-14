@@ -72,20 +72,36 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - State
 
-    enum HandshakeState {
+    enum Phase: PhaseTransitionable {
         case initial
         case clientHelloSent
         case serverHelloReceived
-        case handshakeKeysInstalled
-        case serverFinishedReceived
         case completed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.initial, .clientHelloSent),
+                 (.clientHelloSent, .serverHelloReceived),
+                 (.serverHelloReceived, .completed):
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Properties
 
     private let serverName: String
     private let alpn: [String]
-    private var state: HandshakeState = .initial
+    private var phase: Phase = .initial
+
+    @discardableResult
+    private func transition(to new: Phase) -> Bool {
+        Phase.transition(&phase, to: new)
+    }
+
+    private var builtClientHello: Data?
 
     private var keyDerivation: TLS13KeyDerivation?
     private var handshakeSecret: Data?
@@ -120,7 +136,7 @@ nonisolated class QUICTLSHandler {
     private(set) var peerQUICTransportParameters: Data?
 
     private(set) var negotiatedALPN: String?
-    
+
     private(set) var handshakeError: Error?
 
     // MARK: - Initialization
@@ -138,7 +154,7 @@ nonisolated class QUICTLSHandler {
     }
 
     func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
-        guard state == .completed, let keyDerivation, let exporterMasterSecret, length > 0 else {
+        guard phase == .completed, let keyDerivation, let exporterMasterSecret, length > 0 else {
             throw AnywhereError.quic(.connectionFailed(detail: "TLS exporter unavailable"))
         }
         return keyDerivation.exportKeyingMaterial(
@@ -152,8 +168,12 @@ nonisolated class QUICTLSHandler {
     // MARK: - Build ClientHello
 
     func buildClientHello(transportParams: Data) -> Data? {
+        if phase == .clientHelloSent, let cached = builtClientHello {
+            return cached
+        }
+        guard phase == .initial else { return nil }
         guard let privateKeyP256, let privateKeyX25519 else { return nil }
-        
+
         serverCertificates.removeAll()
         transcriptBeforeCertVerify = nil
         certificateVerifySignature = nil
@@ -200,13 +220,14 @@ nonisolated class QUICTLSHandler {
         }
 
         transcript.append(clientHello)
-        state = .clientHelloSent
+        builtClientHello = clientHello
+        transition(to: .clientHelloSent)
 
         return clientHello
     }
 
     // MARK: - Failure Reporting
-    
+
     private func fail(_ reason: String, error: Error? = nil) -> QUICTLSResult {
         if handshakeError == nil {
             handshakeError = error ?? AnywhereError.tls(.handshakeFailed(detail: reason))
@@ -284,6 +305,9 @@ nonisolated class QUICTLSHandler {
     // MARK: - ServerHello
 
     private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+        guard phase == .clientHelloSent else {
+            return fail("ServerHello in phase \(phase)")
+        }
         guard body.count >= 35 else {
             return fail("ServerHello truncated (\(body.count) B)")
         }
@@ -429,7 +453,7 @@ nonisolated class QUICTLSHandler {
 
             installHandshakeKeys(conn: conn, keys: hsKeys)
 
-            state = .serverHelloReceived
+            transition(to: .serverHelloReceived)
         } catch {
             return fail(String(format: "key agreement failed (group 0x%04x): %@", serverKeyShareGroup, String(describing: error)))
         }
@@ -500,6 +524,9 @@ nonisolated class QUICTLSHandler {
     // MARK: - Server Finished
 
     private func processServerFinished(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+        guard phase == .serverHelloReceived else {
+            return fail("Finished in phase \(phase)")
+        }
         guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
             return fail("internal: handshake secrets unavailable at server Finished")
         }
@@ -565,7 +592,7 @@ nonisolated class QUICTLSHandler {
         }
 
         ngtcp2_conn_tls_handshake_completed(conn)
-        state = .completed
+        transition(to: .completed)
 
         transcript.append(finishedMessage)
         let hsKey = SymmetricKey(data: handshakeSecret)

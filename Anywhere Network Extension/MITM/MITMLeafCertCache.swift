@@ -7,7 +7,6 @@
 
 import Foundation
 import CryptoKit
-@preconcurrency import Security
 import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMLeafCertCache")
@@ -17,9 +16,7 @@ nonisolated final class MITMLeafCertCache: Sendable {
     // MARK: - Public Types
     
     struct Leaf: Sendable {
-        let certificate: SecCertificate
         let certificateDER: Data
-        let privateKeySecKey: SecKey
         let privateKey: P256.Signing.PrivateKey
         let expiry: Date
     }
@@ -28,7 +25,6 @@ nonisolated final class MITMLeafCertCache: Sendable {
 
     private let store: MITMCertificateStore
     private let leafPrivateKey: P256.Signing.PrivateKey
-    private let leafPrivateKeySecKey: SecKey
 
     private static let maxEntries = 256
     private static let validity: TimeInterval = 7 * 24 * 60 * 60
@@ -43,18 +39,14 @@ nonisolated final class MITMLeafCertCache: Sendable {
 
     init(store: MITMCertificateStore) throws(AnywhereError) {
         self.store = store
-        let key = P256.Signing.PrivateKey()
-        self.leafPrivateKey = key
-        self.leafPrivateKeySecKey = try Self.importSoftwareP256(key)
+        self.leafPrivateKey = P256.Signing.PrivateKey()
     }
 
-    /// Resolves a leaf for `hostname`, minting one off the caller if the cache misses.
     func leaf(for hostname: String) async throws -> Leaf {
         let normalized = hostname.lowercased()
         if let cached = cachedLeaf(for: normalized) {
             return cached
         }
-        // Minting (X.509 build + Security import) runs off the caller so the lwIP queue isn't blocked.
         return try await Task.detached(priority: .userInitiated) { [self] in
             try mintAndStore(for: normalized)
         }.value
@@ -74,7 +66,6 @@ nonisolated final class MITMLeafCertCache: Sendable {
     }
 
     private func mintAndStore(for normalized: String) throws -> Leaf {
-        // Minting stays outside the lock; only the cache insert is locked.
         let leaf = try mintLeaf(for: normalized)
         entries.withLock { entries in
             entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
@@ -100,40 +91,19 @@ nonisolated final class MITMLeafCertCache: Sendable {
             notAfter: now.addingTimeInterval(Self.validity)
         )
 
-        guard let secCert = SecCertificateCreateWithData(nil, der as CFData) else {
-            throw AnywhereError.certificate(.asn1ParseFailed(detail: "SecCertificateCreateWithData failed"))
-        }
-
         return Leaf(
-            certificate: secCert,
             certificateDER: der,
-            privateKeySecKey: leafPrivateKeySecKey,
             privateKey: leafPrivateKey,
             expiry: now.addingTimeInterval(Self.validity)
         )
     }
 
     private static func evictIfNeeded(_ entries: inout [String: CacheEntry]) {
-        // O(n) scan tolerated: only runs on a cache miss past the cap.
         while entries.count > Self.maxEntries {
             guard let oldest = entries.min(by: {
                 $0.value.lastAccess < $1.value.lastAccess
             })?.key else { break }
             entries.removeValue(forKey: oldest)
         }
-    }
-
-    private static func importSoftwareP256(_ key: P256.Signing.PrivateKey) throws(AnywhereError) -> SecKey {
-        let attributes: [String: Any] = [
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-            kSecAttrKeySizeInBits as String: 256,
-        ]
-        var error: Unmanaged<CFError>?
-        guard let secKey = SecKeyCreateWithData(key.x963Representation as CFData, attributes as CFDictionary, &error) else {
-            let reason = error.map { ($0.takeRetainedValue() as Error).localizedDescription } ?? "SecKeyCreateWithData failed"
-            throw AnywhereError.certificate(.keyGenerationFailed(detail: "leaf key import: \(reason)"))
-        }
-        return secKey
     }
 }

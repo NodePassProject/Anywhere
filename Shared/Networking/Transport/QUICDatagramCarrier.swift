@@ -62,17 +62,66 @@ actor QUICDatagramCarrier {
 
     private let obfuscator: QUICPacketObfuscator?
 
-    private var engine: (any QUICDatagramEngine)?
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case connecting(any QUICDatagramEngine)
+        case ready(any QUICDatagramEngine)
+        case failed(Int32)
+        case finished
+        case closed
+
+        var engine: (any QUICDatagramEngine)? {
+            switch self {
+            case .connecting(let engine), .ready(let engine): engine
+            case .idle, .failed, .finished, .closed: nil
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .idle: "idle"
+            case .connecting: "connecting"
+            case .ready: "ready"
+            case .failed(let code): "failed(\(code))"
+            case .finished: "finished"
+            case .closed: "closed"
+            }
+        }
+
+        var isTerminal: Bool {
+            switch self {
+            case .failed, .finished, .closed: true
+            case .idle, .connecting, .ready: false
+            }
+        }
+
+        var isClosed: Bool {
+            if case .closed = self { true } else { false }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .ready):
+                return true
+            case (_, .failed), (_, .finished):
+                return !old.isTerminal
+            case (_, .closed):
+                return !old.isClosed
+            default:
+                return false
+            }
+        }
+    }
+    private var phase: Phase = .idle
 
     private var packetHandler: (@Sendable (Data) -> Void)?
-    private var reveiceErrorHandler: (@Sendable (Int32) -> Void)?
+    private var receiveErrorHandler: (@Sendable (Int32) -> Void)?
 
     var onPathDown: (@Sendable () -> Void)?
     var onBetterPath: (@Sendable () -> Void)?
     var onReady: (() -> Void)?
 
-    private var ready = false
-    private var closed = false
     private var flowSlot: FlowSlot?
 
     private var cachedInterfaceType: NWInterface.InterfaceType?
@@ -83,16 +132,26 @@ actor QUICDatagramCarrier {
     }
 
     deinit {
-        engine?.close()
+        phase.engine?.close()
     }
 
     var currentInterfaceType: NWInterface.InterfaceType? {
         cachedInterfaceType
     }
 
+    var isUsable: Bool {
+        switch phase {
+        case .connecting, .ready: true
+        case .idle, .failed, .finished, .closed: false
+        }
+    }
+
     // MARK: - Connect
 
     func connect(remoteAddr: sockaddr_storage, localAddr: inout sockaddr_storage) throws {
+        guard case .idle = phase else {
+            throw AnywhereError.quic(.connectionFailed(detail: "carrier is \(phase.label)"))
+        }
         guard let endpoint = Self.nwEndpoint(from: remoteAddr) else {
             throw AnywhereError.quic(.connectionFailed(detail: "invalid remote address"))
         }
@@ -102,9 +161,9 @@ actor QUICDatagramCarrier {
 
         let sink = QUICDatagramEngineSink(bridge: bridge, carrier: self)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
-            engine = ModernQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)
+            Phase.transition(&phase, to: .connecting(ModernQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
         } else {
-            engine = LegacyQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)
+            Phase.transition(&phase, to: .connecting(LegacyQUICDatagramEngine(endpoint: endpoint, obfuscator: obfuscator, sink: sink)))
         }
     }
 
@@ -114,38 +173,54 @@ actor QUICDatagramCarrier {
         onPacket: @escaping @Sendable (Data) -> Void,
         onError: @escaping @Sendable (Int32) -> Void
     ) {
+        let deadCode: Int32?
+        switch phase {
+        case .failed(let code):
+            deadCode = code
+        case .finished, .closed:
+            deadCode = POSIXErrorCode.ECONNABORTED.rawValue
+        case .idle, .connecting, .ready:
+            deadCode = nil
+        }
+        if let deadCode {
+            bridge.enqueue { onError(deadCode) }
+            return
+        }
         packetHandler = onPacket
-        reveiceErrorHandler = onError
+        receiveErrorHandler = onError
     }
 
     // MARK: - Send
 
     func send(_ datagram: Data) {
-        guard !datagram.isEmpty, let engine else { return }
-        engine.send(datagram)
+        guard !datagram.isEmpty else { return }
+        switch phase {
+        case .connecting(let engine), .ready(let engine):
+            engine.send(datagram)
+        case .idle, .failed, .finished, .closed:
+            logger.debug("[QUICDatagramCarrier] Dropping datagram; carrier is \(self.phase.label)")
+        }
     }
 
     // MARK: - Close
 
     func close() {
-        guard !closed else { return }
-        closed = true
+        if case .closed = phase { return }
         releaseFlowSlot()
-        engine?.close()
-        engine = nil
+        phase.engine?.close()
+        Phase.transition(&phase, to: .closed)
         packetHandler = nil
-        reveiceErrorHandler = nil
+        receiveErrorHandler = nil
         onPathDown = nil
         onBetterPath = nil
         onReady = nil
-        ready = false
     }
 
     // MARK: - State handling
 
     fileprivate func handleReady(interfaceType: NWInterface.InterfaceType?) {
-        guard !closed, !ready else { return }
-        ready = true
+        guard case .connecting(let engine) = phase,
+              Phase.transition(&phase, to: .ready(engine)) else { return }
         cachedInterfaceType = interfaceType
         if let onReady {
             self.onReady = nil
@@ -154,25 +229,31 @@ actor QUICDatagramCarrier {
     }
 
     fileprivate func handleWaiting(_ code: Int32) {
-        guard !closed else { return }
-        if ready, let onPathDown {
-            onPathDown()
-        } else {
-            deliverError(code)
+        switch phase {
+        case .ready:
+            if let onPathDown {
+                onPathDown()
+            } else {
+                enterFailed(code)
+            }
+        case .connecting:
+            enterFailed(code)
+        case .idle, .failed, .finished, .closed:
+            break
         }
     }
 
     fileprivate func handleViabilityLost() {
-        guard !closed, ready else { return }
+        guard case .ready = phase else { return }
         if let onPathDown {
             onPathDown()
         } else {
-            deliverError(POSIXErrorCode.ENETDOWN.rawValue)
+            enterFailed(POSIXErrorCode.ENETDOWN.rawValue)
         }
     }
 
     fileprivate func handleBetterPath() {
-        guard !closed, ready else { return }
+        guard case .ready = phase else { return }
         onBetterPath?()
     }
 
@@ -181,21 +262,50 @@ actor QUICDatagramCarrier {
     }
 
     fileprivate func handleEngineFinished() {
-        engine = nil
         releaseFlowSlot()
+        switch phase {
+        case .idle, .failed, .finished, .closed:
+            return
+        case .connecting, .ready:
+            if case .ready(let engine) = phase, let onPathDown {
+                engine.close()
+                Phase.transition(&phase, to: .finished)
+                onPathDown()
+            } else {
+                enterFailed(POSIXErrorCode.ECONNABORTED.rawValue)
+            }
+        }
     }
 
     // MARK: - Delivery
 
     fileprivate func deliverPacket(_ packet: Data) {
-        guard !closed, let packetHandler else { return }
-        packetHandler(packet)
+        switch phase {
+        case .connecting, .ready:
+            packetHandler?(packet)
+        case .idle, .failed, .finished, .closed:
+            break
+        }
     }
 
     fileprivate func deliverError(_ code: Int32) {
-        guard !closed, let handler = reveiceErrorHandler else { return }
-        reveiceErrorHandler = nil
-        handler(code)
+        enterFailed(code)
+    }
+
+    private func enterFailed(_ code: Int32) {
+        switch phase {
+        case .failed, .finished, .closed:
+            return
+        case .idle, .connecting, .ready:
+            break
+        }
+        phase.engine?.close()
+        Phase.transition(&phase, to: .failed(code))
+        releaseFlowSlot()
+        if let handler = receiveErrorHandler {
+            receiveErrorHandler = nil
+            handler(code)
+        }
     }
 
     private func releaseFlowSlot() {

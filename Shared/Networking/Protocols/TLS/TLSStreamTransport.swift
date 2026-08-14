@@ -20,17 +20,29 @@ nonisolated final class TLSStreamTransport: Sendable {
     private let alpn: [String]
     private let tunnel: ProxyConnection?
 
-    /// TLS session state established by ``connect()``: the handshake client (dropped once the record
-    /// connection is live) and the live record connection, plus readiness. Held in a mutex so the
-    /// abortive nil-swap in ``cancel()`` is atomic against the in-flight send/receive that read it.
-    /// Consumers drive send/receive serially, so the connection reference is only ever taken out and
-    /// awaited off-lock — the record connection serializes its own writes internally.
-    private struct State {
-        var tlsClient: TLSClient?
-        var tlsConnection: TLSRecordConnection?
-        var isReady = false
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case connecting(TLSClient)
+        case ready(TLSRecordConnection)
+        case cancelled
+
+        var isCancelled: Bool {
+            if case .cancelled = self { true } else { false }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .ready):
+                return true
+            case (_, .cancelled):
+                return !old.isCancelled
+            default:
+                return false
+            }
+        }
     }
-    private let state = Mutex(State())
+    private let phase = Mutex<Phase>(.idle)
 
     // MARK: Initialization
 
@@ -51,7 +63,8 @@ nonisolated final class TLSStreamTransport: Sendable {
             alpn: alpn
         )
         let client = TLSClient(configuration: configuration)
-        state.withLock { $0.tlsClient = client }
+        let claimed = phase.withLock { Phase.transition(&$0, to: .connecting(client)) }
+        guard claimed else { throw AnywhereError.transport(.terminated) }
 
         do {
             let connection: TLSRecordConnection
@@ -60,18 +73,14 @@ nonisolated final class TLSStreamTransport: Sendable {
             } else {
                 connection = try await client.connect(host: host, port: port)
             }
-            state.withLock { state in
-                state.tlsConnection = connection
-                state.tlsClient = nil
-                state.isReady = true
+            let published = phase.withLock { Phase.transition(&$0, to: .ready(connection)) }
+            guard published else {
+                connection.cancel()
+                throw AnywhereError.transport(.terminated)
             }
         } catch {
-            let client = state.withLock { state -> TLSClient? in
-                let client = state.tlsClient
-                state.tlsClient = nil
-                return client
-            }
-            client?.cancel()
+            _ = phase.withLock { Phase.transition(&$0, to: .cancelled) }
+            client.cancel()
             throw error
         }
     }
@@ -79,7 +88,7 @@ nonisolated final class TLSStreamTransport: Sendable {
     // MARK: - Send
 
     func send(_ data: Data) async throws {
-        guard let tlsConnection = state.withLock({ $0.isReady ? $0.tlsConnection : nil }) else {
+        guard let tlsConnection = phase.withLock({ if case .ready(let c) = $0 { c } else { nil } }) else {
             throw AnywhereError.transport(.notConnected)
         }
         try await tlsConnection.send(data)
@@ -88,7 +97,7 @@ nonisolated final class TLSStreamTransport: Sendable {
     // MARK: - Receive
 
     func receive() async throws -> Data? {
-        guard let tlsConnection = state.withLock({ $0.isReady ? $0.tlsConnection : nil }) else {
+        guard let tlsConnection = phase.withLock({ if case .ready(let c) = $0 { c } else { nil } }) else {
             throw AnywhereError.transport(.notConnected)
         }
         return try await tlsConnection.receive()
@@ -97,15 +106,19 @@ nonisolated final class TLSStreamTransport: Sendable {
     // MARK: - Cancel
 
     func cancel() {
-        let (client, connection) = state.withLock { state -> (TLSClient?, TLSRecordConnection?) in
-            state.isReady = false
-            let client = state.tlsClient
-            let connection = state.tlsConnection
-            state.tlsClient = nil
-            state.tlsConnection = nil
-            return (client, connection)
+        enum Doomed { case client(TLSClient), connection(TLSRecordConnection), none }
+        let doomed: Doomed = phase.withLock { phase in
+            defer { Phase.transition(&phase, to: .cancelled) }
+            switch phase {
+            case .connecting(let client): return .client(client)
+            case .ready(let connection): return .connection(connection)
+            case .idle, .cancelled: return .none
+            }
         }
-        client?.cancel()
-        connection?.cancel()
+        switch doomed {
+        case .client(let client): client.cancel()
+        case .connection(let connection): connection.cancel()
+        case .none: break
+        }
     }
 }

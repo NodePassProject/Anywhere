@@ -7,13 +7,12 @@
 
 import Foundation
 import CryptoKit
-import Security
+
+nonisolated private let logger = AnywhereLogger(category: "TLSServer")
 
 nonisolated protocol TLSServerDelegate: AnyObject {
     func tlsServer(_ server: TLSServer, didProduceOutput data: Data)
 
-    /// Handshake completed; `clientFinishedHandshakeTrailer` holds application bytes that arrived
-    /// with the client Finished — prepend them to the record connection's receive buffer.
     func tlsServer(
         _ server: TLSServer,
         didCompleteHandshake record: TLSRecordConnection,
@@ -22,7 +21,6 @@ nonisolated protocol TLSServerDelegate: AnyObject {
         clientFinishedHandshakeTrailer: Data
     )
 
-    /// Handshake failed. Any alert bytes are delivered via ``didProduceOutput`` first; this is terminal.
     func tlsServer(_ server: TLSServer, didFail error: AnywhereError)
 }
 
@@ -30,21 +28,34 @@ nonisolated final class TLSServer {
 
     // MARK: - State
 
-    enum State {
+    enum Phase: PhaseTransitionable {
         case waitingClientHello
         case waitingClientHelloAfterHRR
         case sentServerHello
-        case waitingClientFinished
         case sentServerHelloDone12
         case established
         case failed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.waitingClientHello, .waitingClientHelloAfterHRR),
+                 (.waitingClientHello, .sentServerHello),
+                 (.waitingClientHelloAfterHRR, .sentServerHello),
+                 (.waitingClientHello, .sentServerHelloDone12),
+                 (.sentServerHello, .established),
+                 (.sentServerHelloDone12, .established):
+                return true
+            case (_, .failed):
+                return old != .failed && old != .established
+            default:
+                return false
+            }
+        }
     }
 
     weak var delegate: TLSServerDelegate?
 
-    private let leafCert: SecCertificate
     let leafCertDER: Data
-    private let leafPrivateKey: SecKey
     let leafSigningKeyP256: P256.Signing.PrivateKey
     private let preferredCipherSuites: [UInt16]
     let preferredCipherSuites12: [UInt16]
@@ -52,15 +63,19 @@ nonisolated final class TLSServer {
 
     private let acceptableALPNs: [String]
 
-    /// Negotiated ALPN — locked in on the first ClientHello; HRR cannot change it.
     var negotiatedALPN: String = ""
 
-    var state: State = .waitingClientHello
+    private(set) var phase: Phase = .waitingClientHello
+
+    @discardableResult
+    func transition(to new: Phase) -> Bool {
+        Phase.transition(&phase, to: new)
+    }
 
     var rxBuffer = Data()
 
-    /// Decrypted client handshake messages not yet fully parsed; a message may
-    /// span more than one record.
+    private var ccsBudget = 4
+
     private var clientHandshakeMessages = Data()
 
     var sni: String?
@@ -68,23 +83,13 @@ nonisolated final class TLSServer {
     var ephemeralKey12: TLS12ECDHEKey?
     var chosenCipherSuite: UInt16 = 0
     var negotiatedTLSVersion: UInt16 = 0
-    private var sessionID: Data = Data()
     private var handshake = TLS13ServerHandshakeState()
     var handshake12 = TLS12ServerHandshakeState()
-    /// First ClientHello bytes, kept across HRR for the synthetic message_hash transcript record.
-    private var firstClientHelloBytes: Data?
 
     // MARK: - Init
 
-    /// - Parameters:
-    ///   - leafCert: The leaf cert to present (single cert, no chain).
-    ///   - acceptableALPNs: Preference order; fails with `no_application_protocol`
-    ///     if the client's offer has no overlap.
-    ///   - preferredCipherSuites12: Defaults match the ECDSA-P256 leaf.
     init(
-        leafCert: SecCertificate,
         leafCertDER: Data,
-        leafPrivateKey: SecKey,
         leafSigningKeyP256: P256.Signing.PrivateKey,
         acceptableALPNs: [String] = ["http/1.1"],
         acceptableTLSVersions: Set<UInt16> = [0x0304],
@@ -99,9 +104,7 @@ nonisolated final class TLSServer {
             TLSCipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         ]
     ) {
-        self.leafCert = leafCert
         self.leafCertDER = leafCertDER
-        self.leafPrivateKey = leafPrivateKey
         self.leafSigningKeyP256 = leafSigningKeyP256
         self.acceptableALPNs = acceptableALPNs
         self.acceptableTLSVersions = acceptableTLSVersions
@@ -111,9 +114,11 @@ nonisolated final class TLSServer {
 
     // MARK: - Input
 
-    /// Feed inbound bytes from the client; drives the handshake state machine.
     func feed(_ data: Data) {
-        guard state != .failed, state != .established else { return }
+        guard phase != .failed, phase != .established else {
+            logger.debug("[TLSServer] Dropping \(data.count) B fed in state \(String(describing: phase))")
+            return
+        }
         rxBuffer.append(data)
         do {
             try runStateMachine()
@@ -127,10 +132,10 @@ nonisolated final class TLSServer {
     // MARK: - State Machine
 
     private func runStateMachine() throws {
-        switch state {
+        switch phase {
         case .waitingClientHello, .waitingClientHelloAfterHRR:
             try processClientHello()
-        case .sentServerHello, .waitingClientFinished:
+        case .sentServerHello:
             try processClientFinished()
         case .sentServerHelloDone12:
             try processClientHandshakeMessages12()
@@ -140,8 +145,6 @@ nonisolated final class TLSServer {
     }
 
     private func processClientHello() throws {
-        // A ClientHello may legally be split across several TLS records (RFC 8446 §5.1), so
-        // reassemble the whole handshake message before parsing.
         guard let handshakeMessage = try peekReassembledClientHello() else { return }
 
         let parsed = try TLSClientHelloParser.parseHandshakeBody(handshakeMessage)
@@ -156,7 +159,6 @@ nonisolated final class TLSServer {
             }
         }
 
-        // supported_versions is required to indicate TLS 1.3.
         let clientWantsTLS13 = parsed.supportedVersions.contains(0x0304)
         let canDoTLS13 = acceptableTLSVersions.contains(0x0304) && clientWantsTLS13
         let clientWantsTLS12 = parsed.supportedVersions.isEmpty
@@ -166,6 +168,8 @@ nonisolated final class TLSServer {
 
         if canDoTLS13 {
             try processClientHelloTLS13(parsed: parsed)
+        } else if phase == .waitingClientHelloAfterHRR {
+            sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.illegalParameter, message: "second ClientHello dropped TLS 1.3")
         } else if canDoTLS12 {
             try processClientHelloTLS12(parsed: parsed)
         } else {
@@ -187,9 +191,19 @@ nonisolated final class TLSServer {
             return
         }
 
-        guard let suite = preferredCipherSuites.first(where: { parsed.cipherSuites.contains($0) }) else {
-            sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.handshakeFailure, message: "no shared cipher")
-            return
+        let suite: UInt16
+        if phase == .waitingClientHelloAfterHRR, let locked = handshake.keyDerivation?.cipherSuite {
+            guard parsed.cipherSuites.contains(locked) else {
+                sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.illegalParameter, message: "second ClientHello dropped the HRR cipher suite")
+                return
+            }
+            suite = locked
+        } else {
+            guard let selected = preferredCipherSuites.first(where: { parsed.cipherSuites.contains($0) }) else {
+                sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.handshakeFailure, message: "no shared cipher")
+                return
+            }
+            suite = selected
         }
         chosenCipherSuite = suite
 
@@ -205,7 +219,7 @@ nonisolated final class TLSServer {
                 cipherSuite: suite
             )
         } else {
-            if state == .waitingClientHelloAfterHRR {
+            if phase == .waitingClientHelloAfterHRR {
                 sendAlertAndFail(level: TLSAlertLevel.fatal, description: TLSAlertDescription.handshakeFailure, message: "client did not honor HRR")
                 return
             }
@@ -214,9 +228,6 @@ nonisolated final class TLSServer {
     }
 
     private func sendHelloRetryRequest(parsed: TLSClientHelloParsed, cipherSuite: UInt16) {
-        firstClientHelloBytes = parsed.handshakeMessage
-        sessionID = parsed.legacySessionID
-
         let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
         let firstHash = kd.transcriptHash(parsed.handshakeMessage)
         let synthetic = synthesizeMessageHashRecord(hash: firstHash)
@@ -233,7 +244,7 @@ nonisolated final class TLSServer {
 
         emitPlainHandshakeRecord(hrr)
         emitChangeCipherSpec()
-        state = .waitingClientHelloAfterHRR
+        transition(to: .waitingClientHelloAfterHRR)
     }
 
     private func sendServerHello(
@@ -242,7 +253,6 @@ nonisolated final class TLSServer {
         cipherSuite: UInt16
     ) throws {
         sni = parsed.serverName
-        sessionID = parsed.legacySessionID
 
         let kd: TLS13KeyDerivation
         if let existing = handshake.keyDerivation {
@@ -255,7 +265,7 @@ nonisolated final class TLSServer {
         let serverPriv = Curve25519.KeyAgreement.PrivateKey()
         ephemeralKey = serverPriv
 
-        if state == .waitingClientHello {
+        if phase == .waitingClientHello {
             handshake.transcript = parsed.handshakeMessage
         } else {
             handshake.transcript.append(parsed.handshakeMessage)
@@ -283,7 +293,7 @@ nonisolated final class TLSServer {
 
         try emitServerEncryptedHandshake(keys: keys, kd: kd)
 
-        state = .sentServerHello
+        transition(to: .sentServerHello)
     }
 
     private func emitServerEncryptedHandshake(keys: TLS13HandshakeKeys, kd: TLS13KeyDerivation) throws {
@@ -318,47 +328,50 @@ nonisolated final class TLSServer {
 
         let encrypted = try encryptHandshakeRecord(content: combined, contentType: TLSContentType.handshake, keys: keys, kd: kd)
         delegate?.tlsServer(self, didProduceOutput: encrypted)
-
-        state = .waitingClientFinished
     }
 
     // MARK: - Client Finished
 
     private func processClientFinished() throws {
-        guard let record = try peekTLSRecord() else { return }
-        rxBuffer.removeFirst(record.count)
+        while phase == .sentServerHello {
+            guard let record = try peekTLSRecord() else { return }
+            rxBuffer.removeFirst(record.count)
 
-        let contentType = record[record.startIndex]
-        if contentType == TLSContentType.changeCipherSpec {
-            try processClientFinished()
-            return
+            let contentType = record[record.startIndex]
+            if contentType == TLSContentType.changeCipherSpec {
+                ccsBudget -= 1
+                guard ccsBudget > 0 else {
+                    throw AnywhereError.tls(.handshakeFailed(detail: "too many change_cipher_spec records"))
+                }
+                continue
+            }
+            guard contentType == TLSContentType.applicationData else {
+                throw AnywhereError.tls(.handshakeFailed(detail: "expected encrypted handshake (got \(contentType))"))
+            }
+
+            guard let keys = handshake.handshakeKeys, let kd = handshake.keyDerivation,
+                  let hsSecret = handshake.handshakeSecret else {
+                throw AnywhereError.tls(.handshakeFailed(detail: "missing handshake keys"))
+            }
+
+            let header = record.subdata(in: record.startIndex..<(record.startIndex + 5))
+            let ciphertext = record.subdata(in: (record.startIndex + 5)..<record.endIndex)
+
+            let seqNum = handshake.clientHandshakeSeqNum
+            handshake.clientHandshakeSeqNum &+= 1
+
+            let plaintext = try TLSRecordCrypto.decryptRecord(
+                ciphertext: ciphertext,
+                key: SymmetricKey(data: keys.clientKey),
+                iv: keys.clientIV,
+                seqNum: seqNum,
+                recordHeader: header,
+                cipherSuite: chosenCipherSuite
+            )
+
+            clientHandshakeMessages.append(plaintext)
+            try parseClientHandshakeMessages(keys: keys, kd: kd, hsSecret: hsSecret)
         }
-        guard contentType == TLSContentType.applicationData else {
-            throw AnywhereError.tls(.handshakeFailed(detail: "expected encrypted handshake (got \(contentType))"))
-        }
-
-        guard let keys = handshake.handshakeKeys, let kd = handshake.keyDerivation,
-              let hsSecret = handshake.handshakeSecret else {
-            throw AnywhereError.tls(.handshakeFailed(detail: "missing handshake keys"))
-        }
-
-        let header = record.subdata(in: record.startIndex..<(record.startIndex + 5))
-        let ciphertext = record.subdata(in: (record.startIndex + 5)..<record.endIndex)
-
-        let seqNum = handshake.clientHandshakeSeqNum
-        handshake.clientHandshakeSeqNum &+= 1
-
-        let plaintext = try TLSRecordCrypto.decryptRecord(
-            ciphertext: ciphertext,
-            key: SymmetricKey(data: keys.clientKey),
-            iv: keys.clientIV,
-            seqNum: seqNum,
-            recordHeader: header,
-            cipherSuite: chosenCipherSuite
-        )
-
-        clientHandshakeMessages.append(plaintext)
-        try parseClientHandshakeMessages(keys: keys, kd: kd, hsSecret: hsSecret)
     }
 
     private func parseClientHandshakeMessages(
@@ -376,7 +389,6 @@ nonisolated final class TLSServer {
             let length = (Int(buffer[offset + 1]) << 16)
                     | (Int(buffer[offset + 2]) << 8)
                     | Int(buffer[offset + 3])
-            // Length field is uint24; cap below 0xFFFF (not RFC-mandated) to bound allocations.
             guard length <= 0xFFFF else {
                 throw AnywhereError.tls(.handshakeFailed(detail: "handshake message too large"))
             }
@@ -403,8 +415,6 @@ nonisolated final class TLSServer {
                     throw AnywhereError.tls(.handshakeFailed(detail: "Client Finished verify failed"))
                 }
 
-                // The application traffic secrets derive from the transcript through
-                // the server Finished, excluding the client Finished.
                 let appKeys = kd.deriveApplicationKeys(
                     handshakeSecret: hsSecret,
                     fullTranscript: handshake.transcript
@@ -438,7 +448,7 @@ nonisolated final class TLSServer {
         let trailer = rxBuffer
         rxBuffer = Data()
 
-        state = .established
+        transition(to: .established)
         delegate?.tlsServer(
             self,
             didCompleteHandshake: record,
@@ -523,7 +533,7 @@ nonisolated final class TLSServer {
     // MARK: - Failure
 
     private func failHandshake(_ error: AnywhereError) {
-        state = .failed
+        guard transition(to: .failed) else { return }
         delegate?.tlsServer(self, didFail: error)
     }
 
@@ -553,16 +563,12 @@ nonisolated final class TLSServer {
         return rxBuffer.subdata(in: rxBuffer.startIndex..<(rxBuffer.startIndex + total))
     }
 
-    /// Upper bound on a reassembled ClientHello; larger is treated as bogus rather than buffered.
     private static let maxClientHelloBytes = 64 * 1024
 
-    /// Reassembles a (possibly record-fragmented) ClientHello from the head of `rxBuffer`, returning
-    /// the bare handshake-message bytes (msg-type + 3-byte length + body). Consumes only the records
-    /// it uses; returns nil (leaving `rxBuffer` intact) when more records are needed.
     private func peekReassembledClientHello() throws -> Data? {
         var payload = Data()
-        var offset = 0                  // bytes scanned from rxBuffer.startIndex
-        var messageLength: Int?         // 4 + bodyLen, once the handshake header is in hand
+        var offset = 0
+        var messageLength: Int?
         let available = rxBuffer.count
         let base = rxBuffer.startIndex
         while true {
@@ -573,8 +579,6 @@ nonisolated final class TLSServer {
             }
             let length = (Int(rxBuffer[rxBuffer.index(h, offsetBy: 3)]) << 8)
                     | Int(rxBuffer[rxBuffer.index(h, offsetBy: 4)])
-            // Reject zero-length records: they never advance `messageLength`, so the per-message cap
-            // never fires and a flood of them would grow rxBuffer without bound.
             guard length > 0, length <= 16384 + 256 else {
                 throw AnywhereError.tls(.handshakeFailed(detail: "record length \(length) out of bounds"))
             }
@@ -605,5 +609,4 @@ nonisolated final class TLSServer {
             }
         }
     }
-
 }

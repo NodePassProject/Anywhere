@@ -19,8 +19,8 @@ nonisolated final class ConnectionMetrics: Sendable {
         private let metrics: ConnectionMetrics
         private let generation: UInt64
         private let startedAt: ContinuousClock.Instant
-        private let dialRecorded = Atomic<Bool>(false)
-        private let handshakeRecorded = Atomic<Bool>(false)
+        private let dialRecorded = OneShotLatch()
+        private let handshakeRecorded = OneShotLatch()
         
         fileprivate init(metrics: ConnectionMetrics, generation: UInt64) {
             self.metrics = metrics
@@ -29,14 +29,12 @@ nonisolated final class ConnectionMetrics: Sendable {
         }
         
         func noteServerResponse() {
-            guard !dialRecorded.load(ordering: .relaxed) else { return }
-            guard !dialRecorded.exchange(true, ordering: .relaxed) else { return }
+            guard dialRecorded.claim() else { return }
             metrics.commit(.dial, elapsed, generation: generation)
         }
-        
+
         func notePayload() {
-            guard !handshakeRecorded.load(ordering: .relaxed) else { return }
-            guard !handshakeRecorded.exchange(true, ordering: .relaxed) else { return }
+            guard handshakeRecorded.claim() else { return }
             metrics.commit(.handshake, elapsed, generation: generation)
         }
         

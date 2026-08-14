@@ -32,11 +32,40 @@ nonisolated final class NowhereUDPBudgetReservation: Sendable {
 
 nonisolated final class NowhereSession: Sendable {
 
-    private enum State { case idle, connecting, transportReady, authenticating, ready, closed }
+    private enum Phase: PhaseTransitionable {
+        case idle, connecting, transportReady, authenticating, ready, closed
 
-    private struct UDPRoute {
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .transportReady),
+                 (.transportReady, .authenticating),
+                 (.authenticating, .ready):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
+
+    private enum UDPRoutePhase: PhaseTransitionable {
+        case registering, active
+
+        static func canTransition(from old: UDPRoutePhase, to new: UDPRoutePhase) -> Bool {
+            switch (old, new) {
+            case (.registering, .active):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct UDPRoute: PhaseHolding {
         let connection: NowhereUDPConnection
-        var ready: Bool
+        var phase: UDPRoutePhase = .registering
     }
 
     private struct ReassemblyKey: Hashable {
@@ -56,23 +85,23 @@ nonisolated final class NowhereSession: Sendable {
 
     private let quic: QUICConnection
     private let configuration: NowhereConfiguration
-    
+
     private struct StreamOpenWaiter {
         let id: UInt64
-        let registerUnderLock: @Sendable (inout Session, Int64) -> Void
+        let registerUnderLock: @Sendable (inout State, Int64) -> Void
         let continuation: CheckedContinuation<Int64, Error>
     }
-    
-    private struct Session {
-        var state: State = .idle
-        var closed = false
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
+
         var authFrame: Data?
         var firstStreamID: Int64?
         var bootstrapSubmitted = false
 
         var streamOpenWaiters: [StreamOpenWaiter] = []
         var streamOpenWaiterSeq: UInt64 = 0
-        
+
         var cancelledStreamOpenWaiters: Set<UInt64> = []
 
         var tcpStreams: [Int64: NowhereConnection] = [:]
@@ -82,11 +111,13 @@ nonisolated final class NowhereSession: Sendable {
         var reassembly: [ReassemblyKey: ReassemblySlot] = [:]
         var reassemblyExpiryTask: Task<Void, Never>?
         var udpBudgetUsed = 0
-        
+
         var idleSince: ContinuousClock.Instant?
         var idleSweepTask: Task<Void, Never>?
+
+        var onClose: (@Sendable () -> Void)?
     }
-    private let lock = Mutex(Session())
+    private let state = Mutex(State())
 
     static let maxUDPFlows = 256
     private static let maxReassemblySlots = 64
@@ -99,21 +130,18 @@ nonisolated final class NowhereSession: Sendable {
     private let authSignal: AsyncThrowingStream<Never, Error>.Continuation
     private let authTask: Task<Void, Error>
 
-    private struct PoolState {
-        var isClosed = false
-        var tcpCount = 0
-        var udpCount = 0
-        var onClose: (@Sendable () -> Void)?
-    }
-    private let poolState = Mutex(PoolState())
-
-    var isClosed: Bool { poolState.withLock { $0.isClosed } }
+    var isClosed: Bool { state.withLock { $0.phase == .closed } }
     var hasActiveConnections: Bool {
-        poolState.withLock { $0.tcpCount > 0 || $0.udpCount > 0 }
+        state.withLock { !$0.tcpStreams.isEmpty || !$0.udpRoutes.isEmpty }
     }
 
     func setOnClose(_ hook: @escaping @Sendable () -> Void) {
-        poolState.withLock { $0.onClose = hook }
+        let fireNow: Bool = state.withLock { session in
+            guard session.phase != .closed else { return true }
+            session.onClose = hook
+            return false
+        }
+        if fireNow { hook() }
     }
 
     init(configuration: NowhereConfiguration, transport: QUICDatagramTransport? = nil) {
@@ -138,11 +166,7 @@ nonisolated final class NowhereSession: Sendable {
     /// Establishes QUIC/TLS and the exporter. Authentication is deliberately deferred until
     /// the first business flow supplies bytes for the pre-auth stream.
     func ensureReady() async throws {
-        let begin: Bool = lock.withLock { session in
-            guard session.state == .idle else { return false }
-            session.state = .connecting
-            return true
-        }
+        let begin: Bool = state.withLock { $0.transition(to: .connecting) }
         if begin { startConnection() }
         try await transportTask.value
     }
@@ -156,8 +180,8 @@ nonisolated final class NowhereSession: Sendable {
             handlers.streamData = { [weak self] sid, data, fin in
                 self?.handleStreamData(sid: sid, data: data, fin: fin)
             }
-            handlers.streamTermination = { [weak self] sid, error in
-                self?.handleStreamTermination(sid: sid, error: error)
+            handlers.streamTermination = { [weak self] sid, error, cause in
+                self?.handleStreamTermination(sid: sid, error: error, cause: cause)
             }
             handlers.bidiCredit = { [weak self] _ in
                 guard let self else { return }
@@ -185,10 +209,9 @@ nonisolated final class NowhereSession: Sendable {
                     exporter: exporter,
                     sessionID: configuration.sessionID
                 )
-                let proceed: Bool = lock.withLock { session in
-                    guard session.state == .connecting else { return false }
+                let proceed: Bool = state.withLock { session in
+                    guard session.transition(to: .transportReady) else { return false }
                     session.authFrame = authFrame
-                    session.state = .transportReady
                     return true
                 }
                 if proceed { transportSignal.finish() }
@@ -197,14 +220,13 @@ nonisolated final class NowhereSession: Sendable {
             }
         }
     }
-    
+
     private func finishAuthenticationIfReady() {
-        let proceed: Bool = lock.withLock { session in
-            guard session.state == .authenticating,
+        let proceed: Bool = state.withLock { session in
+            guard session.phase == .authenticating,
                   session.bootstrapSubmitted,
                   quic.availableBidiStreams > 0 else { return false }
-            session.state = .ready
-            return true
+            return session.transition(to: .ready)
         }
         guard proceed else { return }
         authSignal.finish()
@@ -215,7 +237,7 @@ nonisolated final class NowhereSession: Sendable {
 
     private func handleStreamData(sid: Int64, data: Data, fin: Bool) {
         enum Route { case tcp(NowhereConnection); case udpControl(NowhereUDPConnection); case serverReject; case orphanData; case ignore }
-        let route: Route = lock.withLock { session in
+        let route: Route = state.withLock { session in
             if let connection = session.tcpStreams[sid] {
                 if !data.isEmpty { session.tcpDeliveredBytes[sid, default: 0] += data.count }
                 return .tcp(connection)
@@ -240,10 +262,14 @@ nonisolated final class NowhereSession: Sendable {
         }
     }
 
-    private func handleStreamTermination(sid: Int64, error: Error?) {
+    private func handleStreamTermination(
+        sid: Int64,
+        error: Error?,
+        cause: QUICConnection.StreamTerminationCause
+    ) {
         enum Effect { case none; case failAuth(Error); case tcp(NowhereConnection); case udpControl(NowhereUDPConnection) }
-        let effect: Effect = lock.withLock { session in
-            if session.firstStreamID == sid, session.state == .authenticating {
+        let effect: Effect = state.withLock { session in
+            if session.firstStreamID == sid, session.phase == .authenticating {
                 return .failAuth(error ?? AnywhereError.proxy(.nowhere, .authenticationRejected(status: nil, detail: "Bootstrap stream closed before authentication")))
             }
             if let connection = session.tcpStreams.removeValue(forKey: sid) { return .tcp(connection) }
@@ -256,9 +282,8 @@ nonisolated final class NowhereSession: Sendable {
         case .failAuth(let error):
             failSession(error)
         case .tcp(let connection):
-            poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
             updateIdleCloseTimer()
-            connection.handleStreamTermination(error: error)
+            connection.handleStreamTermination(error: error, cause: cause)
         case .udpControl(let connection):
             connection.handleControlStreamTermination(error: error)
         }
@@ -271,8 +296,8 @@ nonisolated final class NowhereSession: Sendable {
               let message = NowhereProtocol.decodeUDPDatagram(data) else { return }
 
         enum Deliver { case datagram(NowhereQueuedDatagram); case flowClose; case none }
-        let (connection, deliver): (NowhereUDPConnection?, Deliver) = lock.withLock { session in
-            guard let route = session.udpRoutes[envelope.flowID], route.ready else { return (nil, .none) }
+        let (connection, deliver): (NowhereUDPConnection?, Deliver) = state.withLock { session in
+            guard let route = session.udpRoutes[envelope.flowID], route.phase == .active else { return (nil, .none) }
             switch message.type {
             case .data:
                 guard let reservation = reserveUDPBudget(message.payload.count, &session) else { return (nil, .none) }
@@ -301,8 +326,8 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     /// Reserves `payloadLength` UDP-budget units (min 1), returning a reservation whose deinit
-    /// releases them. Must be called with `lock` held.
-    private func reserveUDPBudget(_ payloadLength: Int, _ session: inout Session) -> NowhereUDPBudgetReservation? {
+    /// releases them. Must be called with `state` held.
+    private func reserveUDPBudget(_ payloadLength: Int, _ session: inout State) -> NowhereUDPBudgetReservation? {
         let units = max(payloadLength, 1)
         guard units <= Self.udpBudgetLimit - session.udpBudgetUsed else { return nil }
         session.udpBudgetUsed += units
@@ -311,16 +336,16 @@ nonisolated final class NowhereSession: Sendable {
         }
     }
 
-    /// Fired from a reservation's deinit — possibly while a lock-holder is dropping the slot that
-    /// owns it — so it defers the mutation onto a fresh task to avoid re-entering `lock`.
+    /// Fired from a reservation's deinit — possibly while a holder of `state` is dropping the slot
+    /// that owns it — so it defers the mutation onto a fresh task to avoid re-entering `state`.
     private func releaseUDPBudget(_ units: Int) {
         Task { [weak self] in
-            self?.lock.withLock { $0.udpBudgetUsed = max(0, $0.udpBudgetUsed - units) }
+            self?.state.withLock { $0.udpBudgetUsed = max(0, $0.udpBudgetUsed - units) }
         }
     }
 
-    /// Must be called with `lock` held.
-    private func acceptFragment(_ message: NowhereProtocol.UDPMessage, _ session: inout Session) -> NowhereQueuedDatagram? {
+    /// Must be called with `state` held.
+    private func acceptFragment(_ message: NowhereProtocol.UDPMessage, _ session: inout State) -> NowhereQueuedDatagram? {
         expireReassembly(now: .now, &session)
         let key = ReassemblyKey(flowID: message.flowID, packetID: message.packetID)
         var slot: ReassemblySlot
@@ -378,21 +403,21 @@ nonisolated final class NowhereSession: Sendable {
         return NowhereQueuedDatagram(payload: payload, reservation: slot.reservation)
     }
 
-    /// Must be called with `lock` held.
-    private func removeReassembly(flowID: UInt32, _ session: inout Session) {
+    /// Must be called with `state` held.
+    private func removeReassembly(flowID: UInt32, _ session: inout State) {
         session.reassembly = session.reassembly.filter { $0.key.flowID != flowID }
         scheduleReassemblyExpiry(&session)
     }
 
-    /// Must be called with `lock` held.
-    private func expireReassembly(now: ContinuousClock.Instant, _ session: inout Session) {
+    /// Must be called with `state` held.
+    private func expireReassembly(now: ContinuousClock.Instant, _ session: inout State) {
         session.reassembly = session.reassembly.filter {
             $0.value.createdAt.duration(to: now) <= Self.reassemblyTTL
         }
     }
 
-    /// Must be called with `lock` held.
-    private func scheduleReassemblyExpiry(_ session: inout Session) {
+    /// Must be called with `state` held.
+    private func scheduleReassemblyExpiry(_ session: inout State) {
         session.reassemblyExpiryTask?.cancel()
         session.reassemblyExpiryTask = nil
         guard let earliest = session.reassembly.values.map(\.createdAt).min() else { return }
@@ -405,19 +430,19 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     private func expireAndRescheduleReassembly() {
-        lock.withLock { session in
+        state.withLock { session in
             expireReassembly(now: .now, &session)
             scheduleReassemblyExpiry(&session)
         }
     }
 
     // MARK: - Stream open
-    
+
     private func openStream(
         request: Data,
         fin: Bool,
         earlyDataAttempt: NowhereFlowOpenAttempt? = nil,
-        registerUnderLock: @escaping @Sendable (inout Session, Int64) -> Void,
+        registerUnderLock: @escaping @Sendable (inout State, Int64) -> Void,
         afterRegister: @escaping @Sendable (Int64) -> Void = { _ in }
     ) async throws -> Int64 {
         try await ensureReady()
@@ -425,13 +450,19 @@ nonisolated final class NowhereSession: Sendable {
         // Bootstrap branch: the first business stream carries AUTH + this FLOW request.
         enum Bootstrap { case notBootstrap; case failed; case ok(sid: Int64, authFrame: Data) }
         let bootstrap: Bootstrap = await quic.run { () -> Bootstrap in
-            guard self.lock.withLock({ $0.state == .transportReady }) else { return .notBootstrap }
-            let authFrame = self.lock.withLock { $0.authFrame }
-            guard let authFrame, let sid = self.quic.openBidiStream() else { return .failed }
-            self.lock.withLock { session in
-                session.state = .authenticating
+            guard self.state.withLock({ $0.phase == .transportReady }) else { return .notBootstrap }
+            guard let sid = self.quic.openBidiStream() else { return .failed }
+            let authFrame: Data? = self.state.withLock { session in
+                guard session.phase == .transportReady,
+                      let frame = session.authFrame,
+                      session.transition(to: .authenticating) else { return nil }
                 session.firstStreamID = sid
                 registerUnderLock(&session, sid)
+                return frame
+            }
+            guard let authFrame else {
+                self.quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
+                return .notBootstrap
             }
             return .ok(sid: sid, authFrame: authFrame)
         }
@@ -447,7 +478,7 @@ nonisolated final class NowhereSession: Sendable {
             do {
                 earlyDataAttempt?.markEarlyDataWriteStarted()
                 try await quic.writeStream(sid, data: payload, fin: fin)
-                lock.withLock { $0.bootstrapSubmitted = true }
+                state.withLock { $0.bootstrapSubmitted = true }
                 await quic.run { self.finishAuthenticationIfReady() }
                 return sid
             } catch {
@@ -460,7 +491,7 @@ nonisolated final class NowhereSession: Sendable {
 
         // Steady state: wait for auth to finish, then open a normal stream.
         try await authTask.value
-        guard lock.withLock({ $0.state == .ready }) else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
+        guard state.withLock({ $0.phase == .ready }) else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
         // Honor cancellation before spending a stream ID (the write below also surfaces it).
         try Task.checkCancellation()
 
@@ -476,15 +507,15 @@ nonisolated final class NowhereSession: Sendable {
             throw error
         }
     }
-    
+
     private func openBidiStreamWhenCreditAvailable(
-        registerUnderLock: @escaping @Sendable (inout Session, Int64) -> Void
+        registerUnderLock: @escaping @Sendable (inout State, Int64) -> Void
     ) async throws -> Int64 {
-        let waiterID: UInt64 = lock.withLock { session in
+        let waiterID: UInt64 = state.withLock { session in
             defer { session.streamOpenWaiterSeq &+= 1 }
             return session.streamOpenWaiterSeq
         }
-        defer { lock.withLock { _ = $0.cancelledStreamOpenWaiters.remove(waiterID) } }
+        defer { state.withLock { _ = $0.cancelledStreamOpenWaiters.remove(waiterID) } }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 quic.enqueue {
@@ -499,18 +530,18 @@ nonisolated final class NowhereSession: Sendable {
             self.cancelStreamOpenWaiter(waiterID)
         }
     }
-    
+
     private func openOrParkOnQueue(
         waiterID: UInt64,
-        registerUnderLock: @escaping @Sendable (inout Session, Int64) -> Void,
+        registerUnderLock: @escaping @Sendable (inout State, Int64) -> Void,
         continuation: CheckedContinuation<Int64, Error>
     ) {
         enum Outcome { case opened(Int64); case failed(Error); case parked }
-        let outcome: Outcome = lock.withLock { session in
+        let outcome: Outcome = state.withLock { session in
             if session.cancelledStreamOpenWaiters.remove(waiterID) != nil {
                 return .failed(CancellationError())
             }
-            guard !session.closed, session.state == .ready else {
+            guard session.phase == .ready else {
                 return .failed(AnywhereError.proxy(.nowhere, .streamClosed))
             }
             if session.streamOpenWaiters.isEmpty, let sid = quic.openBidiStream() {
@@ -530,10 +561,10 @@ nonisolated final class NowhereSession: Sendable {
         case .parked: break
         }
     }
-    
+
     private func drainStreamOpenWaiters() {
-        let drained: [(CheckedContinuation<Int64, Error>, Int64)] = lock.withLock { session in
-            guard !session.closed, session.state == .ready else { return [] }
+        let drained: [(CheckedContinuation<Int64, Error>, Int64)] = state.withLock { session in
+            guard session.phase == .ready else { return [] }
             var resumed: [(CheckedContinuation<Int64, Error>, Int64)] = []
             while !session.streamOpenWaiters.isEmpty {
                 guard let sid = quic.openBidiStream() else { break }
@@ -547,7 +578,7 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     private func cancelStreamOpenWaiter(_ waiterID: UInt64) {
-        let continuation: CheckedContinuation<Int64, Error>? = lock.withLock { session in
+        let continuation: CheckedContinuation<Int64, Error>? = state.withLock { session in
             if let index = session.streamOpenWaiters.firstIndex(where: { $0.id == waiterID }) {
                 return session.streamOpenWaiters.remove(at: index).continuation
             }
@@ -568,9 +599,7 @@ nonisolated final class NowhereSession: Sendable {
             earlyDataAttempt: earlyDataAttempt,
             registerUnderLock: { session, sid in session.tcpStreams[sid] = connection },
             afterRegister: { [weak self] _ in
-                guard let self else { return }
-                self.poolState.withLock { $0.tcpCount += 1 }
-                self.updateIdleCloseTimer()
+                self?.updateIdleCloseTimer()
             }
         )
     }
@@ -592,9 +621,9 @@ nonisolated final class NowhereSession: Sendable {
     func shutdownStream(_ sid: Int64) {
         quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
     }
-    
+
     func releaseTCPStream(_ sid: Int64, credited: Int) {
-        let (routeRemoved, delivered): (Bool, Int) = lock.withLock { session in
+        let (routeRemoved, delivered): (Bool, Int) = state.withLock { session in
             (session.tcpStreams.removeValue(forKey: sid) != nil,
              session.tcpDeliveredBytes.removeValue(forKey: sid) ?? 0)
         }
@@ -603,12 +632,11 @@ nonisolated final class NowhereSession: Sendable {
             quic.extendStreamOffset(sid, count: residual)
         }
         guard routeRemoved else { return }
-        poolState.withLock { $0.tcpCount = max(0, $0.tcpCount - 1) }
         updateIdleCloseTimer()
     }
 
     func releaseUDPControlStream(_ sid: Int64) {
-        lock.withLock { _ = $0.udpControlStreams.removeValue(forKey: sid) }
+        state.withLock { _ = $0.udpControlStreams.removeValue(forKey: sid) }
     }
 
     // MARK: - UDP session API
@@ -617,38 +645,34 @@ nonisolated final class NowhereSession: Sendable {
         _ connection: NowhereUDPConnection,
         requestedFlowID: UInt32? = nil
     ) async throws -> UInt32 {
-        let flowID: UInt32 = try lock.withLock { session in
-            guard session.state != .closed, session.state != .idle else { throw AnywhereError.proxy(.nowhere, .notReady) }
+        let flowID: UInt32 = try state.withLock { session in
+            guard session.phase != .closed, session.phase != .idle else { throw AnywhereError.proxy(.nowhere, .notReady) }
             guard session.udpRoutes.count < Self.maxUDPFlows else {
                 throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP flow pool exhausted"))
             }
             guard let flowID = requestedFlowID, flowID != 0, session.udpRoutes[flowID] == nil else {
                 throw AnywhereError.proxy(.nowhere, .connectionClosed(detail: "UDP flow ID collision"))
             }
-            session.udpRoutes[flowID] = UDPRoute(connection: connection, ready: false)
+            session.udpRoutes[flowID] = UDPRoute(connection: connection)
             return flowID
         }
-        poolState.withLock { $0.udpCount += 1 }
         updateIdleCloseTimer()
         return flowID
     }
 
-    func activateUDPSession(_ flowID: UInt32) async {
-        lock.withLock { session in
-            guard var route = session.udpRoutes[flowID] else { return }
-            route.ready = true
-            session.udpRoutes[flowID] = route
+    func activateUDPSession(_ flowID: UInt32) {
+        state.withLock { session in
+            _ = session.udpRoutes[flowID]?.transition(to: .active)
         }
     }
 
     func releaseUDPSession(_ flowID: UInt32) {
-        let removed = lock.withLock { session -> Bool in
+        let removed = state.withLock { session -> Bool in
             guard session.udpRoutes.removeValue(forKey: flowID) != nil else { return false }
             removeReassembly(flowID: flowID, &session)
             return true
         }
         if removed {
-            poolState.withLock { $0.udpCount = max(0, $0.udpCount - 1) }
             updateIdleCloseTimer()
         }
     }
@@ -662,26 +686,26 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     // MARK: - Idle close
-    
+
     private func updateIdleCloseTimer() {
-        let total = poolState.withLock { $0.tcpCount + $0.udpCount }
-        lock.withLock { session in
-            guard session.state == .ready, !session.closed else {
+        state.withLock { session in
+            guard session.phase == .ready else {
                 session.idleSince = nil
                 return
             }
-            session.idleSince = total == 0 ? ContinuousClock.now : nil
+            let idle = session.tcpStreams.isEmpty && session.udpRoutes.isEmpty
+            session.idleSince = idle ? ContinuousClock.now : nil
             if session.idleSweepTask == nil {
                 session.idleSweepTask = Task { [weak self] in await self?.runIdleSweep() }
             }
         }
     }
-    
+
     private func runIdleSweep() async {
         enum Step { case closeNow; case sleep(Duration); case stop }
         while !Task.isCancelled {
-            let step: Step = lock.withLock { session in
-                guard !session.closed, session.state == .ready else { return .stop }
+            let step: Step = state.withLock { session in
+                guard session.phase == .ready else { return .stop }
                 guard let since = session.idleSince else { return .sleep(.seconds(Self.idleCloseDelay)) }
                 let elapsed = since.duration(to: ContinuousClock.now)
                 if elapsed >= .seconds(Self.idleCloseDelay) { return .closeNow }
@@ -694,8 +718,8 @@ nonisolated final class NowhereSession: Sendable {
                 try? await Task.sleep(for: duration)
             case .closeNow:
                 closeIfStillIdle()
-                let done = lock.withLock { session -> Bool in
-                    if session.closed { return true }
+                let done = state.withLock { session -> Bool in
+                    if session.phase == .closed { return true }
                     session.idleSince = nil
                     return false
                 }
@@ -705,10 +729,11 @@ nonisolated final class NowhereSession: Sendable {
     }
 
     private func closeIfStillIdle() {
-        guard lock.withLock({ $0.state == .ready }) else { return }
-        let liveCount = poolState.withLock { $0.tcpCount + $0.udpCount }
-        guard liveCount == 0 else { return }
-        performTeardown(readyError: AnywhereError.proxy(.nowhere, .streamClosed), handleClean: true)
+        performTeardown(
+            readyError: AnywhereError.proxy(.nowhere, .streamClosed),
+            handleClean: true,
+            onlyIfIdle: true
+        )
     }
 
     // MARK: - Close
@@ -721,24 +746,29 @@ nonisolated final class NowhereSession: Sendable {
         performTeardown(readyError: error, handleClean: false, error: error)
     }
 
-    private func performTeardown(readyError: Error, handleClean: Bool, error: Error? = nil) {
+    private func performTeardown(readyError: Error, handleClean: Bool, error: Error? = nil, onlyIfIdle: Bool = false) {
         struct Teardown {
             var tcp: [NowhereConnection]
             var udp: [NowhereUDPConnection]
             var openWaiters: [StreamOpenWaiter]
             var idleSweepTask: Task<Void, Never>?
             var reassemblyExpiryTask: Task<Void, Never>?
+            var onClose: (@Sendable () -> Void)?
         }
-        let teardown: Teardown? = lock.withLock { session in
-            guard !session.closed else { return nil }
-            session.closed = true
-            session.state = .closed
+        let teardown: Teardown? = state.withLock { session in
+            if onlyIfIdle {
+                guard session.phase == .ready, session.tcpStreams.isEmpty, session.udpRoutes.isEmpty else {
+                    return nil
+                }
+            }
+            guard session.transition(to: .closed) else { return nil }
             let snapshot = Teardown(
                 tcp: Array(session.tcpStreams.values),
                 udp: session.udpRoutes.values.map(\.connection),
                 openWaiters: session.streamOpenWaiters,
                 idleSweepTask: session.idleSweepTask,
-                reassemblyExpiryTask: session.reassemblyExpiryTask
+                reassemblyExpiryTask: session.reassemblyExpiryTask,
+                onClose: session.onClose
             )
             session.idleSweepTask = nil
             session.idleSince = nil
@@ -749,6 +779,7 @@ nonisolated final class NowhereSession: Sendable {
             session.reassembly.removeAll()
             session.udpControlStreams.removeAll()
             session.streamOpenWaiters.removeAll()
+            session.onClose = nil
             return snapshot
         }
         guard let teardown else { return }
@@ -757,14 +788,6 @@ nonisolated final class NowhereSession: Sendable {
         teardown.reassemblyExpiryTask?.cancel()
         quic.handlers.withLock { $0.bidiCredit = nil }
 
-        let onClose = poolState.withLock { state in
-            state.isClosed = true
-            state.tcpCount = 0
-            state.udpCount = 0
-            let hook = state.onClose
-            state.onClose = nil
-            return hook
-        }
         transportSignal.finish(throwing: readyError)
         authSignal.finish(throwing: readyError)
         for waiter in teardown.openWaiters {
@@ -780,6 +803,6 @@ nonisolated final class NowhereSession: Sendable {
             for connection in teardown.udp { connection.handleSessionError(failure) }
         }
         quic.close()
-        onClose?()
+        teardown.onClose?()
     }
 }

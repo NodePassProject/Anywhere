@@ -183,7 +183,7 @@ nonisolated extension ProxyClient {
                         }
                     }
                     group.addTask {
-                        // Mirrors the former `armDeadline`: sleep to the shared absolute deadline,
+                        // Deadline racer: sleep to the shared absolute deadline,
                         // then claim + tear down bound halves before failing.
                         let nowNanos = DispatchTime.now().uptimeNanoseconds
                         let deadlineNanos = deadline.uptimeNanoseconds
@@ -451,7 +451,7 @@ nonisolated extension ProxyClient {
                 throw AnywhereError.proxy(.nowhere, .streamClosed)
             }
             if let activatable = uplink as? NowhereUDPConnection {
-                await activatable.activatePairedFlow()
+                activatable.activatePairedFlow()
             }
             return NowhereDirectionalConnection(
                 uplink: uplink,

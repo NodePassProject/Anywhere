@@ -6,6 +6,7 @@
 //
 
 import Dispatch
+import Synchronization
 
 nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
     let queue: DispatchQueue
@@ -54,12 +55,29 @@ nonisolated final class BridgeExecutor: SerialExecutor, @unchecked Sendable {
 }
 
 nonisolated final class BridgeTimer: @unchecked Sendable {
-    
+
+    private enum Phase: PhaseTransitionable {
+        case running
+        case suspended
+        case cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.running, .suspended),
+                 (.suspended, .running):
+                return true
+            case (_, .cancelled):
+                return old != .cancelled
+            default:
+                return false
+            }
+        }
+    }
+
     private let timer: DispatchSourceTimer
-    
-    private var suspended = false
-    private var cancelled = false
-    
+
+    private let phase = Mutex<Phase>(.running)
+
     fileprivate init(
         queue: DispatchQueue,
         intervalMs: Int,
@@ -78,33 +96,47 @@ nonisolated final class BridgeTimer: @unchecked Sendable {
     }
     
     func suspend() {
-        guard !suspended, !cancelled else { return }
-        suspended = true
+        guard phase.withLock({ Phase.transition(&$0, to: .suspended) }) else { return }
         timer.suspend()
     }
-    
+
     func resume() {
-        guard suspended, !cancelled else { return }
-        suspended = false
+        guard phase.withLock({ Phase.transition(&$0, to: .running) }) else { return }
         timer.resume()
     }
-    
+
     func cancel() {
-        guard !cancelled else { return }
-        cancelled = true
-        if suspended {
-            suspended = false
-            timer.resume()
+        enum Exit {
+            case none
+            case cancel
+            case resumeThenCancel
         }
-        timer.cancel()
+        let exit: Exit = phase.withLock { phase in
+            let wasSuspended = phase == .suspended
+            guard Phase.transition(&phase, to: .cancelled) else { return .none }
+            return wasSuspended ? .resumeThenCancel : .cancel
+        }
+        switch exit {
+        case .none:
+            return
+        case .resumeThenCancel:
+            timer.resume()
+            timer.cancel()
+        case .cancel:
+            timer.cancel()
+        }
+    }
+
+    deinit {
+        cancel()
     }
 }
 
 nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
     
     private let timer: DispatchSourceTimer
-    private var cancelled = false
-    
+    private let cancelled = OneShotLatch()
+
     fileprivate init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.setEventHandler(handler: handler)
@@ -114,21 +146,20 @@ nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
     }
     
     func schedule(afterNanoseconds nanoseconds: UInt64) {
-        guard !cancelled else { return }
+        guard !cancelled.isClaimed else { return }
         timer.schedule(
             deadline: .now() + .nanoseconds(Int(min(nanoseconds, UInt64(Int.max)))),
             leeway: .nanoseconds(0)
         )
     }
-    
+
     func parkUntilRearmed() {
-        guard !cancelled else { return }
+        guard !cancelled.isClaimed else { return }
         timer.schedule(deadline: .distantFuture, leeway: .nanoseconds(0))
     }
-    
+
     func cancel() {
-        guard !cancelled else { return }
-        cancelled = true
+        guard cancelled.claim() else { return }
         timer.cancel()
     }
 }

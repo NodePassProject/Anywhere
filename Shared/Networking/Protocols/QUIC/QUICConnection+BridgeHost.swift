@@ -17,11 +17,11 @@ extension QUICConnection {
     nonisolated private static func isBenignCloseCode(_ code: UInt64) -> Bool {
         code == 0x00 || code == 0x100
     }
-    
+
     func buildClientHello(transportParams: Data) -> Data? {
         tlsHandler?.buildClientHello(transportParams: transportParams)
     }
-    
+
     func processCryptoData(_ data: Data, level: ngtcp2_encryption_level) -> Int32 {
         guard let tls = tlsHandler, let conn = connectionOpaquePointer else {
             return NGTCP2_ERR_CALLBACK_FAILURE
@@ -31,7 +31,7 @@ extension QUICConnection {
         case .error(let code): return code
         }
     }
-    
+
     func deliverStreamData(streamId: Int64, data: Data, fin: Bool) {
         handlers.withLock { $0.streamData }?(streamId, data, fin)
     }
@@ -39,18 +39,17 @@ extension QUICConnection {
     func deliverDatagram(_ data: Data) {
         handlers.withLock { $0.datagram }?(data)
     }
-    
+
     func deliverBidiCredit(maxStreams: UInt64) {
         handlers.withLock { $0.bidiCredit }?(maxStreams)
     }
-    
+
     func handleStreamClose(streamId: Int64, appErrorCode: UInt64, hasAppError: Bool) {
         let error: Error? = (hasAppError && !Self.isBenignCloseCode(appErrorCode))
             ? AnywhereError.quic(.streamClosedWithError(applicationCode: appErrorCode))
             : nil
-        failStreamSendQueue(streamId: streamId, error: error ?? AnywhereError.quic(.closed(graceful: false)))
-        releaseStreamSendState(streamId: streamId)
-        handlers.withLock { $0.streamTermination }?(streamId, error)
+        terminateStreamSendQueue(streamId: streamId, error: error ?? AnywhereError.quic(.closed(graceful: false)))
+        handlers.withLock { $0.streamTermination }?(streamId, error, .closed)
     }
 
     func handleStreamReset(streamId: Int64, appErrorCode: UInt64) {
@@ -58,11 +57,11 @@ extension QUICConnection {
             ? nil
             : AnywhereError.quic(.streamReset(applicationCode: appErrorCode))
         failStreamSendQueue(streamId: streamId, error: error ?? AnywhereError.quic(.closed(graceful: false)))
-        handlers.withLock { $0.streamTermination }?(streamId, error)
+        handlers.withLock { $0.streamTermination }?(streamId, error, .reset)
     }
-    
+
     func handleHandshakeCompleted() {
-        state = .connected
+        guard transition(to: .connected) else { return }
         finishConnect(nil)
     }
 }

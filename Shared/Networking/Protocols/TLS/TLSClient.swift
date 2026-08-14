@@ -24,32 +24,85 @@ nonisolated private enum ServerHelloResult {
 
 actor TLSClient {
     let configuration: TLSConfiguration
-    
-    private let connectionBox = Mutex<(any ByteTransport)?>(nil)
-    nonisolated var connection: (any ByteTransport)? { connectionBox.withLock { $0 } }
-    
-    private func adoptTransport(_ transport: any ByteTransport) {
-        connectionBox.withLock { $0 = transport }
-    }
-    
-    nonisolated func takeConnection() -> (any ByteTransport)? {
-        connectionBox.withLock { connection in
-            let taken = connection
-            connection = nil
-            return taken
+
+    // MARK: Lifecycle
+
+    private enum Phase: PhaseTransitionable {
+        case idle, connecting, established, failed, cancelled
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .established),
+                 (.connecting, .failed):
+                return true
+            case (_, .cancelled):
+                return old != .cancelled
+            default:
+                return false
+            }
         }
     }
-    
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
+        var connection: (any ByteTransport)?
+    }
+    private nonisolated let state = Mutex(State())
+
+    nonisolated var connection: (any ByteTransport)? { state.withLock { $0.connection } }
+
+    private nonisolated func adoptTransport(_ transport: any ByteTransport) {
+        let adopted = state.withLock { state -> Bool in
+            switch state.phase {
+            case .cancelled, .failed:
+                return false
+            case .idle, .connecting, .established:
+                state.connection = transport
+                return true
+            }
+        }
+        if !adopted { transport.cancel() }
+    }
+
+    private func claimConnect() throws {
+        try state.withLock { state in
+            switch state.phase {
+            case .idle:
+                break
+            case .cancelled:
+                throw AnywhereError.tls(.handshakeFailed(detail: "TLS client cancelled"))
+            case .connecting, .established, .failed:
+                throw AnywhereError.tls(.handshakeFailed(detail: "TLS client reused"))
+            }
+            state.transition(to: .connecting)
+        }
+    }
+
+    func commitHandshake(_ record: TLSRecordConnection) throws {
+        let (committed, taken): (Bool, (any ByteTransport)?) = state.withLock { state in
+            let committed = state.transition(to: .established)
+            let taken = state.connection
+            state.connection = nil
+            return (committed, taken)
+        }
+        guard committed else {
+            taken?.cancel()
+            record.cancel()
+            throw AnywhereError.tls(.handshakeFailed(detail: "cancelled during handshake"))
+        }
+        record.adoptTransport(taken)
+    }
+
     var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var storedClientHello: Data?
     private var sentSessionID: Data?
-    
+
     var echContext: ECHClientContext?
-    var echAccepted = false
     private var resolvedECHConfigList: Data?
-    
+
     var tls13 = TLS13HandshakeState()
-    
+
     var clientRandom: Data?
     var serverRandom: Data?
     var masterSecret: Data?
@@ -61,9 +114,9 @@ actor TLSClient {
     var tls12Transcript: Data?
 
     var serverCertificates: [SecCertificate] = []
-    
+
     var postHandshakeBuffer: Data?
-    
+
     var negotiatedALPN: String = ""
 
     private static let supportedTLS12CipherSuites: Set<UInt16> = [
@@ -96,9 +149,9 @@ actor TLSClient {
     }
 
     // MARK: - Public API
-    
+
     private static let handshakeDeadline: Duration = .seconds(30)
-    
+
     private func withHandshakeDeadline(
         _ handshake: @escaping @Sendable () async throws -> TLSRecordConnection
     ) async throws -> TLSRecordConnection {
@@ -115,9 +168,10 @@ actor TLSClient {
             throw error
         }
     }
-    
+
     func connect(host: String, port: UInt16) async throws -> TLSRecordConnection {
-        try await withHandshakeDeadline {
+        try claimConnect()
+        return try await withHandshakeDeadline {
             try await self.performConnect(host: host, port: port)
         }
     }
@@ -143,9 +197,10 @@ actor TLSClient {
 
         return try await receiveServerResponse()
     }
-    
+
     func connect(overTunnel tunnel: ProxyConnection) async throws -> TLSRecordConnection {
-        try await withHandshakeDeadline {
+        try claimConnect()
+        return try await withHandshakeDeadline {
             try await self.performConnect(overTunnel: tunnel)
         }
     }
@@ -173,18 +228,30 @@ actor TLSClient {
 
         return try await receiveServerResponse()
     }
-    
+
     nonisolated func cancel() {
-        takeConnection()?.cancel()
+        let victim = state.withLock { state -> (any ByteTransport)? in
+            _ = state.transition(to: .cancelled)
+            let connection = state.connection
+            state.connection = nil
+            return connection
+        }
+        victim?.cancel()
     }
 
     private func releaseOnFailure() {
-        takeConnection()?.cancel()
+        let victim = state.withLock { state -> (any ByteTransport)? in
+            _ = state.transition(to: .failed)
+            let connection = state.connection
+            state.connection = nil
+            return connection
+        }
+        victim?.cancel()
         clearHandshakeState()
     }
 
     // MARK: - ClientHello
-    
+
     private func prepareECH() async throws {
         guard configuration.echIsOpportunistic else { return }
         let serverName = configuration.serverName
@@ -208,7 +275,7 @@ actor TLSClient {
             throw AnywhereError.tls(.handshakeFailed(detail: "Failed to generate session ID"))
         }
         sentSessionID = sessionId
-        
+
         if configuration.echEnabled,
            let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) ?? resolvedECHConfigList {
             let configs = try ECHConfigParser.parseConfigList(echConfigData)
@@ -260,7 +327,7 @@ actor TLSClient {
     }
 
     // MARK: - Server Response Processing
-    
+
     private func receiveServerResponse(buffer: Data = Data()) async throws -> TLSRecordConnection {
         var buffer = buffer
         while buffer.count < 5 {
@@ -286,7 +353,7 @@ actor TLSClient {
             throw AnywhereError.tls(.handshakeFailed(detail: "Unexpected content type: \(contentType)"))
         }
     }
-    
+
     private func continueReceivingHandshake(buffer: Data) async throws -> TLSRecordConnection {
         var buffer = buffer
         while !bufferContainsCompleteServerHello(buffer) {
@@ -348,7 +415,7 @@ actor TLSClient {
 
         return false
     }
-    
+
     func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {
@@ -390,7 +457,7 @@ actor TLSClient {
                 offset += recordLen
                 continue
             }
-            
+
             let randomOffset = offset + 1 + 3 + 2
             guard randomOffset + 32 <= data.count else { return nil }
 
@@ -542,7 +609,6 @@ actor TLSClient {
         storedClientHello = nil
         sentSessionID = nil
         echContext = nil
-        echAccepted = false
         tls13 = TLS13HandshakeState()
         postHandshakeBuffer = nil
         serverCertificates.removeAll()

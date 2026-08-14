@@ -28,7 +28,8 @@ nonisolated final class TrojanConnection: ProxyConnection {
     var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
 
     func sendRaw(_ data: Data) async throws {
-        try await inner.sendRaw(consumeHeader().map { $0 + data } ?? data)
+        let header = consumeHeader()
+        try await inner.sendRaw(header.map { $0 + data } ?? data)
     }
 
     func receiveRaw() async throws -> Data? {
@@ -39,7 +40,6 @@ nonisolated final class TrojanConnection: ProxyConnection {
         inner.cancel()
     }
 
-    /// Returns the header on the first call and `nil` thereafter.
     private func consumeHeader() -> Data? {
         pendingHeader.withLock { header in
             defer { header = nil }

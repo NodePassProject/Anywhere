@@ -20,38 +20,144 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     private let pathMonitorBridge = PathMonitorConcurrencyBridge()
 
-    private let rootTask = Mutex<Task<Void, Never>?>(nil)
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case starting
+        case running
+        case stopping
+        case stopped
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .starting),
+                 (.stopped, .starting),
+                 (.starting, .running),
+                 (.starting, .stopped),
+                 (.idle, .stopping),
+                 (.starting, .stopping),
+                 (.running, .stopping),
+                 (.stopped, .stopping),
+                 (.stopping, .stopped):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    private struct ProviderState: PhaseHolding {
+        var phase: Phase = .idle
+        var rootTask: Task<Void, Never>?
+        var claimGeneration: UInt64 = 0
+    }
+    private let providerState = Mutex(ProviderState())
+
+    private let lifecycleEventChain = Mutex<Task<Void, Never>?>(nil)
+
+    @discardableResult
+    private func enqueueLifecycleEvent(_ operation: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        lifecycleEventChain.withLock { chain in
+            let previous = chain
+            let task = Task {
+                await previous?.value
+                await operation()
+            }
+            chain = task
+            return task
+        }
+    }
 
     // MARK: - Tunnel Lifecycle
-    
+
     override func startTunnel(options: [String : NSObject]? = nil) async throws {
+        enum Claim { case proceed(UInt64), alreadyUp, superseded }
+        let claim: Claim = providerState.withLock { state in
+            switch state.phase {
+            case .idle, .stopped:
+                state.transition(to: .starting)
+                state.claimGeneration += 1
+                return .proceed(state.claimGeneration)
+            case .starting, .running:
+                return .alreadyUp
+            case .stopping:
+                return .superseded
+            }
+        }
+        let myClaim: UInt64
+        switch claim {
+        case .proceed(let generation):
+            myClaim = generation
+        case .alreadyUp:
+            logger.warning("[VPN] Duplicate start ignored")
+            return
+        case .superseded:
+            logger.warning("[VPN] Start refused: stop in progress")
+            throw AnywhereError.tunnel(.sessionUnavailable)
+        }
+
         guard let configuration = resolveStartConfiguration(options: options) else {
             let error = AnywhereError.tunnel(.invalidConfiguration)
             logger.report("[VPN] Start failed", error: error)
+            releaseStartClaim(myClaim)
             throw error
         }
 
         let settings = buildTunnelSettings()
-        
+
         do {
             try await setTunnelNetworkSettings(settings)
         } catch {
             let wrapped = AnywhereError.tunnel(.settingsApplyFailed(underlying: error))
             logger.report("[VPN]", error: wrapped)
+            releaseStartClaim(myClaim)
             throw wrapped
+        }
+
+        guard providerState.withLock({ $0.phase == .starting && $0.claimGeneration == myClaim }) else {
+            logger.warning("[VPN] Start aborted: stopped while applying settings")
+            throw AnywhereError.tunnel(.sessionUnavailable)
         }
 
 #if os(iOS)
         ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
 
-        await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
-        
-        rootTask.withLock { task in
-            guard task == nil else { return }
-            task = Task { await self.run() }
+        let stackStarted = await tunnelStack.start(packetFlow: packetFlow, configuration: configuration)
+
+        var installed: Bool = providerState.withLock { state in
+            guard state.claimGeneration == myClaim, stackStarted,
+                  state.transition(to: .running) else { return false }
+            return true
         }
-        
+        if installed {
+            enum Install { case adopted, taskAlreadyPresent, superseded }
+            let rootTask = Task { await self.run() }
+            let outcome: Install = providerState.withLock { state in
+                guard state.phase == .running, state.claimGeneration == myClaim else { return .superseded }
+                guard state.rootTask == nil else { return .taskAlreadyPresent }
+                state.rootTask = rootTask
+                return .adopted
+            }
+            switch outcome {
+            case .adopted:
+                startStatsRecorder(claim: myClaim)
+            case .taskAlreadyPresent:
+                rootTask.cancel()
+                startStatsRecorder(claim: myClaim)
+            case .superseded:
+                rootTask.cancel()
+                installed = false
+            }
+        }
+        guard installed else {
+            releaseStartClaim(myClaim)
+            if stackStarted {
+                await tunnelStack.stop()
+            }
+            throw AnywhereError.tunnel(.sessionUnavailable)
+        }
+    }
+
+    private func startStatsRecorder(claim: UInt64) {
         statsRecorder.start { [tunnelStack] in
             return StatsRecorder.RawValues(
                 byteCounts: tunnelStack.byteCounts.withLock { $0 },
@@ -60,8 +166,21 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
                 memoryBytes: Self.memoryFootprint()
             )
         }
+        let stillRunning = providerState.withLock { $0.phase == .running && $0.claimGeneration == claim }
+        if !stillRunning {
+            statsRecorder.stop()
+        }
     }
-    
+
+    @discardableResult
+    private func releaseStartClaim(_ claim: UInt64) -> Bool {
+        providerState.withLock { state in
+            guard state.claimGeneration == claim else { return false }
+            if state.phase == .starting { state.transition(to: .stopped) }
+            return true
+        }
+    }
+
     private func resolveStartConfiguration(options: [String: NSObject]?) -> ProxyConfiguration? {
         if let messageData = options?[TunnelMessage.optionKey] as? Data {
             do {
@@ -99,7 +218,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         }
         ipv4Settings.excludedRoutes = excludedIPv4Routes
         settings.ipv4Settings = ipv4Settings
-        
+
         let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
         if advertiseIPv6ToApps {
             let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelAddressIPv6], networkPrefixLengths: [64])
@@ -107,7 +226,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             ipv6Settings.excludedRoutes = excludedRoutes.ipv6
             settings.ipv6Settings = ipv6Settings
         }
-        
+
         let plainDNSServers: [String]
         if advertiseIPv6ToApps {
             plainDNSServers = [tunnelAddressIPv4, TunnelConstants.tunnelAddressIPv6]
@@ -120,7 +239,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         return settings
     }
-    
+
     private static func parseRoutes(_ strings: [String]) -> (ipv4: [NEIPv4Route], ipv6: [NEIPv6Route]) {
         var ipv4Routes: [NEIPv4Route] = []
         var ipv6Routes: [NEIPv6Route] = []
@@ -137,7 +256,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
         return (ipv4: ipv4Routes, ipv6: ipv6Routes)
     }
-    
+
     private static func parseIPv4Route(_ string: String) -> NEIPv4Route? {
         let parts = string.split(separator: "/", maxSplits: 1)
         guard let addressPart = parts.first else { return nil }
@@ -154,7 +273,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
         let network = UInt32(bigEndian: address.s_addr) & mask
         return NEIPv4Route(destinationAddress: dottedQuad(network), subnetMask: dottedQuad(mask))
     }
-    
+
     private static func parseIPv6Route(_ string: String) -> NEIPv6Route? {
         let parts = string.split(separator: "/", maxSplits: 1)
         guard let addressPart = parts.first else { return nil }
@@ -186,7 +305,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
     private static func dottedQuad(_ value: UInt32) -> String {
         "\((value >> 24) & 0xFF).\((value >> 16) & 0xFF).\((value >> 8) & 0xFF).\(value & 0xFF)"
     }
-    
+
     private func reapplyTunnelSettings() async {
         let settings = buildTunnelSettings()
         do {
@@ -202,18 +321,23 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 #if os(iOS)
         ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
 #endif
-        
-        statsRecorder.stop()
-        
-        let task = rootTask.withLock { task -> Task<Void, Never>? in
-            defer { task = nil }
-            return task
+
+        let task: Task<Void, Never>? = providerState.withLock { state in
+            state.transition(to: .stopping)
+            defer { state.rootTask = nil }
+            return state.rootTask
         }
+
+        statsRecorder.stop()
         task?.cancel()
-        
+
         logTunnelStop(reason: reason)
-        
+
         await tunnelStack.stop()
+
+        providerState.withLock { state in
+            if state.phase == .stopping { state.transition(to: .stopped) }
+        }
     }
 
     // MARK: - App Messages
@@ -246,7 +370,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             return encodeReply(RequestsResponse(requests: tunnelStack.requestLog.snapshot()))
         }
     }
-    
+
     private func encodeReply(_ reply: some Encodable) -> Data? {
         do {
             return try JSONEncoder().encode(reply)
@@ -255,7 +379,7 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
             return nil
         }
     }
-    
+
     private static func memoryFootprint() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
@@ -271,12 +395,16 @@ nonisolated class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Senda
 
     override func sleep() async {
         statsRecorder.noteSleep()
-        await tunnelStack.suspendOutbound()
+        await enqueueLifecycleEvent { [tunnelStack] in
+            await tunnelStack.suspendOutbound()
+        }.value
     }
 
     override func wake() {
         statsRecorder.noteWake()
-        Task { await tunnelStack.handleWake() }
+        enqueueLifecycleEvent { [tunnelStack] in
+            await tunnelStack.handleWake()
+        }
     }
 
     // MARK: - Provider task tree

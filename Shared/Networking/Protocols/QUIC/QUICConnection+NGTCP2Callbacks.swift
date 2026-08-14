@@ -24,7 +24,7 @@ extension QUICConnection {
             return OpaquePointer(bitPattern: raw)
         }
     }
-    
+
     func makeCallbacks(datagramsEnabled: Bool) -> ngtcp2_callbacks {
         var callbacks = ngtcp2_callbacks()
         callbacks.client_initial = ngtcp2ClientInitialCB
@@ -52,7 +52,7 @@ extension QUICConnection {
         }
         return callbacks
     }
-    
+
     nonisolated static func host(from userData: UnsafeMutableRawPointer) -> QUICConnection? {
         BridgeContext.unretained(userData, as: QUICConnection.self)
     }
@@ -200,7 +200,7 @@ nonisolated private let ngtcp2HandshakeCompletedCB: @convention(c) (
 nonisolated private let ngtcp2PathValidationCB: @convention(c) (
     OpaquePointer?, UInt32, UnsafePointer<ngtcp2_path>?, UnsafePointer<ngtcp2_path>?,
     ngtcp2_path_validation_result, UnsafeMutableRawPointer?
-) -> Int32 = { _, _, _, _, res, userData in
+) -> Int32 = { _, _, path, _, res, userData in
     guard let host = hostFromUserData(userData) else { return 0 }
     let result: NGTCP2PathValidationResult
     if res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS {
@@ -210,7 +210,20 @@ nonisolated private let ngtcp2PathValidationCB: @convention(c) (
     } else {
         result = .aborted
     }
-    host.enqueue { host.assumeIsolated { $0.handlePathValidation(result: result) } }
+    var pathLocal: sockaddr_storage?
+    if let path {
+        let local = path.pointee.local
+        if let addr = local.addr, local.addrlen > 0 {
+            var storage = sockaddr_storage()
+            withUnsafeMutableBytes(of: &storage) { dst in
+                let n = min(Int(local.addrlen), dst.count)
+                dst.copyMemory(from: UnsafeRawBufferPointer(start: UnsafeRawPointer(addr), count: n))
+            }
+            pathLocal = storage
+        }
+    }
+    let capturedLocal = pathLocal
+    host.enqueue { host.assumeIsolated { $0.handlePathValidation(result: result, pathLocal: capturedLocal) } }
     return 0
 }
 

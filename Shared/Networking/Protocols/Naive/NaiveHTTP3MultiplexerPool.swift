@@ -29,7 +29,7 @@ nonisolated final class NaiveHTTP3MultiplexerPool: TransportPool {
         pool.startIdleEviction(Self.poolPolicy)
     }
 
-    func reclaim() { pool.closeAll() }
+    func reclaim() { pool.drainAll() }
 
     // MARK: - Acquire
 
@@ -42,31 +42,30 @@ nonisolated final class NaiveHTTP3MultiplexerPool: TransportPool {
     ) async throws -> NaiveHTTP3Stream {
         let key = Base.makeKey(host: host, port: port, sni: sni)
 
-        // A soft-cap eviction must close its victim off-lock (close() re-enters
-        // removeMultiplexer via onClose), so that path splits into two lock holds;
-        // every other path stays in a single hold, matching the original.
         enum Plan { case ready(HTTP3Multiplexer); case closeVictimThenCreate(HTTP3Multiplexer) }
-        let plan: Plan = pool.state.withLock { st in
-            // Prune dead/stream-blocked muxes here; age-based idle eviction is the base's sweep.
-            pruneDead(key: key, &st)
+        var prunedVictims: [HTTP3Multiplexer] = []
+        let plan: Plan = pool.state.withLock { state in
+            prunedVictims = pruneDead(key: key, &state)
 
-            if let existing = st.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
-                st.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
+            if let existing = state.multiplexers[key]?.first(where: { $0.tryReserveStream() }) {
+                state.lastActivity[ObjectIdentifier(existing)] = MonotonicClock.now
                 return .ready(existing)
             }
-            if let overflow = overflowSession(key: key, &st) {
-                st.lastActivity[ObjectIdentifier(overflow)] = MonotonicClock.now
+            if let overflow = overflowSession(key: key, &state) {
+                state.lastActivity[ObjectIdentifier(overflow)] = MonotonicClock.now
                 return .ready(overflow)
             }
-            // Never close a multiplexer with live streams; evict an idle one if possible, else grow up to the hard cap.
-            let currentCount = st.multiplexers[key]?.count ?? 0
-            let softCap = st.policy?.softCapPerKey ?? 0
+
+            let currentCount = state.multiplexers[key]?.count ?? 0
+            let softCap = state.policy?.softCapPerKey ?? 0
             if softCap > 0, currentCount >= softCap,
-               let victim = st.multiplexers[key]?.first(where: { !$0.hasActiveStreams }) {
+               let victim = state.multiplexers[key]?.first(where: { !$0.hasActiveStreams }) {
                 return .closeVictimThenCreate(victim)
             }
-            return .ready(makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni, &st))
+            return .ready(makeAndRegisterMultiplexer(key: key, host: host, port: port, sni: sni, &state))
         }
+
+        for victim in prunedVictims { victim.close() }
 
         let multiplexer: HTTP3Multiplexer
         switch plan {
@@ -81,11 +80,12 @@ nonisolated final class NaiveHTTP3MultiplexerPool: TransportPool {
             }
         }
 
-        multiplexer.noteStreamStarted()
+        guard multiplexer.noteStreamStarted() else {
+            throw AnywhereError.proxy(.http3, .connectionClosed(detail: "Session closed"))
+        }
         return NaiveHTTP3Stream(multiplexer: multiplexer, configuration: configuration, destination: destination)
     }
 
-    /// Builds a fresh multiplexer, wires its self-eviction, and registers it. Must hold ``state``.
     private func makeAndRegisterMultiplexer(key: String, host: String, port: UInt16, sni: String, _ st: inout PoolState) -> HTTP3Multiplexer {
         let new = HTTP3Multiplexer(host: host, port: port, serverName: sni)
         new.setOnClose { [weak self, weak new] in
@@ -94,14 +94,13 @@ nonisolated final class NaiveHTTP3MultiplexerPool: TransportPool {
         }
         st.multiplexers[key, default: []].append(new)
         st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
+        _ = new.tryReserveStream()
         return new
     }
 
-    /// Returns the least-loaded multiplexer when the pool is at its hard cap.
-    /// Must be called with ``state`` held.
-    private func overflowSession(key: String, _ st: inout PoolState) -> HTTP3Multiplexer? {
-        let hardCap = st.policy?.hardCapPerKey ?? 0
-        guard hardCap > 0, let pool = st.multiplexers[key], pool.count >= hardCap else {
+    private func overflowSession(key: String, _ state: inout PoolState) -> HTTP3Multiplexer? {
+        let hardCap = state.policy?.hardCapPerKey ?? 0
+        guard hardCap > 0, let pool = state.multiplexers[key], pool.count >= hardCap else {
             return nil
         }
         let candidate = pool
@@ -114,22 +113,27 @@ nonisolated final class NaiveHTTP3MultiplexerPool: TransportPool {
 
     // MARK: - Eviction
 
-    /// Removes closed/stream-blocked muxes (age-based eviction is the base's). Must hold ``state``.
-    private func pruneDead(key: String, _ st: inout PoolState) {
-        st.multiplexers[key]?.removeAll { multiplexer in
+    private func pruneDead(key: String, _ state: inout PoolState) -> [HTTP3Multiplexer] {
+        guard let current = state.multiplexers[key] else { return [] }
+        var toClose: [HTTP3Multiplexer] = []
+        var survivors: [HTTP3Multiplexer] = []
+        for multiplexer in current {
             if multiplexer.isClosed {
-                st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-                return true
+                state.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                continue
             }
             if multiplexer.poolIsStreamBlocked && !multiplexer.hasActiveStreams {
-                st.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
-                multiplexer.close()
-                return true
+                state.lastActivity.removeValue(forKey: ObjectIdentifier(multiplexer))
+                toClose.append(multiplexer)
+                continue
             }
-            return false
+            survivors.append(multiplexer)
         }
-        if st.multiplexers[key]?.isEmpty == true {
-            st.multiplexers.removeValue(forKey: key)
+        if survivors.isEmpty {
+            state.multiplexers.removeValue(forKey: key)
+        } else {
+            state.multiplexers[key] = survivors
         }
+        return toClose
     }
 }

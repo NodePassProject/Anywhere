@@ -14,8 +14,14 @@ nonisolated private let logger = AnywhereLogger(category: "TunnelStack+Lifecycle
 extension TunnelStack {
 
     // MARK: - Lifecycle
-    
-    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) async {
+
+    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) async -> Bool {
+        guard transition(to: .starting) else { return false }
+        let epoch = claimStartEpoch()
+        pendingConfigurationSwitch = nil
+        pendingSuspend = false
+        pendingWake = false
+        makeFreshDutyCycleStreams()
         AnywhereLogger.installLogSink { [weak self] message, level in
             let logLevel: TunnelLogLevel
             switch level {
@@ -31,27 +37,48 @@ extension TunnelStack {
         let udpPlane = UDPPlane(stack: self)
         self.udpPlane = udpPlane
 
-        running.store(true, ordering: .relaxed)
-
         var precompiledRouting: DomainRouter.CompiledRouting?
         if Self.effectiveProxyMode(settings: TunnelSettings.load(), network: networkContext) == .rule {
             precompiledRouting = await domainRouter.compileRoutingConfiguration()
+        }
+
+        guard phase == .starting, epoch == startEpoch else {
+            logger.warning("[TunnelStack] Start aborted: phase is \(phase), epoch \(epoch)/\(startEpoch)")
+            if epoch == startEpoch {
+                self.packetFlow = nil
+                self.configuration = nil
+                self.udpPlane = nil
+            }
+            return false
         }
         configureRuntime(for: configuration, precompiledRouting: precompiledRouting)
 
         installLwipCallbacks()
         lwip_bridge_init()
         startTimeoutTimer()
-        
+
         rootTask = Task { await self.run(packetFlow: packetFlow, udpPlane: udpPlane) }
-        
+
+        transition(to: .running)
         logger.debug("[TunnelStack] Started")
 
         CertificatePolicy.startObserving()
+        if let pending = pendingConfigurationSwitch {
+            pendingConfigurationSwitch = nil
+            switchConfiguration(pending)
+        }
+        if pendingSuspend {
+            pendingSuspend = false
+            suspendOutbound()
+        } else if pendingWake {
+            pendingWake = false
+            invalidateOutboundState(configuration: configuration)
+        }
+        return true
     }
 
     // MARK: - Task tree
-    
+
     private func run(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         await withDiscardingTaskGroup { group in
             group.addTask { [planeCommands] in
@@ -65,7 +92,7 @@ extension TunnelStack {
             }
         }
     }
-    
+
     private func runDutyCycle(packetFlow: NEPacketTunnelFlow, udpPlane: UDPPlane) async {
         await withDiscardingTaskGroup { group in
             group.addTask { [outputKick] in
@@ -92,7 +119,7 @@ extension TunnelStack {
             group.cancelAll()
         }
     }
-    
+
     private func finishShutdown() {
         shutdownInternal()
         lwip_bridge_set_host_ctx(nil)
@@ -103,36 +130,76 @@ extension TunnelStack {
         configuration = nil
         finishPlaneCommands()
     }
-    
+
     func stop() async {
-        running.store(false, ordering: .relaxed)
+        switch phase {
+        case .idle, .stopped:
+            return
+        case .stopping:
+            await withCheckedContinuation { stopWaiters.append($0) }
+            return
+        case .starting, .running, .suspended:
+            break
+        }
+        transition(to: .stopping)
         nurseryJobContinuation.finish()
         await rootTask?.value
         rootTask = nil
         AnywhereLogger.installLogSink(nil)
+        transition(to: .stopped)
+        let waiters = stopWaiters
+        stopWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
-    
+
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
+        if phase == .starting {
+            logger.info("[VPN] Configuration switch deferred until start completes")
+            pendingConfigurationSwitch = newConfiguration
+            return
+        }
+        guard phase.isActive else {
+            logger.warning("[VPN] Configuration switch ignored: phase is \(phase)")
+            return
+        }
         logger.info("[VPN] Configuration switched")
         restartStack(configuration: newConfiguration)
     }
-    
+
     func handleWake() {
-        guard running.load(ordering: .relaxed), let configuration else { return }
+        pendingSuspend = false
+        guard phase.isActive, let configuration else {
+            if phase == .starting { pendingWake = true }
+            return
+        }
         logger.info("[VPN] Device wake")
+        if phase == .suspended {
+            transition(to: .running)
+        }
         invalidateOutboundState(configuration: configuration)
     }
-    
-    func suspendOutbound() {
-        guard running.load(ordering: .relaxed) else { return }
-        logger.info("[VPN] Path offline/sleep")
 
+    func suspendOutbound() {
+        switch phase {
+        case .running:
+            logger.info("[VPN] Path offline/sleep")
+            transition(to: .suspended)
+        case .starting:
+            logger.info("[VPN] Path offline/sleep during start")
+            pendingSuspend = true
+            pendingWake = false
+            return
+        case .suspended:
+            logger.info("[VPN] Path offline/sleep while suspended")
+        case .idle, .stopping, .stopped:
+            return
+        }
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: false)
     }
-    
+
     func updateNetworkContext(isWiFi: Bool, isCellular: Bool, ssid: String?) {
-        guard running.load(ordering: .relaxed), let configuration else { return }
+        guard phase.isActive, let configuration else { return }
 
         let context = NetworkContext(isWiFi: isWiFi, isCellular: isCellular, ssid: ssid)
         guard context != networkContext else { return }
@@ -143,25 +210,25 @@ extension TunnelStack {
         logger.info("[VPN] Trusted-network policy: effective mode \(proxyMode.rawValue) → \(newEffective.rawValue) (Wi-Fi=\(isWiFi), cellular=\(isCellular), SSID=\(ssid ?? "—"))")
         restartStack(configuration: configuration, revalidateMode: true)
     }
-    
+
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
         closeAllActiveTCP()
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: true)
     }
-    
+
     private func closeAllActiveTCP() {
         lwip_bridge_for_each_tcp { arg in
             guard let arg else { return }
             BridgeContext.unretained(arg, as: TCPConnection.self).assumeIsolated { $0.close() }
         }
     }
-    
+
     private func reclaimAllOutboundPools() {
         TransportReclaim.reclaimAll()
         MITMScriptHTTP2Pool.shared.reclaim()
     }
-    
+
     private func reclaimInstanceTransports(rebuildMultiplexerPool: Bool) {
         let rebuiltMultiplexerPool: VLESSVisionUDPMultiplexerPool?
         if rebuildMultiplexerPool, let configuration, configuration.outboundProtocol == .vless {
@@ -171,7 +238,7 @@ extension TunnelStack {
         }
         submitPlaneCommand(.reclaim(replacementMultiplexerPool: rebuiltMultiplexerPool))
     }
-    
+
     private func shutdownInternal() {
         lwipTick?.cancel()
         lwipTick = nil
@@ -189,17 +256,17 @@ extension TunnelStack {
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: false)
 
-        isTearingDown.store(true, ordering: .relaxed)
+        lwipAbortContext.store(.teardown, ordering: .relaxed)
         lwip_bridge_shutdown()
-        isTearingDown.store(false, ordering: .relaxed)
+        lwipAbortContext.store(.none, ordering: .relaxed)
         FlowGauge.publishTCPTable(0)
         logger.debug("[TunnelStack] Shutdown complete")
     }
-    
+
     private func restartStack(configuration: ProxyConfiguration, revalidateMode: Bool = false) {
         if revalidateMode, deferredRestartScheduled { return }
 
-        let now = CFAbsoluteTimeGetCurrent()
+        let now = MonotonicClock.now
         let elapsed = now - lastRestartTime
 
         if elapsed < TunnelConstants.restartThrottleInterval {
@@ -216,7 +283,7 @@ extension TunnelStack {
 
         restartStackNow(configuration: configuration)
     }
-    
+
     private func runDeferredRestart(
         configuration: ProxyConfiguration,
         revalidateMode: Bool,
@@ -224,21 +291,24 @@ extension TunnelStack {
         generation: Int
     ) async {
         try? await Task.sleep(for: .seconds(delay))
-        guard !Task.isCancelled else { return }
         guard generation == deferredRestartGeneration else { return }
         deferredRestartScheduled = false
-        guard running.load(ordering: .relaxed) else { return }
+        guard !Task.isCancelled, phase.isActive else { return }
         if revalidateMode, computeEffectiveProxyMode() == proxyMode { return }
         restartStackNow(configuration: configuration)
     }
-    
+
     private func restartStackNow(configuration: ProxyConfiguration) {
+        guard phase.isActive else {
+            logger.warning("[TunnelStack] Restart ignored: phase is \(phase)")
+            return
+        }
         deferredRestartGeneration += 1
         deferredRestartScheduled = false
-        lastRestartTime = CFAbsoluteTimeGetCurrent()
+        lastRestartTime = MonotonicClock.now
 
         shutdownInternal()
-        
+
         connectionRouter.clearRejectMarks()
 
         self.configuration = configuration
@@ -250,7 +320,7 @@ extension TunnelStack {
     }
 
     // MARK: - Settings Observation
-    
+
     private func runSettingsObserver() async {
         let settings = AWNotificationCenter.Notification.tunnelSettingsChanged as String
         let routing = AWNotificationCenter.Notification.routingChanged as String
@@ -270,7 +340,7 @@ extension TunnelStack {
     }
 
     private func handleSettingsChanged() {
-        guard running.load(ordering: .relaxed), let configuration else { return }
+        guard phase.isActive, let configuration else { return }
 
         let old = settings
         let new = TunnelSettings.load()
@@ -302,7 +372,7 @@ extension TunnelStack {
             logger.info("[VPN] DNS interception exemptions changed: \(new.interceptExemptDNSServers.sorted())")
         }
         publishUDPConfig()
-        
+
         if new.tunnelIncludedRoutes != old.tunnelIncludedRoutes || new.tunnelExcludedRoutes != old.tunnelExcludedRoutes {
             logger.info("[VPN] Custom routes changed: included=\(new.tunnelIncludedRoutes), excluded=\(new.tunnelExcludedRoutes)")
             requestReapplyTunnelSettings()
@@ -317,24 +387,24 @@ extension TunnelStack {
         }
 
         logger.info("[VPN] Settings changed")
-        
+
         if advertiseIPv6ToAppsChanged || hideVPNIconChanged {
             requestReapplyTunnelSettings()
         }
 
         restartStack(configuration: configuration)
     }
-    
+
     private func handleRoutingChanged() async {
-        guard running.load(ordering: .relaxed) else { return }
+        guard phase.isActive else { return }
         guard proxyMode == .rule else { return }
         logger.info("[VPN] Routing changed")
         domainRouter.install(await domainRouter.compileRoutingConfiguration())
         connectionRouter.clearRejectMarks()
     }
-    
+
     private func handleMITMChanged() {
-        guard running.load(ordering: .relaxed) else { return }
+        guard phase.isActive else { return }
         logger.info("[VPN] MITM settings changed")
         loadMITMSetting()
         publishUDPConfig()

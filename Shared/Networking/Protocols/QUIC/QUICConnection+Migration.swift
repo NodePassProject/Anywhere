@@ -15,11 +15,11 @@ nonisolated private let logger = AnywhereLogger(category: "QUICConnection")
 extension QUICConnection {
 
     // MARK: Migration
-    
+
     var migrationEnabled: Bool {
         transport == nil && !tuning.disableActiveMigration
     }
-    
+
     func makeMigrationLocalAddr() -> sockaddr_storage {
         migrationCounter = migrationCounter &+ 1
         let tag = migrationCounter == 0 ? 1 : migrationCounter
@@ -48,14 +48,29 @@ extension QUICConnection {
         }
         return storage
     }
-    
+
+    func setMigration(_ new: Migration) {
+        guard Migration.canTransition(from: migration, to: new) else {
+            logger.error("[QUIC] Invalid migration transition \(migration.label) → \(new.label); ignored")
+            return
+        }
+        if case .proactiveProbing = new {} else {
+            proactiveDeadlineTask?.cancel()
+            proactiveDeadlineTask = nil
+        }
+        migration = new
+    }
+
     func attemptReactiveMigration() {
-        if migrationKind == .proactive {
-            migratingCarrier?.assumeIsolated { $0.close() }
-            clearMigrationState()
+        switch migration {
+        case .proactiveProbing(let target, _), .proactiveValidating(let target, _):
+            target.assumeIsolated { $0.close() }
+            setMigration(.none)
+        case .none, .reactiveValidating:
+            break
         }
 
-        guard migrationEnabled, state == .connected, migrationKind == nil,
+        guard migrationEnabled, phase == .connected, case .none = migration,
               migrationFailures < Self.maxMigrationFailures,
               let conn = connectionOpaquePointer else {
             close(error: AnywhereError.quic(.connectionFailed(detail: "network path lost")))
@@ -85,8 +100,8 @@ extension QUICConnection {
             close(error: AnywhereError.quic(.connectionFailed(detail: "migration rejected: \(rv)")))
             return
         }
-        
-        migrationKind = .reactive
+
+        setMigration(.reactiveValidating(localAddr: newLocal))
         let oldCarrier = carrier
         carrier = newCarrier
         localAddr = newLocal
@@ -96,9 +111,9 @@ extension QUICConnection {
         writeToUDP()
         rescheduleTimer()
     }
-    
+
     func attemptProactiveMigration() {
-        guard migrationEnabled, state == .connected, migrationKind == nil,
+        guard migrationEnabled, phase == .connected, case .none = migration,
               migrationFailures < Self.maxMigrationFailures,
               connectionOpaquePointer != nil,
               let oldType = carrier?.assumeIsolated({ $0.currentInterfaceType }) else { return }
@@ -114,10 +129,8 @@ extension QUICConnection {
         }
 
         let newLocal = makeMigrationLocalAddr()
-        migrationKind = .proactive
-        migratingCarrier = target
-        migratingLocalAddr = newLocal
-        
+        setMigration(.proactiveProbing(target: target, localAddr: newLocal))
+
         armReceive(target, localAddr: newLocal) { [weak self] _ in
             self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
         }
@@ -126,32 +139,32 @@ extension QUICConnection {
                 self?.assumeIsolated { $0.abortProactiveIfNotValidating() }
             }
         }
-        
-        proactiveDeadlineTask?.cancel()
+
         proactiveDeadlineTask = Task { [weak self, weak target] in
             try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
             guard !Task.isCancelled, let self, let target else { return }
             self.bridge.enqueue {
                 self.assumeIsolated { me in
-                    guard me.migratingCarrier === target, !me.proactiveValidating else { return }
+                    guard case .proactiveProbing(let current, _) = me.migration, current === target else { return }
                     logger.warning("[QUIC] Proactive migration target not ready in \(Int(Self.proactiveReadyTimeout))s; staying put")
                     me.abortProactiveMigration(countAsFailure: false)
                 }
             }
         }
-        
+
         target.assumeIsolated { $0.onReady = { [weak self, weak target] in
             guard let self else { return }
             self.assumeIsolated { me in
-                guard let target, me.migratingCarrier === target,
+                guard let target,
+                      case .proactiveProbing(let current, let migratingLocal) = me.migration, current === target,
                       let conn = me.connectionOpaquePointer,
                       let newType = target.assumeIsolated({ $0.currentInterfaceType }), newType != oldType else {
-                    me.abortProactiveMigration(countAsFailure: false)
+                    me.abortProactiveIfNotValidating()
                     return
                 }
                 let ts = me.currentTimestamp()
                 let prevBusy = me.enterConnHeld()
-                let rv = me.initiateMigration(conn, localAddr: newLocal, remoteAddr: me.remoteAddr,
+                let rv = me.initiateMigration(conn, localAddr: migratingLocal, remoteAddr: me.remoteAddr,
                                               addrLen: me.addrLen, ts: ts)
                 me.exitConnHeld(prevBusy)
                 guard rv == 0 else {
@@ -159,72 +172,102 @@ extension QUICConnection {
                     me.abortProactiveMigration(countAsFailure: true)
                     return
                 }
-                me.proactiveValidating = true
-                me.proactiveDeadlineTask?.cancel()
-                me.proactiveDeadlineTask = nil
+                me.setMigration(.proactiveValidating(target: target, localAddr: migratingLocal))
+                me.proactiveDeadlineTask = Task { [weak self, weak target] in
+                    try? await Task.sleep(for: .seconds(Self.proactiveReadyTimeout))
+                    guard !Task.isCancelled, let self, let target else { return }
+                    self.bridge.enqueue {
+                        self.assumeIsolated { me in
+                            guard case .proactiveValidating(let current, _) = me.migration, current === target else { return }
+                            logger.warning("[QUIC] Proactive migration path validation timed out; staying put")
+                            me.abortProactiveMigration(countAsFailure: true)
+                        }
+                    }
+                }
                 logger.info("[QUIC] Proactive migration: validating better path")
                 me.writeToUDP()
                 me.rescheduleTimer()
             }
         } }
     }
-    
+
     func abortProactiveMigration(countAsFailure: Bool) {
-        guard migrationKind == .proactive else { return }
-        migratingCarrier?.assumeIsolated { $0.close() }
-        clearMigrationState()
-        if countAsFailure { migrationFailures += 1 }
+        switch migration {
+        case .proactiveProbing(let target, _), .proactiveValidating(let target, _):
+            target.assumeIsolated { $0.close() }
+            setMigration(.none)
+            if countAsFailure { migrationFailures += 1 }
+        case .none, .reactiveValidating:
+            break
+        }
     }
-    
+
     func abortProactiveIfNotValidating() {
-        guard migrationKind == .proactive, !proactiveValidating else { return }
+        guard case .proactiveProbing = migration else { return }
         abortProactiveMigration(countAsFailure: false)
     }
-    
-    func clearMigrationState() {
-        proactiveDeadlineTask?.cancel()
-        proactiveDeadlineTask = nil
-        proactiveValidating = false
-        migratingCarrier = nil
-        migrationKind = nil
-    }
-    
-    func handlePathValidation(result: NGTCP2PathValidationResult) {
-        if result == .aborted {
-            if migrationKind == .proactive { abortProactiveMigration(countAsFailure: false) }
+
+    func handlePathValidation(result: NGTCP2PathValidationResult, pathLocal: sockaddr_storage?) {
+        switch migration {
+        case .none:
             return
-        }
-        guard let kind = migrationKind else { return }
-        if result == .success {
-            if kind == .proactive, let target = migratingCarrier {
+        case .proactiveProbing:
+            return
+        case .proactiveValidating(let target, let migratingLocal):
+            guard pathBelongsToMigration(pathLocal, expected: migratingLocal) else { return }
+            switch result {
+            case .success:
+                if !target.assumeIsolated({ $0.isUsable }) {
+                    logger.warning("[QUIC] Migration target died during validation; adopting committed path, expecting path-down")
+                }
                 let old = carrier
                 carrier = target
-                localAddr = migratingLocalAddr
-                migratingCarrier = nil
-                armActiveCarrier(target, localAddr: localAddr)
+                localAddr = migratingLocal
+                armActiveCarrier(target, localAddr: migratingLocal)
                 old?.assumeIsolated { $0.close() }
-            }
-            clearMigrationState()
-            migrationFailures = 0
-            logger.info("[QUIC] Migration validated; new path active")
-        } else {
-            logger.warning("[QUIC] Migration path validation failed")
-            if kind == .proactive {
+                setMigration(.none)
+                migrationFailures = 0
+                logger.info("[QUIC] Migration validated; new path active")
+            case .failure:
+                logger.warning("[QUIC] Migration path validation failed")
                 abortProactiveMigration(countAsFailure: true)
-            } else {
-                clearMigrationState()
+            case .aborted:
+                abortProactiveMigration(countAsFailure: false)
+            }
+        case .reactiveValidating(let migratingLocal):
+            guard pathBelongsToMigration(pathLocal, expected: migratingLocal) else { return }
+            switch result {
+            case .success:
+                setMigration(.none)
+                migrationFailures = 0
+                logger.info("[QUIC] Migration validated; new path active")
+            case .failure:
+                logger.warning("[QUIC] Migration path validation failed")
+                setMigration(.none)
                 close(error: AnywhereError.quic(.connectionFailed(detail: "migration path validation failed")))
+            case .aborted:
+                logger.warning("[QUIC] Reactive migration validation aborted; releasing migration state")
+                setMigration(.none)
             }
         }
     }
-    
-    func carrierForOutPath(local: sockaddr_storage) -> QUICDatagramCarrier? {
-        if migratingCarrier != nil, sockaddrMatches(local, migratingLocalAddr, length: addrLen) {
-            return migratingCarrier
-        }
-        return carrier
+
+    private func pathBelongsToMigration(_ pathLocal: sockaddr_storage?, expected: sockaddr_storage) -> Bool {
+        guard let pathLocal else { return true }
+        return sockaddrMatches(pathLocal, expected, length: addrLen)
     }
-    
+
+    func carrierForOutPath(local: sockaddr_storage) -> QUICDatagramCarrier? {
+        switch migration {
+        case .proactiveProbing(let target, let migratingLocal),
+             .proactiveValidating(let target, let migratingLocal):
+            if sockaddrMatches(local, migratingLocal, length: addrLen) { return target }
+            return carrier
+        case .none, .reactiveValidating:
+            return carrier
+        }
+    }
+
     func sockaddrMatches(_ lhs: sockaddr_storage, _ rhs: sockaddr_storage, length: Int) -> Bool {
         var lhs = lhs
         var rhs = rhs
@@ -235,13 +278,13 @@ extension QUICConnection {
             }
         }
     }
-    
+
     func sendTxBuf(length: Int, to carrier: QUICDatagramCarrier?) {
         guard length > 0 else { return }
         let datagram = txBuffer.withUnsafeBufferPointer { Data(bytes: $0.baseAddress!, count: length) }
         sendDatagram(datagram, to: carrier)
     }
-    
+
     func sendDatagram(_ datagram: Data, to carrier: QUICDatagramCarrier?) {
         if let transport {
             if let transportSealContinuation {

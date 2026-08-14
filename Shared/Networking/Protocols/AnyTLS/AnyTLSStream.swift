@@ -22,38 +22,46 @@ actor AnyTLSStream {
     /// (`receiveRaw`); `Sendable` producer via `yield`/`finish`.
     private let inbox = AsyncInbox<Data>()
 
-    /// Set once `deliverClose` fires; the nonisolated `isConnected` reads it.
-    private nonisolated let _ended = Atomic<Bool>(false)
-    /// Set by `cancel()` so the multiplexer does not echo a FIN back to itself.
-    private nonisolated let _locallyCancelled = Atomic<Bool>(false)
+    private enum Phase: PhaseTransitionable {
+        case open
+        case localCancelled
+        case ended
 
-    private struct EndState {
-        var endFired = false
-        /// Fires exactly once when the stream ends; used to return the multiplexer to the idle
-        /// pool. Installed at creation; nilled after firing so the hook's captures release.
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .localCancelled),
+                 (.open, .ended),
+                 (.localCancelled, .ended):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    private struct StreamState: PhaseHolding {
+        var phase: Phase = .open
         var onEnd: (@Sendable () -> Void)?
     }
-    private let endState: Mutex<EndState>
+    private nonisolated let state: Mutex<StreamState>
 
     init(sid: UInt32, multiplexer: AnyTLSMultiplexer, outerTLSVersion: TLSVersion?,
          onEnd: (@Sendable () -> Void)? = nil) {
         self.sid = sid
         self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
-        self.endState = Mutex(EndState(onEnd: onEnd))
+        self.state = Mutex(StreamState(onEnd: onEnd))
     }
 
-    nonisolated var isConnected: Bool { !_ended.load(ordering: .relaxed) }
+    nonisolated var isConnected: Bool {
+        state.withLock { if case .open = $0.phase { true } else { false } }
+    }
     nonisolated var outerTLSVersion: TLSVersion? { cachedTLSVersion }
-
-    /// Set by `cancel()` so the multiplexer does not echo a FIN back to itself.
-    nonisolated var locallyCancelled: Bool { _locallyCancelled.load(ordering: .relaxed) }
 
     // MARK: - Send
 
     func sendRaw(_ data: Data) async throws {
-        guard let multiplexer else {
-            throw AnywhereError.proxy(.anyTLS, .connectionClosed(detail: "AnyTLS multiplexer deallocated"))
+        guard isConnected, let multiplexer else {
+            throw AnywhereError.proxy(.anyTLS, .connectionClosed(detail: "AnyTLS stream closed"))
         }
         try await multiplexer.writeData(sid: sid, data: data)
     }
@@ -67,10 +75,16 @@ actor AnyTLSStream {
     // MARK: - Cancel
 
     nonisolated func cancel() {
-        guard !_locallyCancelled.exchange(true, ordering: .relaxed) else { return }
+        let outcome: (proceed: Bool, hook: (@Sendable () -> Void)?) = state.withLock { s in
+            guard s.transition(to: .localCancelled) else { return (false, nil) }
+            let hook = s.onEnd
+            s.onEnd = nil
+            return (true, hook)
+        }
+        guard outcome.proceed else { return }
         logger.debug("[AnyTLSStream] cancel sid=\(sid)")
         inbox.finish()
-        fireOnEndOnce()
+        outcome.hook?()
         Task { await self.removeFromMultiplexer() }
     }
 
@@ -87,24 +101,17 @@ actor AnyTLSStream {
 
     /// Delivers a clean EOF (`nil`) or transport failure; further reads are rejected.
     nonisolated func deliverClose(error: Error?) {
-        guard !_ended.exchange(true, ordering: .relaxed) else { return }
+        let outcome: (proceed: Bool, hook: (@Sendable () -> Void)?) = state.withLock { s in
+            guard s.transition(to: .ended) else { return (false, nil) }
+            let hook = s.onEnd
+            s.onEnd = nil
+            return (true, hook)
+        }
+        guard outcome.proceed else { return }
         let kind = error.map { "error=\($0.localizedDescription)" } ?? "EOF"
         logger.debug("[AnyTLSStream] deliverClose sid=\(sid) \(kind)")
         if let error { inbox.finish(throwing: error) } else { inbox.finish() }
-        fireOnEndOnce()
-    }
-
-    private nonisolated func fireOnEndOnce() {
-        let hook: (() -> Void)? = endState.withLock { state in
-            if state.endFired {
-                return nil
-            }
-            state.endFired = true
-            let hook = state.onEnd
-            state.onEnd = nil
-            return hook
-        }
-        hook?()
+        outcome.hook?()
     }
 }
 

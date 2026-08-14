@@ -76,7 +76,12 @@ nonisolated enum TransportErrorLogger {
         prefix: String
     ) {
         let errorDescription = conciseErrorDescription(error)
-        logger.warning("\(prefix) Send failed: \(endpoint): \(errorDescription)")
+        let line = "\(prefix) Send failed: \(endpoint): \(errorDescription)"
+        switch AnywhereError.severity(of: error) {
+        case .debug: logger.debug(line)
+        case .info: logger.info(line)
+        case .warning, .error: logger.warning(line)
+        }
     }
 }
 

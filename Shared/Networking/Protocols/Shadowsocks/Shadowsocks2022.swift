@@ -56,6 +56,8 @@ nonisolated final class Shadowsocks2022Connection: ProxyConnection {
     /// sends must hand the handshake to exactly one caller.
     private let handshake: Mutex<Data?>
 
+    private let sendChain = SerialSender()
+
     init(inner: ProxyConnection, cipher: ShadowsocksCipher, pskList: [Data], addressHeader: Data) {
         self.inner = inner
         self.cipher = cipher
@@ -76,19 +78,21 @@ nonisolated final class Shadowsocks2022Connection: ProxyConnection {
     var isConnected: Bool { inner.isConnected }
 
     func sendRaw(_ data: Data) async throws {
-        let header: Data? = handshake.withLock { header in
-            defer { header = nil }
-            return header
-        }
-
-        let output: Data = try writeState.withLock { state in
-            if let header {
-                return try buildRequest(payload: data, addressHeader: header, state: &state)
-            } else {
-                return try sealChunks(plaintext: data, state: &state)
+        let pending: SerialSender.Pending = try writeState.withLock { state in
+            let header: Data? = handshake.withLock { header in
+                defer { header = nil }
+                return header
             }
+            let output: Data
+            if let header {
+                output = try buildRequest(payload: data, addressHeader: header, state: &state)
+            } else {
+                output = try sealChunks(plaintext: data, state: &state)
+            }
+            let inner = self.inner
+            return sendChain.submit { try await inner.sendRaw(output) }
         }
-        try await inner.sendRaw(output)
+        try await pending.value()
     }
 
     func receiveRaw() async throws -> Data? {
@@ -106,6 +110,7 @@ nonisolated final class Shadowsocks2022Connection: ProxyConnection {
     }
 
     func cancel() {
+        sendChain.cancel()
         inner.cancel()
     }
 

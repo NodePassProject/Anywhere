@@ -31,7 +31,7 @@ nonisolated final class MITMScriptHTTP2Pool: TransportPool {
         pool.startIdleEviction(Self.poolPolicy)
     }
 
-    func reclaim() { pool.closeAll() }
+    func reclaim() { pool.drainAll() }
 
     private static func originKey(host: String, port: UInt16, insecure: Bool) -> String {
         "\(host):\(port):\(insecure)"

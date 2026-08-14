@@ -37,7 +37,22 @@ nonisolated struct MultiplexerPolicy {
 
 nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendable>: Sendable {
 
-    struct PoolState {
+    enum Phase: PhaseTransitionable {
+        case open, closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.open, .closed):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    struct PoolState: PhaseHolding {
+        var phase: Phase = .open
+
         var multiplexers: [String: [S]] = [:]
 
         /// `MonotonicClock.now` at last acquire/reuse, for idle eviction. Subclasses stamp it
@@ -50,7 +65,7 @@ nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendab
         /// Subclass-owned pool state
         var extra: Extra
     }
-    
+
     let state: Mutex<PoolState>
 
     init(extra: Extra) {
@@ -130,17 +145,29 @@ nonisolated final class MultiplexerPool<S: Multiplexer & Sendable, Extra: Sendab
         }
     }
 
-    /// Closes every pooled multiplexer. Leaves the idle sweep running so reused singletons
-    /// keep sweeping; per-config pools cancel it in `deinit` when dropped.
-    func closeAll() {
-        let all: [S] = state.withLock { st in
-            let all = st.multiplexers.values.flatMap { $0 }
-            st.multiplexers.removeAll()
-            st.lastActivity.removeAll()
-            return all
-        }
+    private func takeAll(_ st: inout PoolState) -> [S] {
+        let all = st.multiplexers.values.flatMap { $0 }
+        st.multiplexers.removeAll()
+        st.lastActivity.removeAll()
+        return all
+    }
 
+    func drainAll() {
+        let all: [S] = state.withLock { takeAll(&$0) }
         for multiplexer in all {
+            multiplexer.close(error: nil)
+        }
+    }
+
+    func retire() {
+        let taken: (all: [S], idleTask: Task<Void, Never>?) = state.withLock { st in
+            st.transition(to: .closed)
+            let idleTask = st.idleTask
+            st.idleTask = nil
+            return (takeAll(&st), idleTask)
+        }
+        taken.idleTask?.cancel()
+        for multiplexer in taken.all {
             multiplexer.close(error: nil)
         }
     }

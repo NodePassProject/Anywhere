@@ -41,31 +41,31 @@ actor TunnelStack {
     }
 
     nonisolated let lwipBridge = LWIPConcurrencyBridge(label: AWCore.Identifier.lwipQueue)
-    
+
     var udpPlane: UDPPlane!
-    
-    let outputKick: AsyncStream<Void>
-    private let outputKickContinuation: AsyncStream<Void>.Continuation
-    
-    let planeCommands: AsyncStream<UDPPlaneCommand>
-    private let planeCommandContinuation: AsyncStream<UDPPlaneCommand>.Continuation
-    
+
+    private(set) var outputKick: AsyncStream<Void>
+    private nonisolated let outputKickContinuation: Mutex<AsyncStream<Void>.Continuation>
+
+    private(set) var planeCommands: AsyncStream<UDPPlaneCommand>
+    private var planeCommandContinuation: AsyncStream<UDPPlaneCommand>.Continuation
+
     var rootTask: Task<Void, Never>?
-    
+
     enum NurseryJob {
         case deferredRestart(configuration: ProxyConfiguration, revalidateMode: Bool, delay: TimeInterval, generation: Int)
     }
-    let nurseryJobs: AsyncStream<NurseryJob>
-    nonisolated let nurseryJobContinuation: AsyncStream<NurseryJob>.Continuation
+    private(set) var nurseryJobs: AsyncStream<NurseryJob>
+    var nurseryJobContinuation: AsyncStream<NurseryJob>.Continuation
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
-    
+
     var defaultRouteTarget: RouteTarget = .direct
 
     static let ipv4Proto = NSNumber(value: AF_INET)
     static let ipv6Proto = NSNumber(value: AF_INET6)
-    
+
     struct OutputBufferState {
         var packets: [Data] = []
         var protocols: [NSNumber] = []
@@ -73,19 +73,19 @@ actor TunnelStack {
         var drainInFlight = false
     }
     let outputBuffer = Mutex(OutputBufferState())
-    
+
     var settings = TunnelSettings()
-    
+
     var proxyMode: ProxyMode = .rule
-    
+
     var networkContext = NetworkContext()
-    
+
     private let _mitmEnabled = Atomic<Bool>(false)
     nonisolated var mitmEnabled: Bool { _mitmEnabled.load(ordering: .relaxed) }
     nonisolated let mitmPolicy = MITMRewritePolicy()
     private let _mitmLeafCache = Mutex<MITMLeafCertCache?>(nil)
     nonisolated let mitmCertificateStore = MITMCertificateStore()
-    
+
     nonisolated func mitmLeafCacheCreatingIfNeeded() throws(AnywhereError) -> MITMLeafCertCache {
         try _mitmLeafCache.withLock { (cache) throws(AnywhereError) in
             if let cache { return cache }
@@ -94,17 +94,48 @@ actor TunnelStack {
             return made
         }
     }
-    
-    let running = Atomic<Bool>(false)
-    let isTearingDown = Atomic<Bool>(false)
-    let isPressureFlushing = Atomic<Bool>(false)
-    
-    var lastRestartTime: CFAbsoluteTime = 0
+
+    // MARK: - Lifecycle State
+
+    private(set) var phase: TunnelPhase = .idle
+
+    nonisolated let publishedPhase = Atomic<TunnelPhase>(.idle)
+
+    nonisolated let lwipAbortContext = Atomic<LwipAbortContext>(.none)
+
+    @discardableResult
+    func transition(to new: TunnelPhase) -> Bool {
+        let old = phase
+        guard TunnelPhase.transition(&phase, to: new) else {
+            if new == .starting {
+                logger.debug("[Lifecycle] Start claim declined; phase is \(old)")
+            } else {
+                logger.error("[Lifecycle] Invalid transition \(old) → \(new); ignored")
+            }
+            return false
+        }
+        logger.debug("[Lifecycle] \(old) → \(new)")
+        publishedPhase.store(new, ordering: .relaxed)
+        return true
+    }
+
+    private(set) var startEpoch: UInt64 = 0
+
+    func claimStartEpoch() -> UInt64 {
+        startEpoch += 1
+        return startEpoch
+    }
+
+    var lastRestartTime: TimeInterval = 0
     var deferredRestartGeneration = 0
     var deferredRestartScheduled = false
-    
+    var pendingConfigurationSwitch: ProxyConfiguration?
+    var pendingSuspend = false
+    var pendingWake = false
+    var stopWaiters: [CheckedContinuation<Void, Never>] = []
+
     var lwipTick: BridgeTimer?
-    
+
     let byteCounts = Mutex(TrafficByteCounts())
     nonisolated func addBytesIn(_ n: Int64, target: RouteTarget) {
         byteCounts.withLock { $0.add(bytesIn: n, target: target) }
@@ -132,7 +163,7 @@ actor TunnelStack {
             return entries
         }
     }
-    
+
     private static func compactLogs(_ entries: inout [TunnelLogEntry], now: CFAbsoluteTime) {
         let cutoff = now - TunnelConstants.logRetentionInterval
         entries.removeAll { $0.timestamp < cutoff }
@@ -142,7 +173,7 @@ actor TunnelStack {
     }
 
     // MARK: - UDP Config Snapshot
-    
+
     struct UDPConfig {
         let configuration: ProxyConfiguration?
         let configurationID: UUID?
@@ -165,13 +196,13 @@ actor TunnelStack {
         interceptExemptDNSServers: [],
         advertiseIPv6ToApps: false
     ))
-    
+
     nonisolated func udpConfig() -> UDPConfig { _udpConfig.withLock { $0 } }
-    
+
     nonisolated func isDefaultConfiguration(_ id: UUID) -> Bool {
         udpConfig().configurationID == id
     }
-    
+
     func publishUDPConfig() {
         let snapshot = UDPConfig(
             configuration: configuration,
@@ -186,11 +217,11 @@ actor TunnelStack {
         )
         _udpConfig.withLock { $0 = snapshot }
     }
-    
+
     private let _reflector = Mutex(Reflector.inactive)
-    
+
     nonisolated func reflector() -> Reflector { _reflector.withLock { $0 } }
-    
+
     func publishOutboundRoutingContext(configuration: ProxyConfiguration?) {
         OutboundConnector.setRoutingContext(OutboundConnector.RoutingContext(
             domainRouter: domainRouter,
@@ -200,14 +231,14 @@ actor TunnelStack {
             preventDNSLeak: connectionRouter.preventDNSLeak.load(ordering: .relaxed)
         ))
     }
-    
+
     func publishReflector() {
         let snapshot = settings.reflectionEnabled
             ? Reflector(addresses: settings.reflectionAddresses)
             : .inactive
         _reflector.withLock { $0 = snapshot }
     }
-    
+
     struct UDPFlowKey: Hashable, CustomStringConvertible {
         let srcIP: SIMD16<UInt8>
         let srcPort: UInt16
@@ -219,13 +250,13 @@ actor TunnelStack {
             "\(TunnelStack.ipAddrToString(srcIP, isIPv6: isIPv6)):\(srcPort)-\(TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)):\(dstPort)"
         }
     }
-    
+
     nonisolated let domainRouter: DomainRouter
-    
+
     nonisolated let requestLog = RequestLog()
-    
+
     nonisolated let fakeIPPool: FakeIPPool
-    
+
     nonisolated let connectionRouter: ConnectionRouter
 
     init() {
@@ -236,33 +267,59 @@ actor TunnelStack {
         self.connectionRouter = ConnectionRouter(fakeIPPool: fakeIPPool, domainRouter: domainRouter)
         let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         self.outputKick = stream
-        self.outputKickContinuation = continuation
+        self.outputKickContinuation = Mutex(continuation)
         let (commandStream, commandContinuation) = AsyncStream.makeStream(of: UDPPlaneCommand.self)
         self.planeCommands = commandStream
         self.planeCommandContinuation = commandContinuation
         (self.nurseryJobs, self.nurseryJobContinuation) = AsyncStream.makeStream(of: NurseryJob.self)
         let (reapplyStream, reapplyContinuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
-        self.reapplySettingsSignal = reapplyStream
-        self.reapplySettingsContinuation = reapplyContinuation
+        self.reapplySettingsState = Mutex((stream: reapplyStream, continuation: reapplyContinuation))
     }
-    
+
     nonisolated func kickOutputDrain() {
-        outputKickContinuation.yield(())
+        _ = outputKickContinuation.withLock { $0.yield(()) }
     }
-    
-    nonisolated func submitPlaneCommand(_ command: UDPPlaneCommand) {
+
+    func submitPlaneCommand(_ command: UDPPlaneCommand) {
         planeCommandContinuation.yield(command)
     }
-    
-    nonisolated func finishPlaneCommands() {
+
+    func finishPlaneCommands() {
         planeCommandContinuation.finish()
     }
-    
-    nonisolated let reapplySettingsSignal: AsyncStream<Void>
-    private nonisolated let reapplySettingsContinuation: AsyncStream<Void>.Continuation
-    
+
+    func makeFreshDutyCycleStreams() {
+        planeCommandContinuation.finish()
+        (planeCommands, planeCommandContinuation) = AsyncStream.makeStream(of: UDPPlaneCommand.self)
+        nurseryJobContinuation.finish()
+        (nurseryJobs, nurseryJobContinuation) = AsyncStream.makeStream(of: NurseryJob.self)
+
+        let (kickStream, kickContinuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        outputKick = kickStream
+        let staleKick: AsyncStream<Void>.Continuation = outputKickContinuation.withLock { current in
+            let stale = current
+            current = kickContinuation
+            return stale
+        }
+        staleKick.finish()
+
+        let (reapplyStream, reapplyContinuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        let staleReapply: AsyncStream<Void>.Continuation = reapplySettingsState.withLock { current in
+            let stale = current.continuation
+            current = (stream: reapplyStream, continuation: reapplyContinuation)
+            return stale
+        }
+        staleReapply.finish()
+    }
+
+    private nonisolated let reapplySettingsState: Mutex<(stream: AsyncStream<Void>, continuation: AsyncStream<Void>.Continuation)>
+
+    nonisolated var reapplySettingsSignal: AsyncStream<Void> {
+        reapplySettingsState.withLock { $0.stream }
+    }
+
     nonisolated func requestReapplyTunnelSettings() {
-        reapplySettingsContinuation.yield(())
+        reapplySettingsState.withLock { $0.continuation }.yield(())
     }
 
     // MARK: - Runtime Configuration
@@ -275,7 +332,7 @@ actor TunnelStack {
         connectionRouter.preventDNSLeak.store(settings.preventDNSLeak, ordering: .relaxed)
         proxyMode = Self.effectiveProxyMode(settings: settings, network: networkContext)
         RuleResolver.shared.setUpstream(settings.ipRuleDNSUpstream)
-        
+
         if proxyMode == .direct {
             defaultRouteTarget = .direct
         } else {
@@ -283,20 +340,20 @@ actor TunnelStack {
             ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
             ?? .proxy(configuration.id)
         }
-        
+
         loadMITMSetting()
-        
+
         ConnectionMetrics.shared.setDefaultServer(configuration.id)
 
         publishUDPConfig()
         publishReflector()
         publishOutboundRoutingContext(configuration: configuration)
-        
+
         let multiplexerPool = configuration.outboundProtocol == .vless
         ? VLESSVisionUDPMultiplexerPool(configuration: configuration)
         : nil
         submitPlaneCommand(.setMultiplexerPool(multiplexerPool))
-        
+
         if proxyMode == .rule {
             if let precompiledRouting {
                 domainRouter.install(precompiledRouting)
@@ -307,7 +364,7 @@ actor TunnelStack {
             domainRouter.reset()
         }
     }
-    
+
     static func effectiveProxyMode(settings: TunnelSettings, network: NetworkContext) -> ProxyMode {
         if network.isWiFi, let ssid = network.ssid, settings.trustedSSIDs.contains(ssid) {
             return .direct
@@ -320,7 +377,7 @@ actor TunnelStack {
         }
         return settings.baseProxyMode
     }
-    
+
     func computeEffectiveProxyMode() -> ProxyMode {
         Self.effectiveProxyMode(settings: settings, network: networkContext)
     }
@@ -341,7 +398,7 @@ actor TunnelStack {
     }
 
     // MARK: - IP Address Helpers
-    
+
     static func ipAddrToString(_ addr: UnsafeRawPointer, isIPv6: Bool) -> String {
         var buffer = (
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0),

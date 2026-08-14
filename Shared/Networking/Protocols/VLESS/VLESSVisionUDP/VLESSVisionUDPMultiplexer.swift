@@ -15,13 +15,31 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     // MARK: - Properties
 
     let configuration: ProxyConfiguration
-    
-    private struct State {
+
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case connecting
+        case ready
+        case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting), (.connecting, .ready):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .idle
         var proxyClient: ProxyClient?
         var proxyConnection: ProxyConnection?
         var streams: [UInt16: VLESSVisionUDPStream] = [:]
         var nextSessionID: UInt16 = 1
-        var closed = false
         var isXUDP = false
         var readyTask: Task<Void, Error>?
         var frameParser = VLESSVisionUDPFrameParser()
@@ -29,12 +47,12 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         var runTask: Task<Void, Never>?
     }
 
-    private let lock = Mutex(State())
-    
+    private let state = Mutex(State())
+
     private let sendChain = SerialSender()
 
     private static let idleTimeout: TimeInterval = 16
-    
+
     private let onClose: (@Sendable (VLESSVisionUDPMultiplexer) -> Void)?
 
     // MARK: - Init
@@ -47,30 +65,31 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
 
     // MARK: - Capacity
 
-    var activeStreamCount: Int { lock.withLock { $0.streams.count } }
-    var isClosed: Bool { lock.withLock { $0.closed } }
-    var isFull: Bool { lock.withLock { $0.closed || $0.isXUDP } }
+    var activeStreamCount: Int { state.withLock { $0.streams.count } }
+    var isClosed: Bool { state.withLock { $0.phase == .closed } }
+    var isFull: Bool { state.withLock { $0.phase == .closed || $0.isXUDP } }
 
     // MARK: - Lifecycle
-    
+
     private func ensureReady() async throws {
-        let task: Task<Void, Error> = try lock.withLock { state in
-            if state.closed { throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed")) }
+        let task: Task<Void, Error> = try state.withLock { state in
+            if state.phase == .closed { throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed")) }
             if let existing = state.readyTask { return existing }
             let task = Task<Void, Error> { [weak self] in
                 guard let self else { throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client released")) }
                 try await self.performConnect()
             }
             state.readyTask = task
+            state.transition(to: .connecting)
             return task
         }
         try await task.value
     }
-    
+
     private func performConnect() async throws {
         let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
-        let live = lock.withLock { state -> Bool in
-            guard !state.closed else { return false }
+        let live = state.withLock { state -> Bool in
+            guard state.phase != .closed else { return false }
             state.proxyClient = client
             return true
         }
@@ -84,9 +103,10 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             throw error
         }
 
-        let published = lock.withLock { state -> Bool in
-            guard !state.closed else { return false }
+        let published = state.withLock { state -> Bool in
+            guard state.phase != .closed else { return false }
             state.proxyConnection = connection
+            state.transition(to: .ready)
             markIdlenessLocked(&state)
             return true
         }
@@ -96,7 +116,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         }
         startSession(connection)
     }
-    
+
     private func startSession(_ connection: ProxyConnection) {
         let task = Task {
             await withTaskGroup(of: Void.self) { group in
@@ -104,24 +124,24 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
                 group.addTask { await self.runIdleSweep() }
             }
         }
-        lock.withLock { state in
-            if state.closed {
+        state.withLock { state in
+            if state.phase == .closed {
                 task.cancel()
             } else {
                 state.runTask = task
             }
         }
     }
-    
+
     private func markIdlenessLocked(_ state: inout State) {
         state.idleSince = state.streams.isEmpty ? ContinuousClock.now : nil
     }
-    
+
     private func runIdleSweep() async {
         while !Task.isCancelled {
             enum Step { case expired; case sleep(Duration) }
-            let step: Step? = lock.withLock { state in
-                guard !state.closed else { return nil }
+            let step: Step? = state.withLock { state in
+                guard state.phase != .closed else { return nil }
                 guard let since = state.idleSince else { return .sleep(.seconds(Self.idleTimeout)) }
                 let elapsed = since.duration(to: ContinuousClock.now)
                 if elapsed >= .seconds(Self.idleTimeout) { return .expired }
@@ -140,7 +160,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     }
 
     // MARK: - Streams
-    
+
     func openStream(
         network: VLESSVisionUDPNetwork,
         host: String,
@@ -150,8 +170,8 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         let stream: VLESSVisionUDPStream
         let sessionID: UInt16
         let isXUDP: Bool
-        (stream, sessionID, isXUDP) = try lock.withLock { state in
-            guard !state.closed else {
+        (stream, sessionID, isXUDP) = try state.withLock { state in
+            guard state.phase != .closed else {
                 throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed"))
             }
             let sessionID: UInt16
@@ -185,7 +205,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             removeStreamEntry(sessionID)
             throw error
         }
-        
+
         if isXUDP {
             return stream
         }
@@ -208,23 +228,26 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
         }
         return stream
     }
-    
+
     private func removeStreamEntry(_ sessionID: UInt16) {
-        lock.withLock { _ = $0.streams.removeValue(forKey: sessionID) }
+        state.withLock { state in
+            state.streams.removeValue(forKey: sessionID)
+            markIdlenessLocked(&state)
+        }
     }
-    
+
     func removeStream(_ sessionID: UInt16) {
-        lock.withLock { state in
+        state.withLock { state in
             state.streams.removeValue(forKey: sessionID)
             markIdlenessLocked(&state)
         }
     }
 
     // MARK: - Send
-    
+
     func writeFrame(_ data: Data) async throws {
-        let pending: SerialSender.Pending = try lock.withLock { state in
-            guard !state.closed, let connection = state.proxyConnection else {
+        let pending: SerialSender.Pending = try state.withLock { state in
+            guard state.phase != .closed, let connection = state.proxyConnection else {
                 throw AnywhereError.proxy(.vless, .connectionClosed(detail: "Mux client closed"))
             }
             return sendChain.submit { try await connection.sendRaw(data) }
@@ -262,7 +285,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
 
     private func handleInbound(_ data: Data) {
         enum Deliver { case data(Data); case close }
-        let actions: [(stream: VLESSVisionUDPStream, deliver: Deliver)] = lock.withLock { state in
+        let actions: [(stream: VLESSVisionUDPStream, deliver: Deliver)] = state.withLock { state in
             let frames = state.frameParser.feed(data)
             var out: [(VLESSVisionUDPStream, Deliver)] = []
             for (metadata, payload) in frames {
@@ -278,6 +301,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
                 case .end:
                     if let stream = state.streams[metadata.sessionID] {
                         state.streams.removeValue(forKey: metadata.sessionID)
+                        markIdlenessLocked(&state)
                         out.append((stream, .close))
                     }
 
@@ -297,7 +321,7 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
     }
 
     // MARK: - Close
-    
+
     func close(error: Error? = nil) {
         struct Teardown {
             var streams: [VLESSVisionUDPStream]
@@ -307,9 +331,8 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             var runTask: Task<Void, Never>?
         }
 
-        let teardown: Teardown? = lock.withLock { state in
-            guard !state.closed else { return nil }
-            state.closed = true
+        let teardown: Teardown? = state.withLock { state in
+            guard state.transition(to: .closed) else { return nil }
 
             let snapshot = Teardown(
                 streams: Array(state.streams.values),
@@ -327,13 +350,13 @@ nonisolated final class VLESSVisionUDPMultiplexer: Multiplexer, Sendable {
             return snapshot
         }
         guard let teardown else { return }
-        
+
         teardown.runTask?.cancel()
 
         for stream in teardown.streams {
             stream.deliverClose(error: error)
         }
-        
+
         sendChain.cancel()
         teardown.connection?.cancel()
         teardown.client?.cancel()

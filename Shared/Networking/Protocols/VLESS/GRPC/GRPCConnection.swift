@@ -21,56 +21,57 @@ nonisolated final class GRPCConnection: Sendable {
 
     // MARK: State
 
-    /// Fields guarded by `state`.
-    nonisolated private struct State {
-        var _isConnected = false
+    enum Phase: PhaseTransitionable {
+        case live
+        case halfClosed
+        case cancelled
 
-        /// Raw HTTP/2 byte buffer (accumulates transport reads until a full frame is parseable).
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.live, .halfClosed):
+                return true
+            case (_, .cancelled):
+                return old != .cancelled
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .live
+
         var h2ReadBuffer = Data()
-        /// Reassembles HTTP/2 DATA payloads into length-prefixed gRPC frames.
         var grpcFrameBuffer = Data()
-        /// Decoded app-layer bytes awaiting delivery to the caller.
         var decodedBuffer = Data()
 
-        /// Whether the gRPC response HEADERS (status 200) have been validated.
         var h2ResponseReceived = false
-        /// Whether the server has closed its side of the stream (END_STREAM flag on HEADERS or DATA).
-        var h2StreamClosed = false
 
-        /// Peer's flow-control windows (bytes we can still send without another WINDOW_UPDATE).
         var h2PeerConnectionWindow: Int = 65535
         var h2PeerStreamSendWindow: Int = 65535
         var h2PeerInitialWindowSize: Int = 65535
 
-        /// Local window size, advertised at setup and used as the WINDOW_UPDATE threshold.
-        var h2LocalWindowSize: Int = 4_194_304 // 4 MB
+        var h2LocalWindowSize: Int = 4_194_304
 
-        /// Maximum HTTP/2 frame payload size (SETTINGS_MAX_FRAME_SIZE default, updated by peer).
         var h2MaxFrameSize: Int = 16384
 
-        /// Bytes received but not yet acknowledged via WINDOW_UPDATE.
         var h2ConnectionReceiveConsumed: Int = 0
         var h2StreamReceiveConsumed: Int = 0
 
-        /// Send-side continuations waiting for a WINDOW_UPDATE that re-opens flow control.
         var h2FlowGate = H2FlowGate()
 
-        /// Keepalive ping timer (nil when idleTimeout == 0).
         var keepaliveTask: Task<Void, Never>?
     }
 
     private let state: Mutex<State>
 
-    /// First client-initiated stream ID (odd per RFC 7540 §5.1.1).
     private static let streamId: UInt32 = 1
 
-    /// Safety cap on the raw H2 buffer so a misbehaving peer can't grow memory without bound.
-    private static let maxH2ReadBufferSize = 2_097_152 // 2 MB
-    /// Safety cap on the gRPC reassembly buffer (individual messages > this are an error).
-    private static let maxGRPCFrameBufferSize = 16_777_216 // 16 MB
+    private static let maxH2ReadBufferSize = 2_097_152
+    private static let maxGRPCFrameBufferSize = 16_777_216
 
     var isConnected: Bool {
-        state.withLock { $0._isConnected }
+        state.withLock { $0.phase != .cancelled }
     }
 
     // MARK: - Initializers
@@ -81,7 +82,6 @@ nonisolated final class GRPCConnection: Sendable {
         self.transport = transport
 
         var initialState = State()
-        initialState._isConnected = true
         if configuration.initialWindowsSize > 0 {
             initialState.h2LocalWindowSize = configuration.initialWindowsSize
         }
@@ -98,15 +98,11 @@ nonisolated final class GRPCConnection: Sendable {
 
     // MARK: - Setup
 
-    /// Sends the HTTP/2 preface + SETTINGS and opens the gRPC stream without waiting for
-    /// the server's SETTINGS; some CDNs defer response HEADERS until the first DATA frame.
     func performSetup() async throws {
         var initData = Data()
 
-        // HTTP/2 connection preface (RFC 7540 §3.5).
         initData.append(Self.h2Preface)
 
-        // Client SETTINGS: ENABLE_PUSH=0, INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE=10MB.
         var settingsPayload = Data()
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
         let windowSize = UInt32(state.withLock { $0.h2LocalWindowSize })
@@ -118,7 +114,6 @@ nonisolated final class GRPCConnection: Sendable {
         settingsPayload.append(contentsOf: [0x00, 0x06, 0x00, 0xA0, 0x00, 0x00])
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
-        // Connection-level WINDOW_UPDATE (1 GB).
         let connWindowInc = Self.h2ConnectionWindowSize
         var windowUpdatePayload = Data(count: 4)
         windowUpdatePayload[0] = UInt8((connWindowInc >> 24) & 0xFF)
@@ -127,7 +122,6 @@ nonisolated final class GRPCConnection: Sendable {
         windowUpdatePayload[3] = UInt8(connWindowInc & 0xFF)
         initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: windowUpdatePayload))
 
-        // HEADERS for the gRPC stream; END_STREAM deliberately unset — the tunnel keeps sending DATA.
         let headerBlock = encodeGRPCRequestHeaders()
         initData.append(buildH2Frame(
             type: Self.h2FrameHeaders,
@@ -144,8 +138,6 @@ nonisolated final class GRPCConnection: Sendable {
         try await processInitialServerFrames()
     }
 
-    /// Reads frames until the server's SETTINGS is received and ACKed, handling
-    /// WINDOW_UPDATE/PING and absorbing an early response HEADERS along the way.
     private func processInitialServerFrames() async throws {
         while true {
             let frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)
@@ -164,7 +156,6 @@ nonisolated final class GRPCConnection: Sendable {
                     startKeepaliveIfNeeded()
                     return
                 }
-                // ACK for our own SETTINGS; keep reading for the server's.
                 continue
 
             case Self.h2FrameHeaders:
@@ -172,7 +163,6 @@ nonisolated final class GRPCConnection: Sendable {
                     if let rejection = checkH2ResponseStatus(frame.payload) {
                         throw AnywhereError.proxy(.grpc, .handshakeFailed(detail: "gRPC response rejected: \(rejection)"))
                     }
-                    // Trailers-only response: HTTP 200 but the gRPC call itself failed.
                     if frame.flags & Self.h2FlagEndStream != 0 {
                         if let grpcError = Self.parseGRPCTrailer(frame.payload) {
                             markClosed()
@@ -214,14 +204,12 @@ nonisolated final class GRPCConnection: Sendable {
 
     // MARK: - Public send / receive
 
-    /// Sends a raw byte chunk as one gRPC `Hunk` message on the open stream.
     func send(_ data: Data) async throws {
         let message = Self.encodeHunk(data)
         let framed = Self.wrapGRPCMessage(message)
         try await sendH2Data(framed)
     }
 
-    /// Delivers the next decoded payload, or `nil` on EOF; buffered leftovers are returned first.
     func receive() async throws -> Data? {
         enum Ready { case data(Data); case eof; case read }
         let ready: Ready = state.withLock { state in
@@ -230,7 +218,7 @@ nonisolated final class GRPCConnection: Sendable {
                 state.decodedBuffer.removeAll(keepingCapacity: true)
                 return .data(out)
             }
-            if state.h2StreamClosed { return .eof }
+            if state.phase != .live { return .eof }
             return .read
         }
         switch ready {
@@ -243,16 +231,17 @@ nonisolated final class GRPCConnection: Sendable {
     // MARK: - Cancel
 
     func cancel() {
-        state.withLock { state in
-            state._isConnected = false
-            state.h2StreamClosed = true
+        let keepalive: Task<Void, Never>? = state.withLock { state in
+            state.transition(to: .cancelled)
             state.h2ReadBuffer.removeAll()
             state.grpcFrameBuffer.removeAll()
             state.decodedBuffer.removeAll()
-            state.keepaliveTask?.cancel()
+            let keepalive = state.keepaliveTask
             state.keepaliveTask = nil
             state.h2FlowGate.wakeAll()
+            return keepalive
         }
+        keepalive?.cancel()
         transport.cancel()
     }
 
@@ -264,8 +253,6 @@ nonisolated final class GRPCConnection: Sendable {
 // MARK: - HTTP/2 constants
 
 nonisolated extension GRPCConnection {
-
-    /// HTTP/2 connection preface (RFC 7540 §3.5).
     static let h2Preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
 
     static let h2FrameHeaderSize = 9
@@ -288,8 +275,6 @@ nonisolated extension GRPCConnection {
 // MARK: - Frame I/O
 
 nonisolated extension GRPCConnection {
-
-    /// Builds an HTTP/2 frame per RFC 7540 §4.1.
     fileprivate func buildH2Frame(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) -> Data {
         var frame = Data(capacity: Self.h2FrameHeaderSize + payload.count)
         let length = UInt32(payload.count)
@@ -307,7 +292,6 @@ nonisolated extension GRPCConnection {
         return frame
     }
 
-    /// Parses one complete frame from `state.h2ReadBuffer`, or nil if incomplete. Caller must hold `state`.
     private func parseH2Frame(_ state: inout State) -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)? {
         guard state.h2ReadBuffer.count >= Self.h2FrameHeaderSize else { return nil }
 
@@ -339,9 +323,6 @@ nonisolated extension GRPCConnection {
         return (type, flags, sid, payload)
     }
 
-    /// Reads transport data until at least one complete H2 frame is available, then returns it.
-    /// The straight-line async loop replaces the callback recursion, so the old stack-overflow
-    /// trampoline is unnecessary.
     fileprivate func readH2Frame() async throws -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) {
         while true {
             if let frame = state.withLock({ parseH2Frame(&$0) }) {
@@ -350,7 +331,6 @@ nonisolated extension GRPCConnection {
 
             let chunk = try await transport.receive()
             guard case .bytes(let data) = chunk, !data.isEmpty else {
-                // Clean transport FIN at a frame boundary is a graceful end of stream, not a failure.
                 throw AnywhereError.proxy(.grpc, .streamClosed)
             }
 
@@ -368,7 +348,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Parses a server SETTINGS payload and applies INITIAL_WINDOW_SIZE / MAX_FRAME_SIZE.
     fileprivate func parseH2Settings(_ payload: Data) {
         var offset = payload.startIndex
         while offset + 6 <= payload.endIndex {
@@ -380,7 +359,7 @@ nonisolated extension GRPCConnection {
             offset += 6
 
             switch id {
-            case 0x04: // INITIAL_WINDOW_SIZE — adjusts only stream windows (RFC 7540 §6.9.2).
+            case 0x04: // INITIAL_WINDOW_SIZE
                 state.withLock { state in
                     let delta = Int(value) - state.h2PeerInitialWindowSize
                     state.h2PeerInitialWindowSize = Int(value)
@@ -394,7 +373,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Applies a WINDOW_UPDATE to the send windows and wakes blocked sends.
     fileprivate func handleWindowUpdate(frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
         state.withLock { state in
             if frame.payload.count >= 4 {
@@ -414,55 +392,41 @@ nonisolated extension GRPCConnection {
 // MARK: - HPACK encoding for request HEADERS
 
 nonisolated extension GRPCConnection {
-
-    /// HPACK-encodes the request HEADERS block; static-table indexing where possible,
-    /// strings emitted without Huffman compression.
     fileprivate func encodeGRPCRequestHeaders() -> Data {
         var block = Data()
 
-        // Pseudo-header order required by RFC 7540 §8.1.2.1: :authority, :method, :path, :scheme.
-
-        // :authority — literal w/ incremental indexing, static-table name index 1.
         var authBytes = Self.hpackEncodeInteger(1, prefixBits: 6)
         authBytes[0] |= 0x40
         block.append(contentsOf: authBytes)
         block.append(contentsOf: Self.hpackEncodeString(authority))
 
-        // :method POST — static-table entry 3.
         block.append(0x83)
 
-        // :path — literal w/ incremental indexing, static-table name index 4.
         let path = configuration.resolvedPath()
         var pathBytes = Self.hpackEncodeInteger(4, prefixBits: 6)
         pathBytes[0] |= 0x40
         block.append(contentsOf: pathBytes)
         block.append(contentsOf: Self.hpackEncodeString(path))
 
-        // :scheme https — static-table entry 7.
         block.append(0x87)
 
-        // content-type: application/grpc — literal w/ incremental indexing, name index 31.
         var ctBytes = Self.hpackEncodeInteger(31, prefixBits: 6)
         ctBytes[0] |= 0x40
         block.append(contentsOf: ctBytes)
         block.append(contentsOf: Self.hpackEncodeString("application/grpc"))
 
-        // `te: trailers` is required by the gRPC spec; servers reject requests without it.
         block.append(0x40)
         block.append(contentsOf: Self.hpackEncodeString("te"))
         block.append(contentsOf: Self.hpackEncodeString("trailers"))
 
-        // grpc-encoding: identity — outgoing messages are not compressed.
         block.append(0x40)
         block.append(contentsOf: Self.hpackEncodeString("grpc-encoding"))
         block.append(contentsOf: Self.hpackEncodeString("identity"))
 
-        // grpc-accept-encoding: identity — only identity encoding is decodable here.
         block.append(0x40)
         block.append(contentsOf: Self.hpackEncodeString("grpc-accept-encoding"))
         block.append(contentsOf: Self.hpackEncodeString("identity"))
 
-        // user-agent — literal w/ incremental indexing, static-table name index 58.
         let ua = configuration.userAgent.isEmpty ? ProxyUserAgent.default : configuration.userAgent
         var uaBytes = Self.hpackEncodeInteger(58, prefixBits: 6)
         uaBytes[0] |= 0x40
@@ -472,7 +436,6 @@ nonisolated extension GRPCConnection {
         return block
     }
 
-    /// HPACK integer encoding (RFC 7541 §5.1).
     fileprivate static func hpackEncodeInteger(_ value: Int, prefixBits: Int) -> [UInt8] {
         let maxPrefix = (1 << prefixBits) - 1
         if value < maxPrefix {
@@ -488,7 +451,6 @@ nonisolated extension GRPCConnection {
         return bytes
     }
 
-    /// HPACK string encoding — plain bytes, no Huffman (RFC 7541 §5.2).
     fileprivate static func hpackEncodeString(_ string: String) -> [UInt8] {
         let bytes = Array(string.utf8)
         var result = hpackEncodeInteger(bytes.count, prefixBits: 7)
@@ -501,13 +463,10 @@ nonisolated extension GRPCConnection {
 // MARK: - HPACK decoding for response :status
 
 nonisolated extension GRPCConnection {
-
-    /// Returns `nil` if the HEADERS block's `:status` is `200`, or a short error string otherwise.
     fileprivate func checkH2ResponseStatus(_ headerBlock: Data) -> String? {
         guard !headerBlock.isEmpty else { return "empty header block" }
 
         var offset = headerBlock.startIndex
-        // Skip HPACK dynamic-table-size updates (prefix 001xxxxx, RFC 7541 §6.3).
         while offset < headerBlock.endIndex, headerBlock[offset] & 0xE0 == 0x20 {
             let initial = headerBlock[offset] & 0x1F
             offset += 1
@@ -523,7 +482,6 @@ nonisolated extension GRPCConnection {
         let first = headerBlock[offset]
         let remaining = headerBlock[offset...]
 
-        // Indexed representation (top bit set): 0x88=200, others are error codes.
         if first & 0x80 != 0 {
             if first == 0x88 { return nil }
             let indexedStatus: [UInt8: String] = [
@@ -534,7 +492,6 @@ nonisolated extension GRPCConnection {
             return "status (indexed \(first & 0x7F))"
         }
 
-        // Literal :status — static table indices 8-14 all have name ":status".
         let nameIndex: UInt8
         if first & 0xF0 == 0x00 {
             nameIndex = first & 0x0F
@@ -567,7 +524,6 @@ nonisolated extension GRPCConnection {
         return status == "200" ? nil : "status \(status)"
     }
 
-    /// Decodes a Huffman-encoded digit-only value (RFC 7541 App. B: '0'..'2' are 5-bit, '3'..'9' 6-bit).
     private static func huffmanDecodeDigits(_ data: Data) -> String {
         var result = ""
         var bits: UInt32 = 0
@@ -600,8 +556,6 @@ nonisolated extension GRPCConnection {
 // MARK: - gRPC / protobuf framing
 
 nonisolated extension GRPCConnection {
-
-    /// Encodes a `Hunk` protobuf (`bytes data = 1`): `0x0A <varint length> <bytes>`.
     fileprivate static func encodeHunk(_ data: Data) -> Data {
         var out = Data(capacity: 1 + 10 + data.count)
         out.append(0x0A) // (field 1 << 3) | wire type 2 (length-delimited)
@@ -610,7 +564,6 @@ nonisolated extension GRPCConnection {
         return out
     }
 
-    /// Wraps a protobuf message in the 5-byte gRPC prefix: `[compressed=0][u32be length][message]`.
     fileprivate static func wrapGRPCMessage(_ message: Data) -> Data {
         var out = Data(capacity: 5 + message.count)
         out.append(0x00)
@@ -634,7 +587,6 @@ nonisolated extension GRPCConnection {
         return out
     }
 
-    /// Protobuf varint decoder. Returns `(value, bytesConsumed)` or `nil` if truncated.
     fileprivate static func varintDecode(_ data: Data, at startOffset: Int) -> (value: UInt64, consumed: Int)? {
         var value: UInt64 = 0
         var shift: UInt64 = 0
@@ -652,8 +604,6 @@ nonisolated extension GRPCConnection {
         return nil
     }
 
-    /// Decodes a `Hunk` or `MultiHunk` into concatenated raw bytes: both carry `data` as
-    /// field 1 (wire type 2), so every field-1 occurrence is appended; unknown fields are skipped.
     fileprivate static func decodeHunkPayload(_ message: Data) throws -> Data {
         var out = Data()
         var offset = 0
@@ -666,7 +616,7 @@ nonisolated extension GRPCConnection {
             let wireType = Int(tag & 0x07)
 
             switch wireType {
-            case 2: // length-delimited
+            case 2:
                 guard let (length, lenConsumed) = varintDecode(message, at: offset) else {
                     throw AnywhereError.proxy(.grpc, .protocolViolation(detail: "truncated protobuf length"))
                 }
@@ -679,17 +629,17 @@ nonisolated extension GRPCConnection {
                     out.append(message.subdata(in: message.startIndex + offset ..< message.startIndex + offset + lenInt))
                 }
                 offset += lenInt
-            case 0: // varint — skip
+            case 0:
                 guard let (_, vConsumed) = varintDecode(message, at: offset) else {
                     throw AnywhereError.proxy(.grpc, .protocolViolation(detail: "truncated varint field"))
                 }
                 offset += vConsumed
-            case 5: // fixed32 — skip
+            case 5:
                 guard offset + 4 <= message.count else {
                     throw AnywhereError.proxy(.grpc, .protocolViolation(detail: "truncated fixed32 field"))
                 }
                 offset += 4
-            case 1: // fixed64 — skip
+            case 1:
                 guard offset + 8 <= message.count else {
                     throw AnywhereError.proxy(.grpc, .protocolViolation(detail: "truncated fixed64 field"))
                 }
@@ -702,12 +652,9 @@ nonisolated extension GRPCConnection {
     }
 }
 
-// MARK: - HTTP/2 DATA send (respects flow control)
+// MARK: - HTTP/2 DATA send
 
 nonisolated extension GRPCConnection {
-
-    /// Sends `data` as DATA frames, batching as much as the flow-control window allows into
-    /// one transport write; the remainder awaits a WINDOW_UPDATE.
     fileprivate func sendH2Data(_ data: Data) async throws {
         enum BuildStep {
             case closed
@@ -718,7 +665,7 @@ nonisolated extension GRPCConnection {
         var offset = 0
         while offset < data.count {
             let step: BuildStep = state.withLock { state in
-                if state.h2StreamClosed { return .closed }
+                if state.phase != .live { return .closed }
                 let maxSize = state.h2MaxFrameSize
                 let window = min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow)
                 guard window > 0 else { return .park }
@@ -759,12 +706,10 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Suspends until a WINDOW_UPDATE re-opens the send window (or the stream closes). Re-checks
-    /// under the lock before parking so a window re-open racing the caller's check isn't missed.
     private func parkForFlowWindow() async {
         await H2FlowGate.park {
             state.withLock { state -> AsyncStream<Never>? in
-                if state.h2StreamClosed { return nil }
+                if state.phase != .live { return nil }
                 if min(state.h2PeerConnectionWindow, state.h2PeerStreamSendWindow) > 0 { return nil }
                 return state.h2FlowGate.enroll()
             }
@@ -773,7 +718,7 @@ nonisolated extension GRPCConnection {
 
     private func markClosed() {
         state.withLock { state in
-            state.h2StreamClosed = true
+            state.transition(to: .halfClosed)
             state.h2FlowGate.wakeAll()
         }
     }
@@ -786,14 +731,11 @@ nonisolated extension GRPCConnection {
 // MARK: - Receive pipeline
 
 nonisolated extension GRPCConnection {
-
-    /// Outcome of processing one inbound H2 frame in the receive loop.
     private enum FrameOutcome {
-        case deliver(Data?)   // payload to return, or nil for a clean EOF
+        case deliver(Data?)
         case keepReading
     }
 
-    /// Pulls H2 frames until an application payload is ready; management frames are handled inline.
     fileprivate func readAndDecode() async throws -> Data? {
         while true {
             let frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)
@@ -801,9 +743,8 @@ nonisolated extension GRPCConnection {
                 frame = try await readH2Frame()
             } catch {
                 if case AnywhereError.proxy(.grpc, .streamClosed) = error {
-                    // Graceful end of stream → flush any buffered payload, then EOF.
                     let leftover: Data = state.withLock { state in
-                        state.h2StreamClosed = true
+                        state.transition(to: .halfClosed)
                         let leftover = state.decodedBuffer
                         state.decodedBuffer.removeAll(keepingCapacity: true)
                         return leftover
@@ -822,15 +763,13 @@ nonisolated extension GRPCConnection {
                 outcome = try await handleDataFrame(frame: frame, isOurStream: isOurStream)
 
             case Self.h2FrameHeaders:
-                // Could be the initial 200 OK response or the terminal trailer HEADERS.
                 if isOurStream {
                     let endOfStream = (frame.flags & Self.h2FlagEndStream) != 0
                     try markResponseReceivedIfNeeded(frame.payload)
                     if endOfStream {
-                        // Trailer HEADERS end the stream; non-zero grpc-status surfaces as an error, not silent EOF.
                         let grpcError = Self.parseGRPCTrailer(frame.payload)
                         let leftover: Data = state.withLock { state in
-                            state.h2StreamClosed = true
+                            state.transition(to: .halfClosed)
                             let leftover = state.decodedBuffer
                             state.decodedBuffer.removeAll(keepingCapacity: true)
                             return leftover
@@ -866,7 +805,7 @@ nonisolated extension GRPCConnection {
 
             case Self.h2FrameGoaway:
                 let leftover: Data = state.withLock { state in
-                    state.h2StreamClosed = true
+                    state.transition(to: .halfClosed)
                     let leftover = state.decodedBuffer
                     state.decodedBuffer.removeAll(keepingCapacity: true)
                     return leftover
@@ -877,7 +816,7 @@ nonisolated extension GRPCConnection {
             case Self.h2FrameRstStream:
                 if isOurStream {
                     let leftover: Data = state.withLock { state in
-                        state.h2StreamClosed = true
+                        state.transition(to: .halfClosed)
                         let leftover = state.decodedBuffer
                         state.decodedBuffer.removeAll(keepingCapacity: true)
                         return leftover
@@ -899,7 +838,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Validates the first HEADERS on our stream; throws if the gRPC response was rejected.
     private func markResponseReceivedIfNeeded(_ payload: Data) throws {
         if state.withLock({ $0.h2ResponseReceived }) { return }
 
@@ -910,14 +848,12 @@ nonisolated extension GRPCConnection {
         state.withLock { $0.h2ResponseReceived = true }
     }
 
-    /// Buffers a DATA payload, decodes all complete gRPC messages, and reports the outcome.
     private func handleDataFrame(
         frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data),
         isOurStream: Bool
     ) async throws -> FrameOutcome {
         let endOfStream = (frame.flags & Self.h2FlagEndStream) != 0
 
-        // Ack bytes even on unexpected streams so the connection window stays open.
         await emitWindowUpdatesIfNeeded(receivedBytes: frame.payload.count, onOurStream: isOurStream)
 
         guard isOurStream else { return .keepReading }
@@ -975,7 +911,7 @@ nonisolated extension GRPCConnection {
 
             var streamClosed = false
             if endOfStream {
-                state.h2StreamClosed = true
+                state.transition(to: .halfClosed)
                 streamClosed = true
             }
             return .parsed(decoded: decoded, streamClosed: streamClosed, decodeError: decodeError)
@@ -994,7 +930,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Emits WINDOW_UPDATEs once half the local window is consumed, batching flow-control updates.
     private func emitWindowUpdatesIfNeeded(receivedBytes: Int, onOurStream: Bool) async {
         guard receivedBytes > 0 else { return }
 
@@ -1037,14 +972,12 @@ nonisolated extension GRPCConnection {
 // MARK: - Keepalive
 
 nonisolated extension GRPCConnection {
-
-    /// Starts a periodic keepalive PING loop when `idleTimeout` is non-zero.
     fileprivate func startKeepaliveIfNeeded() {
         let interval = configuration.idleTimeout
         guard interval > 0 else { return }
 
         state.withLock { state in
-            guard state.keepaliveTask == nil else { return }
+            guard state.phase == .live, state.keepaliveTask == nil else { return }
             state.keepaliveTask = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(interval))
@@ -1056,8 +989,7 @@ nonisolated extension GRPCConnection {
     }
 
     private func sendKeepalivePing() async {
-        if state.withLock({ $0.h2StreamClosed }) { return }
-        // 8-byte opaque PING payload (RFC 7540 §6.7).
+        if state.withLock({ $0.phase != .live }) { return }
         let payload = Data([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         let ping = buildH2Frame(type: Self.h2FramePing, flags: 0, streamId: 0, payload: payload)
         try? await transport.send(ping)
@@ -1067,8 +999,6 @@ nonisolated extension GRPCConnection {
 // MARK: - Error-code descriptions
 
 nonisolated extension GRPCConnection {
-
-    /// Human-readable HTTP/2 error code (RFC 7540 §7).
     fileprivate static func h2ErrorCodeName(_ code: UInt32) -> String {
         switch code {
         case 0x00: return "NO_ERROR"
@@ -1089,7 +1019,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Describes a GOAWAY payload (RFC 7540 §6.8).
     fileprivate static func describeGoawayPayload(_ payload: Data) -> String {
         guard payload.count >= 8 else { return "truncated GOAWAY payload" }
         let base = payload.startIndex
@@ -1111,7 +1040,6 @@ nonisolated extension GRPCConnection {
         return "\(name), lastStreamId=\(lastStreamId & 0x7FFFFFFF)\(debug)"
     }
 
-    /// Describes an RST_STREAM payload's error code (RFC 7540 §6.4).
     fileprivate static func describeRstStreamPayload(_ payload: Data) -> String {
         guard payload.count >= 4 else { return "truncated RST_STREAM payload" }
         let base = payload.startIndex
@@ -1121,14 +1049,11 @@ nonisolated extension GRPCConnection {
             | UInt32(payload[base + 3])
         return h2ErrorCodeName(errorCode)
     }
-
 }
 
 // MARK: - gRPC trailer parsing
 
 nonisolated extension GRPCConnection {
-
-    /// Returns `.rpcFailed` when the trailer's `grpc-status` is non-zero; `nil` on OK or absent.
     fileprivate static func parseGRPCTrailer(_ payload: Data) -> AnywhereError? {
         let headers = decodeHPACKHeaders(payload)
         guard let statusStr = headers["grpc-status"], let status = Int(statusStr), status != 0 else {
@@ -1138,7 +1063,6 @@ nonisolated extension GRPCConnection {
         return .proxy(.grpc, .rpcFailed(status: status, method: grpcStatusName(status), message: message))
     }
 
-    /// Maps a numeric gRPC status to its canonical name (from google.rpc.Code).
     fileprivate static func grpcStatusName(_ code: Int) -> String {
         switch code {
         case 0:  return "OK"
@@ -1162,8 +1086,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Minimal HPACK decoder for trailer HEADERS; dynamic-table entries are parsed but not
-    /// stored. Names are lowercased, last value wins.
     fileprivate static func decodeHPACKHeaders(_ payload: Data) -> [String: String] {
         var headers: [String: String] = [:]
         var offset = payload.startIndex
@@ -1171,7 +1093,6 @@ nonisolated extension GRPCConnection {
         while offset < payload.endIndex {
             let b = payload[offset]
 
-            // 1xxxxxxx — indexed header field
             if b & 0x80 != 0 {
                 let (idx, consumed) = decodeHPACKInteger(payload, at: offset, prefixBits: 7)
                 offset += consumed
@@ -1181,7 +1102,6 @@ nonisolated extension GRPCConnection {
                 continue
             }
 
-            // 01xxxxxx — literal with incremental indexing
             if b & 0xC0 == 0x40 {
                 let (nameIdx, nameConsumed) = decodeHPACKInteger(payload, at: offset, prefixBits: 6)
                 offset += nameConsumed
@@ -1199,14 +1119,12 @@ nonisolated extension GRPCConnection {
                 continue
             }
 
-            // 001xxxxx — dynamic table size update
             if b & 0xE0 == 0x20 {
                 let (_, consumed) = decodeHPACKInteger(payload, at: offset, prefixBits: 5)
                 offset += consumed
                 continue
             }
 
-            // 0000xxxx — literal without indexing, 0001xxxx — literal never indexed
             if b & 0xF0 == 0x00 || b & 0xF0 == 0x10 {
                 let (nameIdx, nameConsumed) = decodeHPACKInteger(payload, at: offset, prefixBits: 4)
                 offset += nameConsumed
@@ -1229,7 +1147,6 @@ nonisolated extension GRPCConnection {
         return headers
     }
 
-    /// HPACK integer decoder (RFC 7541 §5.1). Returns (value, bytesConsumed).
     private static func decodeHPACKInteger(_ data: Data, at start: Int, prefixBits: Int) -> (Int, Int) {
         let maxPrefix = (1 << prefixBits) - 1
         guard start < data.endIndex else { return (0, 0) }
@@ -1249,7 +1166,6 @@ nonisolated extension GRPCConnection {
         return (value, offset - start)
     }
 
-    /// HPACK string decoder (RFC 7541 §5.2). Returns (string, bytesConsumed).
     private static func decodeHPACKString(_ data: Data, at start: Int) -> (String, Int)? {
         guard start < data.endIndex else { return nil }
         let meta = data[start]
@@ -1267,7 +1183,6 @@ nonisolated extension GRPCConnection {
         return (string, lenConsumed + length)
     }
 
-    /// Static-table entry (RFC 7541 App. A); only entries expected in gRPC headers are returned.
     private static func staticTableEntry(at index: Int) -> (name: String, value: String?)? {
         switch index {
         case 1:  return (":authority", nil)
@@ -1291,7 +1206,6 @@ nonisolated extension GRPCConnection {
         }
     }
 
-    /// Decodes an HPACK Huffman string (RFC 7541 App. B); `nil` on malformed input.
     private static func huffmanDecode(_ data: Data) -> String? {
         var result = [UInt8]()
         var code: UInt32 = 0
@@ -1301,7 +1215,6 @@ nonisolated extension GRPCConnection {
             code = (code << 8) | UInt32(byte)
             bits += 8
             while bits >= 5 {
-                // Try code lengths 5...30 smallest-first; each symbol has a unique length+prefix.
                 var matched = false
                 for length in 5...min(bits, 30) {
                     let candidate = (code >> (bits - length)) & ((1 << length) - 1)
@@ -1317,7 +1230,6 @@ nonisolated extension GRPCConnection {
             }
         }
 
-        // Any remaining bits must be the EOS prefix (all ones).
         if bits > 0 {
             let trailing = code & ((1 << bits) - 1)
             let allOnes: UInt32 = (1 << bits) - 1
@@ -1333,7 +1245,6 @@ nonisolated extension GRPCConnection {
 
     private struct HuffmanKey: Hashable { let code: UInt32; let length: Int }
 
-    /// HPACK Huffman code table (RFC 7541 Appendix B). Symbol `256` is EOS.
     private static let huffmanTable: [HuffmanKey: Int] = {
         let entries: [(code: UInt32, length: Int, symbol: Int)] = [
             (0x1ff8, 13, 0), (0x7fffd8, 23, 1), (0xfffffe2, 28, 2), (0xfffffe3, 28, 3),

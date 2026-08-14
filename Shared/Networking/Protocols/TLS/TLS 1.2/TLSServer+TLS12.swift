@@ -154,24 +154,38 @@ nonisolated extension TLSServer {
         emitPlainHandshakeRecord(serverKeyExchange)
         emitPlainHandshakeRecord(serverHelloDone)
 
-        state = .sentServerHelloDone12
+        transition(to: .sentServerHelloDone12)
     }
 
     func processClientHandshakeMessages12() throws {
-        while state == .sentServerHelloDone12, let record = try peekTLSRecord() {
+        while phase == .sentServerHelloDone12, let record = try peekTLSRecord() {
             let contentType = record[record.startIndex]
             let payload = record.subdata(in: (record.startIndex + 5)..<record.endIndex)
             rxBuffer.removeFirst(record.count)
 
             switch contentType {
             case TLSContentType.handshake:
-                if !handshake12.receivedCCS {
+                switch handshake12.flight {
+                case .awaitingClientKeyExchange:
                     try handleClientKeyExchange12(payload)
-                } else {
+                    TLS12ServerHandshakeState.Flight.transition(&handshake12.flight, to: .awaitingChangeCipherSpec)
+                case .awaitingChangeCipherSpec:
+                    throw AnywhereError.tls(.handshakeFailed(detail: "handshake record between ClientKeyExchange and ChangeCipherSpec"))
+                case .awaitingFinished:
                     try handleClientFinished12(payload)
                 }
             case TLSContentType.changeCipherSpec:
-                handshake12.receivedCCS = true
+                switch handshake12.flight {
+                case .awaitingClientKeyExchange:
+                    throw AnywhereError.tls(.handshakeFailed(detail: "ChangeCipherSpec before ClientKeyExchange"))
+                case .awaitingChangeCipherSpec:
+                    TLS12ServerHandshakeState.Flight.transition(&handshake12.flight, to: .awaitingFinished)
+                case .awaitingFinished:
+                    handshake12.ccsBudget -= 1
+                    guard handshake12.ccsBudget > 0 else {
+                        throw AnywhereError.tls(.handshakeFailed(detail: "too many change_cipher_spec records"))
+                    }
+                }
             case TLSContentType.alert:
                 let level = payload.count > 0 ? payload[payload.startIndex] : 0
                 let description = payload.count > 1 ? payload[payload.startIndex + 1] : 0
@@ -220,6 +234,11 @@ nonisolated extension TLSServer {
         let clientKeyExchange = recordBody.subdata(in: recordBody.startIndex..<(recordBody.startIndex + 4 + length))
         handshake12.transcript.append(clientKeyExchange)
 
+        guard let clientRandom = handshake12.clientRandom,
+              let serverRandom = handshake12.serverRandom else {
+            throw AnywhereError.tls(.handshakeFailed(detail: "internal: missing randoms at ClientKeyExchange"))
+        }
+
         let useSHA384 = TLSCipherSuite.usesSHA384(chosenCipherSuite)
         let masterSecret: Data
         if handshake12.extendedMasterSecret {
@@ -232,8 +251,8 @@ nonisolated extension TLSServer {
         } else {
             masterSecret = TLS12KeyDerivation.masterSecret(
                 preMasterSecret: preMaster,
-                clientRandom: handshake12.clientRandom!,
-                serverRandom: handshake12.serverRandom!,
+                clientRandom: clientRandom,
+                serverRandom: serverRandom,
                 useSHA384: useSHA384
             )
         }
@@ -244,8 +263,8 @@ nonisolated extension TLSServer {
         let ivLen = TLSCipherSuite.ivLength(chosenCipherSuite)
         handshake12.keys = TLS12KeyDerivation.keysFromMasterSecret(
             masterSecret: masterSecret,
-            clientRandom: handshake12.clientRandom!,
-            serverRandom: handshake12.serverRandom!,
+            clientRandom: clientRandom,
+            serverRandom: serverRandom,
             macLen: macLen,
             keyLen: keyLen,
             ivLen: ivLen,
@@ -334,7 +353,7 @@ nonisolated extension TLSServer {
         let trailer = rxBuffer
         rxBuffer = Data()
 
-        state = .established
+        transition(to: .established)
         delegate?.tlsServer(
             self,
             didCompleteHandshake: connection,

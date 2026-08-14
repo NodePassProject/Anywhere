@@ -105,12 +105,25 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
 
     private static let warmConnectionTTL: Duration = .seconds(30)
 
-    private struct State {
+    private struct State: PhaseHolding {
+        enum Phase: PhaseTransitionable {
+            case open, closed
+
+            static func canTransition(from old: Phase, to new: Phase) -> Bool {
+                switch (old, new) {
+                case (.open, .closed):
+                    return true
+                default:
+                    return false
+                }
+            }
+        }
+
         var idle: [NowhereTCPConnection] = []
         var preparing: [ObjectIdentifier: NowhereTCPConnection] = [:]
         var expirations: [ObjectIdentifier: Task<Void, Never>] = [:]
         var targetSize: Int
-        var closed = false
+        var phase: Phase = .open
     }
 
     private let configuration: NowhereConfiguration
@@ -126,6 +139,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
     func resize(to newSize: Int) {
         var excess: [NowhereTCPConnection] = []
         state.withLock { state in
+            guard state.phase != .closed else { return }
             state.targetSize = newSize
             while state.idle.count + state.preparing.count > newSize, let entry = state.preparing.first {
                 state.preparing.removeValue(forKey: entry.key)
@@ -155,7 +169,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
         var stale: [NowhereTCPConnection] = []
         var unavailable = false
         let replenishments: [NowhereTCPConnection] = state.withLock { state in
-            guard !state.closed else {
+            guard state.phase != .closed else {
                 unavailable = true
                 return []
             }
@@ -226,8 +240,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
 
     func closeAll() {
         let connections: [NowhereTCPConnection] = state.withLock { state in
-            guard !state.closed else { return [] }
-            state.closed = true
+            guard state.transition(to: .closed) else { return [] }
             state.targetSize = 0
             let snapshot = state.idle + Array(state.preparing.values)
             state.idle.removeAll(keepingCapacity: false)
@@ -315,7 +328,7 @@ nonisolated private final class NowhereTCPConnectionPool: Sendable {
 
         let keep: Bool = state.withLock { state in
             let wasPreparing = state.preparing.removeValue(forKey: ObjectIdentifier(connection)) != nil
-            guard wasPreparing, error == nil, !state.closed,
+            guard wasPreparing, error == nil, state.phase != .closed,
                   state.idle.count < state.targetSize, connection.isPrepared else {
                 cancelExpirationLocked(for: connection, in: &state)
                 return false

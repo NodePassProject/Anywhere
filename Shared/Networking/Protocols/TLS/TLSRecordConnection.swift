@@ -16,22 +16,39 @@ nonisolated final class TLSRecordConnection: Sendable {
 
     // MARK: Properties
 
-    /// The underlying async byte transport, held in a mutex so the abortive nil-swap in
-    /// ``cancel()`` is atomic against the in-flight sends/receives that read it. The transport
-    /// reference is the real critical state; access it through the ``connection`` computed
-    /// property or, for the atomic take-and-clear, ``connectionBox`` directly.
-    private let connectionBox = Mutex<(any ByteTransport)?>(nil)
+    private enum Phase: PhaseTransitionable {
+        case unattached
+        case attached(any ByteTransport)
+        case cancelled
 
-    /// The underlying async byte transport. `nil` after ``cancel()``. Every write is serialized
-    /// through the send chain so records reach the wire in submission order. Read-only snapshot;
-    /// the handshake driver hands the transport over via ``adoptTransport(_:)``, and ``cancel()``
-    /// does the atomic take-and-clear on ``connectionBox``.
-    var connection: (any ByteTransport)? { connectionBox.withLock { $0 } }
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.unattached, .attached):
+                return true
+            case (_, .cancelled):
+                return !old.isCancelled
+            default:
+                return false
+            }
+        }
+
+        var isCancelled: Bool { if case .cancelled = self { true } else { false } }
+    }
+    private let phase = Mutex<Phase>(.unattached)
+
+    var connection: (any ByteTransport)? {
+        phase.withLock { if case .attached(let transport) = $0 { transport } else { nil } }
+    }
 
     /// Adopts the handshake's transport. Called once by the handshake driver
     /// (TLSClient/TLSServer/RealityClient) when it hands the connection over.
     func adoptTransport(_ transport: (any ByteTransport)?) {
-        connectionBox.withLock { $0 = transport }
+        guard let transport else { return }
+        let adopted: Bool = phase.withLock { Phase.transition(&$0, to: .attached(transport)) }
+        if !adopted {
+            logger.debug("[TLSRecordConnection] adoptTransport after cancel/attach; cancelling the handed-over transport")
+            transport.cancel()
+        }
     }
 
     /// Ordered wire-send pipeline shared by the async `send`/`sendRaw` surface and the internal
@@ -330,12 +347,12 @@ nonisolated final class TLSRecordConnection: Sendable {
     // MARK: - Cancel
 
     func cancel() {
-        let transport = connectionBox.withLock { box -> (any ByteTransport)? in
-            let transport = box
-            box = nil
-            return transport
+        let transport = phase.withLock { phase -> (any ByteTransport)? in
+            let attached: (any ByteTransport)? = if case .attached(let transport) = phase { transport } else { nil }
+            Phase.transition(&phase, to: .cancelled)
+            return attached
         }
-        
+
         sendChain.cancel()
 
         receiveState.withLock { $0.buffer.removeAll() }

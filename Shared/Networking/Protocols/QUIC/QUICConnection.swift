@@ -27,8 +27,31 @@ actor QUICConnection {
         bridge.executor.asUnownedSerialExecutor()
     }
 
-    enum State {
-        case idle, connecting, handshaking, connected, closing, closed
+    enum Phase: CustomStringConvertible, PhaseTransitionable {
+        case idle, connecting, handshaking, connected, closed
+
+        var description: String {
+            switch self {
+            case .idle: "idle"
+            case .connecting: "connecting"
+            case .handshaking: "handshaking"
+            case .connected: "connected"
+            case .closed: "closed"
+            }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .handshaking),
+                 (.handshaking, .connected):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: Properties
@@ -38,53 +61,65 @@ actor QUICConnection {
     let serverName: String
     let alpn: [String]
     let tuning: QUICTuning
-    
+
     let transport: QUICDatagramTransport?
-    
+
     let obfuscator: QUICPacketObfuscator?
 
-    var state: State = .idle
-    
+    private(set) var phase: Phase = .idle
+
+    @discardableResult
+    func transition(to new: Phase) -> Bool {
+        let old = phase
+        guard Phase.transition(&phase, to: new) else {
+            if new != .closed {
+                logger.error("[QUIC] Invalid transition \(old) → \(new) for \(host); ignored")
+            }
+            return false
+        }
+        return true
+    }
+
     let bridge: NGTCP2ConcurrencyBridge
-    
+
     nonisolated func enqueue(_ work: @escaping @convention(block) @Sendable () -> Void) {
         bridge.enqueue(work)
     }
-    
+
     nonisolated func run<T>(_ body: @escaping () -> T) async -> T {
         await bridge.run(body)
     }
-    
+
     nonisolated func run<T>(_ body: @escaping () -> Result<T, Error>) async throws -> T {
         try await bridge.run(body).get()
     }
 
     // MARK: Reentrancy
-    
+
     private let _connHeld = Atomic<Bool>(false)
     nonisolated var connHeld: Bool { _connHeld.load(ordering: .relaxed) }
-    
+
     nonisolated func enterConnHeld() -> Bool {
         let previous = _connHeld.load(ordering: .relaxed)
         _connHeld.store(true, ordering: .relaxed)
         return previous
     }
-    
+
     nonisolated func exitConnHeld(_ previous: Bool) {
         _connHeld.store(previous, ordering: .relaxed)
     }
 
     var connectionOpaquePointer: OpaquePointer?
     var connRefStorage = ngtcp2_crypto_conn_ref()
-    
+
     var inReadPkt = false
 
     var flushScheduled = false
 
     var carrier: QUICDatagramCarrier?
-    
+
     var rootTask: Task<Void, Never>?
-    
+
     var transportSealContinuation: AsyncStream<Data>.Continuation?
 
     var localAddr = sockaddr_storage()
@@ -93,31 +128,59 @@ actor QUICConnection {
 
     // MARK: Migration state
 
-    enum MigrationKind { case reactive, proactive }
-    var migrationKind: MigrationKind?
-    var migratingCarrier: QUICDatagramCarrier?
-    var migratingLocalAddr = sockaddr_storage()
+    enum Migration: PhaseTransitionable {
+        case none
+        case proactiveProbing(target: QUICDatagramCarrier, localAddr: sockaddr_storage)
+        case proactiveValidating(target: QUICDatagramCarrier, localAddr: sockaddr_storage)
+        case reactiveValidating(localAddr: sockaddr_storage)
+
+        var label: String {
+            switch self {
+            case .none: "none"
+            case .proactiveProbing: "proactiveProbing"
+            case .proactiveValidating: "proactiveValidating"
+            case .reactiveValidating: "reactiveValidating"
+            }
+        }
+
+        static func canTransition(from old: Migration, to new: Migration) -> Bool {
+            switch (old, new) {
+            case (_, .none),
+                 (.none, .proactiveProbing),
+                 (.none, .reactiveValidating),
+                 (.proactiveProbing, .proactiveValidating):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    var migration: Migration = .none
     var migrationCounter: UInt8 = 0
     var migrationFailures = 0
     static let maxMigrationFailures = 3
-    var proactiveValidating = false
     var proactiveDeadlineTask: Task<Void, Never>?
     static let proactiveReadyTimeout: TimeInterval = 5
 
     var tlsHandler: QUICTLSHandler?
-    
+
     var retransmitTimer: BridgeDeadlineTimer?
 
     var dcid = ngtcp2_cid()
     var scid = ngtcp2_cid()
-    
+
     var connectContinuation: CheckedContinuation<Void, Error>?
-    
+
     var dialAttempt: ConnectionMetrics.Attempt?
-    
+
+    enum StreamTerminationCause {
+        case closed
+        case reset
+    }
+
     struct Handlers: Sendable {
         var streamData: (@Sendable (Int64, Data, Bool) -> Void)?
-        var streamTermination: (@Sendable (Int64, Error?) -> Void)?
+        var streamTermination: (@Sendable (Int64, Error?, StreamTerminationCause) -> Void)?
         var datagram: (@Sendable (Data) -> Void)?
         var connectionClosed: (@Sendable (Error) -> Void)?
         var bidiCredit: (@Sendable (UInt64) -> Void)?
@@ -129,10 +192,10 @@ actor QUICConnection {
 
     let datagramsEnabled: Bool
     static let maxDatagramFrameSize: UInt64 = 65535
-    
+
     var streamSendQueues: [Int64: StreamSendQueue] = [:]
     var streamPumpCursor: Int64 = -1
-    
+
     final class StreamSendChunk {
         let storage: UnsafeMutableBufferPointer<UInt8>
         let startOffset: UInt64
@@ -159,7 +222,7 @@ actor QUICConnection {
             body(storage.baseAddress!)
         }
     }
-    
+
     final class StreamSendQueue {
         var chunks: [StreamSendChunk] = []
         var sentOffset: UInt64 = 0
@@ -176,7 +239,7 @@ actor QUICConnection {
             endOffset = chunk.endOffset
             if chunk.fin { finQueued = true }
         }
-        
+
         func currentChunk() -> StreamSendChunk? {
             for chunk in chunks {
                 if chunk.endOffset > sentOffset { return chunk }
@@ -186,7 +249,7 @@ actor QUICConnection {
             }
             return nil
         }
-        
+
         func advance(accepted: Int, regionLength: Int, finFlagged: Bool) -> [CheckedContinuation<Void, Error>] {
             sentOffset &+= UInt64(accepted)
             if finFlagged && accepted == regionLength { finSent = true }
@@ -199,7 +262,7 @@ actor QUICConnection {
             }
             return resumed
         }
-        
+
         func trimAcked(upTo ackedOffset: UInt64) {
             var drop = 0
             while drop < chunks.count {
@@ -210,7 +273,7 @@ actor QUICConnection {
             }
             if drop > 0 { chunks.removeFirst(drop) }
         }
-        
+
         func fail() -> [CheckedContinuation<Void, Error>] {
             var failed: [CheckedContinuation<Void, Error>] = []
             for chunk in chunks {
@@ -227,14 +290,14 @@ actor QUICConnection {
             return failed
         }
     }
-    
+
     struct PendingDatagram {
         let data: Data
         let latch: DatagramBatchLatch?
     }
     var pendingDatagrams: [PendingDatagram] = []
     static let maxPendingDatagrams = 1024
-    
+
     final class DatagramBatchLatch {
         private var remaining: Int
         private var firstError: Error?
@@ -259,7 +322,7 @@ actor QUICConnection {
     static let chainedMaxUDPPayload = 1200
 
     var txBuffer = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
-    
+
     static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
     // MARK: Init

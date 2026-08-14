@@ -17,8 +17,25 @@ actor NowhereUDPConnection {
     private let flowHeader: NowhereProtocol.FlowHeader
     private let expectsResult: Bool
 
-    /// Readiness mirror for the nonisolated `isConnected`/send-guard.
-    private nonisolated let _isReady = Atomic<Bool>(false)
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case opening
+        case ready
+        case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .opening),
+                 (.opening, .ready):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
+    private nonisolated let phase = Mutex<Phase>(.idle)
 
     // MARK: Control stream (handshake)
 
@@ -37,15 +54,7 @@ actor NowhereUDPConnection {
 
     // MARK: Termination
 
-    private struct TerminationState {
-        var handler: (@Sendable (Error?) -> Void)?
-        var terminated = false
-        var error: Error?
-    }
-    private let termination = Mutex(TerminationState())
-
-    /// Guards `teardown()` so the flow is released exactly once.
-    private var closed = false
+    private let termination = TerminationLatch()
 
     init(
         session: NowhereSession,
@@ -58,33 +67,44 @@ actor NowhereUDPConnection {
         self.expectsResult = flowHeader.role != .open
     }
 
-    nonisolated var isConnected: Bool { _isReady.load(ordering: .relaxed) }
+    nonisolated var isConnected: Bool {
+        phase.withLock { if case .ready = $0 { true } else { false } }
+    }
     nonisolated var outerTLSVersion: TLSVersion? { .tls13 }
     nonisolated var deliversDatagrams: Bool { true }
 
     nonisolated func setNowhereTerminationHandler(_ handler: (@Sendable (Error?) -> Void)?) {
-        let immediate: ((@Sendable (Error?) -> Void), Error?)? = termination.withLock { state in
-            if state.terminated {
-                guard let handler else { return nil }
-                return (handler, state.error)
-            }
-            state.handler = handler
-            return nil
-        }
-        immediate?.0(immediate?.1)
+        termination.install(handler)
     }
 
     // MARK: - Open
 
     func open() async throws {
+        let begin = phase.withLock { Phase.transition(&$0, to: .opening) }
+        guard begin else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
         do {
             _ = try await session.registerUDPSession(self, requestedFlowID: flowHeader.flowID)
+            let registrationAdopted = phase.withLock { state in
+                if case .opening = state { true } else { false }
+            }
+            guard registrationAdopted else {
+                session.releaseUDPSession(flowHeader.flowID)
+                throw AnywhereError.proxy(.nowhere, .streamClosed)
+            }
             let request = try NowhereProtocol.encodeFlowRequest(
                 header: flowHeader,
                 target: flowHeader.carriesTarget ? destination : nil
             )
             let sid = try await session.openUDPControlStream(for: self, request: request)
             controlStreamID = sid
+            let streamAdopted = phase.withLock { state in
+                if case .opening = state { true } else { false }
+            }
+            guard streamAdopted else {
+                releaseControlStream(reset: true)
+                session.releaseUDPSession(flowHeader.flowID)
+                throw AnywhereError.proxy(.nowhere, .streamClosed)
+            }
 
             if expectsResult {
                 var buffer = Data()
@@ -111,8 +131,14 @@ actor NowhereUDPConnection {
             // Handshake done: the control stream is no longer needed.
             releaseControlStream(reset: false)
             if flowHeader.role != .open {
-                await session.activateUDPSession(flowHeader.flowID)
-                _isReady.store(true, ordering: .relaxed)
+                session.activateUDPSession(flowHeader.flowID)
+                let activated = phase.withLock { Phase.transition(&$0, to: .ready) }
+                guard activated else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
+            } else {
+                let stillOpening = phase.withLock { state in
+                    if case .opening = state { true } else { false }
+                }
+                guard stillOpening else { throw AnywhereError.proxy(.nowhere, .streamClosed) }
             }
         } catch {
             fail(error)
@@ -161,14 +187,17 @@ actor NowhereUDPConnection {
     }
 
     /// Called by the logical split-flow coordinator after the selected downlink has READY.
-    func activatePairedFlow() async {
-        guard !_isReady.load(ordering: .relaxed), !closed else { return }
-        await session.activateUDPSession(flowHeader.flowID)
-        _isReady.store(true, ordering: .relaxed)
+    nonisolated func activatePairedFlow() {
+        let opening = phase.withLock { phase in
+            if case .opening = phase { true } else { false }
+        }
+        guard opening else { return }
+        session.activateUDPSession(flowHeader.flowID)
+        _ = phase.withLock { Phase.transition(&$0, to: .ready) }
     }
 
     func sendRaw(_ data: Data) async throws {
-        guard _isReady.load(ordering: .relaxed) else {
+        guard isConnected else {
             throw AnywhereError.proxy(.nowhere, .streamClosed)
         }
         // Packet IDs are allocated only when the final PMTU requires fragmentation.
@@ -206,7 +235,7 @@ actor NowhereUDPConnection {
         } catch {
             if case AnywhereError.quic(.datagramTooLarge(let maxBound)) = error,
                retriesLeft > 0 {
-                guard _isReady.load(ordering: .relaxed) else {
+                guard isConnected else {
                     throw AnywhereError.proxy(.nowhere, .streamClosed)
                 }
                 // A new identity prevents the receiver from mixing fragments encoded with
@@ -234,10 +263,20 @@ actor NowhereUDPConnection {
 
     // MARK: - Teardown
 
-    /// Single terminal path: mirrors readiness off, finishes both inboxes, fires the termination
-    /// handler once, and hops a `Task` to the isolated release work.
     private nonisolated func terminate(error: Error?, sendAdvisory: Bool) {
-        let wasReady = _isReady.exchange(false, ordering: .relaxed)
+        enum Prior { case ready, notReady, alreadyClosed }
+        let prior: Prior = phase.withLock { state in
+            switch state {
+            case .closed: return .alreadyClosed
+            case .ready:
+                Phase.transition(&state, to: .closed)
+                return .ready
+            case .idle, .opening:
+                Phase.transition(&state, to: .closed)
+                return .notReady
+            }
+        }
+        guard prior != .alreadyClosed else { return }
         if let error {
             datagramInbox.finish(throwing: error)
             controlInbox.finish(throwing: error)
@@ -245,8 +284,8 @@ actor NowhereUDPConnection {
             datagramInbox.finish()
             controlInbox.finish()
         }
-        notifyTermination(error: error)
-        Task { await self.teardown(sendAdvisory: sendAdvisory, reset: !wasReady) }
+        termination.fire(error)
+        Task { await self.teardown(sendAdvisory: sendAdvisory, reset: prior == .notReady) }
     }
 
     private func fail(_ error: Error) {
@@ -254,8 +293,6 @@ actor NowhereUDPConnection {
     }
 
     private func teardown(sendAdvisory: Bool, reset: Bool) async {
-        guard !closed else { return }
-        closed = true
         if sendAdvisory { await sendCloseFrame() }
         releaseControlStream(reset: reset)
         session.releaseUDPSession(flowHeader.flowID)
@@ -274,18 +311,6 @@ actor NowhereUDPConnection {
         controlStreamID = -1
         if reset { session.shutdownStream(sid) }
         session.releaseUDPControlStream(sid)
-    }
-
-    private nonisolated func notifyTermination(error: Error?) {
-        let handler: (@Sendable (Error?) -> Void)? = termination.withLock { state in
-            guard !state.terminated else { return nil }
-            state.terminated = true
-            state.error = error
-            let handler = state.handler
-            state.handler = nil
-            return handler
-        }
-        handler?(error)
     }
 
     // MARK: - Pull helpers

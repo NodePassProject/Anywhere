@@ -590,7 +590,7 @@ extension TLSClient {
             if let finishedResult = parseTLS12ServerCCSAndFinished(buffer: buffer, keys: keys) {
                 switch finishedResult {
                 case .success(let remainingData):
-                    return buildTLS12Connection(keys: keys, remainingBuffer: remainingData)
+                    return try buildTLS12Connection(keys: keys, remainingBuffer: remainingData)
                 case .failure(let error):
                     throw error
                 }
@@ -830,7 +830,7 @@ extension TLSClient {
     private func buildTLS12Connection(
         keys: TLS12HandshakeKeys,
         remainingBuffer: Data?
-    ) -> TLSRecordConnection {
+    ) throws -> TLSRecordConnection {
         let tlsConnection = TLSRecordConnection(
             tls12ClientKey: keys.clientKey,
             clientIV: keys.clientIV,
@@ -843,7 +843,7 @@ extension TLSClient {
             initialClientSeqNum: 1,
             initialServerSeqNum: 1
         )
-        tlsConnection.adoptTransport(self.takeConnection())
+        try commitHandshake(tlsConnection)
         tlsConnection.publishNegotiatedALPN(self.negotiatedALPN)
 
         if let remaining = remainingBuffer, !remaining.isEmpty {

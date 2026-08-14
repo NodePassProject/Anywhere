@@ -48,10 +48,10 @@ extension TLSClient {
             var effectiveClientHello = clientHello
             if let ech = echContext {
                 if echAcceptConfirmed(serverHello: serverHello, ech: ech, kd: tls13.keyDerivation!) {
-                    echAccepted = true
+                    ech.outcome = .accepted
                     effectiveClientHello = ech.innerTranscriptMessage
                 } else {
-                    ech.rejected = true
+                    ech.outcome = .rejected(retryConfigList: nil)
                 }
             }
 
@@ -174,11 +174,11 @@ extension TLSClient {
                         switch hsType {
                         case TLSHandshakeType.encryptedExtensions:
                             fullTranscript.append(hsMessage)
-                            if let ech = echContext, ech.rejected {
+                            if let ech = echContext, ech.isRejected {
                                 // ECH was rejected; the server may offer fresh
                                 // configs here. Skip ALPN validation — it reflects
                                 // the cover (outer) hello, and we will fail anyway.
-                                ech.retryConfigList = parseECHRetryConfigList(fromEncryptedExtensions: hsBody)
+                                ech.outcome = .rejected(retryConfigList: parseECHRetryConfigList(fromEncryptedExtensions: hsBody))
                             } else if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
                                 guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(alpn) else {
                                     throw AnywhereError.tls(.handshakeFailed(detail: "Server selected an ALPN we didn't offer"))
@@ -249,8 +249,8 @@ extension TLSClient {
             // ECH rejected: the handshake terminated against the cover name, not
             // the intended server. Surface the rejection (with any retry configs)
             // rather than validating the wrong certificate.
-            if let ech = echContext, ech.rejected {
-                throw AnywhereError.tls(.ech(.rejected(retryConfigList: ech.retryConfigList)))
+            if let ech = echContext, case .rejected(let retryConfigList) = ech.outcome {
+                throw AnywhereError.tls(.ech(.rejected(retryConfigList: retryConfigList)))
             }
 
             try validateCertificate()
@@ -384,7 +384,7 @@ extension TLSClient {
             serverAppSecret: appKeys.serverTrafficSecret,
             exporterMasterSecret: application.exporterMasterSecret
         )
-        tlsConnection.adoptTransport(self.takeConnection())
+        try commitHandshake(tlsConnection)
         tlsConnection.publishNegotiatedALPN(self.negotiatedALPN)
 
         if let remaining = self.postHandshakeBuffer, !remaining.isEmpty {

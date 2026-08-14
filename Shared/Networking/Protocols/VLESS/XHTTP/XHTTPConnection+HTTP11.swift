@@ -16,8 +16,7 @@ extension XHTTPConnection {
         let method = configuration.uplinkHTTPMethod
         let path = configuration.normalizedPath
         var request = ""
-
-        // stream-one carries no session ID in the path.
+        
         let metaQuery = queryParamsForMeta()
         request += buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
@@ -74,12 +73,12 @@ extension XHTTPConnection {
     }
 
     // MARK: Upload Response Drain
-    
+
     func startUploadResponseDrain() {
         guard let upload = state.withLock({ $0.uploadTransport }) else { return }
         let task = Task { [weak self] in
             while true {
-                guard let self, self.state.withLock({ $0._isConnected }) else { return }
+                guard let self, self.state.withLock({ $0.phase != .cancelled }) else { return }
                 let chunk: TransportChunk
                 do {
                     chunk = try await upload.receive()
@@ -149,7 +148,7 @@ extension XHTTPConnection {
         }
         try await receiveResponseHeaders()
     }
-    
+
     func performUploadOnlyHTTP11Setup() async throws {
         let upload = NonCancelingByteTransport(download)
         state.withLock { $0.uploadTransport = upload }
@@ -230,7 +229,6 @@ extension XHTTPConnection {
                 let headerData = Data(state.headerBuffer[state.headerBuffer.startIndex..<range.lowerBound])
                 let leftover = Data(state.headerBuffer[range.upperBound...])
                 state.headerBuffer.removeAll()
-                state.downloadHeadersParsed = true
                 if !leftover.isEmpty { state.chunkedDecoder.feed(leftover) }
                 return headerData
             }
@@ -259,7 +257,7 @@ extension XHTTPConnection {
         }
         try await upload.send(ChunkedTransferEncoder.encode(data))
     }
-    
+
     func sendPacketUpHTTP11(data: Data) async throws {
         guard let upload = state.withLock({ $0.uploadTransport }) else {
             throw AnywhereError.proxy(.xhttp, .handshakeFailed(detail: "Upload connection not established"))

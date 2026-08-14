@@ -29,12 +29,12 @@ actor TCPConnection: MITMSessionHost {
 
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
-    
+
     private var rootTask: Task<Void, Never>?
 
     private var routeTarget: RouteTarget
     private var ruleSetName: String?
-    
+
     private var ruleMatched: Bool
 
     private var bypass: Bool {
@@ -43,18 +43,47 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private var pendingData = Data()
-    private var closed = false
-    
-    private var establishing = true
+
+    private enum Phase: PhaseTransitionable {
+        case establishing
+        case relaying
+        case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.establishing, .relaying):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
+
+    private var phase: Phase = .establishing
+
+    @discardableResult
+    private func transition(to new: Phase) -> Bool {
+        let old = phase
+        guard Phase.transition(&phase, to: new) else {
+            if new != .closed {
+                logger.error("[TCP] Invalid transition \(old) → \(new) for \(endpointDescription); ignored")
+            }
+            return false
+        }
+        return true
+    }
+
     private let establishInbox = AsyncInbox<Void>()
-    
+
     // MARK: MITM
 
     private var mitmEnabled = false
     private var mitmPlaintext = false
     private var mitmSNI: String?
     private var mitmSession: MITMSession?
-    
+
     private let hostIsResolvedDomain: Bool
 
     // MARK: SNI / HTTP Sniffing
@@ -97,7 +126,7 @@ actor TCPConnection: MITMSessionHost {
     }
     private let nurseryJobs: AsyncStream<NurseryJob>
     private nonisolated let nurseryJobContinuation: AsyncStream<NurseryJob>.Continuation
-    
+
     private var dialWaiters: [Int: CheckedContinuation<MITMDialResult, Error>] = [:]
     private var nextDialID = 0
 
@@ -131,7 +160,7 @@ actor TCPConnection: MITMSessionHost {
             self.sniffer = TLSClientHelloSniffer()
         }
     }
-    
+
     nonisolated func adopt() -> UnsafeMutableRawPointer {
         assumeIsolated { $0.start() }
         return BridgeContext.passRetained(self)
@@ -140,7 +169,7 @@ actor TCPConnection: MITMSessionHost {
     private func start() {
         rootTask = Task { await self.run() }
     }
-    
+
     private func run() async {
         await withDiscardingTaskGroup { group in
             group.addTask { await self.runLifecycle() }
@@ -157,7 +186,7 @@ actor TCPConnection: MITMSessionHost {
     }
 
     // MARK: - Lifecycle flow
-    
+
     private func runLifecycle() async {
         let outcome = await withHandshakeDeadline { await self.establishAndDial() }
         switch outcome {
@@ -173,7 +202,7 @@ actor TCPConnection: MITMSessionHost {
         case mitm
         case done
     }
-    
+
     private func withHandshakeDeadline(_ operation: @escaping @Sendable () async -> Establishment) async -> Establishment {
         await withTaskGroup(of: Establishment?.self) { group in
             group.addTask { Optional(await operation()) }
@@ -186,7 +215,7 @@ actor TCPConnection: MITMSessionHost {
                 if let established = next {
                     return established
                 }
-                guard establishing, !closed else { continue }
+                guard phase == .establishing else { continue }
                 handshakeTimedOutDuringEstablishment()
                 return .done
             }
@@ -195,29 +224,29 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func handshakeTimedOutDuringEstablishment() {
-        guard !closed, establishing else { return }
-        let phase = isSniffing ? "protocol sniff" : (bypass ? "direct dial" : "proxy dial")
+        guard phase == .establishing else { return }
+        let stage = isSniffing ? "protocol sniff" : (bypass ? "direct dial" : "proxy dial")
         failureReporter.report(
             operation: "Handshake",
             endpoint: endpointDescription,
-            error: AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: phase))
+            error: AnywhereError.transport(.timedOut(.connect, endpoint: nil, detail: stage))
         )
         abort()
     }
 
     private func establishAndDial() async -> Establishment {
         await runSniffPhase()
-        guard !closed else { return .done }
+        guard phase != .closed else { return .done }
         await applyIPRuleMatch()
-        guard !closed else { return .done }
+        guard phase != .closed else { return .done }
         return await beginConnecting()
     }
-    
+
     private func applyIPRuleMatch() async {
-        guard hostIsResolvedDomain, !ruleMatched, !closed,
+        guard hostIsResolvedDomain, !ruleMatched, phase != .closed,
               let stack, !stack.connectionRouter.preventDNSLeak.load(ordering: .relaxed),
               let ip = await RuleResolver.shared.resolveIPv4(for: dstHost),
-              !closed, let match = stack.domainRouter.matchIP(ip)
+              phase != .closed, let match = stack.domainRouter.matchIP(ip)
         else { return }
 
         let router = stack.domainRouter
@@ -255,7 +284,7 @@ actor TCPConnection: MITMSessionHost {
     }
 
     // MARK: - Protocol sniff
-    
+
     private func runSniffPhase() async {
         guard sniffer != nil else { return }
         await withSniffDeadline { await self.runSniffLoop() }
@@ -274,23 +303,23 @@ actor TCPConnection: MITMSessionHost {
             }
         }
     }
-    
+
     private func sniffDeadlineFired() {
-        guard !closed, isSniffing else { return }
+        guard phase != .closed, isSniffing else { return }
         sniffer = nil
         httpSniffer = nil
     }
-    
+
     private func runSniffLoop() async {
         while true {
             feedSniffState()
-            if closed || !isSniffing { return }
+            if phase == .closed || !isSniffing { return }
             if (try? await establishInbox.next()) == nil { return }
         }
     }
-    
+
     private func feedSniffState() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         let delta = sniffDelta()
 
         if sniffer != nil {
@@ -327,7 +356,7 @@ actor TCPConnection: MITMSessionHost {
             return
         }
     }
-    
+
     private func sniffDelta() -> Data {
         guard sniffFedOffset < pendingData.count else { return Data() }
         let delta = pendingData.subdata(in: sniffFedOffset..<pendingData.count)
@@ -346,7 +375,7 @@ actor TCPConnection: MITMSessionHost {
             httpSniffer = nil
         }
     }
-    
+
     private func applySNI(_ sni: String) {
         guard let stack else { return }
         sniffedSNI = sni
@@ -398,7 +427,7 @@ actor TCPConnection: MITMSessionHost {
     // MARK: - Route commit / dial
 
     private func beginConnecting() async -> Establishment {
-        guard !closed else { return .done }
+        guard phase != .closed else { return .done }
         if mitmEnabled {
             return startMITMSession()
         }
@@ -435,8 +464,8 @@ actor TCPConnection: MITMSessionHost {
         } catch let dialError {
             error = dialError
         }
-        
-        guard !closed else { return .done }
+
+        guard phase != .closed else { return .done }
 
         if let error {
             return handleConnectFailure(error, bufferedClientData: initialData)
@@ -450,12 +479,12 @@ actor TCPConnection: MITMSessionHost {
         }
         return .relay(connection, installStream(seed: seed))
     }
-    
+
     private func installStream(seed: Data) -> TCPStreamConcurrencyBridge {
         let stream = TCPStreamConcurrencyBridge(bridge: bridge, pcb: LWIPPCBHandle(raw: pcb))
         if !seed.isEmpty { stream.assumeIsolated { $0.seedUpload(seed) } }
         self.stream = stream
-        establishing = false
+        transition(to: .relaying)
         startIdleTimer()
         return stream
     }
@@ -490,8 +519,8 @@ actor TCPConnection: MITMSessionHost {
         } catch {
             result = .failure(error)
         }
-        
-        guard !closed else {
+
+        guard phase != .closed else {
             if case .success(let connection) = result { connection.cancel() }
             return .done
         }
@@ -514,7 +543,7 @@ actor TCPConnection: MITMSessionHost {
             return handleConnectFailure(error, bufferedClientData: initialData)
         }
     }
-    
+
     private func handleConnectFailure(
         _ error: Error,
         bufferedClientData: Data?
@@ -558,7 +587,7 @@ actor TCPConnection: MITMSessionHost {
                 guard let self else { return }
                 self.bridge.enqueue {
                     self.assumeIsolated { me in
-                        guard !me.closed else { return }
+                        guard me.phase != .closed else { return }
                         me.reportFailure("Write", error: error)
                         me.abort()
                     }
@@ -631,18 +660,19 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func boundDownlinkDrain() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
+        markActivity()
         setIdleTimeout(TunnelConstants.drainBeforeCloseTimeout)
     }
 
     private func relayFailed(_ operation: String, error: Error) {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         reportFailure(operation, error: error)
         abort()
     }
 
     private func relayFinished() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         close()
     }
 
@@ -661,7 +691,7 @@ actor TCPConnection: MITMSessionHost {
     // MARK: - lwIP callbacks
 
     func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
-        guard !closed, count > 0 else { return }
+        guard phase != .closed, count > 0 else { return }
         markActivity()
 
         let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
@@ -678,7 +708,7 @@ actor TCPConnection: MITMSessionHost {
             stream.assumeIsolated { $0.deliverUpload(uploadChunk) }
             return
         }
-        
+
         guard appendPendingData(bytes: bytePtr, count: count) else { return }
         establishInbox.yield(())
     }
@@ -696,12 +726,12 @@ actor TCPConnection: MITMSessionHost {
     }
 
     func handleSent(len: UInt16) {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         stream?.assumeIsolated { $0.deliverSendCredit() }
     }
 
     func handleRemoteClose() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         close()
     }
 
@@ -711,10 +741,10 @@ actor TCPConnection: MITMSessionHost {
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
-        } else if err == -13, stack?.isTearingDown.load(ordering: .relaxed) == true {
+        } else if err == -13, stack?.lwipAbortContext.load(ordering: .relaxed) == .teardown {
             // ERR_ABRT during deliberate teardown; otherwise it's an lwIP pressure abort and warns below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
-        } else if err == -13, stack?.isPressureFlushing.load(ordering: .relaxed) == true {
+        } else if err == -13, stack?.lwipAbortContext.load(ordering: .relaxed) == .pressureFlush {
             // ERR_ABRT from the pressure-cap flush: expected for every live
             // connection at once, and already announced by one warning there.
             logger.debug("[TCP] Connection flushed by pressure cap: \(endpointDescription)")
@@ -722,9 +752,7 @@ actor TCPConnection: MITMSessionHost {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }
         failureReporter.markReported()
-        guard !closed else { return }
-        closed = true
-        teardown(abortive: true)
+        finish(.lwipError)
     }
 
     private var endpointDescription: String {
@@ -768,15 +796,15 @@ actor TCPConnection: MITMSessionHost {
     private enum IdleAction { case stop, waitActivation, sleep(TimeInterval), fire }
 
     private func idleNextAction() -> IdleAction {
-        if closed { return .stop }
+        if phase == .closed { return .stop }
         if !idleActive { return .waitActivation }
         let elapsed = MonotonicClock.now - lastActivityTick.load(ordering: .relaxed)
         if elapsed >= idleTimeoutValue { return .fire }
         return .sleep(idleTimeoutValue - elapsed)
     }
-    
+
     private func idleFireAndReport() -> Bool {
-        guard !closed, idleActive else { return true }
+        guard phase != .closed, idleActive else { return true }
         let elapsed = MonotonicClock.now - lastActivityTick.load(ordering: .relaxed)
         if elapsed >= idleTimeoutValue {
             idleActive = false
@@ -800,7 +828,7 @@ actor TCPConnection: MITMSessionHost {
             }
         }
     }
-    
+
     private nonisolated func idleSleep(_ seconds: TimeInterval) async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { try? await Task.sleep(for: .seconds(seconds)) }
@@ -852,7 +880,7 @@ actor TCPConnection: MITMSessionHost {
                 guard let self else { return }
                 self.bridge.enqueue {
                     self.assumeIsolated { me in
-                        guard !me.closed else { return }
+                        guard me.phase != .closed else { return }
                         me.reportFailure("MITM downlink", error: error)
                         me.abort()
                     }
@@ -860,7 +888,7 @@ actor TCPConnection: MITMSessionHost {
             }
         }
         mitmSession = session
-        establishing = false
+        transition(to: .relaying)
 
         if !initialClientHello.isEmpty {
             acknowledgeReceivedBytes(initialClientHello.count)
@@ -885,9 +913,9 @@ actor TCPConnection: MITMSessionHost {
     }
 
     // MARK: - MITMSessionHost
-    
+
     func mitmDialUpstream(host: String, port: UInt16) async throws -> MITMDialResult {
-        guard !closed else { throw AnywhereError.transport(.notConnected) }
+        guard phase != .closed else { throw AnywhereError.transport(.notConnected) }
         let route: DialRoute
         switch await commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
@@ -902,7 +930,7 @@ actor TCPConnection: MITMSessionHost {
         nextDialID += 1
         let id = nextDialID
         return try await withCheckedThrowingContinuation { continuation in
-            guard !closed else {
+            guard phase != .closed else {
                 continuation.resume(throwing: AnywhereError.transport(.terminated))
                 return
             }
@@ -910,10 +938,10 @@ actor TCPConnection: MITMSessionHost {
             nurseryJobContinuation.yield(.dial(DialJob(id: id, route: route, host: host, port: port)))
         }
     }
-    
+
     private func runDial(_ job: DialJob) async {
         let result: Result<MITMDialResult, Error>
-        if closed {
+        if phase == .closed {
             result = .failure(AnywhereError.transport(.terminated))
         } else {
             do {
@@ -998,7 +1026,7 @@ actor TCPConnection: MITMSessionHost {
     nonisolated func mitmSessionSendToClient(_ data: Data) {
         bridge.enqueue {
             self.assumeIsolated { me in
-                guard !me.closed, let stream = me.stream else { return }
+                guard me.phase != .closed, let stream = me.stream else { return }
                 me.markActivity()
                 stream.assumeIsolated { $0.deliverDownload(data) }
             }
@@ -1008,7 +1036,7 @@ actor TCPConnection: MITMSessionHost {
     nonisolated func mitmSessionDidTearDown(error: Error?) {
         bridge.enqueue {
             self.assumeIsolated { me in
-                guard !me.closed else { return }
+                guard me.phase != .closed else { return }
                 if let error {
                     me.reportFailure("MITM", error: error)
                     me.abort()
@@ -1021,6 +1049,8 @@ actor TCPConnection: MITMSessionHost {
 
     private func commitUpstreamRoute(forDialHost host: String, port: UInt16) async -> UpstreamRoute {
         let resolved = await resolveUpstreamRoute(forDialHost: host)
+        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: resolved.route.target, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
+        guard phase != .closed else { return resolved.route }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
             routeTarget = resolved.route.target
             if case .proxy(_, let configuration) = resolved.route {
@@ -1028,7 +1058,6 @@ actor TCPConnection: MITMSessionHost {
             }
             ruleSetName = resolved.ruleSetName
         }
-        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: resolved.route.target, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
         return resolved.route
     }
 
@@ -1097,9 +1126,10 @@ actor TCPConnection: MITMSessionHost {
     // MARK: - Close / abort / teardown
 
     private func closeWhenDrained() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         guard stream != nil else { close(); return }
         closePending = true
+        markActivity()
         setIdleTimeout(TunnelConstants.drainBeforeCloseTimeout)
         nurseryJobContinuation.yield(.drainThenClose)
     }
@@ -1114,62 +1144,70 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func completeDeferredClose() {
-        guard closePending, !closed else { return }
+        guard closePending, phase != .closed else { return }
         close()
     }
 
+    private enum Exit {
+        case graceful
+        case abortive
+        case silentReject
+        case lwipError
+    }
+
+    private func finish(_ exit: Exit) {
+        guard transition(to: .closed) else { return }
+        switch exit {
+        case .graceful:
+            stream?.assumeIsolated { $0.flushBestEffort() }
+            lwip_bridge_tcp_close(pcb)
+            BridgeContext.release(self)
+            teardown(abortive: false)
+        case .abortive:
+            lwip_bridge_tcp_abort(pcb)
+            BridgeContext.release(self)
+            teardown(abortive: true)
+        case .silentReject:
+            lwip_bridge_tcp_discard(pcb)
+            BridgeContext.release(self)
+            teardown(abortive: true)
+        case .lwipError:
+            teardown(abortive: true)
+        }
+    }
+
     func close() {
-        guard !closed else { return }
-        closed = true
-        stream?.assumeIsolated { $0.flushBestEffort() }
-        relinquishPCB(abortive: false)
-        teardown(abortive: false)
+        finish(.graceful)
     }
 
     func abort() {
-        guard !closed else { return }
-        closed = true
-        relinquishPCB(abortive: true)
-        teardown(abortive: true)
-    }
-    
-    private func relinquishPCB(abortive: Bool) {
-        if abortive {
-            lwip_bridge_tcp_abort(pcb)
-        } else {
-            lwip_bridge_tcp_close(pcb)
-        }
-        BridgeContext.release(self)
+        finish(.abortive)
     }
 
     private func rejectGracefully() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         var remaining = pendingData.count
         while remaining > 0 {
             let chunk = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(chunk)
             lwip_bridge_tcp_recved(pcb, chunk)
         }
-        close()
+        finish(.graceful)
     }
-    
+
     private func rejectSilently() {
-        guard !closed else { return }
-        closed = true
-        lwip_bridge_tcp_discard(pcb)
-        BridgeContext.release(self)
-        teardown(abortive: true)
+        finish(.silentReject)
     }
 
     private func rejectWithTLSAlert() {
-        guard !closed else { return }
+        guard phase != .closed else { return }
         // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
         // length=2, level=2 (fatal), description=49 (access_denied)
         let alert: [UInt8] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31]
         writeImmediate(Data(alert))
         rejectGracefully()
     }
-    
+
     private func writeImmediate(_ data: Data) {
         guard !data.isEmpty else { return }
         var written = 0
@@ -1185,13 +1223,13 @@ actor TCPConnection: MITMSessionHost {
         }
         if written > 0 { lwip_bridge_tcp_output(pcb) }
     }
-    
+
     private func teardown(abortive: Bool) {
         for (_, waiter) in dialWaiters {
             waiter.resume(throwing: AnywhereError.transport(.terminated))
         }
         dialWaiters.removeAll()
-        
+
         nurseryJobContinuation.finish()
         establishInbox.finish()
 
@@ -1209,8 +1247,8 @@ actor TCPConnection: MITMSessionHost {
         sniffer = nil
         httpSniffer = nil
         pendingData = Data()
-        establishing = false
-        
+        closePending = false
+
         session?.assumeIsolated { $0.cancel(error: nil) }
         stream?.assumeIsolated { $0.terminate() }
         if abortive {
@@ -1219,7 +1257,7 @@ actor TCPConnection: MITMSessionHost {
             connection?.cancel()
         }
         client?.cancel()
-        
+
         rootTask?.cancel()
         rootTask = nil
     }

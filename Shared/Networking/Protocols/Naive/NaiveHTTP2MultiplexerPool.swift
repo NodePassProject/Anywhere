@@ -52,6 +52,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool: TransportPool {
                 }
             )
             pool.state.withLock { $0.extra[ObjectIdentifier(multiplexer)] = multiplexer }
+            _ = multiplexer.tryReserveStream()
             return openStream(on: multiplexer, destination: destination)
         }
 
@@ -82,6 +83,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool: TransportPool {
                 )
                 st.multiplexers[key, default: []].append(new)
                 st.lastActivity[ObjectIdentifier(new)] = MonotonicClock.now
+                _ = new.tryReserveStream()
                 return new
             }
         }
@@ -110,7 +112,7 @@ nonisolated final class NaiveHTTP2MultiplexerPool: TransportPool {
             return dedicated
         }
 
-        pool.closeAll()
+        pool.drainAll()
 
         for multiplexer in dedicated {
             multiplexer.close()

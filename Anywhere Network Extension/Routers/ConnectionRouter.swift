@@ -17,11 +17,11 @@ nonisolated struct RouteDecision {
         case reject(ruleSetName: String?)
         case unreachable
     }
-    
+
     let host: String
     let hostIsResolvedDomain: Bool
     let action: Action
-    
+
     var ipRuleLookupPending = false
 
     var viaDefault: Bool {
@@ -35,7 +35,7 @@ nonisolated final class ConnectionRouter: Sendable {
     let domainRouter: DomainRouter
 
     let preventDNSLeak = Atomic(false)
-    
+
     private struct RejectedIPs {
         var v4: Set<UInt32> = []
         var v6: Set<SIMD16<UInt8>> = []
@@ -43,7 +43,7 @@ nonisolated final class ConnectionRouter: Sendable {
     }
     private let rejectedIPs = Mutex(RejectedIPs())
     private static let rejectedIPCap = 4096
-    
+
     private let dnsRejectLogged = Mutex(Set<String>())
     private static let dnsRejectLoggedCap = 4096
 
@@ -51,7 +51,7 @@ nonisolated final class ConnectionRouter: Sendable {
         self.fakeIPPool = fakeIPPool
         self.domainRouter = domainRouter
     }
-    
+
     func decision(forIP ip: String, port: UInt16, proto: String) -> RouteDecision {
         guard FakeIPPool.isFakeIP(ip) else {
             guard let match = domainRouter.matchIP(ip) else {
@@ -78,14 +78,14 @@ nonisolated final class ConnectionRouter: Sendable {
             return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .unreachable)
         }
         let domain = entry.domain
-        
-        let rulesVersion = domainRouter.currentRulesVersion
+
         let match: DomainRouter.Match?
-        if entry.verdictVersion == rulesVersion {
+        if entry.verdictVersion == domainRouter.currentRulesVersion {
             match = entry.verdict
         } else {
-            match = domainRouter.matchDomain(domain)
-            fakeIPPool.cacheVerdict(domain: domain, match: match, version: rulesVersion)
+            let versioned = domainRouter.matchDomainVersioned(domain)
+            match = versioned.match
+            fakeIPPool.cacheVerdict(domain: domain, match: match, version: versioned.version)
         }
 
         if let match {
@@ -136,7 +136,7 @@ nonisolated final class ConnectionRouter: Sendable {
 
         return RouteDecision(host: domain, hostIsResolvedDomain: true, action: .routeViaDefault)
     }
-    
+
     private func markingIfRejected(
         _ action: RouteDecision.Action, domain: String
     ) -> RouteDecision.Action {
@@ -145,7 +145,7 @@ nonisolated final class ConnectionRouter: Sendable {
         }
         return action
     }
-    
+
     private func markingIfRejectedIP(
         _ action: RouteDecision.Action, ip: String
     ) -> RouteDecision.Action {
@@ -180,12 +180,12 @@ nonisolated final class ConnectionRouter: Sendable {
     }
 
     // MARK: - DNS-time verdict
-    
+
     func dnsVerdict(forDomain domain: String) -> (match: DomainRouter.Match?, rulesVersion: UInt64) {
-        let version = domainRouter.currentRulesVersion
-        return (domainRouter.matchDomain(domain), version)
+        let versioned = domainRouter.matchDomainVersioned(domain)
+        return (versioned.match, versioned.version)
     }
-    
+
     func shouldLogDNSReject(domain: String) -> Bool {
         dnsRejectLogged.withLock { set in
             if set.count >= Self.dnsRejectLoggedCap { set.removeAll(keepingCapacity: true) }
@@ -207,7 +207,7 @@ nonisolated final class ConnectionRouter: Sendable {
                 |  UInt32(rawIP.load(fromByteOffset: 3, as: UInt8.self))
         return rejectedIPs.withLock { $0.v4.contains(key) }
     }
-    
+
     func isRejectMarkedDestination(ipBytes: SIMD16<UInt8>, isIPv6: Bool) -> Bool {
         if fakeIPPool.isRejectMarked(ipBytes: ipBytes, isIPv6: isIPv6) { return true }
         if isIPv6 {
@@ -217,7 +217,7 @@ nonisolated final class ConnectionRouter: Sendable {
                 | (UInt32(ipBytes[2]) << 8) | UInt32(ipBytes[3])
         return rejectedIPs.withLock { $0.v4.contains(key) }
     }
-    
+
     func clearRejectMarks() {
         fakeIPPool.clearRejectMarks()
         rejectedIPs.withLock { $0 = RejectedIPs() }

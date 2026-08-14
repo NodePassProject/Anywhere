@@ -758,6 +758,8 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     private let sendState: Mutex<SendState>
     private let recvState: Mutex<RecvState>
 
+    private let sendChain = SerialSender()
+
     fileprivate init(
         inner: ProxyConnection,
         writeAEAD: VLESSEncryptionAEAD,
@@ -790,12 +792,22 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
 
     func sendRaw(_ data: Data) async throws {
         guard !data.isEmpty else { return }
-        let frames = try buildOutboundFrames(plaintext: data)
-        try await inner.sendRaw(frames)
+        let pending: SerialSender.Pending = try sendState.withLock { state in
+            let frames = try Self.buildOutboundFrames(
+                plaintext: data, state: &state, unitedKey: unitedKey, useAES: useAES
+            )
+            let inner = self.inner
+            return sendChain.submit { try await inner.sendRaw(frames) }
+        }
+        try await pending.value()
     }
 
-    private func buildOutboundFrames(plaintext: Data) throws -> Data {
-        return try sendState.withLock { state in
+    private static func buildOutboundFrames(
+        plaintext: Data,
+        state: inout SendState,
+        unitedKey: Data,
+        useAES: Bool
+    ) throws -> Data {
             var output = Data()
             if let prelude = state.preludeBytes {
                 output.append(prelude)
@@ -818,12 +830,11 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                 if willRekey {
                     var context = header
                     context.append(sealed)
-                    state.writeAEAD = VLESSEncryptionAEAD(context: context, key: self.unitedKey, useAES: self.useAES)
+                    state.writeAEAD = VLESSEncryptionAEAD(context: context, key: unitedKey, useAES: useAES)
                 }
                 offset += chunkSize
             }
             return output
-        }
     }
 
     // MARK: - Receive
@@ -980,6 +991,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     }
 
     func cancel() {
+        sendChain.cancel()
         inner.cancel()
     }
 }

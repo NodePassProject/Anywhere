@@ -12,12 +12,27 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
 
     // MARK: - State
 
-    enum Phase { case idle, requestSent, open, closed }
+    enum Phase: PhaseTransitionable {
+        case idle, opening, requestSent, open, closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .opening),
+                 (.opening, .requestSent),
+                 (.requestSent, .open):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
 
     private struct WeakMultiplexer { weak var value: HTTP3Multiplexer? }
     private let multiplexerBox: Mutex<WeakMultiplexer>
 
-    private struct State {
+    private struct State: PhaseHolding {
         var phase: Phase = .idle
         var quicStreamID: Int64?
         var headersReceived = false
@@ -25,10 +40,10 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         var frameBuffer = Data()
         var frameBufferOffset = 0
     }
-    private let lock = Mutex(State())
+    private let state = Mutex(State())
 
-    var quicStreamID: Int64? { lock.withLock { $0.quicStreamID } }
-    var responseStatus: Int? { lock.withLock { $0.responseStatus } }
+    var quicStreamID: Int64? { state.withLock { $0.quicStreamID } }
+    var responseStatus: Int? { state.withLock { $0.responseStatus } }
 
     // MARK: - Response
 
@@ -57,6 +72,9 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
             throw AnywhereError.proxy(.http3, .streamClosed)
         }
+        guard state.withLock({ $0.transition(to: .opening) }) else {
+            throw AnywhereError.proxy(.http3, .streamClosed)
+        }
         try await multiplexer.ensureReady()
 
         let events = HTTP3Multiplexer.StreamEvents(
@@ -69,12 +87,20 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         )
 
         guard let sid = await multiplexer.openStream(events: events) else {
-            lock.withLock { $0.phase = .closed }
-            throw AnywhereError.proxy(.http3, .streamIDsExhausted)
+            let error: AnywhereError = multiplexer.isRetired
+                ? .proxy(.http3, .connectionClosed(detail: "Session retiring"))
+                : .proxy(.http3, .streamIDsExhausted)
+            handleStreamError(error)
+            throw error
         }
-        lock.withLock { state in
+        let adopted: Bool = state.withLock { state in
+            guard state.transition(to: .requestSent) else { return false }
             state.quicStreamID = sid
-            state.phase = .requestSent
+            return true
+        }
+        guard adopted else {
+            detachFromMultiplexer(sid: sid, code: .requestCancelled)
+            throw AnywhereError.proxy(.http3, .streamClosed)
         }
 
         let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
@@ -95,7 +121,7 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         guard let multiplexer = multiplexerBox.withLock({ $0.value }) else {
             throw AnywhereError.proxy(.http3, .streamClosed)
         }
-        let sid: Int64? = lock.withLock { state in
+        let sid: Int64? = state.withLock { state in
             state.phase == .closed ? nil : state.quicStreamID
         }
         guard let sid else { throw AnywhereError.proxy(.http3, .streamClosed) }
@@ -126,14 +152,14 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
     }
 
     func close() {
-        let detach: (sid: Int64?, code: HTTP3ErrorCode)? = lock.withLock { state in
-            guard state.phase != .closed else { return nil }
+        enum Outcome { case alreadyClosed, closed(sid: Int64?, code: HTTP3ErrorCode) }
+        let outcome: Outcome = state.withLock { state in
             let code: HTTP3ErrorCode = state.headersReceived ? .noError : .requestCancelled
-            state.phase = .closed
-            return (state.quicStreamID, code)
+            guard state.transition(to: .closed) else { return .alreadyClosed }
+            return .closed(sid: state.quicStreamID, code: code)
         }
-        guard let detach else { return }
-        detachFromMultiplexer(sid: detach.sid, code: detach.code)
+        guard case .closed(let sid, let code) = outcome else { return }
+        detachFromMultiplexer(sid: sid, code: code)
         responseSignal.finish(throwing: AnywhereError.proxy(.http3, .streamClosed))
         inbox.finish()
     }
@@ -176,7 +202,8 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
         var deliveries: [Data] = []
         var outcome: HeadersOutcome = .none
 
-        lock.withLock { state in
+        state.withLock { state in
+            guard state.phase != .closed else { return }
             state.frameBuffer.append(data)
             while state.frameBufferOffset < state.frameBuffer.count {
                 guard let (frame, consumed) = HTTP3Framer.parseFrame(
@@ -242,9 +269,9 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
 
         let statusValue = headers.first(where: { $0.name == ":status" })?.value
         let status = statusValue.flatMap { Int($0) }
+        guard state.transition(to: .open) else { return .none }
         state.responseStatus = status
         state.headersReceived = true
-        state.phase = .open
 
         if let status {
             return .status(status)
@@ -255,30 +282,32 @@ nonisolated final class XHTTPH3RequestStream: Sendable {
 
     private func ackQuicBytes(_ count: Int) {
         guard count > 0 else { return }
-        guard let sid = lock.withLock({ $0.quicStreamID }) else { return }
+        guard let sid = state.withLock({ $0.quicStreamID }) else { return }
         multiplexerBox.withLock { $0.value }?.extendStreamOffset(sid, count: count)
     }
 
     private func handleStreamError(_ error: Error) {
-        let sid: Int64?? = lock.withLock { state in
-            guard state.phase != .closed else { return nil }
-            state.phase = .closed
-            return .some(state.quicStreamID)
+        enum Outcome { case alreadyClosed, closed(sid: Int64?) }
+        let outcome: Outcome = state.withLock { state in
+            guard state.transition(to: .closed) else { return .alreadyClosed }
+            return .closed(sid: state.quicStreamID)
         }
-        guard let sid else { return }
+        guard case .closed(let sid) = outcome else { return }
         detachFromMultiplexer(sid: sid, code: .internalError)
         responseSignal.finish(throwing: error)
         inbox.finish(throwing: error)
     }
 
     private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {
-        let sid: Int64?? = lock.withLock { state in
-            guard state.phase != .closed else { return nil }
-            state.phase = .closed
-            return .some(state.quicStreamID)
+        enum Outcome { case alreadyClosed, closed(sid: Int64?) }
+        let outcome: Outcome = state.withLock { state in
+            guard state.transition(to: .closed) else { return .alreadyClosed }
+            return .closed(sid: state.quicStreamID)
         }
-        guard let sid else { return }
+        guard case .closed(let sid) = outcome else { return }
         detachFromMultiplexer(sid: sid, code: code)
+        responseSignal.finish(throwing: AnywhereError.proxy(.http3, .streamClosed))
+        inbox.finish()
     }
 
     private func detachFromMultiplexer(sid: Int64?, code: HTTP3ErrorCode) {

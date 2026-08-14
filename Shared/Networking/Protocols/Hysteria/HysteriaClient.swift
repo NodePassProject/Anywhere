@@ -44,7 +44,7 @@ nonisolated final class HysteriaClient: Sendable {
             return client
         }
     }
-    
+
     static func chained(
         configuration: HysteriaConfiguration,
         transport: QUICDatagramTransport
@@ -56,7 +56,7 @@ nonisolated final class HysteriaClient: Sendable {
             poolKey: nil
         )
     }
-    
+
     static func acquireChained(
         configuration: HysteriaConfiguration,
         chainSignature: String,
@@ -87,7 +87,7 @@ nonisolated final class HysteriaClient: Sendable {
             return try await task.value
         }
     }
-    
+
     private static func buildChained(
         key: Key,
         configuration: HysteriaConfiguration,
@@ -120,9 +120,26 @@ nonisolated final class HysteriaClient: Sendable {
     private let transport: QUICDatagramTransport?
     private let poolKey: Key?
 
-    private struct SessionState {
-        var session: HysteriaSession? = nil
-        var transportConsumed = false
+    private enum Phase: PhaseTransitionable {
+        case idle
+        case live(HysteriaSession)
+        case spent
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .live),
+                 (.live, .live),
+                 (.live, .idle),
+                 (.live, .spent):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct SessionState: PhaseHolding {
+        var phase: Phase = .idle
         var chainHolders: [ProxyClient]
     }
     private let state: Mutex<SessionState>
@@ -139,39 +156,52 @@ nonisolated final class HysteriaClient: Sendable {
         self.poolKey = poolKey
     }
 
+    private func removeFromRegistry() {
+        guard transport != nil, let key = poolKey else { return }
+        Self.registry.withLock { registryState in
+            if registryState.entries[key] === self {
+                registryState.entries.removeValue(forKey: key)
+            }
+        }
+    }
+
     private func acquireSession() async throws -> HysteriaSession {
         enum Acquired {
             case reuse(HysteriaSession)
-            case transportSpent
+            case transportSpent(abandoned: [ProxyClient])
             case fresh(HysteriaSession)
         }
         let acquired: Acquired = state.withLock { state in
-            if let existing = state.session, !existing.isClosed {
+            if case .live(let existing) = state.phase, !existing.isClosed {
                 return .reuse(existing)
             }
-            
-            if transport != nil && state.transportConsumed {
-                if let key = poolKey {
-                    Self.registry.withLock { registryState in
-                        if registryState.entries[key] === self {
-                            registryState.entries.removeValue(forKey: key)
-                        }
-                    }
-                }
-                return .transportSpent
+            switch state.phase {
+            case .spent:
+                let abandoned = state.chainHolders
+                state.chainHolders = []
+                removeFromRegistry()
+                return .transportSpent(abandoned: abandoned)
+            case .live where transport != nil:
+                let abandoned = state.chainHolders
+                state.chainHolders = []
+                state.transition(to: .spent)
+                removeFromRegistry()
+                return .transportSpent(abandoned: abandoned)
+            case .idle, .live:
+                let newSession = HysteriaSession(configuration: configuration, transport: transport)
+                state.transition(to: .live(newSession))
+                return .fresh(newSession)
             }
-
-            let newSession = HysteriaSession(configuration: configuration, transport: transport)
-            state.session = newSession
-            if transport != nil { state.transportConsumed = true }
-            return .fresh(newSession)
         }
 
         switch acquired {
         case .reuse(let existing):
             try await existing.ensureReady()
             return existing
-        case .transportSpent:
+        case .transportSpent(let abandoned):
+            for client in abandoned {
+                await client.cancel()
+            }
             throw AnywhereError.proxy(.hysteria, .streamClosed)
         case .fresh(let newSession):
             newSession.setOnClose { [weak self, weak newSession] in
@@ -183,20 +213,14 @@ nonisolated final class HysteriaClient: Sendable {
             return newSession
         }
     }
-    
+
     private func handleSessionClose(_ closedSession: HysteriaSession) {
         let holders: [ProxyClient]? = state.withLock { state in
-            guard state.session === closedSession else { return nil }
-            state.session = nil
+            guard case .live(let current) = state.phase, current === closedSession else { return nil }
+            state.transition(to: transport != nil ? .spent : .idle)
             let holders = state.chainHolders
             state.chainHolders = []
-            if transport != nil, let key = poolKey {
-                Self.registry.withLock { registryState in
-                    if registryState.entries[key] === self {
-                        registryState.entries.removeValue(forKey: key)
-                    }
-                }
-            }
+            removeFromRegistry()
             return holders
         }
         guard let holders else { return }
@@ -205,7 +229,7 @@ nonisolated final class HysteriaClient: Sendable {
             client.cancel()
         }
     }
-    
+
     func openTCP(destination: String) async throws -> ProxyConnection {
         var retriesLeft = 1
         while true {
@@ -249,7 +273,7 @@ nonisolated final class HysteriaClient: Sendable {
             }
         }
     }
-    
+
     private static func isStaleSessionError(_ error: Error) -> Bool {
         if case AnywhereError.quic(let quicError) = error {
             switch quicError {
@@ -269,20 +293,17 @@ nonisolated final class HysteriaClient: Sendable {
         }
         return false
     }
-    
+
     private func invalidateSession() {
         let (current, holders): (HysteriaSession?, [ProxyClient]) = state.withLock { state in
-            let current = state.session
-            state.session = nil
+            var current: HysteriaSession?
+            if case .live(let session) = state.phase {
+                current = session
+                state.transition(to: transport != nil ? .spent : .idle)
+            }
             let holders = state.chainHolders
             state.chainHolders = []
-            if transport != nil, let key = poolKey {
-                Self.registry.withLock { registryState in
-                    if registryState.entries[key] === self {
-                        registryState.entries.removeValue(forKey: key)
-                    }
-                }
-            }
+            removeFromRegistry()
             return (current, holders)
         }
 
@@ -292,7 +313,7 @@ nonisolated final class HysteriaClient: Sendable {
             client.cancel()
         }
     }
-    
+
     static func closeAll() {
         let clients = registry.withLock { state in Array(state.entries.values) }
         for client in clients {

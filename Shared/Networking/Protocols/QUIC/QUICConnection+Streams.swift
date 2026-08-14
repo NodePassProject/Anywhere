@@ -18,25 +18,25 @@ extension QUICConnection {
 
     nonisolated func openBidiStream() -> Int64? {
         assumeIsolated { me in
-            guard me.state == .connected, let conn = me.connectionOpaquePointer else { return nil }
+            guard me.phase == .connected, let conn = me.connectionOpaquePointer else { return nil }
             return me.openBidiStream(conn)
         }
     }
-    
+
     nonisolated var availableBidiStreams: UInt64 {
         assumeIsolated { me in
-            guard me.state == .connected, let conn = me.connectionOpaquePointer else { return 0 }
+            guard me.phase == .connected, let conn = me.connectionOpaquePointer else { return 0 }
             return me.streamsBidiLeft(conn)
         }
     }
 
     nonisolated func openUniStream() -> Int64? {
         assumeIsolated { me in
-            guard me.state == .connected, let conn = me.connectionOpaquePointer else { return nil }
+            guard me.phase == .connected, let conn = me.connectionOpaquePointer else { return nil }
             return me.openUniStream(conn)
         }
     }
-    
+
     nonisolated func extendStreamOffset(_ streamId: Int64, count: Int) {
         guard count > 0 else { return }
         if isOnQueue {
@@ -65,7 +65,7 @@ extension QUICConnection {
             }
         }
     }
-    
+
     nonisolated func shutdownStream(_ streamId: Int64, appErrorCode: UInt64) {
         bridge.enqueue { [weak self] in
             self?.assumeIsolated { me in
@@ -75,10 +75,10 @@ extension QUICConnection {
             }
         }
     }
-    
+
     nonisolated func writeStream(_ streamId: Int64, data: Data, fin: Bool = false) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.connectionOpaquePointer != nil, me.state == .connected else {
+            guard me.connectionOpaquePointer != nil, me.phase == .connected else {
                 continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
@@ -88,16 +88,16 @@ extension QUICConnection {
 
     nonisolated func writeStreamOnQueue(_ streamId: Int64, data: Data, fin: Bool = false) {
         assumeIsolated { me in
-            guard me.connectionOpaquePointer != nil, me.state == .connected else { return }
+            guard me.connectionOpaquePointer != nil, me.phase == .connected else { return }
             me.appendStreamWrite(streamId, data: data, fin: fin, continuation: nil)
         }
     }
 
     // MARK: Datagrams
-    
+
     nonisolated func writeDatagrams(_ datagrams: [Data]) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.connectionOpaquePointer != nil, me.state == .connected else {
+            guard me.connectionOpaquePointer != nil, me.phase == .connected else {
                 continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
@@ -107,10 +107,10 @@ extension QUICConnection {
             me.writeToUDP()
         }
     }
-    
+
     nonisolated func writeDatagramsAtomically(_ datagrams: [Data]) async throws {
         try await bridge.runParkedThrowing(host: self) { me, continuation in
-            guard me.connectionOpaquePointer != nil, me.state == .connected else {
+            guard me.connectionOpaquePointer != nil, me.phase == .connected else {
                 continuation.resume(throwing: AnywhereError.quic(.closed(graceful: false)))
                 return
             }
@@ -133,7 +133,7 @@ extension QUICConnection {
               pendingCount <= maxPendingDatagrams else { return false }
         return batchCount <= maxPendingDatagrams - pendingCount
     }
-    
+
     func enqueueDatagrams(_ datagrams: [PendingDatagram]) {
         pendingDatagrams.append(contentsOf: datagrams)
         let overflow = pendingDatagrams.count - Self.maxPendingDatagrams
@@ -147,11 +147,11 @@ extension QUICConnection {
         let overflowError = AnywhereError.quic(.connectionFailed(detail: "Datagram send queue overflowed"))
         for d in dropped { d.latch?.settle(overflowError) }
     }
-    
+
     nonisolated func currentMaxDatagramPayloadSize() async -> Int {
         await bridge.run { [weak self] in self?.maxDatagramPayloadSize ?? 0 }
     }
-    
+
     nonisolated var maxDatagramPayloadSize: Int {
         assumeIsolated { me in
             guard let conn = me.connectionOpaquePointer else { return 0 }
@@ -164,7 +164,7 @@ extension QUICConnection {
             return min(frameLimit, pathLimit)
         }
     }
-    
+
     func appendStreamWrite(
         _ streamId: Int64,
         data: Data,
@@ -196,7 +196,7 @@ extension QUICConnection {
         )
         writeToUDP()
     }
-    
+
     func pumpStreamQueues(_ conn: OpaquePointer, ts: ngtcp2_tstamp) {
         guard !streamSendQueues.isEmpty else { return }
         guard streamSendQueues.contains(where: { $0.value.hasUnsent }) else { return }
@@ -219,7 +219,7 @@ extension QUICConnection {
                 var chosenLocal = sockaddr_storage()
                 var flags = UInt32(NGTCP2_WRITE_STREAM_FLAG_MORE)
                 if chunk.fin { flags |= UInt32(NGTCP2_WRITE_STREAM_FLAG_FIN) }
-                
+
                 let nwrite = chunk.withStableBase { base in
                     txBuffer.withUnsafeMutableBufferPointer { destination -> ngtcp2_ssize in
                         writeStream(
@@ -237,7 +237,7 @@ extension QUICConnection {
                         )
                     }
                 }
-                
+
                 if nwrite == 0 {
                     break outer
                 }
@@ -295,7 +295,8 @@ extension QUICConnection {
         streamSendQueues[streamId]?.trimAcked(upTo: ackedOffset)
     }
 
-    func releaseStreamSendState(streamId: Int64) {
+    func terminateStreamSendQueue(streamId: Int64, error: Error) {
+        failStreamSendQueue(streamId: streamId, error: error)
         streamSendQueues[streamId] = nil
     }
 

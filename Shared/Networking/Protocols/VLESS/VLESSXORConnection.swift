@@ -26,7 +26,9 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     private let sendState: Mutex<SendState>
     private let receiveState: Mutex<ReceiveState>
-    
+
+    private let sendChain = SerialSender()
+
     init(
         inner: ProxyConnection,
         outCTR: sending VLESSEncryptionCTR,
@@ -41,7 +43,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     var isConnected: Bool { inner.isConnected }
     var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
-    
+
     func installInboundCTR(key: Data, iv: Data) throws {
         try receiveState.withLock { $0.inCTR = try VLESSEncryptionCTR(key: key, iv: iv) }
     }
@@ -50,13 +52,16 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
 
     func sendRaw(_ data: Data) async throws {
         if data.isEmpty { return }
-        var bytes = [UInt8](data)
-        sendState.withLock { state in
+        let pending: SerialSender.Pending = sendState.withLock { state in
+            var bytes = [UInt8](data)
             applyOutboundMask(&bytes, state: &state)
+            let masked = Data(bytes)
+            let inner = self.inner
+            return sendChain.submit { try await inner.sendRaw(masked) }
         }
-        try await inner.sendRaw(Data(bytes))
+        try await pending.value()
     }
-    
+
     private func applyOutboundMask(_ bytes: inout [UInt8], state: inout SendState) {
         var offset = 0
         while offset < bytes.count {
@@ -105,7 +110,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
         }
         return data
     }
-    
+
     private func applyInboundMask(_ data: inout Data, state: inout ReceiveState) {
         guard data.count > 0 else { return }
         var bytes = [UInt8](data)
@@ -142,6 +147,7 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     // MARK: - Cancel
 
     func cancel() {
+        sendChain.cancel()
         inner.cancel()
     }
 

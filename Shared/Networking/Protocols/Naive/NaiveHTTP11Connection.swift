@@ -22,11 +22,27 @@ nonisolated final class NaiveHTTP11Connection: HTTPTunnel, Sendable {
     private let extraHeaders: [(name: String, value: String)]
     private let destination: String
 
-    private let _connected = Atomic<Bool>(false)
+    private enum Phase: PhaseTransitionable {
+        case connecting
+        case open
+        case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.connecting, .open):
+                return true
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
+    }
+    private let phase = Mutex<Phase>(.connecting)
 
     let responseHeaders: [(name: String, value: String)] = []
 
-    var isConnected: Bool { _connected.load(ordering: .relaxed) }
+    var isConnected: Bool { phase.withLock { $0 == .open } }
 
     // MARK: - Initialization
 
@@ -51,11 +67,16 @@ nonisolated final class NaiveHTTP11Connection: HTTPTunnel, Sendable {
     }
 
     func receiveData() async throws -> Data? {
-        try await transport.receive()
+        do {
+            return try await transport.receive()
+        } catch {
+            _ = phase.withLock { Phase.transition(&$0, to: .closed) }
+            throw error
+        }
     }
 
     func close() {
-        _connected.store(false, ordering: .relaxed)
+        _ = phase.withLock { Phase.transition(&$0, to: .closed) }
         transport.cancel()
     }
 
@@ -117,7 +138,10 @@ nonisolated final class NaiveHTTP11Connection: HTTPTunnel, Sendable {
                 throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Proxy sent extraneous data after CONNECT response"))
             }
 
-            _connected.store(true, ordering: .relaxed)
+            let opened = phase.withLock { Phase.transition(&$0, to: .open) }
+            guard opened else {
+                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Closed during CONNECT"))
+            }
             return
         }
     }

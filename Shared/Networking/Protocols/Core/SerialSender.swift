@@ -15,7 +15,7 @@ nonisolated final class SerialSender: Sendable {
         func value() async throws {
             for try await _ in signal { return }
             try Task.checkCancellation()
-            throw CancellationError()
+            throw AnywhereError.transport(.terminated)
         }
     }
 
@@ -46,7 +46,7 @@ nonisolated final class SerialSender: Sendable {
     deinit {
         cancel()
     }
-    
+
     func cancel() {
         jobs.finish()
         let task = pump.withLock { pump -> Task<Void, Never>? in
@@ -60,7 +60,7 @@ nonisolated final class SerialSender: Sendable {
     func submit(_ body: @escaping @Sendable () async throws -> Void) -> Pending {
         let (signal, done) = AsyncThrowingStream.makeStream(of: Void.self)
         if case .terminated = jobs.yield(Job(body: body, done: done)) {
-            done.finish(throwing: CancellationError())
+            done.finish(throwing: AnywhereError.transport(.terminated))
         }
         return Pending(signal: signal)
     }

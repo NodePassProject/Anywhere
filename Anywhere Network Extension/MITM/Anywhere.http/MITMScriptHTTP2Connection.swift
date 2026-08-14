@@ -14,17 +14,32 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     // MARK: Phase
 
-    enum Phase: Equatable {
+    enum Phase: PhaseTransitionable {
         case idle
         case connecting
         case prefaceSent
         case ready
         case goingAway
         case closed
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.idle, .connecting),
+                 (.connecting, .prefaceSent),
+                 (.prefaceSent, .ready):
+                return true
+            case (_, .goingAway):
+                return old != .goingAway && old != .closed
+            case (_, .closed):
+                return old != .closed
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: Flow-control / SETTINGS profile
-    
+
     private static let streamReceiveWindow = 4 * 1024 * 1024
     private static let connectionReceiveWindow = 16 * 1024 * 1024
     private static let maxFrameSize: UInt32 = 16_384
@@ -44,9 +59,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     let insecure: Bool
 
     // MARK: Serial state
-    
-    private struct State {
+
+    private struct State: PhaseHolding {
         var phase: Phase = .idle
+
+        var reserved = 0
 
         var dialed: OutboundConnector.Dialed?
         var tlsClient: TLSClient?
@@ -63,33 +80,23 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
         var receiveBuffer = Data()
         var pendingHeaders: (streamID: UInt32, flags: UInt8, block: Data)?
-        
+
         var flowGate = H2FlowGate()
 
         var negotiatedHTTP1 = false
-        
+
         var rootTask: Task<Void, Never>?
-        
+
         var hpackDecoder = HPACKDecoder()
     }
-    private let lock = Mutex(State())
-    
+    private let state = Mutex(State())
+
     private let readySignal: AsyncThrowingStream<Never, Error>.Continuation
     private let readyTask: Task<Void, Error>
-    
+
     private let onClose: (@Sendable (MITMScriptHTTP2Connection) -> Void)?
-    
+
     private let onNegotiatedHTTP1: (@Sendable () -> Void)?
-
-    // MARK: Pool-visible snapshot
-
-    private struct PoolSnapshot {
-        var state: Phase = .idle
-        var streamCount = 0
-        var reserved = 0
-        var maxConcurrent: UInt32 = MITMScriptHTTP2Connection.ownMaxConcurrentStreams
-    }
-    private let poolSnapshot = Mutex(PoolSnapshot())
 
     // MARK: Init
 
@@ -108,7 +115,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     // MARK: - Task tree
-    
+
     private enum ConnectionJob: Sendable {
         case setup
         case setupDeadline
@@ -120,13 +127,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
     private let jobs: AsyncStream<ConnectionJob>
     private let jobContinuation: AsyncStream<ConnectionJob>.Continuation
-    
+
     private let setupDonePoke = AsyncInbox<Void>(capacity: 1)
 
     private func spawn(_ job: ConnectionJob) {
         jobContinuation.yield(job)
     }
-    
+
     private func run() async {
         await withDiscardingTaskGroup { group in
             for await job in jobs {
@@ -147,7 +154,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .controlSend(let data, let transport): await runControlSend(data, on: transport)
         }
     }
-    
+
     private func startStreamJobs(for stream: MITMScriptHTTP2Stream) {
         spawn(.streamDeadline(stream))
         spawn(.streamIdle(stream))
@@ -156,38 +163,28 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
     // MARK: - Multiplexer
 
-    var isClosed: Bool { poolSnapshot.withLock { $0.state == .closed } }
-    var activeStreamCount: Int { poolSnapshot.withLock { $0.streamCount } }
-    var poolIsGoingAway: Bool { poolSnapshot.withLock { $0.state == .goingAway } }
-    
+    var isClosed: Bool { state.withLock { $0.phase == .closed } }
+    var activeStreamCount: Int { state.withLock { $0.streams.count + $0.reserved } }
+    var poolIsGoingAway: Bool { state.withLock { $0.phase == .goingAway } }
+
     func tryReserveStream() -> Bool {
-        poolSnapshot.withLock { snapshot in
-            switch snapshot.state {
+        state.withLock { state in
+            switch state.phase {
             case .idle, .connecting, .prefaceSent, .ready: break
             case .goingAway, .closed: return false
             }
-            guard snapshot.streamCount < Int(snapshot.maxConcurrent) else { return false }
-            snapshot.reserved += 1
-            snapshot.streamCount += 1
+            guard state.streams.count + state.reserved < Int(state.maxConcurrentStreams) else { return false }
+            state.reserved += 1
             return true
         }
     }
 
     private func releaseReservation() {
-        poolSnapshot.withLock { if $0.reserved > 0 { $0.reserved -= 1 } }
-    }
-    
-    private func refreshPoolSnapshot() {
-        let (phase, count, maxConcurrent) = lock.withLock { ($0.phase, $0.streams.count, $0.maxConcurrentStreams) }
-        poolSnapshot.withLock { snapshot in
-            snapshot.state = phase
-            snapshot.streamCount = count + snapshot.reserved
-            snapshot.maxConcurrent = maxConcurrent
-        }
+        state.withLock { if $0.reserved > 0 { $0.reserved -= 1 } }
     }
 
     // MARK: - Request entry point
-    
+
     func perform(
         request: URLRequest,
         hostHeader: String,
@@ -198,19 +195,19 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             try await ensureReady()
         } catch {
             releaseReservation()
-            refreshPoolSnapshot()
             throw error
         }
 
         let (responseStream, responseSignal) = AsyncThrowingStream.makeStream(of: MITMScriptHTTPClient.Response.self)
         enum Start { case rejected(Error); case go(MITMScriptHTTP2Stream) }
-        let outcome: Start = lock.withLock { state in
+        let outcome: Start = state.withLock { state in
+            if state.reserved > 0 { state.reserved -= 1 }
             guard state.phase != .closed else {
                 return .rejected(state.negotiatedHTTP1 ? AnywhereError.mitm(.needsHTTP1Fallback)
                                                        : AnywhereError.proxy(.http2, .connectionClosed(detail: "connection closed")))
             }
             let sid = state.nextStreamID
-            state.nextStreamID &+= 2   // client streams are odd (RFC 7540 §5.1.1)
+            state.nextStreamID &+= 2
             let stream = MITMScriptHTTP2Stream(
                 streamID: sid,
                 connection: self,
@@ -225,9 +222,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             return .go(stream)
         }
 
-        releaseReservation()
-        refreshPoolSnapshot()
-
         switch outcome {
         case .rejected(let error):
             responseSignal.finish(throwing: error)
@@ -239,16 +233,15 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     // MARK: - Setup
-    
+
     private func ensureReady() async throws {
         enum Kick { case awaitReady; case begin; case fail(Error) }
-        let kick: Kick = lock.withLock { state in
+        let kick: Kick = state.withLock { state in
             switch state.phase {
             case .ready:
-                // The readiness latch already finished successfully; awaiting it returns at once.
                 return .awaitReady
             case .idle:
-                state.phase = .connecting
+                state.transition(to: .connecting)
                 return .begin
             case .connecting, .prefaceSent:
                 return .awaitReady
@@ -261,7 +254,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .awaitReady:
             break
         case .begin:
-            refreshPoolSnapshot()
             beginSetup()
         case .fail(let error):
             throw error
@@ -270,11 +262,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func beginSetup() {
-        lock.withLock { if $0.rootTask == nil { $0.rootTask = Task { await self.run() } } }
+        state.withLock { if $0.rootTask == nil { $0.rootTask = Task { await self.run() } } }
         spawn(.setupDeadline)
         spawn(.setup)
     }
-    
+
     private func runSetup() async {
         let dialed: OutboundConnector.Dialed
         do {
@@ -283,7 +275,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             failSetup(error)
             return
         }
-        let proceed = lock.withLock { state -> Bool in
+        let proceed = state.withLock { state -> Bool in
             guard state.phase == .connecting else { return false }
             state.dialed = dialed
             return true
@@ -293,10 +285,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             await dialed.proxyClient?.cancel()
             return
         }
-        
+
         let configuration = TLSConfiguration(serverName: host, alpn: ["h2", "http/1.1"], insecureSkipVerify: insecure)
         let client = TLSClient(configuration: configuration)
-        lock.withLock { $0.tlsClient = client }
+        state.withLock { $0.tlsClient = client }
         let tlsConnection: TLSRecordConnection
         do {
             tlsConnection = try await client.connect(overTunnel: dialed.connection)
@@ -305,7 +297,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             return
         }
         enum TLSOutcome { case stale; case http1; case proceed }
-        let outcome: TLSOutcome = lock.withLock { state in
+        let outcome: TLSOutcome = state.withLock { state in
             guard state.phase == .connecting else { return .stale }
             guard tlsConnection.negotiatedALPN == "h2" else {
                 state.negotiatedHTTP1 = true
@@ -324,8 +316,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .proceed:
             break
         }
-        
-        let transport: ProxyConnection? = lock.withLock { $0.connection }
+
+        let transport: ProxyConnection? = state.withLock { $0.connection }
         guard let transport else { failSetup(AnywhereError.proxy(.http2, .notReady)); return }
 
         var data = Data()
@@ -347,16 +339,11 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             failSetup(error)
             return
         }
-        let started = lock.withLock { state -> Bool in
-            guard state.phase == .connecting else { return false }
-            state.phase = .prefaceSent
-            return true
-        }
+        let started = state.withLock { $0.transition(to: .prefaceSent) }
         guard started else { return }
-        refreshPoolSnapshot()
         spawn(.readLoop)
     }
-    
+
     private func runSetupDeadline() async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { try? await Task.sleep(for: .seconds(TunnelConstants.handshakeTimeout)) }
@@ -364,16 +351,16 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             _ = await group.next()
             group.cancelAll()
         }
-        let stillSettingUp = lock.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
+        let stillSettingUp = state.withLock { $0.phase == .connecting || $0.phase == .prefaceSent }
         guard stillSettingUp else { return }
         failSetup(AnywhereError.proxy(.http2, .connectionClosed(detail: "handshake/SETTINGS timed out")))
     }
 
     // MARK: - Read loop
-    
+
     private func runReadLoop() async {
         while true {
-            let transport: ProxyConnection? = lock.withLock { $0.phase != .closed ? $0.connection : nil }
+            let transport: ProxyConnection? = state.withLock { $0.phase != .closed ? $0.connection : nil }
             guard let transport else { return }
 
             let data: Data?
@@ -385,7 +372,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 return
             }
 
-            let overflow: Bool = lock.withLock { state in
+            let overflow: Bool = state.withLock { state in
                 guard state.phase != .closed else { return false }
                 state.receiveBuffer.append(data)
                 return state.receiveBuffer.count > Self.maxReceiveBufferSize
@@ -396,26 +383,26 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             }
 
             drainFrames()
-            if lock.withLock({ $0.phase == .closed }) { return }
+            if state.withLock({ $0.phase == .closed }) { return }
         }
     }
-    
+
     private func drainFrames() {
         while true {
-            let frame: NaiveHTTP2Frame? = lock.withLock { state in
+            let frame: NaiveHTTP2Frame? = state.withLock { state in
                 guard state.phase != .closed else { return nil }
                 return NaiveHTTP2Framer.deserialize(from: &state.receiveBuffer)
             }
             guard let frame else { break }
             routeFrame(frame)
         }
-        lock.withLock { state in
+        state.withLock { state in
             if state.receiveBuffer.isEmpty { state.receiveBuffer = Data() }   // release backing store
         }
     }
 
     private func routeFrame(_ frame: NaiveHTTP2Frame) {
-        let pending: (streamID: UInt32, flags: UInt8, block: Data)? = lock.withLock { $0.pendingHeaders }
+        let pending: (streamID: UInt32, flags: UInt8, block: Data)? = state.withLock { $0.pendingHeaders }
         if let pending {
             guard frame.type == .continuation, frame.streamID == pending.streamID else {
                 connectionError("expected CONTINUATION on stream \(pending.streamID)")
@@ -441,14 +428,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case .data:
             handleData(frame)
         case .rstStream:
-            let stream: MITMScriptHTTP2Stream? = lock.withLock { state in
+            let stream: MITMScriptHTTP2Stream? = state.withLock { state in
                 guard let stream = state.streams[frame.streamID] else { return nil }
                 state.streams.removeValue(forKey: stream.streamID)
                 state.sendWindows.removeValue(forKey: stream.streamID)
                 return stream
             }
             if let stream {
-                refreshPoolSnapshot()
                 let code = NaiveHTTP2Framer.parseRstStream(payload: frame.payload) ?? 0
                 stream.handleReset(errorCode: code)
             }
@@ -471,13 +457,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                 connectionError("header block exceeds \(Self.maxHeaderListSize) bytes")
                 return
             }
-            lock.withLock { $0.pendingHeaders = (frame.streamID, frame.flags, fragment) }
+            state.withLock { $0.pendingHeaders = (frame.streamID, frame.flags, fragment) }
         }
     }
 
     private func appendContinuation(_ frame: NaiveHTTP2Frame) {
         enum Step { case none; case overflow; case complete(streamID: UInt32, flags: UInt8, block: Data) }
-        let step: Step = lock.withLock { state in
+        let step: Step = state.withLock { state in
             guard var pending = state.pendingHeaders else { return .none }
             pending.block.append(frame.payload)
             guard pending.block.count <= Self.maxHeaderListSize else {
@@ -500,17 +486,17 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             completeHeaderBlock(streamID: streamID, flags: flags, block: block)
         }
     }
-    
+
     private func completeHeaderBlock(streamID: UInt32, flags: UInt8, block: Data) {
-        guard let decoded = lock.withLock({ $0.hpackDecoder.decodeHeaders(from: block) }) else {
+        guard let decoded = state.withLock({ $0.hpackDecoder.decodeHeaders(from: block) }) else {
             connectionError("HPACK decode failed")
             return
         }
         let endStream = (flags & NaiveHTTP2FrameFlags.endStream) != 0
-        let stream: MITMScriptHTTP2Stream? = lock.withLock { $0.streams[streamID] }
+        let stream: MITMScriptHTTP2Stream? = state.withLock { $0.streams[streamID] }
         stream?.handleHeaders(fields: decoded.fields, endStream: endStream)
     }
-    
+
     private func strippedHeaderBlockFragment(_ frame: NaiveHTTP2Frame) -> Data? {
         var bytes = frame.payload[...]
         if frame.hasFlag(NaiveHTTP2FrameFlags.padded) {
@@ -531,8 +517,8 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     private func handleData(_ frame: NaiveHTTP2Frame) {
         let endStream = frame.hasFlag(NaiveHTTP2FrameFlags.endStream)
         let body = Self.unpaddedDataPayload(frame)
-        
-        let (windowUpdate, transport, stream): (NaiveHTTP2Frame?, ProxyConnection?, MITMScriptHTTP2Stream?) = lock.withLock { state in
+
+        let (windowUpdate, transport, stream): (NaiveHTTP2Frame?, ProxyConnection?, MITMScriptHTTP2Stream?) = state.withLock { state in
             var update: NaiveHTTP2Frame?
             if frame.payload.count > 0 {
                 state.connectionRecvConsumed += frame.payload.count
@@ -549,7 +535,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         }
         stream?.handleData(body, fullPayloadCount: frame.payload.count, endStream: endStream)
     }
-    
+
     private static func unpaddedDataPayload(_ frame: NaiveHTTP2Frame) -> Data {
         guard frame.hasFlag(NaiveHTTP2FrameFlags.padded) else { return frame.payload }
         guard let padLength = frame.payload.first else { return Data() }
@@ -564,7 +550,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         if frame.hasFlag(NaiveHTTP2FrameFlags.ack) { return }
 
         var becameReady = false
-        let transport: ProxyConnection? = lock.withLock { state in
+        let transport: ProxyConnection? = state.withLock { state in
             for (id, value) in NaiveHTTP2Framer.parseSettings(payload: frame.payload) {
                 switch id {
                 case 0x3: // MAX_CONCURRENT_STREAMS
@@ -577,10 +563,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
                     break
                 }
             }
-            if state.phase == .prefaceSent {
-                state.phase = .ready
-                becameReady = true
-            }
+            becameReady = state.transition(to: .ready)
             return state.connection
         }
 
@@ -591,7 +574,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             setupDonePoke.yield(())
             readySignal.finish()
         }
-        refreshPoolSnapshot()
     }
 
     private func handleGoaway(_ frame: NaiveHTTP2Frame) {
@@ -602,9 +584,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
 
         var failReadiness = false
         var doomed: [MITMScriptHTTP2Stream] = []
-        let closeNow: Bool = lock.withLock { state in
+        let closeNow: Bool = state.withLock { state in
             let previous = state.phase
-            state.phase = .goingAway
+            guard previous != .closed else { return false }
+            state.transition(to: .goingAway)
             if let parsed {
                 for (id, stream) in state.streams where id > parsed.lastStreamID {
                     state.streams.removeValue(forKey: id)
@@ -618,7 +601,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             return state.streams.isEmpty
         }
 
-        refreshPoolSnapshot()
         for stream in doomed { stream.failFromSession(AnywhereError.proxy(.http2, .goaway)) }
         if failReadiness { readySignal.finish(throwing: AnywhereError.proxy(.http2, .goaway)) }
         if closeNow { close(error: AnywhereError.proxy(.http2, .goaway)) }
@@ -628,7 +610,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         guard let increment = NaiveHTTP2Framer.parseWindowUpdate(payload: frame.payload), increment > 0 else { return }
 
         enum Update { case ok; case overflow }
-        let result: Update = lock.withLock { state in
+        let result: Update = state.withLock { state in
             if frame.streamID == 0 {
                 let updated = state.connectionSendWindow + Int(increment)
                 guard updated <= 0x7FFF_FFFF else { return .overflow }
@@ -646,13 +628,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             break
         }
     }
-    
+
     func wakeFlowParks() {
-        lock.withLock { $0.flowGate.wakeAll() }
+        state.withLock { $0.flowGate.wakeAll() }
     }
 
     // MARK: - Sending
-    
+
     func sendHeaders(streamID: UInt32, headerBlock: Data, endStream: Bool) async throws {
         guard headerBlock.count <= Int(Self.maxFrameSize) else {
             throw AnywhereError.mitm(.requestHeadersTooLarge)
@@ -661,7 +643,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         let transport = try currentTransport()
         try await transport.send(frame.serialized)
     }
-    
+
     private enum DataSendStep {
         case notReady
         case streamGone(UInt32)
@@ -669,7 +651,7 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         case park
         case send(frame: Data, nextOffset: Int, isLast: Bool, transport: ProxyConnection)
     }
-    
+
     func sendData(_ data: Data, on stream: MITMScriptHTTP2Stream, endStream: Bool) async throws {
         var offset = 0
         while true {
@@ -690,9 +672,9 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             }
         }
     }
-    
+
     private func buildDataStep(_ data: Data, on stream: MITMScriptHTTP2Stream, offset: Int, endStream: Bool) -> DataSendStep {
-        lock.withLock { state in
+        state.withLock { state in
             guard state.phase == .ready || state.phase == .goingAway else { return .notReady }
             guard let streamSendWindow = state.sendWindows[stream.streamID] else { return .streamGone(stream.streamID) }
             guard let connection = state.connection else { return .notReady }
@@ -718,10 +700,10 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             return .send(frame: frame.serialized, nextOffset: offset + chunkSize, isLast: isLast, transport: connection)
         }
     }
-    
+
     private func parkForFlow(stream: MITMScriptHTTP2Stream) async {
         await H2FlowGate.park {
-            lock.withLock { state -> AsyncStream<Never>? in
+            state.withLock { state -> AsyncStream<Never>? in
                 if state.phase == .closed { return nil }
                 guard let streamSendWindow = state.sendWindows[stream.streamID] else { return nil }
                 if min(state.connectionSendWindow, streamSendWindow) > 0 { return nil }
@@ -729,13 +711,13 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
             }
         }
     }
-    
+
     func sendControlFrame(_ frame: NaiveHTTP2Frame) {
-        let transport: ProxyConnection? = lock.withLock { $0.connection }
+        let transport: ProxyConnection? = state.withLock { $0.connection }
         guard let transport else { return }
         sendFrame(frame, on: transport)
     }
-    
+
     private func sendFrame(_ frame: NaiveHTTP2Frame, on transport: ProxyConnection) {
         spawn(.controlSend(frame.serialized, transport: transport))
     }
@@ -746,17 +728,17 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     }
 
     private func currentTransport() throws -> ProxyConnection {
-        guard let connection = lock.withLock({ $0.connection }) else {
+        guard let connection = state.withLock({ $0.connection }) else {
             throw AnywhereError.proxy(.http2, .notReady)
         }
         return connection
     }
 
     // MARK: - Stream teardown
-    
+
     func removeStream(_ stream: MITMScriptHTTP2Stream, sendRST: Bool) {
         enum Outcome { case gone; case removed(rst: Bool, closeGoaway: Bool, transport: ProxyConnection?) }
-        let outcome: Outcome = lock.withLock { state in
+        let outcome: Outcome = state.withLock { state in
             guard state.streams.removeValue(forKey: stream.streamID) != nil else { return .gone }
             state.sendWindows.removeValue(forKey: stream.streamID)
             let rst = sendRST && (state.phase == .ready || state.phase == .goingAway)
@@ -768,7 +750,6 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
         if rst, let transport {
             sendFrame(NaiveHTTP2Framer.rstStreamFrame(streamID: stream.streamID, errorCode: 0x8 /* CANCEL */), on: transport)
         }
-        refreshPoolSnapshot()
         if closeGoaway {
             close(error: AnywhereError.proxy(.http2, .goaway))
         }
@@ -788,35 +769,34 @@ nonisolated final class MITMScriptHTTP2Connection: Multiplexer, Sendable {
     private func failSetup(_ error: Error) {
         teardown(reason: error)
     }
-    
+
     private func teardown(reason: Error) {
         typealias Teardown = (victims: [MITMScriptHTTP2Stream], rootTask: Task<Void, Never>?)
-        let teardownState: Teardown? = lock.withLock { state in
-            guard state.phase != .closed else { return nil }
-            state.phase = .closed
+        let teardownState: Teardown? = state.withLock { state in
+            guard state.transition(to: .closed) else { return nil }
             state.flowGate.wakeAll()
             let victims = Array(state.streams.values)
             state.streams.removeAll()
             state.sendWindows.removeAll()
+            state.reserved = 0
             state.pendingHeaders = nil
             let root = state.rootTask
             state.rootTask = nil
             return (victims, root)
         }
         guard let (victims, rootTask) = teardownState else { return }
-        
+
         jobContinuation.finish()
         setupDonePoke.yield(())
         rootTask?.cancel()
         teardownTransport()
         readySignal.finish(throwing: reason)
-        refreshPoolSnapshot()
         for stream in victims { stream.failFromSession(reason) }
         onClose?(self)
     }
-    
+
     private func teardownTransport() {
-        let (connection, tlsClient, dialed): (ProxyConnection?, TLSClient?, OutboundConnector.Dialed?) = lock.withLock { state in
+        let (connection, tlsClient, dialed): (ProxyConnection?, TLSClient?, OutboundConnector.Dialed?) = state.withLock { state in
             let captured = (state.connection, state.tlsClient, state.dialed)
             state.connection = nil
             state.tlsClient = nil

@@ -24,7 +24,6 @@ private nonisolated let tls13SupportedVersions: [UInt8] = [0x00, 0x2b, 0x00, 0x0
 private nonisolated let tlsHandshakeTypeClientHello: UInt8 = 0x01
 private nonisolated let tlsHandshakeTypeServerHello: UInt8 = 0x02
 
-/// TLS 1.3 cipher suites that support XTLS direct copy.
 private nonisolated let tls13CipherSuites: Set<UInt16> = [
     0x1301,  // TLS_AES_128_GCM_SHA256
     0x1302,  // TLS_AES_256_GCM_SHA384
@@ -35,7 +34,44 @@ private nonisolated let tls13CipherSuites: Set<UInt16> = [
 
 // MARK: - Traffic State
 
-nonisolated class VisionTrafficState {
+nonisolated struct VisionTrafficState {
+    enum WriterPhase: PhaseTransitionable {
+        case padding
+        case ended
+        case direct
+
+        static func canTransition(from old: WriterPhase, to new: WriterPhase) -> Bool {
+            switch (old, new) {
+            case (.padding, .ended),
+                 (.padding, .direct):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    enum ReaderPhase: PhaseTransitionable {
+        case withinPadding
+        case ended
+        case direct
+        case failed
+
+        static func canTransition(from old: ReaderPhase, to new: ReaderPhase) -> Bool {
+            switch (old, new) {
+            case (.withinPadding, .ended),
+                 (.withinPadding, .direct),
+                 (.ended, .withinPadding),
+                 (.ended, .direct):
+                return true
+            case (_, .failed):
+                return old != .failed
+            default:
+                return false
+            }
+        }
+    }
+
     let userUUID: Data
 
     var numberOfPacketsToFilter: Int = 8
@@ -45,15 +81,14 @@ nonisolated class VisionTrafficState {
     var cipher: UInt16 = 0
     var remainingServerHello: Int32 = -1
 
-    var writerIsPadding: Bool = true
-    var writerDirectCopy: Bool = false
+    var writerPhase: WriterPhase = .padding
+    var readerPhase: ReaderPhase = .withinPadding
 
-    var readerWithinPaddingBuffers: Bool = true
-    var readerDirectCopy: Bool = false
     var remainingCommand: Int32 = -1
     var remainingContent: Int32 = -1
     var remainingPadding: Int32 = -1
     var currentCommand: Int = 0
+
 
     var writeOnceUserUUID: Data?
 
@@ -63,19 +98,14 @@ nonisolated class VisionTrafficState {
     }
 }
 
-/// Vision padding seed: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
 private nonisolated let visionPaddingSeed: [UInt32] = [900, 500, 900, 256]
 
 // MARK: - Buffer Reshaping
 
-/// Must equal the protocol buffer size.
 private nonisolated let visionBufSize: Int32 = 8192
 
-/// Buffers >= this are split to leave room for the 21-byte padding header.
 private nonisolated let reshapeThreshold: Int = 8192 - 21
 
-/// Splits data too large for one Vision-padded frame at the last TLS application-data
-/// boundary (midpoint fallback), recursing until every chunk is below reshapeThreshold.
 private nonisolated func reshapeData(_ data: Data) -> [Data] {
     guard data.count >= reshapeThreshold else {
         return [data]
@@ -96,15 +126,12 @@ private nonisolated func reshapeData(_ data: Data) -> [Data] {
 
     let first = data.prefix(splitIndex)
     let second = data.suffix(from: data.index(data.startIndex, offsetBy: splitIndex))
-    // Either chunk may still exceed reshapeThreshold (peer buffers are capped at 8192).
     return reshapeData(first) + reshapeData(second)
 }
 
 // MARK: - Padding Functions
 
-/// Frame layout: `[UUID (16 bytes, first packet only)] [command (1)] [contentLen (2)] [paddingLen (2)] [content] [padding]`.
-/// `longPadding` pads short content with a large random block to obscure the VLESS header.
-private nonisolated func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficState, longPadding: Bool) -> Data {
+private nonisolated func visionPadding(data: Data?, command: VisionCommand, state: inout VisionTrafficState, longPadding: Bool) -> Data {
     let contentLen = Int32(data?.count ?? 0)
     var paddingLen: Int32 = 0
 
@@ -114,8 +141,6 @@ private nonisolated func visionPadding(data: Data?, command: VisionCommand, stat
         paddingLen = Int32.random(in: 0..<Int32(visionPaddingSeed[3]))
     }
 
-    // Frame must fit the peer's 8192-byte buffer or its reshaper
-    // fragments it and breaks padding detection.
     let maxPadding = 8192 - 21 - contentLen
     if paddingLen > maxPadding {
         paddingLen = maxPadding
@@ -156,7 +181,7 @@ private nonisolated func visionPadding(data: Data?, command: VisionCommand, stat
     return result
 }
 
-private nonisolated func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
+private nonisolated func visionUnpadding(data: inout Data, state: inout VisionTrafficState) -> Data {
     var readOffset = 0
     let dataCount = data.count
     let startIdx = data.startIndex
@@ -205,9 +230,10 @@ private nonisolated func visionUnpadding(data: inout Data, state: VisionTrafficS
         }
 
         if state.remainingCommand <= 0 && state.remainingContent <= 0 && state.remainingPadding <= 0 {
-            if state.currentCommand == 0 {
+            switch state.currentCommand {
+            case 0:
                 state.remainingCommand = 5
-            } else {
+            case 1, 2:
                 state.remainingCommand = -1
                 state.remainingContent = -1
                 state.remainingPadding = -1
@@ -215,8 +241,12 @@ private nonisolated func visionUnpadding(data: inout Data, state: VisionTrafficS
                     result.append(data[(startIdx + readOffset)..<(startIdx + dataCount)])
                     readOffset = dataCount
                 }
-                break
+            default:
+                VisionTrafficState.ReaderPhase.transition(&state.readerPhase, to: .failed)
+                data = Data()
+                return result
             }
+            if state.currentCommand != 0 { break }
         }
     }
 
@@ -231,8 +261,7 @@ private nonisolated func visionUnpadding(data: inout Data, state: VisionTrafficS
 
 // MARK: - TLS Filtering
 
-/// Detects TLS 1.3 in incoming server responses.
-private nonisolated func visionFilterTLS(data: Data, state: VisionTrafficState) {
+private nonisolated func visionFilterTLS(data: Data, state: inout VisionTrafficState) {
     guard state.numberOfPacketsToFilter > 0 else { return }
 
     state.numberOfPacketsToFilter -= 1
@@ -277,15 +306,13 @@ private nonisolated func visionFilterTLS(data: Data, state: VisionTrafficState) 
             state.numberOfPacketsToFilter = 0
             return
         } else if state.remainingServerHello <= 0 {
-            // Server Hello complete with no TLS 1.3 marker — it's TLS 1.2.
             state.numberOfPacketsToFilter = 0
             return
         }
     }
 }
 
-/// Detects a TLS Client Hello in outgoing data without decrementing the filter counter.
-private nonisolated func visionDetectClientHello(data: Data, state: VisionTrafficState) {
+private nonisolated func visionDetectClientHello(data: Data, state: inout VisionTrafficState) {
     guard data.count >= 6 else { return }
 
     let startIdx = data.startIndex
@@ -337,58 +364,56 @@ private nonisolated func isCompleteTLSRecord(data: Data) -> Bool {
 
 nonisolated final class VLESSVisionConnection: ProxyConnection {
     private let innerConnection: ProxyConnection
-    /// Guards `VisionTrafficState` mutations across the async send/receive paths.
     private let trafficState: Mutex<VisionTrafficState>
+
+    private let sendChain = SerialSender()
 
     init(connection: ProxyConnection, userUUID: Data) {
         self.innerConnection = connection
         self.trafficState = Mutex(VisionTrafficState(userUUID: userUUID))
     }
 
-    /// Sends an empty padding frame to camouflage the VLESS header when no initial
-    /// data is available. Callers must await it before subsequent sends.
     func sendEmptyPadding() async throws {
-        let padded = trafficState.withLock { state in
-            visionPadding(data: nil, command: .paddingContinue, state: state, longPadding: true)
+        let pending: SerialSender.Pending = trafficState.withLock { state in
+            let padded = visionPadding(data: nil, command: .paddingContinue, state: &state, longPadding: true)
+            let inner = self.innerConnection
+            return sendChain.submit { try await inner.send(padded) }
         }
-        try await innerConnection.send(padded)
+        try await pending.value()
     }
-    
+
     var isConnected: Bool {
         return innerConnection.isConnected
     }
 
     // MARK: - Async Surface
 
-    // Async-native Vision framing. `receive()` delegates to `receiveRaw()` because the inner
-    // connection already handled response-header/byte accounting.
-
     func sendRaw(_ data: Data) async throws {
-        let (isDirectCopy, paddedData) = trafficState.withLock { state -> (Bool, Data) in
-            (state.writerDirectCopy, processSendData(data, state: state))
+        let pending: SerialSender.Pending = trafficState.withLock { state in
+            let isDirectCopy = state.writerPhase == .direct
+            let paddedData = processSendData(data, state: &state)
+            let inner = self.innerConnection
+            return sendChain.submit {
+                if isDirectCopy {
+                    try await inner.sendDirectRaw(paddedData)
+                } else {
+                    try await inner.send(paddedData)
+                }
+            }
         }
-
-        if isDirectCopy {
-            try await innerConnection.sendDirectRaw(paddedData)
-        } else {
-            try await innerConnection.send(paddedData)
-        }
+        try await pending.value()
     }
 
     func receive() async throws -> Data? {
         try await receiveRaw()
     }
 
-    private func processSendData(_ data: Data, state: VisionTrafficState) -> Data {
+    private func processSendData(_ data: Data, state: inout VisionTrafficState) -> Data {
         if !state.isTLS {
-            visionDetectClientHello(data: data, state: state)
+            visionDetectClientHello(data: data, state: &state)
         }
 
-        if state.writerDirectCopy {
-            return data
-        }
-
-        guard state.writerIsPadding else {
+        guard state.writerPhase == .padding else {
             return data
         }
 
@@ -397,7 +422,6 @@ nonisolated final class VLESSVisionConnection: ProxyConnection {
 
         let chunks = reshapeData(data)
 
-        // A complete TLS application-data record ends padding mode.
         let startIdx = data.startIndex
         if state.isTLS && data.count >= 6 &&
            data[startIdx] == tlsApplicationDataStart[0] &&
@@ -411,41 +435,43 @@ nonisolated final class VLESSVisionConnection: ProxyConnection {
                     var command: VisionCommand = .paddingEnd
                     if state.enableXtls {
                         command = .paddingDirect
-                        state.writerDirectCopy = true
+                        VisionTrafficState.WriterPhase.transition(&state.writerPhase, to: .direct)
+                    } else {
+                        VisionTrafficState.WriterPhase.transition(&state.writerPhase, to: .ended)
                     }
-                    state.writerIsPadding = false
-                    result.append(visionPadding(data: chunk, command: command, state: state, longPadding: false))
+                    result.append(visionPadding(data: chunk, command: command, state: &state, longPadding: false))
                 } else {
-                    result.append(visionPadding(data: chunk, command: .paddingContinue, state: state, longPadding: true))
+                    result.append(visionPadding(data: chunk, command: .paddingContinue, state: &state, longPadding: true))
                 }
             }
             return result
         }
 
-        // Finish padding one packet early for older Vision receivers (the `<= 1` boundary).
         if !state.isTLS12orAbove && state.numberOfPacketsToFilter <= 1 {
-            state.writerIsPadding = false
+            VisionTrafficState.WriterPhase.transition(&state.writerPhase, to: .ended)
             var result = Data()
             for (i, chunk) in chunks.enumerated() {
                 let cmd: VisionCommand = (i == chunks.count - 1) ? .paddingEnd : .paddingContinue
-                result.append(visionPadding(data: chunk, command: cmd, state: state, longPadding: longPadding))
+                result.append(visionPadding(data: chunk, command: cmd, state: &state, longPadding: longPadding))
             }
             return result
         }
 
         var result = Data()
         for chunk in chunks {
-            result.append(visionPadding(data: chunk, command: .paddingContinue, state: state, longPadding: longPadding))
+            result.append(visionPadding(data: chunk, command: .paddingContinue, state: &state, longPadding: longPadding))
         }
         return result
     }
 
     func receiveRaw() async throws -> Data? {
         while true {
-            let isDirectCopy = trafficState.withLock { $0.readerDirectCopy }
+            let readerPhase = trafficState.withLock { $0.readerPhase }
+            if readerPhase == .failed {
+                throw AnywhereError.proxy(.vless, .protocolViolation(detail: "Vision: invalid padding command"))
+            }
 
-            if isDirectCopy {
-                // Direct copy bypasses Reality decryption.
+            if readerPhase == .direct {
                 let data = try await innerConnection.receiveDirectRaw()
                 guard let data, !data.isEmpty else { return nil }
                 return data
@@ -454,9 +480,13 @@ nonisolated final class VLESSVisionConnection: ProxyConnection {
             let received = try await innerConnection.receive()
             guard var data = received, !data.isEmpty else { return nil }
 
-            let processedData = trafficState.withLock { processReceiveData(&data, state: $0) }
+            let (processedData, failed) = trafficState.withLock { state in
+                (processReceiveData(&data, state: &state), state.readerPhase == .failed)
+            }
+            if failed {
+                throw AnywhereError.proxy(.vless, .protocolViolation(detail: "Vision: invalid padding command"))
+            }
 
-            // Empty result means only padding was received; continue rather than signalling EOF.
             if processedData.isEmpty {
                 continue
             }
@@ -464,25 +494,24 @@ nonisolated final class VLESSVisionConnection: ProxyConnection {
         }
     }
 
-    private func processReceiveData(_ data: inout Data, state: VisionTrafficState) -> Data {
+    private func processReceiveData(_ data: inout Data, state: inout VisionTrafficState) -> Data {
         if state.numberOfPacketsToFilter > 0 {
-            visionFilterTLS(data: data, state: state)
+            visionFilterTLS(data: data, state: &state)
         }
 
-        if state.readerDirectCopy {
+        if state.readerPhase == .direct {
             return data
         }
 
-        if state.readerWithinPaddingBuffers || state.numberOfPacketsToFilter > 0 {
-            let unpadded = visionUnpadding(data: &data, state: state)
+        if state.readerPhase == .withinPadding || state.numberOfPacketsToFilter > 0 {
+            let unpadded = visionUnpadding(data: &data, state: &state)
 
             if state.remainingContent > 0 || state.remainingPadding > 0 || state.currentCommand == 0 {
-                state.readerWithinPaddingBuffers = true
+                VisionTrafficState.ReaderPhase.transition(&state.readerPhase, to: .withinPadding)
             } else if state.currentCommand == 1 {
-                state.readerWithinPaddingBuffers = false
+                VisionTrafficState.ReaderPhase.transition(&state.readerPhase, to: .ended)
             } else if state.currentCommand == 2 {
-                state.readerWithinPaddingBuffers = false
-                state.readerDirectCopy = true
+                VisionTrafficState.ReaderPhase.transition(&state.readerPhase, to: .direct)
             }
 
             return unpadded
@@ -492,6 +521,7 @@ nonisolated final class VLESSVisionConnection: ProxyConnection {
     }
 
     func cancel() {
+        sendChain.cancel()
         innerConnection.cancel()
     }
 }

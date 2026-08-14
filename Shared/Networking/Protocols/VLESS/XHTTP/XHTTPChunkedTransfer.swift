@@ -9,42 +9,60 @@ import Foundation
 
 // MARK: - ChunkedTransferDecoder
 
-/// Chunked transfer decoder (RFC 7230 §4.1); tolerates partial reads across `feed` calls.
 nonisolated struct ChunkedTransferDecoder {
-    private var buffer = Data()
-    private var _isFinished = false
+    private enum Phase: PhaseTransitionable {
+        case parsing
+        case finished
+        case malformed
 
-    var isFinished: Bool { _isFinished }
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.parsing, .finished),
+                 (.parsing, .malformed):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private var buffer = Data()
+    private var phase: Phase = .parsing
+
+    var isFinished: Bool { phase == .finished }
+    var isMalformed: Bool { phase == .malformed }
+
+    private static let maxSizeLineLength = 1024
 
     mutating func feed(_ data: Data) {
         buffer.append(data)
     }
 
-    /// Returns the next complete chunk's payload (without framing), or nil if more data is needed;
-    /// the zero-length terminator sets `isFinished`.
     mutating func nextChunk() -> Data? {
-        guard !_isFinished else { return nil }
+        guard case .parsing = phase else { return nil }
 
         let crlf = Data([0x0D, 0x0A])
         guard let crlfRange = buffer.range(of: crlf) else {
+            if buffer.count > Self.maxSizeLineLength { Phase.transition(&phase, to: .malformed) }
             return nil
         }
 
         let sizeLineData = buffer[buffer.startIndex..<crlfRange.lowerBound]
-        guard let sizeLine = String(data: Data(sizeLineData), encoding: .ascii) else {
+        guard sizeLineData.count <= Self.maxSizeLineLength,
+              let sizeLine = String(data: Data(sizeLineData), encoding: .ascii) else {
+            Phase.transition(&phase, to: .malformed)
             return nil
         }
 
-        // Parse hex chunk size (ignoring chunk extensions after ";")
         let sizeStr = sizeLine.split(separator: ";", maxSplits: 1).first.map(String.init) ?? sizeLine
         guard let chunkSize = UInt64(sizeStr.trimmingCharacters(in: .whitespaces), radix: 16) else {
+            Phase.transition(&phase, to: .malformed)
             return nil
         }
 
         if chunkSize == 0 {
-            _isFinished = true
+            Phase.transition(&phase, to: .finished)
             let termEnd = crlfRange.upperBound
-            // +2 skips the trailing CRLF after the zero chunk
             if buffer.endIndex >= termEnd + 2 {
                 buffer.removeFirst(termEnd + 2 - buffer.startIndex)
             }
@@ -53,7 +71,7 @@ nonisolated struct ChunkedTransferDecoder {
         }
 
         let dataStart = crlfRange.upperBound
-        let needed = dataStart + Int(chunkSize) + 2 // chunk data + \r\n
+        let needed = dataStart + Int(chunkSize) + 2
         guard buffer.endIndex >= needed else {
             return nil
         }
@@ -69,9 +87,7 @@ nonisolated struct ChunkedTransferDecoder {
 
 // MARK: - ChunkedTransferEncoder
 
-/// Chunked transfer encoder (RFC 7230 §4.1).
 nonisolated enum ChunkedTransferEncoder {
-    /// Encodes data as a single chunked-encoded chunk: `{hex-size}\r\n{data}\r\n`.
     static func encode(_ data: Data) -> Data {
         let sizeStr = String(data.count, radix: 16)
         var encoded = Data()
@@ -82,7 +98,6 @@ nonisolated enum ChunkedTransferEncoder {
         return encoded
     }
 
-    /// Encodes the terminal zero-length chunk: `0\r\n\r\n`.
     static func encodeTerminator() -> Data {
         return Data([0x30, 0x0D, 0x0A, 0x0D, 0x0A])
     }

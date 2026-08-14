@@ -9,11 +9,35 @@ import Foundation
 import Synchronization
 
 nonisolated final class NowhereFlowOpenAttempt: Sendable {
-    private struct State {
+    enum Phase: PhaseTransitionable {
+        case racing
+        case resolved
+        case cancelled
+        case resolvedThenCancelled
+
+        var isCancelled: Bool {
+            switch self {
+            case .cancelled, .resolvedThenCancelled: true
+            case .racing, .resolved: false
+            }
+        }
+
+        static func canTransition(from old: Phase, to new: Phase) -> Bool {
+            switch (old, new) {
+            case (.racing, .resolved),
+                 (.racing, .cancelled),
+                 (.resolved, .resolvedThenCancelled),
+                 (.cancelled, .resolvedThenCancelled):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private struct State: PhaseHolding {
+        var phase: Phase = .racing
         var connections: [ObjectIdentifier: ProxyConnection] = [:]
-        var cancelled = false
-        var resolved = false
-        var deadline: Task<Void, Never>?
         var earlyDataWriteStarted = false
     }
     private let state = Mutex(State())
@@ -22,7 +46,7 @@ nonisolated final class NowhereFlowOpenAttempt: Sendable {
     /// the race closes it before any late success can escape.
     func bind(_ connection: ProxyConnection) -> Bool {
         let accepted = state.withLock { state in
-            guard !state.cancelled else { return false }
+            guard !state.phase.isCancelled else { return false }
             state.connections[ObjectIdentifier(connection)] = connection
             return true
         }
@@ -30,54 +54,30 @@ nonisolated final class NowhereFlowOpenAttempt: Sendable {
         return accepted
     }
 
-    var isCancelled: Bool { state.withLock { $0.cancelled } }
-
     func markEarlyDataWriteStarted() {
         state.withLock { $0.earlyDataWriteStarted = true }
     }
 
     var hasStartedEarlyDataWrite: Bool { state.withLock { $0.earlyDataWriteStarted } }
 
-    func armDeadline(at deadline: DispatchTime, handler: @escaping @Sendable () -> Void) {
-        // A Task starts on creation, so only spin one up if we might still arm.
-        let shouldArm = state.withLock { state -> Bool in !state.resolved }
-        guard shouldArm else { return }
-
-        let task = Task { [weak self] in
-            let nowNanos = DispatchTime.now().uptimeNanoseconds
-            let deadlineNanos = deadline.uptimeNanoseconds
-            let delayNanos = deadlineNanos > nowNanos ? deadlineNanos - nowNanos : 0
-            try? await Task.sleep(nanoseconds: delayNanos)
-            guard !Task.isCancelled, let self, self.claimResult() else { return }
-            self.cancel()
-            handler()
-        }
-
-        let armed = state.withLock { state -> Bool in
-            guard !state.resolved else { return false }
-            state.deadline?.cancel()
-            state.deadline = task
-            return true
-        }
-        if !armed { task.cancel() }
-    }
-
     func claimResult() -> Bool {
-        let (accepted, deadline): (Bool, Task<Void, Never>?) = state.withLock { state in
-            guard !state.resolved else { return (false, nil) }
-            state.resolved = true
-            let deadline = state.deadline
-            state.deadline = nil
-            return (true, deadline)
+        state.withLock { state -> Bool in
+            switch state.phase {
+            case .racing: state.transition(to: .resolved)
+            case .cancelled: state.transition(to: .resolvedThenCancelled)
+            case .resolved, .resolvedThenCancelled: false
+            }
         }
-        deadline?.cancel()
-        return accepted
     }
 
     func cancel() {
         let connections = state.withLock { state -> [ProxyConnection] in
-            guard !state.cancelled else { return [] }
-            state.cancelled = true
+            let won = switch state.phase {
+            case .racing: state.transition(to: .cancelled)
+            case .resolved: state.transition(to: .resolvedThenCancelled)
+            case .cancelled, .resolvedThenCancelled: false
+            }
+            guard won else { return [] }
             let connections = Array(state.connections.values)
             state.connections.removeAll(keepingCapacity: false)
             return connections

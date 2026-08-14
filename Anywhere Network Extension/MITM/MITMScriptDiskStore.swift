@@ -21,8 +21,16 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         var cache: [UUID: [String: Data]] = [:]
         var loaded: Set<UUID> = []
         var fileSizes: [UUID: Int] = [:]
+        var commitGenerations: [UUID: UInt64] = [:]
+        var generationCounter: UInt64 = 0
         var totalBytes: Int = 0
         var didScan = false
+
+        mutating func bumpCommitGeneration(for scope: UUID) -> UInt64 {
+            generationCounter += 1
+            commitGenerations[scope] = generationCounter
+            return generationCounter
+        }
     }
 
     private let state = Mutex(State())
@@ -46,7 +54,12 @@ nonisolated final class MITMScriptDiskStore: Sendable {
 
     func set(scope: UUID, key: String, value: Data) throws(AnywhereError) {
         ensureLoaded(scope)
-        let serialized: Data = try state.withLock { (state) throws(AnywhereError) -> Data in
+        struct Reservation {
+            let serialized: Data
+            let committedBucket: [String: Data]
+            let generation: UInt64
+        }
+        let reservation: Reservation = try state.withLock { (state) throws(AnywhereError) -> Reservation in
             var bucket = state.cache[scope] ?? [:]
             bucket[key] = value
             guard let serialized = serialize(bucket) else {
@@ -59,18 +72,17 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             if state.totalBytes - oldSize + serialized.count > Self.maxTotalBytes {
                 throw AnywhereError.mitm(.scriptStoreCapacityExceeded)
             }
-            return serialized
+            return Reservation(serialized: serialized, committedBucket: bucket,
+                               generation: state.bumpCommitGeneration(for: scope))
         }
-        guard writeToDisk(scope: scope, data: serialized) else {
+        guard writeToDisk(scope: scope, data: reservation.serialized) else {
             throw AnywhereError.mitm(.scriptStoreWriteFailed)
         }
         state.withLock { state in
-            var bucket = state.cache[scope] ?? [:]
-            bucket[key] = value
-            state.cache[scope] = bucket
-            let oldSize = state.fileSizes[scope] ?? 0
-            state.totalBytes = state.totalBytes - oldSize + serialized.count
-            state.fileSizes[scope] = serialized.count
+            guard state.commitGenerations[scope] == reservation.generation else { return }
+            state.cache[scope] = reservation.committedBucket
+            state.totalBytes = state.totalBytes - (state.fileSizes[scope] ?? 0) + reservation.serialized.count
+            state.fileSizes[scope] = reservation.serialized.count
         }
     }
 
@@ -78,29 +90,33 @@ nonisolated final class MITMScriptDiskStore: Sendable {
         ensureLoaded(scope)
         enum Pending {
             case nothing
-            case removeFile
-            case write(Data, bucket: [String: Data])
+            case removeFile(generation: UInt64)
+            case write(Data, bucket: [String: Data], generation: UInt64)
         }
         let pending: Pending = state.withLock { state in
             guard var bucket = state.cache[scope], bucket[key] != nil else { return .nothing }
             bucket.removeValue(forKey: key)
-            if bucket.isEmpty { return .removeFile }
+            if bucket.isEmpty {
+                return .removeFile(generation: state.bumpCommitGeneration(for: scope))
+            }
             guard let serialized = serialize(bucket) else { return .nothing }
-            return .write(serialized, bucket: bucket)
+            return .write(serialized, bucket: bucket, generation: state.bumpCommitGeneration(for: scope))
         }
         switch pending {
         case .nothing:
             return
-        case .removeFile:
+        case .removeFile(let generation):
             removeFile(scope)
             state.withLock { state in
+                guard state.commitGenerations[scope] == generation else { return }
                 state.cache[scope] = [:]
                 state.totalBytes -= state.fileSizes[scope] ?? 0
                 state.fileSizes.removeValue(forKey: scope)
             }
-        case .write(let serialized, let bucket):
+        case .write(let serialized, let bucket, let generation):
             guard writeToDisk(scope: scope, data: serialized) else { return }
             state.withLock { state in
+                guard state.commitGenerations[scope] == generation else { return }
                 state.cache[scope] = bucket
                 let oldSize = state.fileSizes[scope] ?? 0
                 state.totalBytes = state.totalBytes - oldSize + serialized.count
@@ -125,6 +141,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
                 state.cache.removeValue(forKey: scope)
                 state.loaded.remove(scope)
             }
+            state.commitGenerations = state.commitGenerations.filter { activeIDs.contains($0.key) }
             return stale
         }
         for scope in stale {
@@ -134,7 +151,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
     }
 
     // MARK: - Private
-    
+
     private func ensureScanned() {
         let needsScan = state.withLock { !$0.didScan }
         guard needsScan else { return }
@@ -159,7 +176,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             state.totalBytes = state.fileSizes.values.reduce(0, +)
         }
     }
-    
+
     private func ensureLoaded(_ scope: UUID) {
         ensureScanned()
         let needsLoad = state.withLock { !$0.loaded.contains(scope) }
@@ -185,7 +202,7 @@ nonisolated final class MITMScriptDiskStore: Sendable {
             state.cache[scope] = bucket
         }
     }
-    
+
     private func coordinatedRead(_ url: URL) -> Data? {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?

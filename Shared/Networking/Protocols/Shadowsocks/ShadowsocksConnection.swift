@@ -28,6 +28,8 @@ nonisolated final class ShadowsocksConnection: ProxyConnection {
     /// Receive-path AEAD + reassembly state, guarded at the sharing boundary.
     private let reader: Mutex<ShadowsocksAEADReader>
 
+    private let sendChain = SerialSender()
+
     init(inner: ProxyConnection, cipher: ShadowsocksCipher, masterKey: Data, addressHeader: Data) {
         self.inner = inner
         self.sendState = Mutex(SendState(
@@ -40,16 +42,18 @@ nonisolated final class ShadowsocksConnection: ProxyConnection {
     var isConnected: Bool { inner.isConnected }
 
     func sendRaw(_ data: Data) async throws {
-        let encrypted = try sendState.withLock { state in
+        let pending: SerialSender.Pending = try sendState.withLock { state in
             var plaintext = Data()
             if let header = state.addressHeader {
                 plaintext.append(header)
                 state.addressHeader = nil
             }
             plaintext.append(data)
-            return try state.writer.seal(plaintext: plaintext)
+            let encrypted = try state.writer.seal(plaintext: plaintext)
+            let inner = self.inner
+            return sendChain.submit { try await inner.sendRaw(encrypted) }
         }
-        try await inner.sendRaw(encrypted)
+        try await pending.value()
     }
 
     func receiveRaw() async throws -> Data? {
@@ -66,6 +70,7 @@ nonisolated final class ShadowsocksConnection: ProxyConnection {
     }
 
     func cancel() {
+        sendChain.cancel()
         inner.cancel()
     }
 }
