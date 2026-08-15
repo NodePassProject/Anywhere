@@ -241,7 +241,7 @@ struct OnboardingView: View {
     }
     
     private func triggerNetworkPermission() {
-        guard let url = URL(string: "https://argsment.com") else { return }
+        guard let url = URL(string: "https://captive.apple.com") else { return }
         Task { _ = try? await URLSession.shared.data(from: url) }
     }
 }
