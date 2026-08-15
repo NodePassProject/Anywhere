@@ -18,7 +18,6 @@ nonisolated protocol MITMUpstreamLegDelegate: AnyObject {
 }
 
 actor MITMHTTP2UpstreamLeg {
-
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         lwipBridge.executor.asUnownedSerialExecutor()
     }
@@ -101,9 +100,11 @@ actor MITMHTTP2UpstreamLeg {
 
     private var firstSettingsSeen = false
 
+    private static let unadvertisedMaxConcurrentStreams = 100
+
     private var maxConcurrentStreams: Int {
         if let s = serverMaxConcurrentStreams { return s }
-        return firstSettingsSeen ? Int.max : Self.provisionalMaxConcurrentStreams
+        return firstSettingsSeen ? Self.unadvertisedMaxConcurrentStreams : Self.provisionalMaxConcurrentStreams
     }
 
     private struct QueuedRequest {

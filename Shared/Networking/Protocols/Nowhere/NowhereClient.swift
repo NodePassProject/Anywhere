@@ -42,8 +42,6 @@ nonisolated final class NowhereFlowOpenAttempt: Sendable {
     }
     private let state = Mutex(State())
 
-    /// Binds the concrete half as soon as it exists. A cancellation that won
-    /// the race closes it before any late success can escape.
     func bind(_ connection: ProxyConnection) -> Bool {
         let accepted = state.withLock { state in
             guard !state.phase.isCancelled else { return false }
@@ -87,7 +85,6 @@ nonisolated final class NowhereFlowOpenAttempt: Sendable {
 }
 
 nonisolated final class NowhereClient: Sendable {
-
     private struct Key: Hashable {
         let host: String
         let port: UInt16
@@ -102,8 +99,6 @@ nonisolated final class NowhereClient: Sendable {
 
     private struct RegistryState {
         var entries: [Key: NowhereClient] = [:]
-        /// Coalesces concurrent first-time builds for the same key: the leader stores its in-flight
-        /// build task here and every joiner awaits it, so there is no waiter array of continuations.
         var pending: [Key: Task<NowhereClient, Error>] = [:]
         var epoch: UInt64 = 0
     }
@@ -172,7 +167,7 @@ nonisolated final class NowhereClient: Sendable {
                 try await Self.buildChained(key: key, configuration: configuration,
                                             buildEpoch: buildEpoch, builder: builder)
             }
-            state.pending[key] = task           // our task leads; joiners await it
+            state.pending[key] = task
             return .join(task)
         }
         switch decision {
@@ -183,8 +178,6 @@ nonisolated final class NowhereClient: Sendable {
         }
     }
 
-    /// Runs the coalesced build once for the leader; joiners share its result via `task.value`.
-    /// Clears the pending slot and honors the epoch guard (a `closeAll` mid-build discards the result).
     private static func buildChained(
         key: Key,
         configuration: NowhereConfiguration,
@@ -196,11 +189,11 @@ nonisolated final class NowhereClient: Sendable {
         catch { builderResult = .failure(error) }
 
         let (outcome, discarded): (Result<NowhereClient, Error>, [ProxyClient]) = registry.withLock { state in
-            state.pending.removeValue(forKey: key)
             guard state.epoch == buildEpoch else {
                 let discarded = (try? builderResult.get())?.1 ?? []
                 return (.failure(AnywhereError.proxy(.nowhere, .streamClosed)), discarded)
             }
+            state.pending.removeValue(forKey: key)
             switch builderResult {
             case .success(let (transport, holders)):
                 let client = NowhereClient(
@@ -411,9 +404,6 @@ nonisolated final class NowhereClient: Sendable {
         }
     }
 
-    /// Invalidates only the direct shared client identified by this transport
-    /// configuration. Used when the TCP half of an asymmetric flow reports
-    /// SessionReplaced before the QUIC sibling observes its session close.
     static func invalidateSharedSession(for configuration: NowhereConfiguration) {
         shared(for: configuration).invalidateSession()
     }

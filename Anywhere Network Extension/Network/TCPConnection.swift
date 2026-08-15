@@ -11,7 +11,6 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "TCPConnection")
 
 actor TCPConnection: MITMSessionHost {
-
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
     }
@@ -1159,7 +1158,14 @@ actor TCPConnection: MITMSessionHost {
         guard transition(to: .closed) else { return }
         switch exit {
         case .graceful:
-            stream?.assumeIsolated { $0.flushBestEffort() }
+            if let stream {
+                stream.assumeIsolated {
+                    $0.flushBestEffort()
+                    $0.flushReceiveWindowForClose()
+                }
+            } else {
+                flushPendingReceiveWindow()
+            }
             lwip_bridge_tcp_close(pcb)
             BridgeContext.release(self)
             teardown(abortive: false)
@@ -1185,14 +1191,18 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func rejectGracefully() {
-        guard phase != .closed else { return }
+        finish(.graceful)
+    }
+
+    private func flushPendingReceiveWindow() {
+        guard !pendingData.isEmpty else { return }
         var remaining = pendingData.count
+        pendingData.removeAll(keepingCapacity: false)
         while remaining > 0 {
             let chunk = UInt16(min(remaining, Int(UInt16.max)))
             remaining -= Int(chunk)
             lwip_bridge_tcp_recved(pcb, chunk)
         }
-        finish(.graceful)
     }
 
     private func rejectSilently() {
@@ -1201,8 +1211,6 @@ actor TCPConnection: MITMSessionHost {
 
     private func rejectWithTLSAlert() {
         guard phase != .closed else { return }
-        // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
-        // length=2, level=2 (fatal), description=49 (access_denied)
         let alert: [UInt8] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31]
         writeImmediate(Data(alert))
         rejectGracefully()

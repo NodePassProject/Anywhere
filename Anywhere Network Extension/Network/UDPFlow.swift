@@ -93,6 +93,9 @@ actor UDPFlow {
     private var pendingBufferSize = 0
     private var didWarnPendingOverflow = false
 
+    private var queuedSendBytes = 0
+    private var didWarnQueueOverflow = false
+
     private enum Job: Sendable {
         case send(Data)
         case drain([Data])
@@ -202,10 +205,22 @@ actor UDPFlow {
         case .dialing:
             bufferPayload(data: data, payloadLength: payloadLength)
         case .established:
-            jobContinuation.yield(.send(data.prefix(payloadLength)))
+            enqueueSend(data.prefix(payloadLength))
         case .closed:
             return
         }
+    }
+
+    private func enqueueSend(_ payload: Data) {
+        guard queuedSendBytes + payload.count <= TunnelConstants.udpMaxBufferSize else {
+            if !didWarnQueueOverflow {
+                didWarnQueueOverflow = true
+                logger.warning("[UDP] Send queue overflow for \(flowKey); dropping datagrams until the outbound drains")
+            }
+            return
+        }
+        queuedSendBytes += payload.count
+        jobContinuation.yield(.send(payload))
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {
@@ -224,6 +239,7 @@ actor UDPFlow {
         guard !pendingData.isEmpty else { return }
         let buffered = pendingData
         pendingData.removeAll()
+        queuedSendBytes += pendingBufferSize
         pendingBufferSize = 0
         jobContinuation.yield(.drain(buffered))
     }
@@ -242,9 +258,11 @@ actor UDPFlow {
             switch job {
             case .send(let payload):
                 await runSend(payload)
+                queuedSendBytes = max(0, queuedSendBytes - payload.count)
             case .drain(let payloads):
                 for payload in payloads {
                     await runSend(payload)
+                    queuedSendBytes = max(0, queuedSendBytes - payload.count)
                 }
             }
         }
@@ -449,6 +467,8 @@ actor UDPFlow {
     // MARK: ProxyClient
 
     private func runProxyClientLifecycle() async {
+        guard phase != .closed else { return }
+
         let client = ProxyClient(
             configuration: configuration,
             isDefaultProxy: stack?.isDefaultConfiguration(configuration.id) ?? false
@@ -537,6 +557,7 @@ actor UDPFlow {
         proxyClient = nil
         pendingData.removeAll()
         pendingBufferSize = 0
+        queuedSendBytes = 0
 
         switch doomed {
         case .direct(let transport):

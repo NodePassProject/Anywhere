@@ -56,10 +56,10 @@ actor UDPPlane {
 
     // MARK: - Intake
 
-    func feed(_ packets: [Data]) {
+    func feed(_ packets: [Data]) async {
         for packet in packets {
             if let datagram = UDPPacket.parse(packet) {
-                handleInboundUDP(datagram)
+                await handleInboundUDP(datagram)
             }
         }
     }
@@ -95,62 +95,49 @@ actor UDPPlane {
         return true
     }
 
-    private func resumeAfterResolution(flowKey: TunnelStack.UDPFlowKey) {
+    private func resumeAfterResolution(flowKey: TunnelStack.UDPFlowKey) async {
         guard let pending = pendingResolutions.removeValue(forKey: flowKey) else { return }
         if pendingResolutionCapWarned, pendingResolutions.count <= TunnelLimits.udpMaxPendingResolutions / 2 {
             pendingResolutionCapWarned = false
             logger.info("[UDP] pending-resolution table drained; waiting on IP-rule lookups again")
         }
         for datagram in pending.datagrams {
-            handleInboundUDP(datagram, awaitedResolution: true)
+            await handleInboundUDP(datagram, awaitedResolution: true)
         }
     }
 
-    private func handleInboundUDP(_ datagram: UDPPacket.Inbound, awaitedResolution: Bool = false) {
+    private func handleInboundUDP(_ datagram: UDPPacket.Inbound, awaitedResolution: Bool = false) async {
         let payload = datagram.payload
         let isIPv6 = datagram.isIPv6
 
         let udpConfig = stack.udpConfig()
 
-        // DNS interception: fake-IP for our own resolver; queries to any other
-        // resolver are proxied to the real server.
         if datagram.dstPort == 53 {
             let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
             if let destination = TunnelStack.dnsDestination(
                 for: dstIPString, exempting: udpConfig.interceptExemptDNSServers
             ) {
-                if handleDNSQuery(datagram, destination: destination) {
+                if await handleDNSQuery(datagram, destination: destination) {
                     return  // Fake response sent, no flow needed
                 }
-                // `.publicResolver` non-A/AAAA — fall through, proxy MX/SRV/TXT to real server
             }
-            // Non-intercepted DNS server — fall through to ordinary UDP flow
         }
 
-        // Block UDP: reject every datagram except DNS (port 53).
         if udpConfig.blockUDP && datagram.dstPort != 53 {
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
-        // QUIC (Blocked mode): drop UDP/443 with ICMP port-unreachable so
-        // HTTP/3 clients fail fast and fall back to HTTP/2. Automatic mode is
-        // decided post-resolution below (needs the routing result).
         if datagram.dstPort == 443 && udpConfig.quicPolicy.blocksAllQUIC {
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
-        // WebRTC: reject STUN so ICE gathering fails fast. STUN rides arbitrary
-        // negotiated ports, so classify by payload; runs before the flow lookup
-        // so a candidate never opens a flow.
         if udpConfig.blockWebRTC && TunnelStack.isSTUNMessage(payload) {
             stack.sendICMPPortUnreachable(rejecting: datagram)
             return
         }
 
-        // Fast path: deliver to an existing flow. The flow holds its resolved
-        // domain from creation, so it survives fake-IP pool eviction.
         let flowKey = TunnelStack.UDPFlowKey(
             srcIP: datagram.srcIP, srcPort: datagram.srcPort,
             dstIP: datagram.dstIP, dstPort: datagram.dstPort,
@@ -158,7 +145,7 @@ actor UDPPlane {
         )
         if let flow = flows[flowKey] {
             if !flow.isClosed {
-                Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
+                await flow.handleReceivedData(payload, payloadLength: payload.count)
                 return
             }
             flows.removeValue(forKey: flowKey)
@@ -205,9 +192,6 @@ actor UDPPlane {
             return
         }
 
-        // QUIC (Automatic mode): drop UDP/443 that is proxied or MITM-listed,
-        // forcing fallback to TCP where those paths work. `mitmListed` is an
-        // autoclosure — the trie is consulted only when it can change the answer.
         let isProxied = routeTarget.configurationID != nil
         if datagram.dstPort == 443,
            udpConfig.quicPolicy.blocksResolvedQUIC(
@@ -237,7 +221,7 @@ actor UDPPlane {
         )
         flushAllFlowsIfAtCap()
         flows[flowKey] = flow
-        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
+        await flow.handleReceivedData(payload, payloadLength: payload.count)
     }
 
     // MARK: - Flow registry
@@ -318,7 +302,7 @@ actor UDPPlane {
 
     // MARK: - DNS interception (fake-IP)
 
-    private func handleDNSQuery(_ datagram: UDPPacket.Inbound, destination: TunnelStack.DNSDestination) -> Bool {
+    private func handleDNSQuery(_ datagram: UDPPacket.Inbound, destination: TunnelStack.DNSDestination) async -> Bool {
         let payload = datagram.payload
         guard let parsed = payload.withUnsafeBytes({ ptr -> (domain: String, qtype: UInt16)? in
             guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
@@ -328,14 +312,10 @@ actor UDPPlane {
         let domain = parsed.domain.lowercased()
         let qtype = parsed.qtype
 
-        // Block DDR (RFC 9462) — otherwise the system auto-upgrades to DoH/DoT
-        // and bypasses the port-53 interception this tunnel relies on.
         if domain == "_dns.resolver.arpa" {
             return sendNODATA(answering: datagram, qtype: qtype)
         }
 
-        // NODATA for SVCB/HTTPS (qtype 65, RFC 9460). NODATA forces the
-        // fallback to A/AAAA, which we fake-IP and route.
         if qtype == 65 {
             return sendNODATA(answering: datagram, qtype: qtype)
         }
@@ -366,7 +346,7 @@ actor UDPPlane {
 
         guard qtype == 1 || qtype == 28 else {
             if destination == .anywhereResolver {
-                if forwardToUpstreamResolver(datagram, domain: domain, qtype: qtype) {
+                if await forwardToUpstreamResolver(datagram, domain: domain, qtype: qtype) {
                     return true
                 }
                 return sendNODATA(answering: datagram, qtype: qtype)
@@ -396,7 +376,7 @@ actor UDPPlane {
         )
     }
 
-    private func forwardToUpstreamResolver(_ datagram: UDPPacket.Inbound, domain: String, qtype: UInt16) -> Bool {
+    private func forwardToUpstreamResolver(_ datagram: UDPPacket.Inbound, domain: String, qtype: UInt16) async -> Bool {
         let udpConfig = stack.udpConfig()
         guard let defaultConfiguration = udpConfig.configuration else { return false }
 
@@ -412,7 +392,7 @@ actor UDPPlane {
         )
         if let existing = flows[flowKey] {
             if !existing.isClosed {
-                Task { await existing.handleReceivedData(payload, payloadLength: payload.count) }
+                await existing.handleReceivedData(payload, payloadLength: payload.count)
                 return true
             }
             flows.removeValue(forKey: flowKey)
@@ -454,10 +434,10 @@ actor UDPPlane {
             flowKey: flowKey,
             srcHost: TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: datagram.isIPv6),
             srcPort: datagram.srcPort,
-            dstHost: upstream,                  // outbound → real upstream resolver
+            dstHost: upstream,
             dstPort: datagram.dstPort,
             srcIPData: datagram.srcIPData,
-            dstIPData: datagram.dstIPData,      // reply source → the Anywhere resolver address
+            dstIPData: datagram.dstIPData,
             isIPv6: datagram.isIPv6,
             configuration: flowConfiguration,
             routeTarget: routeTarget
@@ -465,7 +445,7 @@ actor UDPPlane {
         flushAllFlowsIfAtCap()
         flows[flowKey] = flow
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(datagram.dstPort) via \(flowConfiguration.name)")
-        Task { await flow.handleReceivedData(payload, payloadLength: payload.count) }
+        await flow.handleReceivedData(payload, payloadLength: payload.count)
         return true
     }
 

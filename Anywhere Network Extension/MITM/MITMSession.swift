@@ -150,6 +150,8 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         case abort(streamID: UInt32)
     }
     private var pendingRequestEvents: [PendingRequestEvent] = []
+    private var pendingRequestBytes = 0
+    private static let maxPendingRequestBytes = 8 * 1024 * 1024
 
     private final class BridgeStream {
         let clientStreamID: UInt32
@@ -198,8 +200,10 @@ actor MITMSession: MITMHTTP1StreamDelegate {
     }
 
     private var bridgeStreams: [UInt32: BridgeStream] = [:]
+    private var sessionUnsentUpstreamBytes = 0
     private static let maxConcurrentBridgeStreams = 128
     private static let maxBridgeUpstreamBufferedBytes = 8 * 1024 * 1024
+    private static let maxSessionUpstreamBufferedBytes = 16 * 1024 * 1024
 
     private var sharedUpstreamRecord: TLSRecordConnection?
     private var sharedUpstreamConnection: ProxyConnection?
@@ -481,6 +485,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             bridgeStream.responseStream.assumeIsolated { $0.markTorn() }
         }
         bridgeStreams.removeAll()
+        sessionUnsentUpstreamBytes = 0
         sharedUpstreamRecord?.cancel()
         sharedUpstreamRecord = nil
         sharedUpstreamConnection?.cancel()
@@ -490,6 +495,7 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         sharedUpstreamTLSClient?.cancel()
         sharedUpstreamTLSClient = nil
         pendingRequestEvents.removeAll()
+        pendingRequestBytes = 0
         tlsServer = nil
         tlsClient?.cancel()
         tlsClient = nil
@@ -768,7 +774,11 @@ actor MITMSession: MITMHTTP1StreamDelegate {
                 cancel(error: error)
                 return
             }
-            guard let data, !data.isEmpty else { return }
+            guard let data else {
+                cancel(error: nil)
+                return
+            }
+            guard !data.isEmpty else { continue }
 
             let transformed = await inbound.feed(data)
             if phase == .torn { return }
@@ -1082,12 +1092,14 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
             let error: Error?
             do { data = try await inner.receive(); error = nil }
             catch let e { data = nil; error = e }
-            // Resumes on the actor.
             if phase == .torn { return }
             if let error { cancel(error: error); return }
-            guard let data, !data.isEmpty, let client = bridgeClient else {
+            guard let data else {
+                cancel(error: nil)
                 return
             }
+            if data.isEmpty { continue }
+            guard let client = bridgeClient else { return }
             await client.feed(data)
         }
     }
@@ -1142,6 +1154,13 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         case .h1:
             appendH1RequestData(streamID: streamID, data, endStream: endStream)
         case .undetermined:
+            guard pendingRequestBytes + data.count <= Self.maxPendingRequestBytes else {
+                handleClientLegFatalError(
+                    "buffered \(pendingRequestBytes + data.count) B of request body before an upstream was bound"
+                )
+                return
+            }
+            pendingRequestBytes += data.count
             pendingRequestEvents.append(.data(streamID: streamID, data, endStream: endStream))
         }
     }
@@ -1213,15 +1232,14 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
     private func failPendingBridgeRequests(error: Error) {
         guard phase != .torn else { return }
         logger.warning("[MITM] \(dstHost): first upstream connect failed: \(AnywhereError.describe(error)); answering pending streams 502, keeping the connection")
-        // Discard the failed probe connection; nothing to reuse.
         sharedUpstreamRecord = nil
         sharedUpstreamTLSClient?.cancel(); sharedUpstreamTLSClient = nil
         sharedUpstreamConnection?.cancel(); sharedUpstreamConnection = nil
         sharedUpstreamProxyClient?.cancel(); sharedUpstreamProxyClient = nil
-        // Let the next request re-probe (upstreamProtocol stays .undetermined).
         firstUpstreamDialStarted = false
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
+        pendingRequestBytes = 0
         for event in events {
             if case .head(let head, _, _) = event {
                 bridgeClient?.assumeIsolated { $0.failStream(streamID: head.clientStreamID, status: 502, message: "Bad Gateway") }
@@ -1276,6 +1294,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         bridgeClient?.assumeIsolated { $0.uploadDrainCoupled = true }
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
+        pendingRequestBytes = 0
         let client = bridgeClient
         let rewriter = h2Rewriter
         leg.assumeIsolated { legSelf in
@@ -1335,6 +1354,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         logger.info("\(dstHost): bridging h2 client to http/1.1 upstream")
         let events = pendingRequestEvents
         pendingRequestEvents.removeAll()
+        pendingRequestBytes = 0
         for event in events {
             switch event {
             case .head(let head, let url, _):
@@ -1376,6 +1396,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         bs.framing = head.framing
         bs.pendingToUpstream = MITMHTTP1Serializer.requestHead(head, host: dstHost)
         bs.unsentUpstreamBytes = bs.pendingToUpstream.count
+        sessionUnsentUpstreamBytes += bs.unsentUpstreamBytes
         bridgeStreams[streamID] = bs
 
         if let record = sharedUpstreamRecord {
@@ -1430,11 +1451,19 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         }
         guard !out.isEmpty else { return }
         bs.unsentUpstreamBytes += out.count
+        sessionUnsentUpstreamBytes += out.count
         if bs.unsentUpstreamBytes > Self.maxBridgeUpstreamBufferedBytes {
             logger.warning("\(dstHost): bridge stream \(streamID) upstream-bound backlog \(bs.unsentUpstreamBytes) B over cap; resetting stream")
             bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) }
             bridgeAbortStream(streamID)
             return
+        }
+        if sessionUnsentUpstreamBytes > Self.maxSessionUpstreamBufferedBytes,
+           let victim = bridgeStreams.max(by: { $0.value.unsentUpstreamBytes < $1.value.unsentUpstreamBytes })?.key {
+            logger.warning("\(dstHost): session upstream-bound backlog \(sessionUnsentUpstreamBytes) B over cap; resetting largest stream \(victim)")
+            bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: victim) }
+            bridgeAbortStream(victim)
+            if victim == streamID { return }
         }
         if bs.handshakeDone, let record = bs.upstreamRecord {
             flushToBridgeUpstream(out, streamID: streamID, record: record)
@@ -1454,12 +1483,16 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
 
     private func noteBridgeUpstreamDrained(streamID: UInt32, count: Int, sendError: Error?) {
         guard phase != .torn else { return }
-        bridgeStreams[streamID]?.unsentUpstreamBytes -= count
+        if let bs = bridgeStreams[streamID] {
+            bs.unsentUpstreamBytes -= count
+            sessionUnsentUpstreamBytes -= count
+        }
         if sendError != nil { bridgeClient?.assumeIsolated { $0.acceptResponseAborted(streamID: streamID) } }
     }
 
     private func bridgeAbortStream(_ streamID: UInt32) {
         guard let bs = bridgeStreams.removeValue(forKey: streamID) else { return }
+        sessionUnsentUpstreamBytes -= bs.unsentUpstreamBytes
         bs.tlsClient?.cancel()
         bs.connection?.cancel()
         bs.proxyClient?.cancel()

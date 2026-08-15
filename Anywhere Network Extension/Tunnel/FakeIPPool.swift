@@ -160,7 +160,15 @@ nonisolated final class FakeIPPool: Sendable {
     }
 
     func reset() {
-        state.withLock { $0 = State() }
+        state.withLock { state in
+            var node = state.lruHead
+            while let current = node {
+                node = current.next
+                current.prev = nil
+                current.next = nil
+            }
+            state = State()
+        }
     }
 
     var count: Int { state.withLock { $0.domainToOffset.count } }

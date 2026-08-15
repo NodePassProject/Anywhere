@@ -73,6 +73,18 @@ actor TunnelStack {
         var drainInFlight = false
     }
     let outputBuffer = Mutex(OutputBufferState())
+    
+    func purgeOutputBuffer() {
+        outputBuffer.withLock { buffer in
+            buffer.packets.removeAll(keepingCapacity: true)
+            buffer.protocols.removeAll(keepingCapacity: true)
+            for release in buffer.releases {
+                release.run()
+            }
+            buffer.releases.removeAll(keepingCapacity: true)
+            buffer.drainInFlight = false
+        }
+    }
 
     var settings = TunnelSettings()
 

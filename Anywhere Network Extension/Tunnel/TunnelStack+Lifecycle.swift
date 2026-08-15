@@ -18,6 +18,7 @@ extension TunnelStack {
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) async -> Bool {
         guard transition(to: .starting) else { return false }
         let epoch = claimStartEpoch()
+        TransportReclaim.unsealAll()
         pendingConfigurationSwitch = nil
         pendingSuspend = false
         pendingWake = false
@@ -121,7 +122,9 @@ extension TunnelStack {
     }
 
     private func finishShutdown() {
+        TransportReclaim.sealAll()
         shutdownInternal()
+        purgeOutputBuffer()
         lwip_bridge_set_host_ctx(nil)
         OutboundConnector.setRoutingContext(nil)
         fakeIPPool.reset()
@@ -243,15 +246,9 @@ extension TunnelStack {
         lwipTick?.cancel()
         lwipTick = nil
 
-        outputBuffer.withLock { buffer in
-            buffer.packets.removeAll(keepingCapacity: true)
-            buffer.protocols.removeAll(keepingCapacity: true)
-            for r in buffer.releases {
-                r.fn(r.ctx)
-            }
-            buffer.releases.removeAll(keepingCapacity: true)
-            buffer.drainInFlight = false
-        }
+        purgeOutputBuffer()
+
+        closeAllActiveTCP()
 
         reclaimAllOutboundPools()
         reclaimInstanceTransports(rebuildMultiplexerPool: false)

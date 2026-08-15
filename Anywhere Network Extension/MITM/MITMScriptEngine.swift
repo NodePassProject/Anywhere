@@ -13,14 +13,11 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "MITMScriptEngine")
 
-/// Input-body bytes pinned by suspended async invocations, summed across all engines.
 nonisolated private let mitmScriptSuspendedBodyBytes = Atomic<Int>(0)
 
-/// In-flight Anywhere.http fetches across all engines, bounded by httpMaxConcurrentGlobal.
 nonisolated private let mitmScriptGlobalFetchCount = Atomic<Int>(0)
 
 actor MITMScriptEngine {
-
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         JSCConcurrencyBridge.shared.executor.asUnownedSerialExecutor()
     }
@@ -65,6 +62,12 @@ actor MITMScriptEngine {
     }
     
     fileprivate final class Invocation {
+        private static let idSequence = Atomic<UInt64>(0)
+
+        let id = Invocation.idSequence.wrappingAdd(1, ordering: .relaxed).newValue
+
+        let startedAt = MonotonicClock.now
+
         let scope: UUID?
         let allowsHTTP: Bool
         var directive: Directive?
@@ -107,13 +110,13 @@ actor MITMScriptEngine {
 
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
     
-    private var liveInvocations: [ObjectIdentifier: Invocation] = [:]
+    private var liveInvocations: [UInt64: Invocation] = [:]
     private var currentInvocation: Invocation?
 
     // MARK: - Watchdog task tree
     
     private struct WatchdogJob: Sendable {
-        let id: ObjectIdentifier
+        let id: UInt64
         let disarm: AsyncInbox<Void>
     }
     private let watchdogJobs: AsyncStream<WatchdogJob>
@@ -141,6 +144,8 @@ actor MITMScriptEngine {
     
     private static let invocationIdleTimeout: TimeInterval = httpMaxTimeout + 30
     
+    private static let invocationAbsoluteTimeout: TimeInterval = invocationIdleTimeout * 3
+
     nonisolated private let isFormattingException = Atomic(false)
 
     init() {
@@ -160,7 +165,7 @@ actor MITMScriptEngine {
         }
     }
     
-    private func runWatchdog(id: ObjectIdentifier, disarm: AsyncInbox<Void>) async {
+    private func runWatchdog(id: UInt64, disarm: AsyncInbox<Void>) async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
                 do { try await Task.sleep(for: .seconds(Self.invocationIdleTimeout)); return true }
@@ -182,6 +187,14 @@ actor MITMScriptEngine {
     }
     
     fileprivate func shutdown() {
+        for invocation in Array(liveInvocations.values) {
+            guard !invocation.delivered, let original = invocation.original else { continue }
+            deliver(.modified(original), for: invocation)
+        }
+        liveInvocations.removeAll()
+
+        pendingFetches.removeAll()
+
         watchdogJobContinuation.finish()
         watchdogRoot?.cancel()
         watchdogRoot = nil
@@ -292,14 +305,13 @@ actor MITMScriptEngine {
         invocation.pinnedBodyBytes = bodyBytes
         Self.addSuspendedBodyBytes(bodyBytes)
         invocation.resultPromise = returned
-        liveInvocations[ObjectIdentifier(invocation)] = invocation
+        liveInvocations[invocation.id] = invocation
         currentInvocation = nil
-        // Arm first: an already-settled promise delivers synchronously and deliver() cancels the timer.
         armWatchdog(for: invocation)
-        attachSettleHandlers(to: returned, for: ObjectIdentifier(invocation))
+        attachSettleHandlers(to: returned, for: invocation.id)
     }
     
-    private func attachSettleHandlers(to promise: JSValue, for id: ObjectIdentifier) {
+    private func attachSettleHandlers(to promise: JSValue, for id: UInt64) {
         let onFulfilled: @convention(block) (JSValue) -> Void = { [weak self] _ in
             guard let self else { return }
             self.assumeIsolated { engine in
@@ -344,7 +356,7 @@ actor MITMScriptEngine {
         invocation.delivered = true
         invocation.watchdogDisarm?.finish()
         invocation.watchdogDisarm = nil
-        liveInvocations.removeValue(forKey: ObjectIdentifier(invocation))
+        liveInvocations.removeValue(forKey: invocation.id)
         if invocation.pinnedBodyBytes > 0 {
             Self.addSuspendedBodyBytes(-invocation.pinnedBodyBytes)
             invocation.pinnedBodyBytes = 0
@@ -363,7 +375,7 @@ actor MITMScriptEngine {
         invocation.watchdogDisarm?.finish()
         let disarm = AsyncInbox<Void>(capacity: 1)
         invocation.watchdogDisarm = disarm
-        watchdogJobContinuation.yield(WatchdogJob(id: ObjectIdentifier(invocation), disarm: disarm))
+        watchdogJobContinuation.yield(WatchdogJob(id: invocation.id, disarm: disarm))
     }
 
     private static func suspendedBodyBytes() -> Int {
@@ -427,7 +439,7 @@ actor MITMScriptEngine {
     }
     
     fileprivate func resetOnReload(keepingCompiled keep: Set<Int>) {
-        guard currentInvocation == nil, liveInvocations.isEmpty else {
+        guard currentInvocation == nil, liveInvocations.isEmpty, pendingFetches.isEmpty else {
             pruneCompiled(keeping: keep)
             return
         }
@@ -641,7 +653,6 @@ actor MITMScriptEngine {
         let utf8Decode: @convention(block) (JSValue) -> String = { val in
             let context = JSContext.current()!
             let bytes = Self.bytesFromValue(val, in: context) ?? Data()
-            // Lossy: invalid UTF-8 → U+FFFD so partial-text buffers still decode.
             return String(decoding: bytes, as: UTF8.self)
         }
         utf8.setObject(utf8Encode, forKeyedSubscript: "encode" as NSString)
@@ -1575,7 +1586,14 @@ actor MITMScriptEngine {
         result: Result<MITMScriptHTTPClient.Response, Error>
     ) {
         if invocation.inFlightFetches > 0 { invocation.inFlightFetches -= 1 }
-        if !invocation.delivered { armWatchdog(for: invocation) }
+        guard !invocation.delivered else { return }
+        if MonotonicClock.now - invocation.startedAt > Self.invocationAbsoluteTimeout,
+           let original = invocation.original {
+            logger.warning("[MITM][JS] process(ctx) exceeded the absolute invocation budget; reverting")
+            deliver(.modified(original), for: invocation)
+            return
+        }
+        armWatchdog(for: invocation)
         currentInvocation = invocation
         defer { currentInvocation = nil }
         _ = runUserScript("async script (Anywhere.http resume continuation)") {

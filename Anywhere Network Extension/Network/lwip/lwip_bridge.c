@@ -127,7 +127,31 @@ static err_t tun_netif_init_fn(struct netif *netif) {
  *  TCP callbacks
  * ======================================================================== */
 
-/* Helper to extract raw IP bytes from ip_addr_t */
+static struct tcp_pcb *s_callback_pcb = NULL;
+static int s_callback_pcb_destroyed = 0;
+
+struct pcb_guard { struct tcp_pcb *pcb; int destroyed; };
+
+static struct pcb_guard pcb_guard_enter(struct tcp_pcb *tpcb) {
+    struct pcb_guard saved = { s_callback_pcb, s_callback_pcb_destroyed };
+    s_callback_pcb = tpcb;
+    s_callback_pcb_destroyed = 0;
+    return saved;
+}
+
+static int pcb_guard_leave(struct pcb_guard saved) {
+    int destroyed = s_callback_pcb_destroyed;
+    s_callback_pcb = saved.pcb;
+    s_callback_pcb_destroyed = saved.destroyed;
+    return destroyed;
+}
+
+static void note_pcb_destroyed(struct tcp_pcb *tpcb) {
+    if (s_callback_pcb != NULL && s_callback_pcb == tpcb) {
+        s_callback_pcb_destroyed = 1;
+    }
+}
+
 static void ip_addr_to_bytes(const ip_addr_t *addr, uint8_t *out, int *is_ipv6) {
     if (IP_IS_V6(addr)) {
         memcpy(out, ip_2_ip6(addr), 16);
@@ -138,7 +162,6 @@ static void ip_addr_to_bytes(const ip_addr_t *addr, uint8_t *out, int *is_ipv6) 
     }
 }
 
-/* Forward declarations for TCP callbacks used in tcp_accept_cb */
 static err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
 static err_t tcp_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len);
 static void  tcp_err_cb(void *arg, err_t err);
@@ -173,10 +196,6 @@ static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     tcp_sent(newpcb, tcp_sent_cb);
     tcp_err(newpcb, tcp_err_cb);
 
-    /* The lwIP ↔ local-app leg rides over TUN with no real loss or congestion.
-     * Nagle coalescing only adds latency for small writes (HTTP/2 frames,
-     * WebSocket pings, interactive SSH). Upload coalescing already happens in
-     * TCPConnection before handing bytes to lwIP. */
     tcp_nagle_disable(newpcb);
 
     return ERR_OK;
@@ -190,42 +209,41 @@ static err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t 
         return ERR_ABRT;
     }
 
+    struct pcb_guard saved = pcb_guard_enter(tpcb);
+
+    err_t result = ERR_OK;
+
     if (!p) {
-        /* Remote closed connection (graceful FIN) */
         if (s_tcp_recv_fn) {
             s_tcp_recv_fn(arg, NULL, 0);
         }
-        return ERR_OK;
-    }
-
-    if (s_tcp_recv_fn) {
-        if (p->next != NULL) {
-            void *buf = mem_malloc(p->tot_len);
-            if (buf) {
-                pbuf_copy_partial(p, buf, p->tot_len, 0);
-                s_tcp_recv_fn(arg, buf, p->tot_len);
-                mem_free(buf);
-            } else {
-                os_log_error(s_log, "[Bridge] tcp_recv_cb: mem_malloc failed for %u bytes, returning ERR_MEM", p->tot_len);
-                /* Don't free p — lwIP retains ownership when we return an error,
-                 * and will redeliver the segment later. */
-                return ERR_MEM;
-            }
+    } else if (s_tcp_recv_fn && p->next != NULL) {
+        void *buf = mem_malloc(p->tot_len);
+        if (buf) {
+            pbuf_copy_partial(p, buf, p->tot_len, 0);
+            s_tcp_recv_fn(arg, buf, p->tot_len);
+            mem_free(buf);
+            pbuf_free(p);
         } else {
+            os_log_error(s_log, "[Bridge] tcp_recv_cb: mem_malloc failed for %u bytes, returning ERR_MEM", p->tot_len);
+            result = ERR_MEM;
+        }
+    } else {
+        if (s_tcp_recv_fn) {
             s_tcp_recv_fn(arg, p->payload, p->tot_len);
         }
+        pbuf_free(p);
     }
 
-    pbuf_free(p);
-    return ERR_OK;
+    return pcb_guard_leave(saved) ? ERR_ABRT : result;
 }
 
 static err_t tcp_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len) {
-    (void)tpcb;
-    if (arg && s_tcp_sent_fn) {
-        s_tcp_sent_fn(arg, len);
-    }
-    return ERR_OK;
+    if (!arg || !s_tcp_sent_fn) return ERR_OK;
+
+    struct pcb_guard saved = pcb_guard_enter(tpcb);
+    s_tcp_sent_fn(arg, len);
+    return pcb_guard_leave(saved) ? ERR_ABRT : ERR_OK;
 }
 
 static void tcp_err_cb(void *arg, err_t err) {
@@ -493,6 +511,7 @@ void lwip_bridge_tcp_close(void *pcb) {
     err_t err = tcp_close(tpcb);
     if (err != ERR_OK) {
         os_log_error(s_log, "[Bridge] tcp_close failed (err=%d), falling back to abort", (int)err);
+        note_pcb_destroyed(tpcb);
         tcp_abort(tpcb);
     }
 }
@@ -503,6 +522,7 @@ void lwip_bridge_tcp_abort(void *pcb) {
     tcp_recv(tpcb, NULL);
     tcp_sent(tpcb, NULL);
     tcp_err(tpcb, NULL);
+    note_pcb_destroyed(tpcb);
     tcp_abort(tpcb);
 }
 
@@ -512,6 +532,7 @@ void lwip_bridge_tcp_discard(void *pcb) {
     tcp_recv(tpcb, NULL);
     tcp_sent(tpcb, NULL);
     tcp_err(tpcb, NULL);
+    note_pcb_destroyed(tpcb);
     tcp_abandon(tpcb, 0);
 }
 

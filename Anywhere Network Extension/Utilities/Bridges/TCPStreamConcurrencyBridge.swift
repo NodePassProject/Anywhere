@@ -9,7 +9,6 @@ import Foundation
 import Synchronization
 
 actor TCPStreamConcurrencyBridge {
-
     nonisolated var unownedExecutor: UnownedSerialExecutor {
         bridge.executor.asUnownedSerialExecutor()
     }
@@ -61,6 +60,8 @@ actor TCPStreamConcurrencyBridge {
     private var uploadBuffer = Data()
     private var uploadWaiter: CheckedContinuation<Void, Never>?
 
+    private var unreceivedBytes = 0
+
     // MARK: Download (upstream → app)
 
     private var pendingWrite = Data()
@@ -84,6 +85,7 @@ actor TCPStreamConcurrencyBridge {
     func deliverUpload(_ bytes: Data) {
         guard !phase.isTerminated, !bytes.isEmpty else { return }
         uploadBuffer.append(bytes)
+        unreceivedBytes += bytes.count
         resumeUploadWaiter()
     }
 
@@ -106,6 +108,7 @@ actor TCPStreamConcurrencyBridge {
     func seedUpload(_ data: Data) {
         guard !phase.isTerminated, !data.isEmpty else { return }
         uploadBuffer.append(data)
+        unreceivedBytes += data.count
         resumeUploadWaiter()
     }
 
@@ -137,8 +140,20 @@ actor TCPStreamConcurrencyBridge {
         }
     }
 
+    func flushReceiveWindowForClose() {
+        guard !phase.isTerminated, unreceivedBytes > 0 else { return }
+        var remaining = unreceivedBytes
+        unreceivedBytes = 0
+        while remaining > 0 {
+            let part = UInt16(min(remaining, Int(UInt16.max)))
+            remaining -= Int(part)
+            lwip_bridge_tcp_recved(pcb, part)
+        }
+    }
+
     private func ackUpload(_ byteCount: Int) {
         guard !phase.isTerminated, byteCount > 0 else { return }
+        unreceivedBytes = max(0, unreceivedBytes - byteCount)
         var remaining = byteCount
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
@@ -298,8 +313,8 @@ actor TCPStreamConcurrencyBridge {
             let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
             let error = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
             if error != 0 {
-                if error == -1 { break }  // ERR_MEM: transient
-                return -1                 // fatal
+                if error == -1 { break }
+                return -1
             }
             offset += chunkSize
         }

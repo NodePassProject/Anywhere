@@ -162,4 +162,8 @@ nonisolated final class BridgeDeadlineTimer: @unchecked Sendable {
         guard cancelled.claim() else { return }
         timer.cancel()
     }
+
+    deinit {
+        cancel()
+    }
 }

@@ -176,6 +176,8 @@ actor MITMHTTP1Stream {
     weak var responseIRSink: MITMHTTP1ResponseIRSink?
 
     private var parkedContinuation: CheckedContinuation<Data, Never>?
+    
+    private var pendingHop: Task<Void, Never>?
 
     private var pendingPreParkOutput = Data()
 
@@ -264,6 +266,8 @@ actor MITMHTTP1Stream {
 
     func markTorn() {
         guard transition(to: .torn) else { return }
+        pendingHop?.cancel()
+        pendingHop = nil
         let continuation = parkedContinuation
         parkedContinuation = nil
         pendingPreParkOutput = Data()
@@ -614,7 +618,7 @@ actor MITMHTTP1Stream {
                 mode = .awaitingScript
                 let rules = self.rules
                 let engineProvider = self.scriptEngineProvider
-                Task { [weak self] in
+                pendingHop = Task { [weak self] in
                     let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
                     guard let self else { return }
                     self.lwipBridge.enqueue {
@@ -723,7 +727,7 @@ actor MITMHTTP1Stream {
             return peeked
         }
         mode = .awaitingGates
-        Task { [weak self] in
+        pendingHop = Task { [weak self] in
             let table = await MITMGateVerdictTable.resolve(rules: rules, url: url)
             guard let self else { return }
             self.lwipBridge.enqueue {
@@ -1040,7 +1044,7 @@ actor MITMHTTP1Stream {
                         postFrame: .finalThenTrailer,
                         into: &output
                     ) {
-                        return false // parked
+                        return false
                     }
                     output.append(contentsOf: "0\r\n".utf8)
                     currentInner = .trailerOrEnd
@@ -1174,7 +1178,7 @@ actor MITMHTTP1Stream {
         mode = .awaitingScript
         let engineProvider = self.scriptEngineProvider
         let cursor = streaming.cursor
-        Task { [weak self] in
+        pendingHop = Task { [weak self] in
             let result = await MITMScriptTransform.applyFrame(
                 chunk,
                 frameContext: frameContext,
@@ -1340,7 +1344,7 @@ actor MITMHTTP1Stream {
         mode = .awaitingScript
         let rules = self.rules
         let engineProvider = self.scriptEngineProvider
-        Task { [weak self] in
+        pendingHop = Task { [weak self] in
             let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
             guard let self else { return }
             self.lwipBridge.enqueue {

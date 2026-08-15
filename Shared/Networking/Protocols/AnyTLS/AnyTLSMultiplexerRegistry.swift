@@ -10,9 +10,7 @@ import Synchronization
 
 nonisolated private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
 
-/// Keyed by `(host, port, password)`; configs sharing the triple reuse one warm pool.
 nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
-
     nonisolated static let shared = AnyTLSMultiplexerRegistry()
 
     private struct Key: Hashable {
@@ -21,11 +19,18 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
         let password: String
     }
 
-    private let pools = Mutex<[Key: AnyTLSMultiplexerPool]>([:])
+    private struct State {
+        var pools: [Key: AnyTLSMultiplexerPool] = [:]
+        var sealed = false
+    }
+    private let state = Mutex(State())
 
     private init() {}
 
-    /// Creates the pool on first use; on reuse the passed `dialOut` is dropped.
+    func seal() { state.withLock { $0.sealed = true } }
+
+    func unseal() { state.withLock { $0.sealed = false } }
+
     func pool(
         for configuration: ProxyConfiguration,
         dialOut: @escaping AnyTLSMultiplexerPool.DialOut
@@ -38,10 +43,11 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
         }
         let key = Key(host: configuration.serverAddress, port: configuration.serverPort, password: password)
         var reused = true
-        let pool = pools.withLock { pools -> AnyTLSMultiplexerPool in
-            if let existing = pools[key] {
+        let pool = state.withLock { state -> AnyTLSMultiplexerPool? in
+            if let existing = state.pools[key] {
                 return existing
             }
+            guard !state.sealed else { return nil }
             reused = false
             let created = AnyTLSMultiplexerPool(
                 password: password,
@@ -50,8 +56,12 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
                 minIdleSession:           minIdleSession,
                 dialOut: dialOut
             )
-            pools[key] = created
+            state.pools[key] = created
             return created
+        }
+        guard let pool else {
+            logger.debug("[AnyTLSMultiplexerRegistry] sealed — refusing to create pool \(configuration.serverAddress):\(configuration.serverPort)")
+            return nil
         }
         if reused {
             logger.debug("[AnyTLSMultiplexerRegistry] reuse pool \(configuration.serverAddress):\(configuration.serverPort)")
@@ -61,11 +71,10 @@ nonisolated final class AnyTLSMultiplexerRegistry: Sendable {
         return pool
     }
 
-    /// Called on wake/path change/stop because the kernel may have torn down the sockets.
     func closeAll() {
-        let snapshot = pools.withLock { pools -> [AnyTLSMultiplexerPool] in
-            let values = Array(pools.values)
-            pools.removeAll(keepingCapacity: false)
+        let snapshot = state.withLock { state -> [AnyTLSMultiplexerPool] in
+            let values = Array(state.pools.values)
+            state.pools.removeAll(keepingCapacity: false)
             return values
         }
         if !snapshot.isEmpty {

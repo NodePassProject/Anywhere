@@ -9,7 +9,6 @@ import Foundation
 import Synchronization
 
 nonisolated final class HysteriaClient: Sendable {
-
     private struct Key: Hashable {
         let host: String
         let port: UInt16
@@ -21,6 +20,7 @@ nonisolated final class HysteriaClient: Sendable {
     private struct RegistryState {
         var entries: [Key: HysteriaClient] = [:]
         var pending: [Key: Task<HysteriaClient, Error>] = [:]
+        var epoch: UInt64 = 0
     }
     private static let registry = Mutex(RegistryState())
 
@@ -74,8 +74,12 @@ nonisolated final class HysteriaClient: Sendable {
         let decision: Decision = registry.withLock { state in
             if let client = state.entries[key] { return .existing(client) }
             if let inFlight = state.pending[key] { return .join(inFlight) }
+            let buildEpoch = state.epoch
             let task = Task<HysteriaClient, Error> {
-                try await Self.buildChained(key: key, configuration: configuration, builder: builder)
+                try await Self.buildChained(
+                    key: key, configuration: configuration,
+                    buildEpoch: buildEpoch, builder: builder
+                )
             }
             state.pending[key] = task
             return .join(task)
@@ -91,13 +95,19 @@ nonisolated final class HysteriaClient: Sendable {
     private static func buildChained(
         key: Key,
         configuration: HysteriaConfiguration,
+        buildEpoch: UInt64,
         builder: @escaping @Sendable () async throws -> (QUICDatagramTransport, [ProxyClient])
     ) async throws -> HysteriaClient {
         let builderResult: Result<(QUICDatagramTransport, [ProxyClient]), Error>
         do { builderResult = .success(try await builder()) }
         catch { builderResult = .failure(error) }
 
-        let outcome: Result<HysteriaClient, Error> = registry.withLock { state in
+        typealias Discard = (Result<HysteriaClient, Error>, QUICDatagramTransport?, [ProxyClient])
+        let (outcome, staleTransport, staleHolders): Discard = registry.withLock { state in
+            guard state.epoch == buildEpoch else {
+                let built = try? builderResult.get()
+                return (.failure(AnywhereError.proxy(.hysteria, .streamClosed)), built?.0, built?.1 ?? [])
+            }
             state.pending.removeValue(forKey: key)
             switch builderResult {
             case .success(let (transport, holders)):
@@ -108,11 +118,13 @@ nonisolated final class HysteriaClient: Sendable {
                     poolKey: key
                 )
                 state.entries[key] = client
-                return .success(client)
+                return (.success(client), nil, [])
             case .failure(let error):
-                return .failure(error)
+                return (.failure(error), nil, [])
             }
         }
+        staleTransport?.cancel()
+        for client in staleHolders { await client.cancel() }
         return try outcome.get()
     }
 
@@ -315,7 +327,15 @@ nonisolated final class HysteriaClient: Sendable {
     }
 
     static func closeAll() {
-        let clients = registry.withLock { state in Array(state.entries.values) }
+        let (clients, pending): ([HysteriaClient], [Task<HysteriaClient, Error>]) = registry.withLock { state in
+            let clients = Array(state.entries.values)
+            state.entries.removeAll(keepingCapacity: false)
+            let pending = Array(state.pending.values)
+            state.pending.removeAll(keepingCapacity: false)
+            state.epoch &+= 1
+            return (clients, pending)
+        }
+        for task in pending { task.cancel() }
         for client in clients {
             client.invalidateSession()
         }
