@@ -136,6 +136,7 @@ struct ProxiesView: View {
                 ReorderView(scope: scope)
             }
             .toolbar { toolbar }
+            .containerBackground(Color(.systemGroupedBackground), for: .navigation)
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
