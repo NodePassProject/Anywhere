@@ -87,9 +87,7 @@ struct ProxiesView: View {
     }
     
     var body: some View {
-        ZStack {
-            Color(.systemGroupedBackground)
-                .ignoresSafeArea()
+        NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     if proxyType == .servers {
@@ -126,191 +124,18 @@ struct ProxiesView: View {
                     }
                 }
             }
-        }
-        .overlay {
-            if proxyType == .servers, configurationStore.configurations.isEmpty, serverGroups.isEmpty {
-                ContentUnavailableView("No Proxies", systemImage: "network")
-            } else if proxyType == .chains, chainCoordinator.models.isEmpty, chainGroups.isEmpty {
-                ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
-            }
-        }
-        .navigationTitle("Proxies")
-        .toolbar {
-            if let subscription = expandedSubscription {
-                ToolbarItem(placement: .bottomBar) {
-                    if updatingSubscription?.id == subscription.id {
-                        ProgressView()
-                    } else {
-                        Button {
-                            updateSubscription(subscription)
-                        } label: {
-                            Label("Update", systemImage: "arrow.clockwise")
-                        }
-                    }
-                }
-                
-                ToolbarItem(placement: .bottomBar) {
-                    Menu("More", systemImage: "ellipsis") {
-                        let configurationCount = configurationStore.configurations(for: subscription).count
-                        if configurationCount > 1 {
-                            Button {
-                                reorderScope = .subscription(subscription.id)
-                            } label: {
-                                Label("Reorder", systemImage: "arrow.up.arrow.down")
-                            }
-                        }
-                        if configurationCount > 0 {
-                            Section {
-                                Button {
-                                    latencyCenter.testLatencies(for: configurationStore.configurations(for: subscription))
-                                } label: {
-                                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                                }
-                            }
-                        }
-                        Section {
-                            Button {
-                                renameText = subscription.name
-                                renamingSubscription = subscription
-                            } label: {
-                                Label("Rename", systemImage: "pencil")
-                            }
-                            Button {
-                                updateSubscription(subscription)
-                            } label: {
-                                Label("Update", systemImage: "arrow.clockwise")
-                            }
-                            Button(role: .destructive) {
-                                subscriptionStore.delete(subscription)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                    }
-                }
-            } else if let group = expandedGroup {
-                ToolbarItem(placement: .bottomBar) {
-                    Button{
-                        groupToEdit = group
-                    } label: {
-                        Label("Edit", systemImage: "pencil")
-                    }
-                }
-                
-                ToolbarItem(placement: .bottomBar) {
-                    Menu("More", systemImage: "ellipsis") {
-                        let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
-                        if memberCount > 1 {
-                            Section {
-                                Button {
-                                    reorderScope = .group(group.id)
-                                } label: {
-                                    Label("Reorder", systemImage: "arrow.up.arrow.down")
-                                }
-                            }
-                        }
-                        if memberCount > 0 {
-                            Section {
-                                Button {
-                                    testGroupLatency(group)
-                                } label: {
-                                    Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                                }
-                            }
-                        }
-                        Section {
-                            Button {
-                                groupToEdit = group
-                            } label: {
-                                Label("Edit", systemImage: "pencil")
-                            }
-                            Button(role: .destructive) {
-                                groupStore.delete(group)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                    }
+            .overlay {
+                if proxyType == .servers, configurationStore.configurations.isEmpty, serverGroups.isEmpty {
+                    ContentUnavailableView("No Proxies", systemImage: "network")
+                } else if proxyType == .chains, chainCoordinator.models.isEmpty, chainGroups.isEmpty {
+                    ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
                 }
             }
-            
-            ToolbarItem {
-                Button {
-                    switch proxyType {
-                    case .servers:
-                        showingAddSheet = true
-                    case .chains:
-                        if configurationStore.configurations.count < 2 {
-                            showingNotEnoughProxiesAlert = true
-                        } else {
-                            showingChainAddSheet = true
-                        }
-                    }
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
+            .navigationTitle("Proxies")
+            .navigationDestination(item: $reorderScope) { scope in
+                ReorderView(scope: scope)
             }
-            
-            ToolbarItem {
-                Menu("More", systemImage: "ellipsis") {
-                    Section {
-                        Picker("Proxy Type", selection: $proxyType) {
-                            Label("Servers", systemImage: "server.rack")
-                                .tag(ProxyType.servers)
-                            Label("Chains", systemImage:  "point.bottomleft.forward.to.point.topright.scurvepath.fill")
-                                .tag(ProxyType.chains)
-                        }
-                    }
-                    Section {
-                        Button {
-                            showingGroupAddSheet = true
-                        } label: {
-                            Label("New Group", systemImage: "folder.badge.plus")
-                        }
-                        if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 || serverGroups.count > 1 || chainGroups.count > 1 {
-                            NavigationLink {
-                                ReorderView()
-                            } label: {
-                                Label("Reorder", systemImage: "arrow.up.arrow.down")
-                            }
-                        }
-                    }
-                    Section {
-                        Button {
-                            switch proxyType {
-                            case .servers:
-                                let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
-                                let hiddenGroupMemberIds = Set(serverGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
-                                let visible = configurationStore.configurations.filter { configuration in
-                                    guard let subscriptionId = configuration.subscriptionId else {
-                                        return !hiddenGroupMemberIds.contains(configuration.id)
-                                    }
-                                    return liveSubscriptionIds.contains(subscriptionId) && subscriptionId == expandedContainerId
-                                }
-                                latencyCenter.testLatencies(for: visible)
-                            case .chains:
-                                let hiddenChainIds = Set(chainGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
-                                let visibleChains = chainStore.chains.filter { !hiddenChainIds.contains($0.id) }
-                                latencyCenter.testAllChainLatencies(chains: visibleChains, configurations: configurationStore.configurations)
-                            }
-                        } label: {
-                            Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                        }
-                    }
-                    if !subscriptionStore.subscriptions.isEmpty {
-                        Section {
-                            Button {
-                                updateAllSubscriptions()
-                            } label: {
-                                Label("Update All", systemImage: "arrow.clockwise")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .navigationDestination(item: $reorderScope) { scope in
-            ReorderView(scope: scope)
+            .toolbar { toolbar }
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -374,6 +199,184 @@ struct ProxiesView: View {
         }
         .onAppear {
             unfoldSelectedProxyContainer()
+        }
+    }
+    
+    // MARK: - Toolbar
+    
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        if let subscription = expandedSubscription {
+            ToolbarItem(placement: .bottomBar) {
+                if updatingSubscription?.id == subscription.id {
+                    ProgressView()
+                } else {
+                    Button {
+                        updateSubscription(subscription)
+                    } label: {
+                        Label("Update", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+            
+            ToolbarItem(placement: .bottomBar) {
+                Menu("More", systemImage: "ellipsis") {
+                    let configurationCount = configurationStore.configurations(for: subscription).count
+                    if configurationCount > 1 {
+                        Button {
+                            reorderScope = .subscription(subscription.id)
+                        } label: {
+                            Label("Reorder", systemImage: "arrow.up.arrow.down")
+                        }
+                    }
+                    if configurationCount > 0 {
+                        Section {
+                            Button {
+                                latencyCenter.testLatencies(for: configurationStore.configurations(for: subscription))
+                            } label: {
+                                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                            }
+                        }
+                    }
+                    Section {
+                        Button {
+                            renameText = subscription.name
+                            renamingSubscription = subscription
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button {
+                            updateSubscription(subscription)
+                        } label: {
+                            Label("Update", systemImage: "arrow.clockwise")
+                        }
+                        Button(role: .destructive) {
+                            subscriptionStore.delete(subscription)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+        } else if let group = expandedGroup {
+            ToolbarItem(placement: .bottomBar) {
+                Button{
+                    groupToEdit = group
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+            }
+            
+            ToolbarItem(placement: .bottomBar) {
+                Menu("More", systemImage: "ellipsis") {
+                    let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
+                    if memberCount > 1 {
+                        Section {
+                            Button {
+                                reorderScope = .group(group.id)
+                            } label: {
+                                Label("Reorder", systemImage: "arrow.up.arrow.down")
+                            }
+                        }
+                    }
+                    if memberCount > 0 {
+                        Section {
+                            Button {
+                                testGroupLatency(group)
+                            } label: {
+                                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                            }
+                        }
+                    }
+                    Section {
+                        Button {
+                            groupToEdit = group
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            groupStore.delete(group)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+        }
+        
+        ToolbarItem {
+            Button {
+                switch proxyType {
+                case .servers:
+                    showingAddSheet = true
+                case .chains:
+                    if configurationStore.configurations.count < 2 {
+                        showingNotEnoughProxiesAlert = true
+                    } else {
+                        showingChainAddSheet = true
+                    }
+                }
+            } label: {
+                Label("Add", systemImage: "plus")
+            }
+        }
+        
+        ToolbarItem {
+            Menu("More", systemImage: "ellipsis") {
+                Section {
+                    Picker("Proxy Type", selection: $proxyType) {
+                        Label("Servers", systemImage: "server.rack")
+                            .tag(ProxyType.servers)
+                        Label("Chains", systemImage:  "point.bottomleft.forward.to.point.topright.scurvepath.fill")
+                            .tag(ProxyType.chains)
+                    }
+                }
+                Section {
+                    Button {
+                        showingGroupAddSheet = true
+                    } label: {
+                        Label("New Group", systemImage: "folder.badge.plus")
+                    }
+                    if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 || serverGroups.count > 1 || chainGroups.count > 1 {
+                        NavigationLink {
+                            ReorderView()
+                        } label: {
+                            Label("Reorder", systemImage: "arrow.up.arrow.down")
+                        }
+                    }
+                }
+                Section {
+                    Button {
+                        switch proxyType {
+                        case .servers:
+                            let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
+                            let hiddenGroupMemberIds = Set(serverGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
+                            let visible = configurationStore.configurations.filter { configuration in
+                                guard let subscriptionId = configuration.subscriptionId else {
+                                    return !hiddenGroupMemberIds.contains(configuration.id)
+                                }
+                                return liveSubscriptionIds.contains(subscriptionId) && subscriptionId == expandedContainerId
+                            }
+                            latencyCenter.testLatencies(for: visible)
+                        case .chains:
+                            let hiddenChainIds = Set(chainGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
+                            let visibleChains = chainStore.chains.filter { !hiddenChainIds.contains($0.id) }
+                            latencyCenter.testAllChainLatencies(chains: visibleChains, configurations: configurationStore.configurations)
+                        }
+                    } label: {
+                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+                if !subscriptionStore.subscriptions.isEmpty {
+                    Section {
+                        Button {
+                            updateAllSubscriptions()
+                        } label: {
+                            Label("Update All", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
+            }
         }
     }
     
