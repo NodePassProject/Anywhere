@@ -34,8 +34,6 @@ extension CompiledMITMRule {
         let authStart = sep.upperBound
         let authEnd = url[authStart...].firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? url.endIndex
         var authority = url[authStart..<authEnd].lowercased()
-        // Strip a trailing FQDN dot (an SNI may carry one) — URL side only;
-        // in a pattern a trailing `.` is the any-char metacharacter.
         if authority.hasSuffix(".") { authority.removeLast() }
         return url[..<authStart].lowercased() + authority + String(url[authEnd...])
     }
@@ -135,13 +133,10 @@ nonisolated struct MITMGateVerdictTable: Sendable {
 }
 
 nonisolated struct ReplacementURL: Equatable {
-    /// IPv6 URI brackets stripped, matching the form the resolver expects.
     let host: String
     let port: UInt16?
-    /// path+query in origin form; `/` when the URL carries no path.
     let requestTarget: String
-
-    /// RFC 9112 §3.2 authority: bare host (IPv6 re-bracketed), or `host:port` when a port was given.
+    
     var authority: String {
         let bracketedHost = host.contains(":") ? "[\(host)]" : host
         if let port { return "\(bracketedHost):\(port)" }
@@ -215,7 +210,6 @@ nonisolated final class MITMRewritePolicy: Sendable {
         let trie = FlatLabelTrieBuilder<Int16>()
         var newGates: [String: MITMGateRegex] = [:]
         for set in ruleSets {
-            // Disabled sets stay in activeIDs so toggling off preserves the script-store bucket.
             guard set.enabled else { continue }
             if let compiled = insert(set, into: &newState, trie: trie, previousGates: previousGates, newGates: &newGates) {
                 scopedRules.append((scope: set.id, rules: compiled))
@@ -224,13 +218,10 @@ nonisolated final class MITMRewritePolicy: Sendable {
         newState.gateCache = newGates
         newState.trie = trie.freeze()
         state.withLock { $0 = newState }
-        // Purge JS engine state for deleted sets; edited sets (stable id) keep theirs.
         let activeIDs = Set(ruleSets.map { $0.id })
         MITMScriptEngine.purgeEngines(activeIDs: activeIDs)
-        // Surface each set's resolved parameters to scripts as Anywhere.params.
         MITMParamStore.shared.replaceAll(ruleSets.map { (scope: $0.id, values: $0.parameterValues) })
-        // Prewarm compile caches so the first intercepted flow doesn't pay cold-start inline.
-        MITMScriptTransform.prewarm(scopedRules: scopedRules)
+        MITMScriptTransform.rulesDidReload(scopedRules: scopedRules)
         let purged = MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
         if purged > 0 {
             logger.debug("Loaded \(ruleSets.count) rule set(s); purged \(purged) stale script-store bucket(s)")
@@ -441,7 +432,6 @@ nonisolated final class MITMRewritePolicy: Sendable {
             if template.referencesCaptures {
                 return .redirect302(.templated(template))
             }
-            // Trim first: HTTPHeader.isValidValue allows SP/HTAB, and stray whitespace in Location trips some clients.
             let trimmed = url.trimmingCharacters(in: .whitespaces)
             guard parseReplacementURL(trimmed) != nil, HTTPHeader.isValidValue(trimmed) else {
                 logger.warning("rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
@@ -467,12 +457,10 @@ nonisolated final class MITMRewritePolicy: Sendable {
         guard !trimmed.isEmpty,
               let components = URLComponents(string: trimmed),
               let rawHost = components.host, !rawHost.isEmpty else { return nil }
-        // Strip IPv6 URI brackets for the dial; `authority` re-adds them.
         var host = rawHost
         if host.hasPrefix("["), host.hasSuffix("]"), host.count >= 2 {
             host = String(host.dropFirst().dropLast())
         }
-        // An out-of-range port drops the rule rather than silently falling back to the scheme default.
         let port: UInt16?
         if let rawPort = components.port {
             guard let valid = UInt16(exactly: rawPort) else {
@@ -510,7 +498,6 @@ nonisolated final class MITMRewritePolicy: Sendable {
 // MARK: - Binary deserialization
 
 nonisolated enum MITMBinaryReader {
-    
     static func decode(_ data: Data) -> (enabled: Bool, ruleSets: [MITMRuleSet])? {
         data.withUnsafeBytes { raw -> (enabled: Bool, ruleSets: [MITMRuleSet])? in
             var cursor = Cursor(bytes: raw.bindMemory(to: UInt8.self))

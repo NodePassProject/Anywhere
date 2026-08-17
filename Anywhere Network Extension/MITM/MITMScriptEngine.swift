@@ -153,6 +153,15 @@ actor MITMScriptEngine {
         (self.watchdogJobs, self.watchdogJobContinuation) = AsyncStream.makeStream(of: WatchdogJob.self)
         configureContext(context)
     }
+    
+    static func warmVirtualMachine() {
+        JSCConcurrencyBridge.shared.enqueue { _ = warmedVirtualMachine }
+    }
+    
+    private static let warmedVirtualMachine: Bool = {
+        withExtendedLifetime(MITMScriptEngine()) {}
+        return true
+    }()
 
     // MARK: - Watchdog tree driver
     
@@ -428,11 +437,7 @@ actor MITMScriptEngine {
     }
 
     // MARK: - Compilation
-    
-    func precompile(source: String, sourceKey: Int) {
-        _ = compileIfNeeded(source, key: sourceKey)
-    }
-    
+
     func pruneCompiled(keeping keep: Set<Int>) {
         let stale = compiled.keys.filter { !keep.contains($0) }
         for key in stale { compiled.removeValue(forKey: key) }

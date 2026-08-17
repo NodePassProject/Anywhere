@@ -10,31 +10,23 @@ import JavaScriptCore
 import Synchronization
 
 nonisolated enum MITMScriptTransform {
-    static func prewarm(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
-        var scriptsByScope: [UUID: [(source: String, sourceKey: Int)]] = [:]
+    static func rulesDidReload(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
+        var scriptKeysByScope: [UUID: Set<Int>] = [:]
         for entry in scopedRules {
-            var seen = Set<Int>()
-            let scripts: [(source: String, sourceKey: Int)] = entry.rules.compactMap { rule in
+            var keys = Set<Int>()
+            for rule in entry.rules {
                 switch rule.operation {
-                case .script(let source, let sourceKey), .streamScript(let source, let sourceKey):
-                    return seen.insert(sourceKey).inserted ? (source: source, sourceKey: sourceKey) : nil
+                case .script(_, let sourceKey), .streamScript(_, let sourceKey):
+                    keys.insert(sourceKey)
                 case .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
-                    return nil
+                    continue
                 }
             }
-            if !scripts.isEmpty { scriptsByScope[entry.scope] = scripts }
+            if !keys.isEmpty { scriptKeysByScope[entry.scope] = keys }
         }
-        let keepByScope = scriptsByScope.mapValues { Set($0.map { $0.sourceKey }) }
-        MITMScriptEngine.resetCachesOnReload(keepByScope: keepByScope)
-        for (scope, scripts) in scriptsByScope {
-            JSCConcurrencyBridge.shared.enqueue {
-                // The enqueue body runs on the JSC queue = the engine's actor executor.
-                let engine = MITMScriptEngine.sharedEngine(forScope: scope)
-                for script in scripts {
-                    engine.assumeIsolated { $0.precompile(source: script.source, sourceKey: script.sourceKey) }
-                }
-            }
-        }
+        MITMScriptEngine.resetCachesOnReload(keepByScope: scriptKeysByScope)
+        guard !scriptKeysByScope.isEmpty else { return }
+        MITMScriptEngine.warmVirtualMachine()
     }
 
     enum Outcome {
