@@ -21,6 +21,7 @@ and JavaScript. It does **not** cover the settings UI.
 - [Rule operations](#rule-operations)
 - [Scripting: `script`](#scripting-script)
 - [Scripting: `stream-script`](#scripting-stream-script)
+- [Execution model](#execution-model)
 - [The `ctx` object](#the-ctx-object)
 - [The `Anywhere` API](#the-anywhere-api)
 - [Single-rule semantics](#single-rule-semantics)
@@ -529,14 +530,60 @@ Per-frame context adds:
 
 - `ctx.frame` — `{ index, end }`: the 0-based frame index and an `end` flag set
   on the final frame.
-- `ctx.state` — a JS object persisted **across frames of the same stream**.
-  Mutate it to accumulate state; it starts as `{}`.
+- `ctx.state` — a JS object shared by **every frame of the same stream**, and by
+  nothing else. It starts as `{}` on the first frame and dies with the stream, so
+  it is where a stream-script accumulates: a partial line, a running count, a
+  parser's position. See [Execution model](#execution-model).
 
 Authoring is identical to `script` but with op `101`:
 
 ```
 1, 101, ^/events, <base64>
 ```
+
+---
+
+## Execution model
+
+Every invocation runs in its **own JavaScript context**, created when the
+invocation starts and destroyed when it ends. Nothing survives it, and nothing is
+shared with any other invocation.
+
+An invocation is:
+
+| Rule                  | One invocation spans |
+| --------------------- | -------------------- |
+| `script`              | one message — a request, or a response |
+| `script` with `await` | that same message, extended until the Promise settles |
+| `stream-script`       | one **stream** — every frame of that body |
+
+What it gives a script:
+
+- **Fresh intrinsics.** `Object.prototype`, `JSON`, `Promise`, `RegExp` and the
+  whole `Anywhere` API are rebuilt per invocation. A script cannot patch a
+  built-in and read another rule set's traffic through it, and cannot be watched
+  by one that tries.
+- **A private global.** Top-level `var` / `let` / `function` belong to that
+  script alone and never reach `globalThis`.
+- **No crosstalk between rule sets.** Two rule sets matching the same flow share
+  no objects, no prototypes, and no globals.
+
+What it costs:
+
+- **No state outlives an invocation.** A top-level `let cache = {}` is empty
+  again on the next message. State that must outlive one message belongs in
+  [`Anywhere.store`](#anywherestore); state scoped to the current message belongs
+  on `ctx`; state scoped to a stream belongs on `ctx.state`.
+- **Top-level code runs every time.** The source is compiled per invocation, so
+  module scope is not a free place to precompute. Build lookup tables and regexes
+  inside the branch that needs them.
+
+Concurrency follows from this. A script that `await`s an
+[`Anywhere.http`](#anywherehttp) fetch parks its own connection while other
+connections keep running — but those run in *other* contexts and cannot touch
+anything held across the suspension. The one resource genuinely shared between
+invocations is the runtime's thread: a CPU-bound loop still blocks every other
+script (see [Limits and safety](#limits-and-safety)).
 
 ---
 
@@ -681,7 +728,9 @@ and `[index]` / `["key"]` brackets). Recursive methods take a bare key name.
 
 ### `Anywhere.store`
 
-Per-rule-set key/value state, scoped by rule-set id.
+Per-rule-set key/value state, scoped by rule-set id — and, because every
+invocation gets a fresh context, the **only** place script state outlives a
+single message (see [Execution model](#execution-model)).
 
 - `get(key[, onDisk]) → Uint8Array | undefined`
 - `getString(key[, onDisk]) → string | undefined`
@@ -693,8 +742,9 @@ Per-rule-set key/value state, scoped by rule-set id.
 
 Every method is **shared across every connection to the same rule set** — and
 across the rule set's `script` and `stream-script` rules — and survives a
-rule-set edit. State is cleared when the rule set is **removed** (a disabled set
-keeps its data).
+rule-set edit. Because concurrent invocations share it, treat read-modify-write
+as racy: another connection can write between your `get` and your `set`. State is
+cleared when the rule set is **removed** (a disabled set keeps its data).
 
 The optional **`onDisk`** flag (default `false`) selects the backing:
 
@@ -808,11 +858,13 @@ the extension's own outbound traffic, and is **not** itself re-intercepted by th
 MITM, so a script may safely call a host the rule set also intercepts without
 looping.
 
-Because other invocations run during an `await`, another connection running the
-**same** rule set can mutate shared `globalThis` state between your `await` and
-its resumption — don't assume exclusive access across a suspension. Per-message
-state lives on `ctx`; cross-connection state belongs in
-[`Anywhere.store`](#anywherestore), whose sharing semantics are already explicit.
+Other invocations run while you `await`, but each has its own context (see
+[Execution model](#execution-model)), so nothing your script holds across the
+suspension can change underneath it. The exception is
+[`Anywhere.store`](#anywherestore), which is deliberately shared: a concurrent
+invocation of the same rule set can write a key between your `await` and its
+resumption, so re-read a store value after a fetch instead of caching it across
+one.
 
 > **Security.** `Anywhere.http` requests follow the tunnel's routing rules — a
 > `reject` rule blocks the fetch and a `proxy` rule sends it through that proxy —
@@ -876,11 +928,18 @@ If you need composed behavior, consolidate the logic into a single
 | `Anywhere.http` response body      | 4 MiB        | Promise rejects |
 | HTTP/1 request/response head       | 64 KiB       | fails closed — connection closed (request) / 502 (response) |
 | Body bytes pinned by suspended `async` scripts (all) | 16 MiB | new flow passes through unmodified |
+| Contexts pinned by unsettled scripts (all) | 32 | new flow passes through unmodified; a new stream runs unscripted |
 | Idle suspended `async` script      | ~60 s no progress | reverted to original, released |
 | Runaway synchronous JS span        | ~30 s        | extension crashes & relaunches clean |
 
 Other safety properties:
 
+- **Isolation.** Each invocation runs in its own JavaScript context (see
+  [Execution model](#execution-model)), so a script cannot reach another rule
+  set's globals or patch a shared built-in to watch its traffic. The boundary is
+  per *invocation*, not per rule set: two connections running the same rule set
+  are isolated from each other as well. [`Anywhere.store`](#anywherestore) is the
+  one deliberate channel through it.
 - **Wire safety.** Header names, header values, methods, and request targets
   produced by scripts are validated; CR/LF/NUL and other smuggling vectors are
   rejected so a script can't split the wire framing.

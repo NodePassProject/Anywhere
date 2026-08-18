@@ -1012,14 +1012,12 @@ actor MITMHTTP2UpstreamLeg {
             isLast: endStream,
             ruleSetID: rewriter.ruleSetID
         )
-        let rewriter = self.rewriter
         let cursor = streamingResponse.cursor
         Task { [weak self] in
             let result = await MITMScriptTransform.applyFrame(
                 body,
                 frameContext: context,
-                cursor: cursor,
-                engineProvider: rewriter.scriptEngineProvider
+                cursor: cursor
             )
             guard let self else { return }
             self.lwipBridge.enqueue {

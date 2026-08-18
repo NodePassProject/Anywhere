@@ -177,8 +177,8 @@ nonisolated enum CompiledMITMOperation {
     case headerReplace(name: String, value: String)
     case bodyReplace(MITMBodyReplace.CompiledOperation)
     case bodyJSON(MITMJSONPatch.CompiledOperation)
-    case script(source: String, sourceKey: Int)
-    case streamScript(source: String, sourceKey: Int)
+    case script(source: String)
+    case streamScript(source: String)
 }
 
 nonisolated struct CompiledMITMRuleSet {
@@ -219,7 +219,7 @@ nonisolated final class MITMRewritePolicy: Sendable {
         newState.trie = trie.freeze()
         state.withLock { $0 = newState }
         let activeIDs = Set(ruleSets.map { $0.id })
-        MITMScriptEngine.purgeEngines(activeIDs: activeIDs)
+        MITMScriptEngine.purgeRuns(activeIDs: activeIDs)
         MITMParamStore.shared.replaceAll(ruleSets.map { (scope: $0.id, values: $0.parameterValues) })
         MITMScriptTransform.rulesDidReload(scopedRules: scopedRules)
         let purged = MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
@@ -346,12 +346,12 @@ nonisolated final class MITMRewritePolicy: Sendable {
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "script") else {
                 return nil
             }
-            return .script(source: source, sourceKey: sourceCacheKey(source))
+            return .script(source: source)
         case .streamScript(let scriptBase64):
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "streamScript") else {
                 return nil
             }
-            return .streamScript(source: source, sourceKey: sourceCacheKey(source))
+            return .streamScript(source: source)
         case .bodyReplace(let search, let replacement):
             guard let compiled = MITMBodyReplace.compile(search: search, replacement: replacement) else {
                 logger.warning("bodyReplace dropped: search is not a valid regex (suffix=\(suffix))")
@@ -367,13 +367,6 @@ nonisolated final class MITMRewritePolicy: Sendable {
         }
     }
     
-    private func sourceCacheKey(_ source: String) -> Int {
-        var hasher = Hasher()
-        hasher.combine(source.utf8.count)
-        hasher.combine(source)
-        return hasher.finalize()
-    }
-
     private func decodeScript(_ scriptBase64: String, suffix: String, kind: String) -> String? {
         guard let raw = Data(base64Encoded: scriptBase64) else {
             logger.warning("\(kind) invalid base64 (suffix=\(suffix))")

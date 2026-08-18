@@ -50,7 +50,7 @@ actor MITMScriptEngine {
     }
     
     enum FrameOutcome {
-        case modified(body: Data, state: JSValue?)
+        case modified(body: Data)
         case done(body: Data)
         case exit
     }
@@ -61,60 +61,75 @@ actor MITMScriptEngine {
         case respond(SynthesizedResponse)
     }
     
-    fileprivate final class Invocation {
+    final class ScriptRun: @unchecked Sendable {
         private static let idSequence = Atomic<UInt64>(0)
 
-        let id = Invocation.idSequence.wrappingAdd(1, ordering: .relaxed).newValue
-
+        let id = ScriptRun.idSequence.wrappingAdd(1, ordering: .relaxed).newValue
         let startedAt = MonotonicClock.now
-
+        
         let scope: UUID?
         let allowsHTTP: Bool
-        var directive: Directive?
-        
-        let original: Message?
-        var ctxValue: JSValue?
-        var continuation: CheckedContinuation<Outcome, Never>?
-        var resultPromise: JSValue?
-        var inFlightFetches = 0
-        var totalFetches = 0
-        var delivered = false
-        var pinnedBodyBytes = 0
-        
-        var watchdogDisarm: AsyncInbox<Void>?
+        let context: JSContext
 
-        init(scope: UUID?, original: Message, continuation: CheckedContinuation<Outcome, Never>) {
-            self.scope = scope
-            self.allowsHTTP = true
-            self.original = original
-            self.continuation = continuation
+        fileprivate var directive: Directive?
+        fileprivate let original: Message?
+        fileprivate var ctxValue: JSValue?
+        fileprivate var continuation: CheckedContinuation<Outcome, Never>?
+        fileprivate var resultPromise: JSValue?
+        fileprivate var inFlightFetches = 0
+        fileprivate var totalFetches = 0
+        fileprivate var delivered = false
+        
+        fileprivate var isClosed = false
+        fileprivate var pinnedBodyBytes = 0
+        fileprivate var watchdogDisarm: AsyncInbox<Void>?
+        
+        fileprivate var streamState: JSValue?
+        fileprivate var streamProcess: JSValue?
+        fileprivate var streamCompileAttempted = false
+
+        fileprivate var isFormattingException = false
+
+        fileprivate var pendingFetches: [Int: PendingFetch] = [:]
+        private var nextFetchID = 0
+
+        fileprivate func claimFetchID() -> Int {
+            nextFetchID += 1
+            return nextFetchID
         }
 
-        /// Lightweight sync-span invocation: carries only scope, HTTP gate, and directive slot.
-        init(scope: UUID?, allowsHTTP: Bool) {
+        fileprivate init(scope: UUID?, allowsHTTP: Bool, context: JSContext, original: Message?) {
             self.scope = scope
             self.allowsHTTP = allowsHTTP
-            self.original = nil
-            self.continuation = nil
+            self.context = context
+            self.original = original
+        }
+        
+        fileprivate func teardown() {
+            isClosed = true
+            for fetch in pendingFetches.values { fetch.task?.cancel() }
+            pendingFetches.removeAll()
+            resultPromise = nil
+            ctxValue = nil
+            streamState = nil
+            streamProcess = nil
+            context.exception = nil
+            context.exceptionHandler = nil
         }
     }
 
-    private var context: JSContext
-    
-    private struct CompiledEntry {
-        let byteCount: Int
-        let function: JSValue
+    fileprivate struct PendingFetch {
+        let resolve: JSValue?
+        let reject: JSValue?
+        var task: Task<Void, Never>?
     }
-    
-    private var compiled: [Int: CompiledEntry] = [:]
 
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
     
-    private var liveInvocations: [UInt64: Invocation] = [:]
-    private var currentInvocation: Invocation?
+    private var liveRuns: [UInt64: ScriptRun] = [:]
 
     // MARK: - Watchdog task tree
-    
+
     private struct WatchdogJob: Sendable {
         let id: UInt64
         let disarm: AsyncInbox<Void>
@@ -122,16 +137,10 @@ actor MITMScriptEngine {
     private let watchdogJobs: AsyncStream<WatchdogJob>
     private nonisolated let watchdogJobContinuation: AsyncStream<WatchdogJob>.Continuation
     private var watchdogRoot: Task<Void, Never>?
-    
-    nonisolated private func activeScope() -> UUID? {
-        assumeIsolated { $0.currentInvocation?.scope }
-    }
-    
-    nonisolated private func setActiveDirective(_ directive: Directive) {
-        assumeIsolated { $0.currentInvocation?.directive = directive }
-    }
-    
+
     private static let maxSuspendedBodyBytes: Int = 16 * 1024 * 1024
+    
+    private static let maxLiveRuns = 32
 
     // MARK: Anywhere.http caps
 
@@ -141,30 +150,57 @@ actor MITMScriptEngine {
     private static let httpMaxTotalPerInvocation = 16
     private static let httpMaxResponseBytes = 4 * 1024 * 1024
     private static let httpMaxConcurrentGlobal = 32
-    
+
     private static let invocationIdleTimeout: TimeInterval = httpMaxTimeout + 30
-    
+
     private static let invocationAbsoluteTimeout: TimeInterval = invocationIdleTimeout * 3
 
-    nonisolated private let isFormattingException = Atomic(false)
-
     init() {
-        self.context = JSContext(virtualMachine: Self.sharedVM)
         (self.watchdogJobs, self.watchdogJobContinuation) = AsyncStream.makeStream(of: WatchdogJob.self)
-        configureContext(context)
     }
-    
+
     static func warmVirtualMachine() {
         JSCConcurrencyBridge.shared.enqueue { _ = warmedVirtualMachine }
     }
     
     private static let warmedVirtualMachine: Bool = {
-        withExtendedLifetime(MITMScriptEngine()) {}
+        let engine = MITMScriptEngine()
+        let run = engine.makeRun(scope: nil, allowsHTTP: false, original: nil)
+        run.teardown()
+        withExtendedLifetime(engine) {}
         return true
     }()
 
-    // MARK: - Watchdog tree driver
+    // MARK: - Run construction
     
+    nonisolated private func makeRun(scope: UUID?, allowsHTTP: Bool, original: Message?) -> ScriptRun {
+        let context = JSContext(virtualMachine: Self.sharedVM)!
+        let run = ScriptRun(scope: scope, allowsHTTP: allowsHTTP, context: context, original: original)
+        configureContext(context, for: run)
+        return run
+    }
+
+    nonisolated private func configureContext(_ context: JSContext, for run: ScriptRun) {
+        context.exceptionHandler = { [weak run] context, exception in
+            defer { context?.exception = exception }
+            guard let run else { return }
+            if run.isFormattingException {
+                logger.warning("[MITM][JS] uncaught (nested throw while formatting exception)")
+                return
+            }
+            run.isFormattingException = true
+            defer { run.isFormattingException = false }
+            if let exception {
+                logger.warning("[MITM][JS] uncaught: \(String(describing: exception))")
+            } else {
+                logger.warning("[MITM][JS] uncaught: <unknown>")
+            }
+        }
+        installAnywhereGlobals(context: context, for: run)
+    }
+
+    // MARK: - Watchdog tree driver
+
     private func runWatchdogTree() async {
         await withDiscardingTaskGroup { group in
             for await job in watchdogJobs {
@@ -173,71 +209,49 @@ actor MITMScriptEngine {
             group.cancelAll()
         }
     }
-    
+
     private func runWatchdog(id: UInt64, disarm: AsyncInbox<Void>) async {
         let timedOut = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
                 do { try await Task.sleep(for: .seconds(Self.invocationIdleTimeout)); return true }
-                catch { return false }   // cancelled with the tree
+                catch { return false }
             }
             group.addTask {
-                _ = try? await disarm.next(); return false   // disarmed by deliver / re-arm
+                _ = try? await disarm.next(); return false
             }
             let first = await group.next() ?? false
             group.cancelAll()
             return first
         }
         guard timedOut else { return }
-        guard let invocation = liveInvocations[id],
-              !invocation.delivered,
-              let original = invocation.original else { return }
+        guard let run = liveRuns[id], !run.delivered, let original = run.original else { return }
         logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
-        deliver(.modified(original), for: invocation)
+        deliver(.modified(original), for: run)
     }
     
-    fileprivate func shutdown() {
-        for invocation in Array(liveInvocations.values) {
-            guard !invocation.delivered, let original = invocation.original else { continue }
-            deliver(.modified(original), for: invocation)
-        }
-        liveInvocations.removeAll()
-
-        pendingFetches.removeAll()
-
-        watchdogJobContinuation.finish()
-        watchdogRoot?.cancel()
-        watchdogRoot = nil
-    }
-    
-    nonisolated private func configureContext(_ context: JSContext) {
-        context.exceptionHandler = { [weak self] context, exception in
-            defer { context?.exception = exception }
-            if self?.isFormattingException.load(ordering: .relaxed) == true {
-                logger.warning("[MITM][JS] uncaught (nested throw while formatting exception)")
-                return
-            }
-            self?.isFormattingException.store(true, ordering: .relaxed)
-            defer { self?.isFormattingException.store(false, ordering: .relaxed) }
-            if let exception {
-                logger.warning("[MITM][JS] uncaught: \(String(describing: exception))")
+    fileprivate func dropRuns(notIn activeIDs: Set<UUID>) {
+        for run in Array(liveRuns.values) {
+            guard let scope = run.scope, !activeIDs.contains(scope) else { continue }
+            if !run.delivered, let original = run.original {
+                deliver(.modified(original), for: run)
             } else {
-                logger.warning("[MITM][JS] uncaught: <unknown>")
+                liveRuns.removeValue(forKey: run.id)
+                run.teardown()
             }
         }
-        installAnywhereGlobals(context: context)
     }
-    
+
     @inline(__always)
     private func runUserScript<T>(_ label: String, _ body: () -> T) -> T {
         MITMScriptWatchdog.begin(label)
         defer { MITMScriptWatchdog.end() }
         return body()
     }
-    
-    private func finalize(original: Message, updated: Message, directive: Directive?) -> Outcome {
-        let hadException = context.exception != nil
-        context.exception = nil
-        if let directive {
+
+    private func finalize(_ run: ScriptRun, original: Message, updated: Message) -> Outcome {
+        let hadException = run.context.exception != nil
+        run.context.exception = nil
+        if let directive = run.directive {
             return outcome(forDirective: directive, original: original, updated: updated)
         }
         if hadException {
@@ -245,7 +259,7 @@ actor MITMScriptEngine {
         }
         return .modified(updated)
     }
-    
+
     private func outcome(forDirective directive: Directive, original: Message, updated: Message) -> Outcome {
         switch directive {
         case .done: return .done(updated)
@@ -258,8 +272,8 @@ actor MITMScriptEngine {
             return .modified(updated)
         }
     }
-    
-    private func isThenable(_ value: JSValue) -> Bool {
+
+    private func isThenable(_ value: JSValue, in context: JSContext) -> Bool {
         guard value.isObject,
               let thenVal = value.objectForKeyedSubscript("then"),
               thenVal.isObject,
@@ -272,119 +286,124 @@ actor MITMScriptEngine {
         }
         return JSObjectIsFunction(ctxRef, object)
     }
-    
+
+    // MARK: - Script
+
     func applyAsync(
         _ message: Message,
-        source: String,
-        sourceKey: Int
+        source: String
     ) async -> Outcome {
         await JSCConcurrencyBridge.shared.runParked { (continuation: CheckedContinuation<Outcome, Never>) in
-            self.runApply(message, source: source, sourceKey: sourceKey, continuation: continuation)
+            self.runApply(message, source: source, continuation: continuation)
         }
     }
-    
+
     private func runApply(
         _ message: Message,
         source: String,
-        sourceKey: Int,
         continuation: CheckedContinuation<Outcome, Never>
     ) {
-        let invocation = Invocation(scope: message.ruleSetID, original: message, continuation: continuation)
         let bodyBytes = message.body.count
         let pinned = Self.suspendedBodyBytes()
         if pinned + bodyBytes > Self.maxSuspendedBodyBytes {
             logger.warning("[MITM][JS] suspended-body budget reached (\(pinned) B pinned by awaiting scripts); passing this flow through unmodified")
-            deliver(.modified(message), for: invocation)
+            continuation.resume(returning: .modified(message))
             return
         }
-        guard let function = compileIfNeeded(source, key: sourceKey) else {
-            deliver(.modified(message), for: invocation)
+        if liveRuns.count >= Self.maxLiveRuns {
+            logger.warning("[MITM][JS] \(Self.maxLiveRuns) unsettled scripts already hold a context; passing this flow through unmodified")
+            continuation.resume(returning: .modified(message))
             return
         }
-        let contextValue = makeContextValue(message)
-        invocation.ctxValue = contextValue
-        currentInvocation = invocation
+
+        let run = makeRun(scope: message.ruleSetID, allowsHTTP: true, original: message)
+        run.continuation = continuation
+
+        guard let function = compile(source, in: run) else {
+            deliver(.modified(message), for: run)
+            return
+        }
+        let contextValue = makeContextValue(message, in: run.context)
+        run.ctxValue = contextValue
         let returned = runUserScript(source) { function.call(withArguments: [contextValue]) }
-        guard let returned, isThenable(returned) else {
-            currentInvocation = nil
-            let updated = readBack(message, from: contextValue)
-            deliver(finalize(original: message, updated: updated, directive: invocation.directive), for: invocation)
+        guard let returned, isThenable(returned, in: run.context) else {
+            let updated = readBack(message, from: contextValue, in: run.context)
+            deliver(finalize(run, original: message, updated: updated), for: run)
             return
         }
-        invocation.pinnedBodyBytes = bodyBytes
+        run.pinnedBodyBytes = bodyBytes
         Self.addSuspendedBodyBytes(bodyBytes)
-        invocation.resultPromise = returned
-        liveInvocations[invocation.id] = invocation
-        currentInvocation = nil
-        armWatchdog(for: invocation)
-        attachSettleHandlers(to: returned, for: invocation.id)
+        run.resultPromise = returned
+        liveRuns[run.id] = run
+        armWatchdog(for: run)
+        attachSettleHandlers(to: returned, for: run)
     }
-    
-    private func attachSettleHandlers(to promise: JSValue, for id: UInt64) {
+
+    private func attachSettleHandlers(to promise: JSValue, for run: ScriptRun) {
+        let id = run.id
         let onFulfilled: @convention(block) (JSValue) -> Void = { [weak self] _ in
             guard let self else { return }
             self.assumeIsolated { engine in
-                guard let invocation = engine.liveInvocations[id] else { return }
-                engine.finishSuccess(invocation)
+                guard let run = engine.liveRuns[id] else { return }
+                engine.finishSuccess(run)
             }
         }
         let onRejected: @convention(block) (JSValue) -> Void = { [weak self] reason in
             guard let self else { return }
             self.assumeIsolated { engine in
-                guard let invocation = engine.liveInvocations[id] else { return }
-                engine.finishRejected(invocation, reason: reason)
+                guard let run = engine.liveRuns[id] else { return }
+                engine.finishRejected(run, reason: reason)
             }
         }
         promise.invokeMethod("then", withArguments: [onFulfilled, onRejected])
-        if context.exception != nil { context.exception = nil }
+        if run.context.exception != nil { run.context.exception = nil }
     }
 
-    private func finishSuccess(_ invocation: Invocation) {
-        guard !invocation.delivered, let original = invocation.original, let ctxArg = invocation.ctxValue else { return }
-        let updated = readBack(original, from: ctxArg)
-        deliver(finalize(original: original, updated: updated, directive: invocation.directive), for: invocation)
+    private func finishSuccess(_ run: ScriptRun) {
+        guard !run.delivered, let original = run.original, let ctxArg = run.ctxValue else { return }
+        let updated = readBack(original, from: ctxArg, in: run.context)
+        deliver(finalize(run, original: original, updated: updated), for: run)
     }
-    
-    private func finishRejected(_ invocation: Invocation, reason: JSValue?) {
-        guard !invocation.delivered, let original = invocation.original else { return }
-        let ctxArg = invocation.ctxValue ?? makeContextValue(original)
-        let updated = readBack(original, from: ctxArg)
-        context.exception = nil
-        if let directive = invocation.directive {
-            deliver(outcome(forDirective: directive, original: original, updated: updated), for: invocation)
+
+    private func finishRejected(_ run: ScriptRun, reason: JSValue?) {
+        guard !run.delivered, let original = run.original else { return }
+        let ctxArg = run.ctxValue ?? makeContextValue(original, in: run.context)
+        let updated = readBack(original, from: ctxArg, in: run.context)
+        run.context.exception = nil
+        if let directive = run.directive {
+            deliver(outcome(forDirective: directive, original: original, updated: updated), for: run)
         } else {
             if let reason {
                 logger.warning("[MITM][JS] process(ctx) promise rejected: \(String(describing: reason))")
             }
-            deliver(.modified(original), for: invocation)
+            deliver(.modified(original), for: run)
         }
     }
     
-    private func deliver(_ outcome: Outcome, for invocation: Invocation) {
-        guard !invocation.delivered else { return }
-        invocation.delivered = true
-        invocation.watchdogDisarm?.finish()
-        invocation.watchdogDisarm = nil
-        liveInvocations.removeValue(forKey: invocation.id)
-        if invocation.pinnedBodyBytes > 0 {
-            Self.addSuspendedBodyBytes(-invocation.pinnedBodyBytes)
-            invocation.pinnedBodyBytes = 0
+    private func deliver(_ outcome: Outcome, for run: ScriptRun) {
+        guard !run.delivered else { return }
+        run.delivered = true
+        run.watchdogDisarm?.finish()
+        run.watchdogDisarm = nil
+        liveRuns.removeValue(forKey: run.id)
+        if run.pinnedBodyBytes > 0 {
+            Self.addSuspendedBodyBytes(-run.pinnedBodyBytes)
+            run.pinnedBodyBytes = 0
         }
-        invocation.resultPromise = nil
-        invocation.ctxValue = nil
-        let continuation = invocation.continuation
-        invocation.continuation = nil
+        let continuation = run.continuation
+        run.continuation = nil
+        run.teardown()
         continuation?.resume(returning: outcome)
     }
-    
-    private func armWatchdog(for invocation: Invocation) {
+
+    private func armWatchdog(for run: ScriptRun) {
         if watchdogRoot == nil {
             watchdogRoot = Task { await self.runWatchdogTree() }
         }
-        invocation.watchdogDisarm?.finish()
+        run.watchdogDisarm?.finish()
         let disarm = AsyncInbox<Void>(capacity: 1)
-        invocation.watchdogDisarm = disarm
-        watchdogJobContinuation.yield(WatchdogJob(id: invocation.id, disarm: disarm))
+        run.watchdogDisarm = disarm
+        watchdogJobContinuation.yield(WatchdogJob(id: run.id, disarm: disarm))
     }
 
     private static func suspendedBodyBytes() -> Int {
@@ -394,21 +413,41 @@ actor MITMScriptEngine {
     private static func addSuspendedBodyBytes(_ delta: Int) {
         mitmScriptSuspendedBodyBytes.wrappingAdd(delta, ordering: .relaxed)
     }
+
+    // MARK: - Stream Script
     
+    func openStreamRun(scope: UUID?) -> ScriptRun? {
+        guard liveRuns.count < Self.maxLiveRuns else {
+            logger.warning("[MITM][JS] \(Self.maxLiveRuns) scripts already hold a context; this stream runs unscripted")
+            return nil
+        }
+        let run = makeRun(scope: scope, allowsHTTP: false, original: nil)
+        liveRuns[run.id] = run
+        return run
+    }
+    
+    func closeStreamRun(_ run: ScriptRun) {
+        liveRuns.removeValue(forKey: run.id)
+        run.teardown()
+    }
+
     func applyFrame(
         _ frame: Data,
         source: String,
-        sourceKey: Int,
         frameContext: FrameContext,
-        state: JSValue?
+        run: ScriptRun
     ) -> FrameOutcome {
-        guard let function = compileIfNeeded(source, key: sourceKey) else {
-            return .modified(body: frame, state: state)
+        guard !run.isClosed else { return .modified(body: frame) }
+        if !run.streamCompileAttempted {
+            run.streamCompileAttempted = true
+            run.streamProcess = compile(source, in: run)
         }
-        let invocation = Invocation(scope: frameContext.ruleSetID, allowsHTTP: false)
-        currentInvocation = invocation
-        defer { currentInvocation = nil }
-        let ctxArg = makeFrameContextValue(frameContext, frame: frame, state: state)
+        guard let function = run.streamProcess else {
+            return .modified(body: frame)
+        }
+        run.directive = nil
+        let context = run.context
+        let ctxArg = makeFrameContextValue(frameContext, frame: frame, in: run)
         _ = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         let body: Data
         if let bodyVal = ctxArg.objectForKeyedSubscript("body"),
@@ -417,48 +456,29 @@ actor MITMScriptEngine {
         } else {
             body = frame
         }
-        let updatedState = ctxArg.objectForKeyedSubscript("state")
+        run.streamState = ctxArg.objectForKeyedSubscript("state")
         let hadException = context.exception != nil
-        if let directive = invocation.directive {
+        if let directive = run.directive {
             context.exception = nil
             switch directive {
             case .done: return .done(body: body)
             case .exit: return .exit
             case .respond:
                 logger.warning("[MITM][JS] Anywhere.respond ignored in streamScript")
-                return .modified(body: body, state: updatedState)
+                return .modified(body: body)
             }
         }
         if hadException {
             context.exception = nil
-            return .modified(body: frame, state: state)
+            return .modified(body: frame)
         }
-        return .modified(body: body, state: updatedState)
+        return .modified(body: body)
     }
 
     // MARK: - Compilation
-
-    func pruneCompiled(keeping keep: Set<Int>) {
-        let stale = compiled.keys.filter { !keep.contains($0) }
-        for key in stale { compiled.removeValue(forKey: key) }
-    }
     
-    fileprivate func resetOnReload(keepingCompiled keep: Set<Int>) {
-        guard currentInvocation == nil, liveInvocations.isEmpty, pendingFetches.isEmpty else {
-            pruneCompiled(keeping: keep)
-            return
-        }
-        compiled.removeAll()
-        context = JSContext(virtualMachine: Self.sharedVM)
-        configureContext(context)
-    }
-    
-    private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
-        let byteCount = source.utf8.count
-        if let cached = compiled[key] {
-            if cached.byteCount == byteCount { return cached.function }
-            logger.warning("[MITM][JS] cache-key collision: recompiling under same key")
-        }
+    private func compile(_ source: String, in run: ScriptRun) -> JSValue? {
+        let context = run.context
         let wrapped = "(function(){\n\"use strict\";\n\(source)\nreturn process;\n})()"
         let value = runUserScript(source) { context.evaluateScript(wrapped) }
         if context.exception != nil {
@@ -479,13 +499,12 @@ actor MITMScriptEngine {
             logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
             return nil
         }
-        compiled[key] = CompiledEntry(byteCount: byteCount, function: value)
         return value
     }
 
     // MARK: - Context bridging
 
-    private func makeContextValue(_ msg: Message) -> JSValue {
+    private func makeContextValue(_ msg: Message, in context: JSContext) -> JSValue {
         let object = JSValue(newObjectIn: context)!
         object.setObject(
             msg.phase == .httpRequest ? "request" : "response",
@@ -500,12 +519,13 @@ actor MITMScriptEngine {
         object.setObject(Self.makeUint8Array(in: context, from: msg.body), forKeyedSubscript: "body" as NSString)
         return object
     }
-    
+
     private func makeFrameContextValue(
         _ ctx: FrameContext,
         frame: Data,
-        state: JSValue?
+        in run: ScriptRun
     ) -> JSValue {
+        let context = run.context
         let object = JSValue(newObjectIn: context)!
         object.setObject(
             ctx.phase == .httpRequest ? "request" : "response",
@@ -523,19 +543,14 @@ actor MITMScriptEngine {
         frameInfo.setObject(ctx.isLast, forKeyedSubscript: "end" as NSString)
         object.setObject(frameInfo, forKeyedSubscript: "frame" as NSString)
         
-        let stateValue: JSValue
-        if let state, state.context === context {
-            stateValue = state
-        } else {
-            stateValue = JSValue(newObjectIn: context)!
-        }
+        let stateValue = run.streamState ?? JSValue(newObjectIn: context)!
         object.setObject(stateValue, forKeyedSubscript: "state" as NSString)
 
         object.setObject(Self.makeUint8Array(in: context, from: frame), forKeyedSubscript: "body" as NSString)
         return object
     }
-    
-    private func readBack(_ original: Message, from ctx: JSValue) -> Message {
+
+    private func readBack(_ original: Message, from ctx: JSValue, in context: JSContext) -> Message {
         var message = original
         if let body = ctx.objectForKeyedSubscript("body"),
            let bytes = Self.bytesFromValue(body, in: context) {
@@ -543,7 +558,8 @@ actor MITMScriptEngine {
         }
         return message
     }
-    
+
+
     private static func validatedArrayLength(_ value: JSValue, max: Int) -> Int? {
         guard let lengthVal = value.objectForKeyedSubscript("length"), lengthVal.isNumber else {
             return nil
@@ -599,55 +615,123 @@ actor MITMScriptEngine {
     }
 
     // MARK: - Anywhere globals
-
-    nonisolated private func installAnywhereGlobals(context: JSContext) {
-        let anywhere = JSValue(newObjectIn: context)!
-        installCodecGlobals(on: anywhere, context: context)
-        installCryptoGlobals(on: anywhere, context: context)
-        installJWTGlobals(on: anywhere, context: context)
-        installJSONGlobals(on: anywhere, context: context)
-        installStoreGlobals(on: anywhere, context: context)
-        installParamsGlobals(on: anywhere, context: context)
-        installLogGlobals(on: anywhere, context: context)
-        installControlGlobals(on: anywhere, context: context)
-        installHTTPGlobals(on: anywhere, context: context)
-        context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
-        // Must follow Anywhere install: the shim captures Anywhere.codec.utf8.
-        installTextCodecGlobals(context: context)
-    }
     
-    nonisolated private func installTextCodecGlobals(context: JSContext) {
-        let installed = context.evaluateScript(#"""
-        (function (g) {
-          if (!g.Anywhere || !g.Anywhere.codec || !g.Anywhere.codec.utf8) return false;
-          var enc = g.Anywhere.codec.utf8.encode;
-          var dec = g.Anywhere.codec.utf8.decode;
-          function TextEncoder() { this.encoding = "utf-8"; }
-          TextEncoder.prototype.encode = function (input) {
-            return enc(input == null ? "" : String(input));
-          };
-          function TextDecoder(label, options) {
-            this.encoding = (label == null ? "utf-8" : String(label)).toLowerCase();
-            this.fatal = !!(options && options.fatal);
-            this.ignoreBOM = !!(options && options.ignoreBOM);
-          }
-          TextDecoder.prototype.decode = function (input) {
-            return input == null ? "" : dec(input);
-          };
-          Object.defineProperty(g, "TextEncoder", { value: TextEncoder, writable: true, configurable: true });
-          Object.defineProperty(g, "TextDecoder", { value: TextDecoder, writable: true, configurable: true });
-          return true;
-        })(typeof globalThis !== "undefined" ? globalThis : this);
-        """#)
-        if context.exception != nil {
-            context.exception = nil
-            logger.warning("[MITM][JS] failed to install TextEncoder/TextDecoder globals")
-        } else if installed?.isBoolean == true, installed?.toBool() == false {
-            logger.warning("[MITM][JS] TextEncoder/TextDecoder install skipped: Anywhere.codec.utf8 missing")
+    private static let lazyNamespaceNames = [
+        "codec", "crypto", "jwt", "json", "store", "params", "log", "http"
+    ]
+    
+    nonisolated private func makeNamespace(_ name: String, in context: JSContext, for run: ScriptRun) -> JSValue? {
+        switch name {
+        case "codec":  return makeCodecNamespace(in: context)
+        case "crypto": return makeCryptoNamespace(in: context)
+        case "jwt":    return makeJWTNamespace(in: context)
+        case "json":   return makeJSONNamespace(in: context)
+        case "store":  return makeStoreNamespace(in: context, scope: run.scope)
+        case "params": return makeParamsNamespace(in: context, scope: run.scope)
+        case "log":    return makeLogNamespace(in: context)
+        case "http":   return makeHTTPNamespace(in: context, for: run)
+        default:       return nil
         }
     }
 
-    nonisolated private func installCodecGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func installAnywhereGlobals(context: JSContext, for run: ScriptRun) {
+        let anywhere = JSValue(newObjectIn: context)!
+        for name in Self.lazyNamespaceNames {
+            installLazyNamespace(named: name, on: anywhere, for: run)
+        }
+        installControlGlobals(on: anywhere, for: run)
+        context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
+        installTextCodecGlobals(context: context)
+    }
+
+
+    nonisolated private func installLazyNamespace(named name: String, on anywhere: JSValue, for run: ScriptRun) {
+        let getter: @convention(block) () -> JSValue = { [weak self, weak run] in
+            let context = JSContext.current()!
+            guard let self, let run, let namespace = self.makeNamespace(name, in: context, for: run) else {
+                return JSValue(undefinedIn: context)
+            }
+            Self.pinProperty(named: name, value: namespace, enumerable: true)
+            return namespace
+        }
+        let setter: @convention(block) (JSValue) -> Void = { assigned in
+            Self.pinProperty(named: name, value: assigned, enumerable: true)
+        }
+        anywhere.defineProperty(name, descriptor: [
+            "get": getter, "set": setter, "enumerable": true, "configurable": true
+        ])
+    }
+    
+    nonisolated private static func pinProperty(named name: String, value: JSValue, enumerable: Bool) {
+        JSContext.currentThis()?.defineProperty(name, descriptor: [
+            "value": value, "writable": true,
+            "enumerable": enumerable, "configurable": true
+        ])
+    }
+    
+    nonisolated private func installTextCodecGlobals(context: JSContext) {
+        for name in ["TextEncoder", "TextDecoder"] {
+            let getter: @convention(block) () -> JSValue = { [weak self] in
+                let context = JSContext.current()!
+                guard let self else { return JSValue(undefinedIn: context) }
+                return self.materializeTextCodecs(returning: name, in: context)
+            }
+            let setter: @convention(block) (JSValue) -> Void = { assigned in
+                Self.pinProperty(named: name, value: assigned, enumerable: false)
+            }
+            context.globalObject.defineProperty(name, descriptor: [
+                "get": getter, "set": setter, "enumerable": false, "configurable": true
+            ])
+        }
+    }
+    
+    private static let textCodecFactory = #"""
+    (function (encode, decode) {
+      "use strict";
+      function TextEncoder() { this.encoding = "utf-8"; }
+      TextEncoder.prototype.encode = function (input) { return encode(input); };
+      function TextDecoder(label, options) {
+        this.encoding = (label == null ? "utf-8" : String(label)).toLowerCase();
+        this.fatal = !!(options && options.fatal);
+        this.ignoreBOM = !!(options && options.ignoreBOM);
+      }
+      TextDecoder.prototype.decode = function (input) { return decode(input); };
+      return { TextEncoder: TextEncoder, TextDecoder: TextDecoder };
+    })
+    """#
+
+    nonisolated private func materializeTextCodecs(returning name: String, in context: JSContext) -> JSValue {
+        let encode: @convention(block) (JSValue) -> JSValue = { input in
+            let context = JSContext.current()!
+            let text = (input.isUndefined || input.isNull) ? "" : (input.toString() ?? "")
+            return Self.makeUint8Array(in: context, from: Data(text.utf8))
+        }
+        let decode: @convention(block) (JSValue) -> String = { input in
+            let context = JSContext.current()!
+            guard !input.isUndefined, !input.isNull else { return "" }
+            return String(decoding: Self.bytesFromValue(input, in: context) ?? Data(), as: UTF8.self)
+        }
+        guard let factory = context.evaluateScript(Self.textCodecFactory),
+              context.exception == nil,
+              let pair = factory.call(withArguments: [encode, decode]),
+              context.exception == nil
+        else {
+            context.exception = nil
+            logger.warning("[MITM][JS] failed to install TextEncoder/TextDecoder")
+            return JSValue(undefinedIn: context)
+        }
+        for key in ["TextEncoder", "TextDecoder"] {
+            guard let constructor = pair.objectForKeyedSubscript(key) else { continue }
+            context.globalObject.defineProperty(key, descriptor: [
+                "value": constructor, "writable": true,
+                "enumerable": false, "configurable": true
+            ])
+        }
+        return pair.objectForKeyedSubscript(name) ?? JSValue(undefinedIn: context)
+    }
+
+
+    nonisolated private func makeCodecNamespace(in context: JSContext) -> JSValue {
         let codec = JSValue(newObjectIn: context)!
 
         let utf8 = JSValue(newObjectIn: context)!
@@ -671,7 +755,6 @@ actor MITMScriptEngine {
         }
         let base64Decode: @convention(block) (String) -> JSValue = { str in
             let context = JSContext.current()!
-            // Lenient: skip embedded whitespace so wrapped base64 still decodes.
             return Self.makeUint8Array(in: context, from: Data(base64Encoded: str, options: .ignoreUnknownCharacters) ?? Data())
         }
         base64.setObject(base64Encode, forKeyedSubscript: "encode" as NSString)
@@ -796,7 +879,7 @@ actor MITMScriptEngine {
         installCompressionCodec(on: codec, named: "deflate", codec: .deflate, context: context)
         installCompressionCodec(on: codec, named: "brotli", codec: .brotli, context: context)
 
-        anywhere.setObject(codec, forKeyedSubscript: "codec" as NSString)
+        return codec
     }
     
     nonisolated private func installCompressionCodec(on codecNamespace: JSValue, named name: String, codec codecKind: MITMBodyCodec.Codec, context: JSContext) {
@@ -839,7 +922,7 @@ actor MITMScriptEngine {
         codecNamespace.setObject(object, forKeyedSubscript: name as NSString)
     }
 
-    nonisolated private func installCryptoGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func makeCryptoNamespace(in context: JSContext) -> JSValue {
         let crypto = JSValue(newObjectIn: context)!
         let md5Block: @convention(block) (JSValue) -> JSValue = { val in
             let context = JSContext.current()!
@@ -1055,10 +1138,10 @@ actor MITMScriptEngine {
         aesGCM.setObject(aesGCMEncryptBlock, forKeyedSubscript: "encrypt" as NSString)
         aesGCM.setObject(aesGCMDecryptBlock, forKeyedSubscript: "decrypt" as NSString)
         crypto.setObject(aesGCM, forKeyedSubscript: "aesGCM" as NSString)
-        anywhere.setObject(crypto, forKeyedSubscript: "crypto" as NSString)
+        return crypto
     }
     
-    nonisolated private func installJWTGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func makeJWTNamespace(in context: JSContext) -> JSValue {
         let jwt = JSValue(newObjectIn: context)!
         let jwtDecodeBlock: @convention(block) (String) -> JSValue = { token in
             let context = JSContext.current()!
@@ -1149,10 +1232,10 @@ actor MITMScriptEngine {
         }
         jwt.setObject(jwtDecodeBlock, forKeyedSubscript: "decode" as NSString)
         jwt.setObject(jwtEncodeBlock, forKeyedSubscript: "encode" as NSString)
-        anywhere.setObject(jwt, forKeyedSubscript: "jwt" as NSString)
+        return jwt
     }
     
-    nonisolated private func installJSONGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func makeJSONNamespace(in context: JSContext) -> JSValue {
         let json = JSValue(newObjectIn: context)!
         
         let addBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
@@ -1252,7 +1335,7 @@ actor MITMScriptEngine {
         json.setObject(deleteRecursiveBlock, forKeyedSubscript: "deleteRecursive" as NSString)
         json.setObject(removeWhereKeyExistsBlock, forKeyedSubscript: "removeWhereKeyExists" as NSString)
         json.setObject(removeWhereFieldInBlock, forKeyedSubscript: "removeWhereFieldIn" as NSString)
-        anywhere.setObject(json, forKeyedSubscript: "json" as NSString)
+        return json
     }
 
     // MARK: - Anywhere.json internals
@@ -1290,27 +1373,27 @@ actor MITMScriptEngine {
         if let single = jsonValue(from: value, in: ctx) { return [single] }
         return []
     }
-
-    nonisolated private func installStoreGlobals(on anywhere: JSValue, context: JSContext) {
+    
+    nonisolated private func makeStoreNamespace(in context: JSContext, scope: UUID?) -> JSValue {
         let store = JSValue(newObjectIn: context)!
-        let storeGet: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
+        let storeGet: @convention(block) (String, Bool) -> JSValue = { key, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.activeScope(),
+            guard let scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk)
             else { return JSValue(undefinedIn: context) }
             return Self.makeUint8Array(in: context, from: bytes)
         }
-        let storeGetString: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
+        let storeGetString: @convention(block) (String, Bool) -> JSValue = { key, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.activeScope(),
+            guard let scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk),
                   let string = String(data: bytes, encoding: .utf8)
             else { return JSValue(undefinedIn: context) }
             return JSValue(object: string, in: context)
         }
-        let storeSet: @convention(block) (String, JSValue, Bool) -> Void = { [weak self] key, val, onDisk in
+        let storeSet: @convention(block) (String, JSValue, Bool) -> Void = { key, val, onDisk in
             let context = JSContext.current()!
-            guard let scope = self?.activeScope() else { return }
+            guard let scope else { return }
             let bytes = Self.bytesFromValue(val, in: context) ?? Data()
             do {
                 try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes, onDisk: onDisk)
@@ -1329,12 +1412,12 @@ actor MITMScriptEngine {
                 context.exception = err
             }
         }
-        let storeDelete: @convention(block) (String, Bool) -> Void = { [weak self] key, onDisk in
-            guard let scope = self?.activeScope() else { return }
+        let storeDelete: @convention(block) (String, Bool) -> Void = { key, onDisk in
+            guard let scope else { return }
             MITMScriptStore.shared.delete(scope: scope, key: key, onDisk: onDisk)
         }
-        let storeKeys: @convention(block) (Bool) -> [String] = { [weak self] onDisk in
-            guard let scope = self?.activeScope() else { return [] }
+        let storeKeys: @convention(block) (Bool) -> [String] = { onDisk in
+            guard let scope else { return [] }
             return MITMScriptStore.shared.keys(scope: scope, onDisk: onDisk)
         }
         store.setObject(storeGet, forKeyedSubscript: "get" as NSString)
@@ -1342,33 +1425,33 @@ actor MITMScriptEngine {
         store.setObject(storeSet, forKeyedSubscript: "set" as NSString)
         store.setObject(storeDelete, forKeyedSubscript: "delete" as NSString)
         store.setObject(storeKeys, forKeyedSubscript: "keys" as NSString)
-        anywhere.setObject(store, forKeyedSubscript: "store" as NSString)
+        return store
     }
     
-    nonisolated private func installParamsGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func makeParamsNamespace(in context: JSContext, scope: UUID?) -> JSValue {
         let params = JSValue(newObjectIn: context)!
-        let paramsGet: @convention(block) (String) -> JSValue = { [weak self] key in
+        let paramsGet: @convention(block) (String) -> JSValue = { key in
             let context = JSContext.current()!
-            guard let scope = self?.activeScope(),
+            guard let scope,
                   let value = MITMParamStore.shared.get(scope: scope, key: key)
             else { return JSValue(undefinedIn: context) }
             return JSValue(object: value, in: context)
         }
-        let paramsKeys: @convention(block) () -> [String] = { [weak self] in
-            guard let scope = self?.activeScope() else { return [] }
+        let paramsKeys: @convention(block) () -> [String] = {
+            guard let scope else { return [] }
             return MITMParamStore.shared.keys(scope: scope)
         }
-        let paramsAll: @convention(block) () -> [String: String] = { [weak self] in
-            guard let scope = self?.activeScope() else { return [:] }
+        let paramsAll: @convention(block) () -> [String: String] = {
+            guard let scope else { return [:] }
             return MITMParamStore.shared.all(scope: scope)
         }
         params.setObject(paramsGet, forKeyedSubscript: "get" as NSString)
         params.setObject(paramsKeys, forKeyedSubscript: "keys" as NSString)
         params.setObject(paramsAll, forKeyedSubscript: "all" as NSString)
-        anywhere.setObject(params, forKeyedSubscript: "params" as NSString)
+        return params
     }
 
-    nonisolated private func installLogGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func makeLogNamespace(in context: JSContext) -> JSValue {
         let log = JSValue(newObjectIn: context)!
         let logInfo: @convention(block) (String) -> Void = { msg in
             logger.info("[MITM][JS] \(msg)")
@@ -1386,25 +1469,25 @@ actor MITMScriptEngine {
         log.setObject(logWarning, forKeyedSubscript: "warning" as NSString)
         log.setObject(logError, forKeyedSubscript: "error" as NSString)
         log.setObject(logDebug, forKeyedSubscript: "debug" as NSString)
-        anywhere.setObject(log, forKeyedSubscript: "log" as NSString)
+        return log
     }
-
-    nonisolated private func installControlGlobals(on anywhere: JSValue, context: JSContext) {
-        let doneBlock: @convention(block) () -> Void = { [weak self] in
-            self?.setActiveDirective(.done)
+    
+    nonisolated private func installControlGlobals(on anywhere: JSValue, for run: ScriptRun) {
+        let doneBlock: @convention(block) () -> Void = { [weak run] in
+            run?.directive = .done
         }
-        let exitBlock: @convention(block) () -> Void = { [weak self] in
-            self?.setActiveDirective(.exit)
+        let exitBlock: @convention(block) () -> Void = { [weak run] in
+            run?.directive = .exit
         }
         anywhere.setObject(doneBlock, forKeyedSubscript: "done" as NSString)
         anywhere.setObject(exitBlock, forKeyedSubscript: "exit" as NSString)
 
-        let respondBlock: @convention(block) (JSValue) -> Void = { [weak self] spec in
-            guard let self else { return }
+        let respondBlock: @convention(block) (JSValue) -> Void = { [weak run] spec in
+            guard let run else { return }
             guard !spec.isUndefined, !spec.isNull else {
-                self.setActiveDirective(.respond(
+                run.directive = .respond(
                     SynthesizedResponse(status: 200, headers: [], body: Data())
-                ))
+                )
                 return
             }
             let status: Int
@@ -1435,42 +1518,43 @@ actor MITMScriptEngine {
             } else {
                 body = Data()
             }
-            self.setActiveDirective(.respond(
+            run.directive = .respond(
                 SynthesizedResponse(status: status, headers: headers, body: body)
-            ))
+            )
         }
         anywhere.setObject(respondBlock, forKeyedSubscript: "respond" as NSString)
     }
 
     // MARK: - Anywhere.http
     
-    nonisolated private func installHTTPGlobals(on anywhere: JSValue, context: JSContext) {
+    nonisolated private func makeHTTPNamespace(in context: JSContext, for run: ScriptRun) -> JSValue {
         let http = JSValue(newObjectIn: context)!
-        let getBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
+        let getBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self, weak run] urlVal, optsVal in
             let context = JSContext.current()!
-            guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
+            guard let self, let run else { return Self.rejected("Anywhere.http: invocation released", in: context) }
             // The block runs on the actor's JSC queue.
-            return self.assumeIsolated { $0.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal, in: context) }
+            return self.assumeIsolated { $0.startHTTP(run: run, defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal) }
         }
-        let postBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
+        let postBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self, weak run] urlVal, optsVal in
             let context = JSContext.current()!
-            guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
-            return self.assumeIsolated { $0.startHTTP(defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal, in: context) }
+            guard let self, let run else { return Self.rejected("Anywhere.http: invocation released", in: context) }
+            return self.assumeIsolated { $0.startHTTP(run: run, defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal) }
         }
-        let requestBlock: @convention(block) (JSValue) -> JSValue = { [weak self] specVal in
+        let requestBlock: @convention(block) (JSValue) -> JSValue = { [weak self, weak run] specVal in
             let context = JSContext.current()!
-            guard let self else { return Self.rejected("Anywhere.http: engine released", in: context) }
+            guard let self, let run else { return Self.rejected("Anywhere.http: invocation released", in: context) }
             let urlVal: JSValue = specVal.objectForKeyedSubscript("url") ?? JSValue(undefinedIn: context)
-            return self.assumeIsolated { $0.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: specVal, in: context) }
+            return self.assumeIsolated { $0.startHTTP(run: run, defaultMethod: "GET", urlVal: urlVal, optsVal: specVal) }
         }
         http.setObject(getBlock, forKeyedSubscript: "get" as NSString)
         http.setObject(postBlock, forKeyedSubscript: "post" as NSString)
         http.setObject(requestBlock, forKeyedSubscript: "request" as NSString)
-        anywhere.setObject(http, forKeyedSubscript: "http" as NSString)
+        return http
     }
 
-    private func startHTTP(defaultMethod: String, urlVal: JSValue, optsVal: JSValue, in ctx: JSContext) -> JSValue {
-        guard let invocation = currentInvocation, invocation.allowsHTTP else {
+    private func startHTTP(run: ScriptRun, defaultMethod: String, urlVal: JSValue, optsVal: JSValue) -> JSValue {
+        let ctx = run.context
+        guard run.allowsHTTP else {
             return Self.rejected(
                 "Anywhere.http is only available inside a buffered `script` rule — an `async function process(ctx)` that awaits it. It is unavailable in stream-script.",
                 in: ctx
@@ -1484,10 +1568,10 @@ actor MITMScriptEngine {
         else {
             return Self.rejected("Anywhere.http: expected an absolute http(s) URL", in: ctx)
         }
-        if invocation.totalFetches >= Self.httpMaxTotalPerInvocation {
+        if run.totalFetches >= Self.httpMaxTotalPerInvocation {
             return Self.rejected("Anywhere.http: per-invocation request cap (\(Self.httpMaxTotalPerInvocation)) reached", in: ctx)
         }
-        if invocation.inFlightFetches >= Self.httpMaxConcurrentPerInvocation {
+        if run.inFlightFetches >= Self.httpMaxConcurrentPerInvocation {
             return Self.rejected("Anywhere.http: too many concurrent requests in this invocation (max \(Self.httpMaxConcurrentPerInvocation))", in: ctx)
         }
         if Self.globalFetchCount() >= Self.httpMaxConcurrentGlobal {
@@ -1528,21 +1612,18 @@ actor MITMScriptEngine {
 
         let maxBytes = Self.httpMaxResponseBytes
 
-        let promise = JSValue(newPromiseIn: ctx, fromExecutor: { [weak self] resolve, reject in
-            guard let self else {
-                reject?.call(withArguments: [Self.error("Anywhere.http: engine released", in: ctx)])
+        let promise = JSValue(newPromiseIn: ctx, fromExecutor: { [weak self, weak run] resolve, reject in
+            guard let self, let run else {
+                reject?.call(withArguments: [Self.error("Anywhere.http: invocation released", in: ctx)])
                 return
             }
             self.assumeIsolated { engine in
-                guard let liveInvocation = engine.currentInvocation else {
-                    reject?.call(withArguments: [Self.error("Anywhere.http: invocation released", in: ctx)])
-                    return
-                }
-                liveInvocation.inFlightFetches += 1
-                liveInvocation.totalFetches += 1
+                run.inFlightFetches += 1
+                run.totalFetches += 1
                 Self.reserveGlobalFetchSlot()
-                let fetchID = engine.registerPendingFetch(invocation: liveInvocation, resolve: resolve, reject: reject)
-                Task { [request] in
+                let runID = run.id
+                let fetchID = run.claimFetchID()
+                let task = Task { [request] in
                     let result: Result<MITMScriptHTTPClient.Response, Error>
                     do {
                         let response = try await MITMScriptHTTPClient.shared.send(
@@ -1556,51 +1637,41 @@ actor MITMScriptEngine {
                     } catch {
                         result = .failure(error)
                     }
-                    engine.completeFetch(id: fetchID, result: result)
+                    engine.completeFetch(runID: runID, fetchID: fetchID, result: result)
                 }
+                run.pendingFetches[fetchID] = PendingFetch(resolve: resolve, reject: reject, task: task)
             }
         })
         return promise ?? Self.rejected("Anywhere.http: could not create Promise", in: ctx)
     }
-    
-    private struct PendingFetch {
-        weak var invocation: Invocation?
-        let resolve: JSValue?
-        let reject: JSValue?
-    }
-    private var pendingFetches: [Int: PendingFetch] = [:]
-    private var nextFetchID = 0
 
-    private func registerPendingFetch(invocation: Invocation, resolve: JSValue?, reject: JSValue?) -> Int {
-        nextFetchID += 1
-        pendingFetches[nextFetchID] = PendingFetch(invocation: invocation, resolve: resolve, reject: reject)
-        return nextFetchID
-    }
-    
-    private func completeFetch(id: Int, result: Result<MITMScriptHTTPClient.Response, Error>) {
+    private func completeFetch(
+        runID: UInt64,
+        fetchID: Int,
+        result: Result<MITMScriptHTTPClient.Response, Error>
+    ) {
         Self.releaseGlobalFetchSlot()
-        guard let pending = pendingFetches.removeValue(forKey: id) else { return }
-        guard let invocation = pending.invocation else { return }
-        resumeFetch(invocation: invocation, resolve: pending.resolve, reject: pending.reject, result: result)
+        guard let run = liveRuns[runID],
+              let pending = run.pendingFetches.removeValue(forKey: fetchID) else { return }
+        resumeFetch(run: run, resolve: pending.resolve, reject: pending.reject, result: result)
     }
-    
+
     private func resumeFetch(
-        invocation: Invocation,
+        run: ScriptRun,
         resolve: JSValue?,
         reject: JSValue?,
         result: Result<MITMScriptHTTPClient.Response, Error>
     ) {
-        if invocation.inFlightFetches > 0 { invocation.inFlightFetches -= 1 }
-        guard !invocation.delivered else { return }
-        if MonotonicClock.now - invocation.startedAt > Self.invocationAbsoluteTimeout,
-           let original = invocation.original {
+        if run.inFlightFetches > 0 { run.inFlightFetches -= 1 }
+        guard !run.delivered else { return }
+        if MonotonicClock.now - run.startedAt > Self.invocationAbsoluteTimeout,
+           let original = run.original {
             logger.warning("[MITM][JS] process(ctx) exceeded the absolute invocation budget; reverting")
-            deliver(.modified(original), for: invocation)
+            deliver(.modified(original), for: run)
             return
         }
-        armWatchdog(for: invocation)
-        currentInvocation = invocation
-        defer { currentInvocation = nil }
+        armWatchdog(for: run)
+        let context = run.context
         _ = runUserScript("async script (Anywhere.http resume continuation)") {
             switch result {
             case .success(let response):
@@ -1611,6 +1682,7 @@ actor MITMScriptEngine {
         }
         if context.exception != nil { context.exception = nil }
     }
+
 
     // MARK: Anywhere.http helpers
 
@@ -1836,7 +1908,6 @@ actor MITMScriptEngine {
             index = next
             let wire = UInt8(tag & 0x7)
             let fieldRaw = tag >> 3
-            // Field 0 is reserved; max is 2^29-1 per the protobuf spec.
             guard fieldRaw > 0, fieldRaw <= 536870911 else {
                 throw AnywhereError.mitm(.scriptMessageMalformed(detail: "invalid field number \(fieldRaw)"))
             }
@@ -2041,56 +2112,11 @@ actor MITMScriptEngine {
 }
 
 extension MITMScriptEngine {
-    private struct EngineRegistry {
-        var engines: [UUID: MITMScriptEngine] = [:]
-        var scopelessEngine: MITMScriptEngine?
-    }
-    private static let registry = Mutex(EngineRegistry())
-
-    static func sharedEngine(forScope scope: UUID?) -> MITMScriptEngine {
-        registry.withLock { registry -> MITMScriptEngine in
-            guard let scope else {
-                if let engine = registry.scopelessEngine { return engine }
-                let engine = MITMScriptEngine()
-                registry.scopelessEngine = engine
-                return engine
-            }
-            if let engine = registry.engines[scope] { return engine }
-            let engine = MITMScriptEngine()
-            registry.engines[scope] = engine
-            return engine
-        }
-    }
-
-    static func purgeEngines(activeIDs: Set<UUID>) {
-        let dropped: [MITMScriptEngine] = registry.withLock { registry in
-            let removed = registry.engines.filter { !activeIDs.contains($0.key) }.map { $0.value }
-            registry.engines = registry.engines.filter { activeIDs.contains($0.key) }
-            return removed
-        }
-        guard !dropped.isEmpty else { return }
-        JSCConcurrencyBridge.shared.enqueue {
-            for engine in dropped {
-                engine.assumeIsolated { $0.shutdown() }
-            }
-            withExtendedLifetime(dropped) {}
-        }
-    }
+    static let shared = MITMScriptEngine()
     
-    static func resetCachesOnReload(keepByScope: [UUID: Set<Int>]) {
+    static func purgeRuns(activeIDs: Set<UUID>) {
         JSCConcurrencyBridge.shared.enqueue {
-            let snapshot: [(engine: MITMScriptEngine, keep: Set<Int>)] = registry.withLock { registry in
-                registry.engines.map { (engine: $0.value, keep: keepByScope[$0.key] ?? []) }
-            }
-            for item in snapshot {
-                item.engine.assumeIsolated { $0.resetOnReload(keepingCompiled: item.keep) }
-            }
+            shared.assumeIsolated { $0.dropRuns(notIn: activeIDs) }
         }
-    }
-    
-    final class Provider: Sendable {
-        private let scope: UUID?
-        init(scope: UUID?) { self.scope = scope }
-        func get() -> MITMScriptEngine { MITMScriptEngine.sharedEngine(forScope: scope) }
     }
 }

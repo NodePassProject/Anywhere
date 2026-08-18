@@ -23,14 +23,12 @@ nonisolated final class MITMHTTP2Rewriter: Sendable {
     }
     private let rewriteState: Mutex<RewriteState>
 
-    let scriptEngineProvider: MITMScriptEngine.Provider
     let requestLog: MITMRequestLog
 
     init(
         host: String,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
-        scriptEngineProvider: MITMScriptEngine.Provider,
         requestLog: MITMRequestLog
     ) {
         self.host = host
@@ -40,7 +38,6 @@ nonisolated final class MITMHTTP2Rewriter: Sendable {
         self.responseRules = matchedRules.filter { $0.phase == .httpResponse }
         self.cachedRuleSetID = matchedSet?.id
         self.rewriteState = Mutex(RewriteState(effectiveAuthority: effectiveAuthority))
-        self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
     }
 
@@ -157,11 +154,7 @@ nonisolated final class MITMHTTP2Rewriter: Sendable {
         _ message: HTTPMessage,
         phase: MITMPhase
     ) async -> MITMScriptTransform.Outcome {
-        await MITMScriptTransform.apply(
-            message,
-            rules: rules(phase: phase),
-            engineProvider: scriptEngineProvider
-        )
+        await MITMScriptTransform.apply(message, rules: rules(phase: phase))
     }
     
     func makeResponseFrameCursor(verdicts: MITMGateVerdictTable) -> MITMScriptTransform.FrameCursor {

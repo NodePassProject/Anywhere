@@ -217,8 +217,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
 
     private let h2FlowController = MITMHTTP2FlowController()
 
-    private let scriptEngineProvider: MITMScriptEngine.Provider
-
     private let requestLog = MITMRequestLog()
 
     private enum Phase: PhaseTransitionable {
@@ -338,14 +336,12 @@ actor MITMSession: MITMHTTP1StreamDelegate {
         (self.deferredActions, self.deferredActionContinuation) = AsyncStream.makeStream(of: DeferredAction.self)
         (self.sessionJobs, self.sessionJobContinuation) = AsyncStream.makeStream(of: SessionJob.self)
         let scheme = isPlaintext ? "http" : "https"
-        self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
         self.requestStream = MITMHTTP1Stream(
             host: dstHost,
             scheme: scheme,
             direction: .httpRequest,
             policy: policy,
             effectiveAuthority: nil,
-            scriptEngineProvider: scriptEngineProvider,
             requestLog: requestLog,
             lwipBridge: lwipBridge
         )
@@ -355,7 +351,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             direction: .httpResponse,
             policy: policy,
             effectiveAuthority: nil,
-            scriptEngineProvider: scriptEngineProvider,
             requestLog: requestLog,
             lwipBridge: lwipBridge
         )
@@ -363,7 +358,6 @@ actor MITMSession: MITMHTTP1StreamDelegate {
             host: dstHost,
             policy: policy,
             effectiveAuthority: nil,
-            scriptEngineProvider: scriptEngineProvider,
             requestLog: requestLog
         )
     }
@@ -1382,7 +1376,7 @@ extension MITMSession: MITMBridgeClientLegDelegate, MITMUpstreamLegDelegate {
         responseLog.recordHTTP1(method: head.method, url: url, originalUrl: head.originalURL)
         let responseStream = MITMHTTP1Stream(
             host: dstHost, direction: .httpResponse, policy: policy, effectiveAuthority: nil,
-            scriptEngineProvider: scriptEngineProvider, requestLog: responseLog, lwipBridge: lwipBridge,
+            requestLog: responseLog, lwipBridge: lwipBridge,
             bridgeClientStreamID: streamID
         )
         responseStream.assumeIsolated { $0.delegate = self }

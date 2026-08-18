@@ -56,8 +56,6 @@ actor MITMHTTP1Stream {
 
     weak var delegate: MITMHTTP1StreamDelegate?
 
-    private let scriptEngineProvider: MITMScriptEngine.Provider
-
     private let requestLog: MITMRequestLog
 
     private let lwipBridge: LWIPConcurrencyBridge
@@ -68,7 +66,6 @@ actor MITMHTTP1Stream {
         direction: MITMPhase,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
-        scriptEngineProvider: MITMScriptEngine.Provider,
         requestLog: MITMRequestLog,
         lwipBridge: LWIPConcurrencyBridge,
         bridgeClientStreamID: UInt32? = nil
@@ -84,7 +81,6 @@ actor MITMHTTP1Stream {
             : []
         self.ruleSetID = matchedSet?.id
         self.effectiveAuthority = effectiveAuthority
-        self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
         self.lwipBridge = lwipBridge
     }
@@ -617,9 +613,8 @@ actor MITMHTTP1Stream {
                 let originatingMethod = originatingRequest?.method
                 mode = .awaitingScript
                 let rules = self.rules
-                let engineProvider = self.scriptEngineProvider
                 pendingHop = Task { [weak self] in
-                    let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
+                    let outcome = await MITMScriptTransform.apply(message, rules: rules)
                     guard let self else { return }
                     self.lwipBridge.enqueue {
                         self.assumeIsolated {
@@ -1176,14 +1171,12 @@ actor MITMHTTP1Stream {
         )
         let captured = streaming
         mode = .awaitingScript
-        let engineProvider = self.scriptEngineProvider
         let cursor = streaming.cursor
         pendingHop = Task { [weak self] in
             let result = await MITMScriptTransform.applyFrame(
                 chunk,
                 frameContext: frameContext,
-                cursor: cursor,
-                engineProvider: engineProvider
+                cursor: cursor
             )
             guard let self else { return }
             self.lwipBridge.enqueue {
@@ -1343,9 +1336,8 @@ actor MITMHTTP1Stream {
         _ = originalSizes
         mode = .awaitingScript
         let rules = self.rules
-        let engineProvider = self.scriptEngineProvider
         pendingHop = Task { [weak self] in
-            let outcome = await MITMScriptTransform.apply(message, rules: rules, engineProvider: engineProvider)
+            let outcome = await MITMScriptTransform.apply(message, rules: rules)
             guard let self else { return }
             self.lwipBridge.enqueue {
                 self.assumeIsolated { $0.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode) }
