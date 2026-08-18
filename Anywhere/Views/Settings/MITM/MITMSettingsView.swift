@@ -140,9 +140,7 @@ struct MITMSettingsView: View {
     @ViewBuilder
     private func ruleSetRow(for ruleSet: MITMRuleSet) -> some View {
         HStack {
-            Image(systemName: "list.bullet.rectangle")
-                .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
+            RuleSetIconView(iconLight: ruleSet.iconLight, iconDark: ruleSet.iconDark)
             VStack(alignment: .leading) {
                 Text(ruleSet.name)
                     .foregroundStyle(.primary)
@@ -193,7 +191,9 @@ struct MITMSettingsView: View {
                 name: name,
                 domainSuffixes: parsed.domainSuffixes,
                 rules: parsed.rules,
-                parameters: parsed.parameters
+                parameters: parsed.parameters,
+                iconLight: parsed.iconLight,
+                iconDark: parsed.iconDark
             )
             ruleSetStore.addRuleSet(ruleSet)
         } catch {
@@ -230,7 +230,9 @@ struct MITMSettingsView: View {
                     domainSuffixes: parsed.domainSuffixes,
                     rules: parsed.rules,
                     parameters: parsed.parameters,
-                    subscriptionURL: url
+                    subscriptionURL: url,
+                    iconLight: parsed.iconLight,
+                    iconDark: parsed.iconDark
                 )
                 ruleSetStore.addRuleSet(ruleSet)
             } catch {

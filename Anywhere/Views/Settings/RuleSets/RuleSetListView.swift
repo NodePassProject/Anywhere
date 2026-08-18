@@ -55,7 +55,7 @@ struct RuleSetListView: View {
             Section {
                 ForEach($builtInServiceRuleSets) { $ruleSet in
                     if !ruleSet.isCustom {
-                        assignmentMenu(for: $ruleSet)
+                        builtInRuleSetRow(for: $ruleSet)
                     }
                 }
             }
@@ -206,16 +206,24 @@ struct RuleSetListView: View {
         NavigationLink {
             CustomRuleSetDetailView(customRuleSetId: customRuleSet.id)
         } label: {
-            ruleSetRow(for: customRuleSet)
+            customRuleSetRow(for: customRuleSet)
+        }
+    }
+    
+    @ViewBuilder
+    private func builtInRuleSetRow(for ruleSet: Binding<RoutingRuleSet>) -> some View {
+        HStack {
+            AppIconView(ruleSet.wrappedValue.name)
+            Text(ruleSet.wrappedValue.name)
+            Spacer()
+            AssignmentMenuButton(selection: ruleSet.assignedConfigurationId)
         }
     }
 
     @ViewBuilder
-    private func ruleSetRow(for ruleSet: CustomRoutingRuleSet) -> some View {
+    private func customRuleSetRow(for ruleSet: CustomRoutingRuleSet) -> some View {
         HStack {
-            Image(systemName: "list.bullet.rectangle")
-                .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
+            RuleSetIconView(iconLight: ruleSet.iconLight, iconDark: ruleSet.iconDark)
             VStack(alignment: .leading) {
                 Text(ruleSet.name)
                 Text("\(ruleSet.rules.count) rule(s)")
@@ -251,7 +259,7 @@ struct RuleSetListView: View {
             let name = parsed.name.isEmpty
                 ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
                 : parsed.name
-            let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules)
+            let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
             routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
             customRuleSets = routingRuleSetStore.customRuleSets
         } catch {
@@ -283,7 +291,7 @@ struct RuleSetListView: View {
                 let name = parsed.name.isEmpty
                     ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
                     : parsed.name
-                let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
+                let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
                 routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
                 customRuleSets = routingRuleSetStore.customRuleSets
             } catch {
@@ -301,15 +309,5 @@ struct RuleSetListView: View {
     private func countryLabel(for code: String) -> String {
         let name = Locale.current.localizedString(forRegionCode: code) ?? code
         return "\(flag(for: code)) \(name)"
-    }
-    
-    @ViewBuilder
-    private func assignmentMenu(for ruleSet: Binding<RoutingRuleSet>) -> some View {
-        HStack {
-            AppIconView(ruleSet.wrappedValue.name)
-            Text(ruleSet.wrappedValue.name)
-            Spacer()
-            AssignmentMenuButton(selection: ruleSet.assignedConfigurationId)
-        }
     }
 }

@@ -493,6 +493,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
     var parameters: [MITMParameter]
     var parameterValues: [String: String]
     var subscriptionURL: URL?
+    var iconLight: Data?
+    var iconDark: Data?
     var updatedAt: Date
     var deletedAt: Date? = nil
 
@@ -505,6 +507,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         parameters: [MITMParameter] = [],
         parameterValues: [String: String] = [:],
         subscriptionURL: URL? = nil,
+        iconLight: Data? = nil,
+        iconDark: Data? = nil,
         updatedAt: Date = .now
     ) {
         self.id = id
@@ -515,6 +519,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         self.parameters = parameters
         self.parameterValues = parameterValues
         self.subscriptionURL = subscriptionURL
+        self.iconLight = iconLight
+        self.iconDark = iconDark
         self.updatedAt = updatedAt
     }
     
@@ -532,6 +538,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         case parameters
         case parameterValues
         case subscriptionURL
+        case iconLight
+        case iconDark
         case updatedAt
         case deletedAt
     }
@@ -553,6 +561,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         self.parameters = (try? c.decodeSkippingInvalid([MITMParameter].self, forKey: .parameters)) ?? []
         self.parameterValues = (try? c.decodeIfPresent([String: String].self, forKey: .parameterValues)) ?? [:]
         self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.iconLight = try c.decodeIfPresent(Data.self, forKey: .iconLight)
+        self.iconDark = try c.decodeIfPresent(Data.self, forKey: .iconDark)
         self.updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
         self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
@@ -567,6 +577,8 @@ nonisolated struct MITMRuleSet: Codable, Equatable, Identifiable, SoftDeletable 
         if !parameters.isEmpty { try c.encode(parameters, forKey: .parameters) }
         if !parameterValues.isEmpty { try c.encode(parameterValues, forKey: .parameterValues) }
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try c.encodeIfPresent(iconLight, forKey: .iconLight)
+        try c.encodeIfPresent(iconDark, forKey: .iconDark)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }

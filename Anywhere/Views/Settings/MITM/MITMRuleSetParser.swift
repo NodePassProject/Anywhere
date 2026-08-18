@@ -9,11 +9,9 @@ import Foundation
 import JavaScriptCore
 
 enum MITMRuleSetParser {
-    /// Parsing starts in `.rule`, so files without `[Section]` headers parse as rules.
     private enum Section {
         case rule
         case parameter
-        /// Unrecognized `[Section]`; its body is skipped (forward-compatible).
         case ignored
     }
 
@@ -23,6 +21,8 @@ enum MITMRuleSetParser {
         var rules: [MITMRule] = []
         var parameters: [MITMParameter] = []
         var parameterNames: Set<String> = []
+        var iconLight: Data?
+        var iconDark: Data?
         var section: Section = .rule
 
         for raw in text.components(separatedBy: .newlines) {
@@ -34,8 +34,7 @@ enum MITMRuleSetParser {
                 section = next
                 continue
             }
-
-            // `name`/`hostname` are file-level metadata, recognized in any section.
+            
             if let header = parseHeader(line) {
                 switch header.key {
                 case "name":
@@ -45,6 +44,10 @@ enum MITMRuleSetParser {
                         .split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty }
+                case "icon-light":
+                    iconLight = Data(iconBase64: header.value)
+                case "icon-dark":
+                    iconDark = Data(iconBase64: header.value)
                 default:
                     break
                 }
@@ -70,11 +73,12 @@ enum MITMRuleSetParser {
             name: name,
             domainSuffixes: suffixes,
             rules: rules,
-            parameters: parameters
+            parameters: parameters,
+            iconLight: iconLight,
+            iconDark: iconDark
         )
     }
-
-    /// Recognizes a `[Section]` header; unknown sections return `.ignored`.
+    
     private static func parseSection(_ line: String) -> Section? {
         guard line.hasPrefix("["), line.hasSuffix("]"), line.count >= 2 else { return nil }
         let inner = line.dropFirst().dropLast()
@@ -93,9 +97,10 @@ enum MITMRuleSetParser {
     private static let recognizedHeaders: Set<String> = [
         "name",
         "hostname",
+        "icon-light",
+        "icon-dark",
     ]
-
-    /// Splits a `<key> = <value>` line on its first `=`. An unrecognized key returns nil so the caller retries the line as a rule.
+    
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }
         let key = line[line.startIndex..<equal]
@@ -108,14 +113,7 @@ enum MITMRuleSetParser {
     }
 
     // MARK: - Rewrite sub-mode parsing
-
-    /// Sub-mode table for `rewrite` (operation `0`):
-    ///
-    ///     0  transparent       <full-url>     rewrite the URL (+ dial on host change)
-    ///     1  302 redirect      <full-url>     synthesize a 302 to the URL
-    ///     2  200 reject (text) [<content>]    synthesize a text/plain 200
-    ///     3  200 reject (gif)                 synthesize the canned 1×1 GIF
-    ///     4  200 reject (data) [<base64>]     synthesize an octet-stream 200
+    
     private static func parseRewriteAction(subMode: String, fields: [String]) -> MITMRewriteAction? {
         switch subMode.trimmingCharacters(in: .whitespaces) {
         case "0":
@@ -137,8 +135,7 @@ enum MITMRuleSetParser {
             return nil
         }
     }
-
-    /// Partial check only (absolute URL with a host); the runtime re-validates in `MITMRewritePolicy`.
+    
     private static func validRewriteURL(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
@@ -156,38 +153,37 @@ enum MITMRuleSetParser {
               let phase = phase(from: phaseInt) else { return nil }
         guard let opInt = Int(fields[1]) else { return nil }
         let args = Array(fields.dropFirst(2))
-
-        // Every rule leads with a urlPattern regex (matched against the whole request URL) gating the operation.
+        
         switch opInt {
-        case 0:  // rewrite — fields: urlPattern, subMode (0–4), <sub-mode args>
+        case 0:
             guard args.count >= 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
             guard let action = parseRewriteAction(subMode: args[1], fields: Array(args.dropFirst(2))) else { return nil }
             return MITMRule(phase: .httpRequest, urlPattern: urlPattern, operation: .rewrite(action))
 
-        case 1:  // header-add
+        case 1:
             guard args.count == 3 else { return nil }
             let urlPattern = args[0]
             let name = args[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerAdd(name: name, value: args[2]))
 
-        case 2:  // header-delete
+        case 2:
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
             let name = args[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerDelete(name: name))
 
-        case 3:  // header-replace — fields: urlPattern, name, value
+        case 3:
             guard args.count == 3 else { return nil }
             let urlPattern = args[0]
             let name = args[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerReplace(name: name, value: args[2]))
 
-        case 4:  // body-replace — fields: urlPattern, search, replacement
+        case 4:
             guard args.count == 3 else { return nil }
             let urlPattern = args[0]
             let search = args[1]
@@ -195,15 +191,14 @@ enum MITMRuleSetParser {
                   !search.isEmpty, isValidSearchRegex(search) else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: args[2]))
 
-        case 5:  // body-json — fields: urlPattern, action, <action-specific…>
+        case 5:
             guard args.count >= 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
             guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyJSON(operation))
-
-        // Scripting operations use a separate 100+ id range.
-        case 100:  // script — fields: urlPattern, base64
+            
+        case 100:
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
@@ -215,7 +210,7 @@ enum MITMRuleSetParser {
                 operation: .script(scriptBase64: scriptBase64)
             )
 
-        case 101:  // stream-script — fields: urlPattern, base64
+        case 101:
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
@@ -231,20 +226,7 @@ enum MITMRuleSetParser {
             return nil
         }
     }
-
-    /// Field layout for `body-json` (operation `5`) actions:
-    ///
-    ///     add                      <path>, <value>
-    ///     replace                  <path>, <value>
-    ///     delete                   <path>
-    ///     replace-recursive        <key>, <value>
-    ///     delete-recursive         <key>
-    ///     remove-where-key-exists  <path>, <key>
-    ///     remove-where-field-in    <path>, <field>, <values>
-    ///
-    /// Tokens matched case-insensitively; hyphenated and camelCase aliases
-    /// both accepted. `<value>` / `<values>` are JSON literals; a non-JSON
-    /// string is taken literally (see `MITMJSONPatch`).
+    
     private static func parseJSONOperation(action rawAction: String, fields: [String]) -> MITMJSONOperation? {
         switch rawAction.trimmingCharacters(in: .whitespaces).lowercased() {
         case "add":
@@ -274,9 +256,7 @@ enum MITMRuleSetParser {
     }
 
     // MARK: - Parameter line parsing
-
-    /// Field layout: `<type>, <dataType>, <name>, <label>, <description>, <default> [, "[options]"]`
-    /// (`type`: 0 input · 1 picker; `dataType`: 0 string). Picker options are a CSV-quoted bracketed list.
+    
     private static func parseParameterLine(_ line: String) -> MITMParameter? {
         let fields = splitCSV(line)
         guard fields.count >= 6 else { return nil }
@@ -324,8 +304,7 @@ enum MITMRuleSetParser {
             )
         }
     }
-
-    /// Parses a picker's bracketed, CSV-quoted options list into its values.
+    
     private static func parseOptionList(_ field: String) -> [String] {
         var inner = field.trimmingCharacters(in: .whitespaces)
         if inner.hasPrefix("[") { inner.removeFirst() }
@@ -348,9 +327,7 @@ enum MITMRuleSetParser {
         default: return nil
         }
     }
-
-    /// CSV-style split. `""` inside a quoted field produces a literal `"`;
-    /// whitespace around unquoted fields is trimmed but preserved inside quotes.
+    
     private static func splitCSV(_ input: String) -> [String] {
         var fields: [String] = []
         var current = ""
@@ -398,15 +375,11 @@ enum MITMRuleSetParser {
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
     }
-
-    /// Validates a `search` pattern using Swift `Regex` (not `NSRegularExpression`)
-    /// to match the engine the runtime uses at substitution time.
+    
     private static func isValidSearchRegex(_ search: String) -> Bool {
         (try? Regex(search)) != nil
     }
-
-    /// base64 → UTF-8 → JS syntax check, wrapped in the same IIFE the runtime uses.
-    /// Parse-only: never evaluates, so user code with side effects is not run at import time.
+    
     private static func isValidScriptBase64(_ b64: String) -> Bool {
         guard let raw = Data(base64Encoded: b64),
               let source = String(data: raw, encoding: .utf8)

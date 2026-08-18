@@ -32,12 +32,16 @@ enum RoutingRuleSetParser {
         var name: String
         var rules: [RoutingRule]
         var routing: RuleSetImportRoute
+        var iconLight: Data?
+        var iconDark: Data?
     }
 
     static func parse(_ text: String) -> ParseResult {
         var name = ""
         var rules: [RoutingRule] = []
         var routing: RuleSetImportRoute = .default
+        var iconLight: Data?
+        var iconDark: Data?
 
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -52,6 +56,10 @@ enum RoutingRuleSetParser {
                     if let code = Int(header.value), let value = RuleSetImportRoute(rawValue: code) {
                         routing = value
                     }
+                case "icon-light":
+                    iconLight = Data(iconBase64: header.value)
+                case "icon-dark":
+                    iconDark = Data(iconBase64: header.value)
                 default:
                     break
                 }
@@ -60,10 +68,10 @@ enum RoutingRuleSetParser {
             }
         }
 
-        return ParseResult(name: name, rules: rules, routing: routing)
+        return ParseResult(name: name, rules: rules, routing: routing, iconLight: iconLight, iconDark: iconDark)
     }
 
-    private static let recognizedHeaders: Set<String> = ["name", "routing"]
+    private static let recognizedHeaders: Set<String> = ["name", "routing", "icon-light", "icon-dark"]
 
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }

@@ -189,10 +189,12 @@ routing = 1
 Shape: `<key> = <value>`. Keys are case-insensitive; the value is trimmed and
 otherwise kept verbatim (there is **no** inline `#` comment after a value).
 
-| Key       | Meaning                                                                |
-| --------- | --------------------------------------------------------------------- |
-| `name`    | Display name for the rule set.                                         |
-| `routing` | Initial action, applied on first import: `0` Default, `1` Direct, `2` Reject. |
+| Key          | Meaning                                                                |
+| ------------ | ---------------------------------------------------------------------- |
+| `name`       | Display name for the rule set.                                         |
+| `routing`    | Initial action, applied on first import: `0` Default, `1` Direct, `2` Reject. |
+| `icon-light` | Base64-encoded image bytes for the icon shown in light appearance.     |
+| `icon-dark`  | Base64-encoded image bytes for the icon shown in dark appearance.      |
 
 Unrecognized keys are ignored. If `name` is absent or empty, the importer
 falls back to the file name (or `Imported` / `Subscription`).
@@ -203,6 +205,11 @@ absent / unrecognized value — leaves the set on **Default** (inactive). It is 
 first-import convenience only: a subscription **refresh ignores it**, so
 re-fetching never overrides the action you have set locally. A specific proxy
 target cannot be expressed this way — assign one in the app.
+
+The icon headers embed the image displayed next to the rule set in the
+**Routing Rules** list. Providing a single variant is sufficient: when no icon
+matches the current appearance, the other variant is used. A value that is not
+valid base64, or that decodes to more than **256 KB**, is dropped.
 
 ### Rule lines
 
@@ -220,23 +227,17 @@ A line whose type is not `0`–`3`, or whose value is empty, is dropped. CIDR
 validity itself is not checked at import — a malformed CIDR survives parsing
 but is discarded later when rules are loaded.
 
-> **Remember:** the file sets the name, the rules, and at most an initial
-> Default / Direct / Reject via `routing`. To route a set through a **proxy**
-> — or to change the action after import — open it in **Routing Rules** and
-> assign a target. A set left on Default is inactive.
-
 ---
 
 ## Subscriptions
 
 A subscription is a `.arrs` file served over **http(s)** from a URL whose path
 ends in `.arrs`. Anywhere fetches it, parses it with the format above, and
-stores the result as a custom set. On **refresh**, the rules are **replaced**
-wholesale by the freshly fetched file, while the name you gave the set locally
-is **preserved** across refreshes — so a remote rename does not clobber yours,
-and you keep editing the assignment, not the rules. The `routing` header is
-honored only on the **initial** subscribe; a refresh likewise leaves your
-assigned action untouched.
+stores the result as a custom set. On **refresh**, the rules and icons are
+**replaced** wholesale by the freshly fetched file, while the name you gave
+the set locally is **preserved** across refreshes — so a remote rename does
+not clobber yours, and you keep editing the assignment, not the rules. The
+`routing` header is honored only on the **initial** subscribe.
 
 The same **10,000-rule** cap applies; a file that exceeds it is rejected in
 full rather than truncated.

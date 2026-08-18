@@ -181,6 +181,8 @@ final class MITMRuleSetStore {
         domainSuffixes: [String],
         rules: [MITMRule],
         parameters: [MITMParameter],
+        iconLight: Data?,
+        iconDark: Data?,
         to id: UUID
     ) -> MITMRuleSet? {
         guard let writeIndex = ruleSets.firstIndex(where: { $0.id == id }) else {
@@ -190,6 +192,8 @@ final class MITMRuleSetStore {
         ruleSets[writeIndex].domainSuffixes = domainSuffixes
         ruleSets[writeIndex].rules = rules
         ruleSets[writeIndex].parameters = parameters
+        ruleSets[writeIndex].iconLight = iconLight
+        ruleSets[writeIndex].iconDark = iconDark
         ruleSets[writeIndex].parameterValues = Self.mergedParameterValues(
             definitions: parameters,
             previousValues: previousValues
@@ -226,6 +230,8 @@ final class MITMRuleSetStore {
             tomb.rules = []
             tomb.parameters = []
             tomb.parameterValues = [:]
+            tomb.iconLight = nil
+            tomb.iconDark = nil
             tombstones.append(tomb)
         }
     }

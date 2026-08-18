@@ -22,19 +22,23 @@ nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftD
     var name: String
     var rules: [RoutingRule]
     var subscriptionURL: URL?
+    var iconLight: Data?
+    var iconDark: Data?
     var updatedAt: Date
     var deletedAt: Date? = nil
 
-    init(name: String, rules: [RoutingRule] = [], subscriptionURL: URL? = nil) {
+    init(name: String, rules: [RoutingRule] = [], subscriptionURL: URL? = nil, iconLight: Data? = nil, iconDark: Data? = nil) {
         self.id = UUID()
         self.name = name
         self.rules = rules
         self.subscriptionURL = subscriptionURL
+        self.iconLight = iconLight
+        self.iconDark = iconDark
         self.updatedAt = .now
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, rules, subscriptionURL, deletedAt, updatedAt
+        case id, name, rules, subscriptionURL, iconLight, iconDark, deletedAt, updatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -43,6 +47,8 @@ nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftD
         self.name = try container.decode(String.self, forKey: .name)
         self.rules = try container.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
         self.subscriptionURL = try container.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.iconLight = try container.decodeIfPresent(Data.self, forKey: .iconLight)
+        self.iconDark = try container.decodeIfPresent(Data.self, forKey: .iconDark)
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? deletedAt ?? .distantPast
         self.deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
@@ -53,6 +59,8 @@ nonisolated struct CustomRoutingRuleSet: Codable, Identifiable, Equatable, SoftD
         try container.encode(name, forKey: .name)
         try container.encode(rules, forKey: .rules)
         try container.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try container.encodeIfPresent(iconLight, forKey: .iconLight)
+        try container.encodeIfPresent(iconDark, forKey: .iconDark)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
@@ -234,10 +242,14 @@ class RoutingRuleSetStore {
         rebuildRuleSets()
     }
 
-    func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [RoutingRule]? = nil) {
+    func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [RoutingRule]? = nil, icons: (light: Data?, dark: Data?)? = nil) {
         guard let index = customRuleSets.firstIndex(where: { $0.id == id }) else { return }
         if let name { customRuleSets[index].name = name }
         if let rules { customRuleSets[index].rules = rules }
+        if let icons {
+            customRuleSets[index].iconLight = icons.light
+            customRuleSets[index].iconDark = icons.dark
+        }
         customRuleSets[index].updatedAt = SyncStamp.after(customRuleSets[index])
         saveCustomRuleSets()
         rebuildRuleSets()
@@ -280,6 +292,8 @@ class RoutingRuleSetStore {
         var tomb = ruleSet
         tomb.deletedAt = .now
         tomb.rules = []
+        tomb.iconLight = nil
+        tomb.iconDark = nil
         customTombstones.removeAll { $0.id == ruleSet.id }
         customTombstones.append(tomb)
     }

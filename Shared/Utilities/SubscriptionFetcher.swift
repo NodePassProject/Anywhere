@@ -142,12 +142,8 @@ nonisolated struct SubscriptionFetcher {
     }
 
     private static func parseIcon(from response: HTTPURLResponse?, field: String) -> Data? {
-        guard let value = response?.value(forHTTPHeaderField: field),
-              let data = Data(base64Encoded: value, options: .ignoreUnknownCharacters),
-              !data.isEmpty,
-              data.count <= 256 * 1024 // persisted into the subscriptions blob on every save
-        else { return nil }
-        return data
+        guard let value = response?.value(forHTTPHeaderField: field) else { return nil }
+        return Data(iconBase64: value)
     }
 
     private static func parseSubscriptionUserInfo(from response: HTTPURLResponse?) -> (upload: Int64?, download: Int64?, total: Int64?, expire: Date?) {

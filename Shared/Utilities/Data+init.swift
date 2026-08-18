@@ -24,6 +24,14 @@ nonisolated extension Data {
 
         self = data
     }
+    
+    init?(iconBase64 value: String) {
+        guard let data = Data(base64Encoded: value, options: .ignoreUnknownCharacters),
+              !data.isEmpty,
+              data.count <= 256 * 1024
+        else { return nil }
+        self = data
+    }
 
     init?(base64URLEncoded string: String) {
         var base64 = string

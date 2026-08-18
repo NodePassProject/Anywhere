@@ -257,7 +257,7 @@ final class ImportRuleSetsModel {
                     return
                 }
                 let name = parsed.name.isEmpty ? Self.fallbackName(for: url) : parsed.name
-                let set = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
+                let set = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
                 let summary = String(localized: "Routing") + " · " + String(localized: "\(parsed.rules.count) rule(s)")
                 apply(id: id) {
                     $0.status = .ready
@@ -279,7 +279,9 @@ final class ImportRuleSetsModel {
                     domainSuffixes: parsed.domainSuffixes,
                     rules: parsed.rules,
                     parameters: parsed.parameters,
-                    subscriptionURL: url
+                    subscriptionURL: url,
+                    iconLight: parsed.iconLight,
+                    iconDark: parsed.iconDark
                 )
                 var summary = String(localized: "MITM") + " · " + String(localized: "\(parsed.rules.count) rule(s)")
                 if !parsed.domainSuffixes.isEmpty {

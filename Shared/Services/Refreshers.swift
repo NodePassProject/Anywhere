@@ -86,8 +86,11 @@ final class CustomRuleSetRefresher {
         }
 
         guard let current = ruleSetStore.customRuleSet(for: id),
-              current.rules != parsed.rules else { return }
-        ruleSetStore.updateCustomRuleSet(id, rules: parsed.rules)
+              current.rules != parsed.rules
+                || current.iconLight != parsed.iconLight
+                || current.iconDark != parsed.iconDark
+        else { return }
+        ruleSetStore.updateCustomRuleSet(id, rules: parsed.rules, icons: (parsed.iconLight, parsed.iconDark))
     }
 }
 
@@ -143,6 +146,8 @@ final class MITMRuleSetRefresher {
             domainSuffixes: parsed.domainSuffixes,
             rules: parsed.rules,
             parameters: parsed.parameters,
+            iconLight: parsed.iconLight,
+            iconDark: parsed.iconDark,
             to: id
         ) else {
             throw MITMRuleSetRefreshError.ruleSetRemoved

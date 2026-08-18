@@ -120,11 +120,8 @@ A rule set is a sequence of **header lines**, **rule lines**, and (optionally)
 recognized header nor a valid rule/parameter is dropped silently, so a partially
 valid file still imports what it can.
 
-Lines belong to a **section** introduced by a bracketed header — `[Rule]` or
-`[Parameter]`. Sections are optional and a file starts in `[Rule]`, so any file
-without section headers (every rule set predating this feature) parses exactly as
-before. An unrecognized `[Section]` and its body are skipped. The `name` /
-`hostname` headers are file-level and are recognized in any section.
+Lines belong to a **section** introduced by a bracketed header. Sections are
+optional and a file starts in `[Rule]`.
 
 ```
 # A complete example
@@ -146,10 +143,17 @@ otherwise kept verbatim.
 | -------------- | ---------------------------------------------------------------------------------------- |
 | `name`         | Display name (required).                                                                 |
 | `hostname`     | Comma-separated domain suffixes.                                                         |
+| `icon-light`   | Base64-encoded image bytes for the icon shown in light appearance.                       |
+| `icon-dark`    | Base64-encoded image bytes for the icon shown in dark appearance.                        |
 
 Unrecognized keys are ignored. Redirect / reject / host-rewrite are configured
 per-rule via the [`rewrite` operation](#rewrite-0--request-only), not as
 set-level headers.
+
+The icon headers embed the image displayed next to the rule set in **MITM**
+settings. Providing a single variant is sufficient: when no icon matches the
+current appearance, the other variant is used. A value that is not valid
+base64, or that decodes to more than **256 KB**, is dropped.
 
 ### Rule lines
 
