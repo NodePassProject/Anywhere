@@ -68,8 +68,8 @@ final class RoutingExporter {
         await Task.detached {
             var entries: [RoutingBinaryWriter.Entry] = []
             var configurationsById: [String: ProxyConfiguration] = [:]
-
-            for ruleSet in snapshot {
+            
+            for ruleSet in snapshot.reversed() {
                 let fallbackId = ruleSet.id == "ADBlock" ? nil : defaultTargetId
                 guard let assignedId = ruleSet.assignedConfigurationId ?? fallbackId else { continue }
 
