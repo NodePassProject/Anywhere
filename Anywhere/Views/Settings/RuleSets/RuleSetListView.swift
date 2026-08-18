@@ -34,6 +34,15 @@ struct RuleSetListView: View {
         @Bindable var routingRuleSetStore = routingRuleSetStore
         List {
             Section {
+                Toggle(isOn: $adBlockEnabled) {
+                    TextWithColorfulIcon(title: "Block Advertisements", comment: nil, systemName: "shield.checkered", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                }
+                .onChange(of: adBlockEnabled) { _, newValue in
+                    guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
+                    routingRuleSetStore.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
+                }
+            }
+            Section {
                 Picker(selection: $routingRuleSetStore.bypassCountryCode) {
                     Text("Disable").tag("")
                     ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
@@ -41,15 +50,6 @@ struct RuleSetListView: View {
                     }
                 } label: {
                     TextWithColorfulIcon(title: "Country Bypass", comment: nil, systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                }
-            }
-            Section {
-                Toggle(isOn: $adBlockEnabled) {
-                    TextWithColorfulIcon(title: "Block Advertisements", comment: nil, systemName: "horn.blast.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
-                }
-                .onChange(of: adBlockEnabled) { _, newValue in
-                    guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
-                    routingRuleSetStore.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
                 }
             }
             Section {

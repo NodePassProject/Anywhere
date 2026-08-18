@@ -15,9 +15,9 @@ nonisolated final class DomainRouter: Sendable {
     // MARK: - Tier model
 
     fileprivate enum Tier: Int, CaseIterable {
-        case user = 0
-        case adBlock = 1
-        case builtIn = 2
+        case adBlock = 0
+        case builtIn = 1
+        case user = 2
         case bypass = 3
     }
 
@@ -143,7 +143,7 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         let tiers = state.matcher.tiers
-        logger.debug("[DomainRouter] Loaded tiers — user: \(tiers[Tier.user.rawValue].domainRuleCount)+\(tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(tiers[Tier.adBlock.rawValue].domainRuleCount)+\(tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(tiers[Tier.builtIn.rawValue].domainRuleCount)+\(tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(tiers[Tier.bypass.rawValue].domainRuleCount)+\(tiers[Tier.bypass.rawValue].ipRuleCount); \(state.configurationMap.count) configurations")
+        logger.debug("[DomainRouter] Loaded tiers — adBlock: \(tiers[Tier.adBlock.rawValue].domainRuleCount)+\(tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(tiers[Tier.builtIn.rawValue].domainRuleCount)+\(tiers[Tier.builtIn.rawValue].ipRuleCount), user: \(tiers[Tier.user.rawValue].domainRuleCount)+\(tiers[Tier.user.rawValue].ipRuleCount), bypass: \(tiers[Tier.bypass.rawValue].domainRuleCount)+\(tiers[Tier.bypass.rawValue].ipRuleCount); \(state.configurationMap.count) configurations")
         return state
     }
 
@@ -175,9 +175,7 @@ nonisolated final class DomainRouter: Sendable {
             for entryIndex in 0..<entryCount {
                 try readEntry(state: &state, entryIndex: UInt16(clamping: entryIndex))
             }
-
-            // Trailing names section (newer payloads): u32 count == entry count,
-            // then a u16-length-prefixed UTF-8 name per entry, in entry order.
+            
             state.ruleSetNames = readNames(expectedCount: entryCount) ?? []
         }
 
@@ -200,9 +198,6 @@ nonisolated final class DomainRouter: Sendable {
             let payload = RulePayload(action: action, entryIndex: entryIndex)
 
             var remainingRules = try u32()
-            // Upper bound on this entry's CIDR rules; reserving on the first of each family lets a bulk load
-            // skip the doubling reallocations. Clamp to what the payload could hold (min rule = 3 bytes) so a
-            // corrupt count can't drive a wild reserveCapacity.
             let reserveHint = min(Int(remainingRules), count / 3)
             var reservedV4 = false
             var reservedV6 = false
@@ -290,7 +285,6 @@ nonisolated final class DomainRouter: Sendable {
 
     func matchDomainVersioned(_ domain: String) -> (match: Match?, version: UInt64) {
         guard !domain.isEmpty else { return (nil, currentRulesVersion) }
-        // Lowercase once, outside the lock, and share the UTF-8 bytes across tiers.
         var lowered = RouteMatching.asciiLowercasedIfNeeded(domain)
         return routingState.withLock { state in
             let payload = lowered.withUTF8 { state.matcher.matchDomain(bytes: $0) }
