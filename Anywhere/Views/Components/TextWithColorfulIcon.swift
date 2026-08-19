@@ -19,11 +19,11 @@ struct TextWithColorfulIcon<F, B>: View where F : ShapeStyle, B : ShapeStyle {
             Image(systemName: systemName)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 19, height: 19)
+                .frame(width: 18, height: 18)
                 .foregroundStyle(foregroundStyle)
                 .padding(5)
                 .background(backgroundStyle)
-                .clipShape(.rect(cornerRadius: 7))
+                .clipShape(.rect(cornerRadius: 8))
             Text(String(localized: title, comment: comment))
         }
     }
@@ -43,11 +43,11 @@ struct TextWithColorfulIconAndCustomImage<F, B>: View where F : ShapeStyle, B : 
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 19, height: 19)
+                .frame(width: 18, height: 18)
                 .foregroundStyle(foregroundStyle)
                 .padding(5)
                 .background(backgroundStyle)
-                .clipShape(.rect(cornerRadius: 7))
+                .clipShape(.rect(cornerRadius: 8))
             Text(String(localized: title, comment: comment))
         }
     }

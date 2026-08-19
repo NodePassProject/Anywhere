@@ -8,6 +8,8 @@
 import SwiftUI
 
 struct SubscriptionView<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    
     let subscription: Subscription
     let configurationCount: Int
     @Binding var isExpanded: Bool
@@ -18,14 +20,10 @@ struct SubscriptionView<Content: View>: View {
 
     @ViewBuilder let content: Content
 
-    @Environment(\.colorScheme) private var colorScheme
-
-    private let animation: Animation = .spring(response: 0.5, dampingFraction: 0.82)
-
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                withAnimation(animation) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
                     isExpanded.toggle()
                 }
             } label: {
@@ -73,7 +71,7 @@ struct SubscriptionView<Content: View>: View {
 
     @ViewBuilder
     private var iconView: some View {
-        let imageSize: CGFloat = isExpanded ? 32 : 16
+        let imageSize: CGFloat = isExpanded ? 36 : 18
         if let icon = iconData, let image = UIImage(data: icon) {
             Image(uiImage: image)
                 .resizable()

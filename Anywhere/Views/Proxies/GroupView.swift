@@ -65,7 +65,7 @@ struct GroupView<Content: View>: View {
     
     @ViewBuilder
     private var iconView: some View {
-        let imageSize: CGFloat = isExpanded ? 32 : 16
+        let imageSize: CGFloat = isExpanded ? 36 : 18
         Image(systemName: "folder")
             .resizable()
             .scaledToFit()

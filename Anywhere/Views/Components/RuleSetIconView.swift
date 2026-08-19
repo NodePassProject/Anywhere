@@ -26,16 +26,12 @@ struct RuleSetIconView: View {
                 .interpolation(.high)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 32, height: 32)
-                .clipShape(.rect(cornerRadius: 7))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(.gray.opacity(0.2), lineWidth: 1)
-                )
+                .frame(width: 30, height: 30)
+                .clipShape(.rect(cornerRadius: 8))
         } else {
             Image(systemName: "list.bullet.rectangle")
                 .foregroundStyle(.secondary)
-                .frame(width: 32, height: 32)
+                .frame(width: 30, height: 30)
         }
     }
 }
