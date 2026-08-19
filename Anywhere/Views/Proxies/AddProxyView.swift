@@ -91,7 +91,7 @@ struct AddProxyView: View {
         }
         .alert("Remnawave HWID", isPresented: $showingRemnawaveHWIDAlert) {
             Button("Enable") {
-                fetchSubscription(url: pendingSubscriptionURL, withRemnawaveHWID: true)
+                fetchSubscription(url: pendingSubscriptionURL)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -276,15 +276,15 @@ struct AddProxyView: View {
                 showingRemnawaveHWIDAlert = true
                 return
             }
-            fetchSubscription(url: trimmedURL, withRemnawaveHWID: requiresRemnawaveHWID)
+            fetchSubscription(url: trimmedURL)
         }
     }
 
-    private func fetchSubscription(url: String, withRemnawaveHWID: Bool) {
+    private func fetchSubscription(url: String) {
         isLoading = true
         Task {
             do {
-                let result = try await SubscriptionFetcher.fetch(url: url, withRemnawaveHWID: withRemnawaveHWID)
+                let result = try await SubscriptionFetcher.fetch(url: url)
                 let subscription = Subscription(
                     name: result.name ?? URL(string: url)?.host ?? String(localized: "Subscription"),
                     url: url,

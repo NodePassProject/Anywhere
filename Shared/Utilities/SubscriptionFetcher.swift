@@ -21,14 +21,14 @@ nonisolated struct SubscriptionFetcher {
         let iconDark: Data?
     }
 
-    static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
+    static func fetch(url urlString: String) async throws -> Result {
         guard let url = URL(string: urlString) else {
             throw AnywhereError.subscription(.invalidURL)
         }
 
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
-        if withRemnawaveHWID {
+        if AWCore.getRemnawaveHWIDEnabled() {
             request.setValue(AWCore.getRemnawaveHWID(), forHTTPHeaderField: "x-hwid")
         }
 
