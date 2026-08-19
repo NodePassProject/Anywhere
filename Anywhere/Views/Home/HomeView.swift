@@ -65,10 +65,10 @@ struct HomeView: View {
             } action: { size in
                 containerSize = size
             }
-            .navigationDestination(isPresented: $showingProxiesView) {
+            .sheet(isPresented: $showingProxiesView) {
                 ProxiesView()
             }
-            .navigationDestination(isPresented: $showingSettingsView) {
+            .sheet(isPresented: $showingSettingsView) {
                 SettingsView()
             }
             .sheet(isPresented: $showingAddSheet) {

@@ -108,6 +108,10 @@ struct SubscriptionView<Content: View>: View {
         }
         .padding()
         .contentShape(RoundedRectangle(cornerRadius: 24))
+        .background {
+            RoundedRectangle(cornerRadius: 24)
+                .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
+        }
         .swipeActions {
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")

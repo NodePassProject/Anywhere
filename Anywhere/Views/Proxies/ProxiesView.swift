@@ -13,6 +13,7 @@ private enum ProxyType: String {
 }
 
 struct ProxiesView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(AppContainer.self) private var appContainer
     @Environment(ProxySelection.self) private var proxySelection
     @Environment(LatencyCenter.self) private var latencyCenter
@@ -207,6 +208,14 @@ struct ProxiesView: View {
     
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button {
+                dismiss()
+            } label: {
+                Label("Close", systemImage: "xmark")
+            }
+        }
+        
         if let subscription = expandedSubscription {
             ToolbarItem(placement: .bottomBar) {
                 if updatingSubscription?.id == subscription.id {

@@ -59,7 +59,7 @@ struct GroupEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Name", comment: nil, systemName: "folder.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Name", comment: nil, systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 }
 
