@@ -301,7 +301,7 @@ actor MITMBridgeClientLeg: MITMResponseSink {
         case Codec.FrameType.priority:     break
         case Codec.FrameType.goaway:       break
         case Codec.FrameType.pushPromise:  fail("client sent PUSH_PROMISE")
-        default:                           break // RFC 9113 §4.1: ignore unknown types
+        default:                           break
         }
         return false
     }
@@ -342,8 +342,6 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             paceStates[frame.streamID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + inc)
             flushResponse(frame.streamID)
         } else if streamMethods[frame.streamID] != nil {
-            // Window enlarged before the response head delivered (no PaceState yet); stash the
-            // credit for makePaceState to fold in.
             let acc = (pendingStreamCredit[frame.streamID] ?? 0) + inc
             pendingStreamCredit[frame.streamID] = min(MITMHTTP2FlowController.maxWindow, acc)
         }
@@ -724,9 +722,9 @@ actor MITMBridgeClientLeg: MITMResponseSink {
             return false
         }
         let url = HTTPHeader.firstValue(in: buf.rewrittenHeaders, named: ":path").map { "https://\(host)\($0)" }
+        requestStreams[streamID] = .streaming(remaining: nil)
         delegate?.clientLegSendRequestHead(head, url: url, endStream: false)
         if !buf.data.isEmpty { delegate?.clientLegSendRequestData(streamID: streamID, buf.data, endStream: false) }
-        requestStreams[streamID] = .streaming(remaining: nil)
         return false
     }
 
