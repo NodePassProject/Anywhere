@@ -8,9 +8,9 @@
 import SwiftUI
 
 struct VoyagerNotice: View {
-    @Environment(AppState.self) private var appState
-
     let description: LocalizedStringKey
+
+    @State private var isPresentingVoyager = false
 
     init(_ description: LocalizedStringKey) {
         self.description = description
@@ -29,10 +29,11 @@ struct VoyagerNotice: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 JoinVoyagerButton {
-                    appState.isPresentingVoyagerView = true
+                    isPresentingVoyager = true
                 }
             }
             .padding(.vertical, 4)
+            .voyagerCover(isPresented: $isPresentingVoyager)
         }
     }
 }

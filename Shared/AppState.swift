@@ -12,5 +12,4 @@ import Observation
 @Observable
 final class AppState {
     var orphanedRuleSetNames: [String] = []
-    var isPresentingVoyagerView = false
 }

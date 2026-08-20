@@ -43,12 +43,6 @@ struct ContentView: View {
                 .sheet(isPresented: $showingImportRuleSetsSheet, onDismiss: { pendingRuleSetLinks = [] }) {
                     ImportRuleSetsView(links: pendingRuleSetLinks)
                 }
-                .fullScreenCover(isPresented: Binding(
-                    get: { appState.isPresentingVoyagerView },
-                    set: { appState.isPresentingVoyagerView = $0 }
-                )) {
-                    AnywhereVoyagerView()
-                }
                 .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
                     Button(String(localized: "OK")) {}
                 } message: {
