@@ -53,7 +53,7 @@ struct SubscriptionView<Content: View>: View {
         .padding(.vertical, isExpanded ? 12 : 0)
         .background {
             RoundedRectangle(cornerRadius: 24)
-                .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
+                .fill(Color(isExpanded ? .systemGroupedBackground : .clear))
                 .shadow(color: .primary.opacity(isExpanded ? 0.2 : 0), radius: 6)
                 .padding(.horizontal, isExpanded ? 0 : 12)
         }
@@ -72,7 +72,7 @@ struct SubscriptionView<Content: View>: View {
     @ViewBuilder
     private var iconView: some View {
         let imageSize: CGFloat = isExpanded ? 36 : 18
-        if let icon = iconData, let image = UIImage(data: icon) {
+        if let icon = iconData, let image = SubscriptionIconCache.image(for: icon) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFit()
@@ -107,11 +107,12 @@ struct SubscriptionView<Content: View>: View {
             }
         }
         .padding()
-        .contentShape(RoundedRectangle(cornerRadius: 24))
         .background {
             RoundedRectangle(cornerRadius: 24)
                 .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
         }
+        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
         .swipeActions {
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
@@ -129,6 +130,20 @@ struct SubscriptionView<Content: View>: View {
                 Label("Delete", systemImage: "trash")
             }
         }
+    }
+}
+
+private enum SubscriptionIconCache {
+    static let cache = NSCache<NSData, UIImage>()
+
+    static func image(for data: Data) -> UIImage? {
+        let key = data as NSData
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+        guard let image = UIImage(data: data) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
     }
 }
 

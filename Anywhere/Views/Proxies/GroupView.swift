@@ -54,7 +54,7 @@ struct GroupView<Content: View>: View {
         .padding(.vertical, isExpanded ? 12 : 0)
         .background {
             RoundedRectangle(cornerRadius: 24)
-                .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
+                .fill(Color(isExpanded ? .systemGroupedBackground : .clear))
                 .shadow(color: .primary.opacity(isExpanded ? 0.2 : 0), radius: 6)
                 .padding(.horizontal, isExpanded ? 0 : 12)
         }
@@ -82,11 +82,12 @@ struct GroupView<Content: View>: View {
             TagBadge(text: memberCount.description, color: .accentColor)
         }
         .padding()
-        .contentShape(RoundedRectangle(cornerRadius: 24))
         .background {
             RoundedRectangle(cornerRadius: 24)
                 .fill(Color(isExpanded ? .systemGroupedBackground : .secondarySystemGroupedBackground))
         }
+        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
         .swipeActions {
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
