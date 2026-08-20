@@ -8,23 +8,14 @@
 import Foundation
 
 nonisolated struct TLS13HandshakeState {
-    /// Set when the ServerHello cipher suite is parsed.
     var keyDerivation: TLS13KeyDerivation?
-
-    /// Held until the application keys are derived from the full transcript.
     var handshakeSecret: Data?
-
-    /// Handshake-traffic keys; decrypt Certificate/CertificateVerify/Finished.
     var handshakeKeys: TLS13HandshakeKeys?
-
-    /// Derived after the server Finished is verified.
     var applicationKeys: TLS13ApplicationKeys?
-
     var handshakeTranscript: Data?
-
     var serverHandshakeSeqNum: UInt64 = 0
-    
     var transcriptBeforeCertVerify: Data?
     var certificateVerifySignature: Data?
     var certificateVerifyAlgorithm: UInt16 = 0
+    var clientCertRequested = false
 }

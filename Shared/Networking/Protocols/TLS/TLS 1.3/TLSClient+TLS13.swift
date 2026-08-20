@@ -40,11 +40,7 @@ extension TLSClient {
             tls13.transcriptBeforeCertVerify = nil
             tls13.certificateVerifySignature = nil
             tls13.certificateVerifyAlgorithm = 0
-
-            // With ECH, the accepted handshake transcript is seeded by the inner
-            // ClientHello. Detect acceptance via the confirmation embedded in the
-            // ServerHello random; on rejection fall back to the outer hello so
-            // the (doomed) handshake still decrypts far enough to read retry configs.
+            
             var effectiveClientHello = clientHello
             if let ech = echContext {
                 if echAcceptConfirmed(serverHello: serverHello, ech: ech, kd: tls13.keyDerivation!) {
@@ -72,15 +68,7 @@ extension TLSClient {
     }
 
     // MARK: - ECH Accept Confirmation
-
-    /// Returns true if the ServerHello signals that ECH was accepted.
-    ///
-    /// The server places an 8-byte confirmation in the last 8 bytes of the
-    /// ServerHello random, derived (with the negotiated cipher suite's hash) as:
-    ///
-    ///     PRK  = HKDF-Extract(salt: 0, IKM: ClientHelloInner.random)
-    ///     conf = Hash(innerTranscript || ServerHello with random[24..32] zeroed)
-    ///     tag  = HKDF-Expand-Label(PRK, "ech accept confirmation", conf, 8)
+    
     private func echAcceptConfirmed(serverHello: Data, ech: ECHClientContext, kd: TLS13KeyDerivation) -> Bool {
         let serverHelloBytes = [UInt8](serverHello)
         guard serverHelloBytes.count >= 38 else { return false }
@@ -96,9 +84,7 @@ extension TLSClient {
 
         return constantTimeEqual(expected, Data(serverHelloBytes[30..<38]))
     }
-
-    /// Extract the `retry_configs` ECHConfigList from the server's
-    /// encrypted_client_hello extension in EncryptedExtensions, if present.
+    
     private func parseECHRetryConfigList(fromEncryptedExtensions body: Data) -> Data? {
         let extensionsBytes = [UInt8](body)
         guard extensionsBytes.count >= 2 else { return nil }
@@ -128,162 +114,159 @@ extension TLSClient {
         var startOffset = initialOffset
 
         while true {
-        guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
-            throw AnywhereError.tls(.handshakeFailed(detail: "Missing handshake keys"))
-        }
-
-        var offset = startOffset
-        var fullTranscript = tls13.handshakeTranscript ?? Data()
-        var foundServerFinished = false
-
-        while offset + 5 <= buffer.count {
-            let contentType = buffer[offset]
-            let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
-
-            guard offset + 5 + recordLen <= buffer.count else { break }
-
-            if contentType == TLSContentType.changeCipherSpec || contentType == TLSContentType.handshake {
-                offset += 5 + recordLen
-                continue
-            } else if contentType == TLSContentType.applicationData {
-                let recordHeader = buffer.subdata(in: offset..<(offset + 5))
-                let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
-
-                do {
-                    let seqNum = tls13.serverHandshakeSeqNum
-                    let decrypted = try TLSRecordCrypto.decryptRecord(
-                        ciphertext: ciphertext,
-                        key: SymmetricKey(data: keys.serverKey),
-                        iv: keys.serverIV,
-                        seqNum: seqNum,
-                        recordHeader: recordHeader,
-                        cipherSuite: kd.cipherSuite
-                    )
-                    tls13.serverHandshakeSeqNum += 1
-
-                    var hsOffset = 0
-                    while hsOffset + 4 <= decrypted.count {
-                        let hsType = decrypted[hsOffset]
-                        let hsLen = Int(decrypted[hsOffset + 1]) << 16 | Int(decrypted[hsOffset + 2]) << 8 | Int(decrypted[hsOffset + 3])
-
-                        guard hsOffset + 4 + hsLen <= decrypted.count else { break }
-
-                        let hsMessage = decrypted.subdata(in: hsOffset..<(hsOffset + 4 + hsLen))
-                        let hsBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
-
-                        switch hsType {
-                        case TLSHandshakeType.encryptedExtensions:
-                            fullTranscript.append(hsMessage)
-                            if let ech = echContext, ech.isRejected {
-                                // ECH was rejected; the server may offer fresh
-                                // configs here. Skip ALPN validation — it reflects
-                                // the cover (outer) hello, and we will fail anyway.
-                                ech.outcome = .rejected(retryConfigList: parseECHRetryConfigList(fromEncryptedExtensions: hsBody))
-                            } else if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
-                                guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(alpn) else {
-                                    throw AnywhereError.tls(.handshakeFailed(detail: "Server selected an ALPN we didn't offer"))
+            guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
+                throw AnywhereError.tls(.handshakeFailed(detail: "Missing handshake keys"))
+            }
+            
+            var offset = startOffset
+            var fullTranscript = tls13.handshakeTranscript ?? Data()
+            var foundServerFinished = false
+            
+            while offset + 5 <= buffer.count {
+                let contentType = buffer[offset]
+                let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
+                
+                guard offset + 5 + recordLen <= buffer.count else { break }
+                
+                if contentType == TLSContentType.changeCipherSpec || contentType == TLSContentType.handshake {
+                    offset += 5 + recordLen
+                    continue
+                } else if contentType == TLSContentType.applicationData {
+                    let recordHeader = buffer.subdata(in: offset..<(offset + 5))
+                    let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
+                    
+                    do {
+                        let seqNum = tls13.serverHandshakeSeqNum
+                        let decrypted = try TLSRecordCrypto.decryptRecord(
+                            ciphertext: ciphertext,
+                            key: SymmetricKey(data: keys.serverKey),
+                            iv: keys.serverIV,
+                            seqNum: seqNum,
+                            recordHeader: recordHeader,
+                            cipherSuite: kd.cipherSuite
+                        )
+                        tls13.serverHandshakeSeqNum += 1
+                        
+                        var hsOffset = 0
+                        while hsOffset + 4 <= decrypted.count {
+                            let hsType = decrypted[hsOffset]
+                            let hsLen = Int(decrypted[hsOffset + 1]) << 16 | Int(decrypted[hsOffset + 2]) << 8 | Int(decrypted[hsOffset + 3])
+                            
+                            guard hsOffset + 4 + hsLen <= decrypted.count else { break }
+                            
+                            let hsMessage = decrypted.subdata(in: hsOffset..<(hsOffset + 4 + hsLen))
+                            let hsBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
+                            
+                            switch hsType {
+                            case TLSHandshakeType.encryptedExtensions:
+                                fullTranscript.append(hsMessage)
+                                if let ech = echContext, ech.isRejected {
+                                    ech.outcome = .rejected(retryConfigList: parseECHRetryConfigList(fromEncryptedExtensions: hsBody))
+                                } else if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
+                                    guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(alpn) else {
+                                        throw AnywhereError.tls(.handshakeFailed(detail: "Server selected an ALPN we didn't offer"))
+                                    }
+                                    self.negotiatedALPN = alpn
                                 }
-                                self.negotiatedALPN = alpn
-                            }
-
-                        case TLSHandshakeType.certificate:
-                            fullTranscript.append(hsMessage)
-                            parseTLS13CertificateMessage(hsBody)
-
-                        case TLSHandshakeType.certificateVerify:
-                            tls13.transcriptBeforeCertVerify = fullTranscript
-                            fullTranscript.append(hsMessage)
-                            if hsBody.count >= 4 {
-                                tls13.certificateVerifyAlgorithm = UInt16(hsBody[0]) << 8 | UInt16(hsBody[1])
-                                let sigLen = Int(hsBody[2]) << 8 | Int(hsBody[3])
-                                if hsBody.count >= 4 + sigLen {
-                                    tls13.certificateVerifySignature = hsBody.subdata(in: 4..<(4 + sigLen))
+                                
+                            case TLSHandshakeType.certificateRequest:
+                                fullTranscript.append(hsMessage)
+                                tls13.clientCertRequested = true
+                                
+                            case TLSHandshakeType.certificate:
+                                fullTranscript.append(hsMessage)
+                                parseTLS13CertificateMessage(hsBody)
+                                
+                            case TLSHandshakeType.certificateVerify:
+                                tls13.transcriptBeforeCertVerify = fullTranscript
+                                fullTranscript.append(hsMessage)
+                                if hsBody.count >= 4 {
+                                    tls13.certificateVerifyAlgorithm = UInt16(hsBody[0]) << 8 | UInt16(hsBody[1])
+                                    let sigLen = Int(hsBody[2]) << 8 | Int(hsBody[3])
+                                    if hsBody.count >= 4 + sigLen {
+                                        tls13.certificateVerifySignature = hsBody.subdata(in: 4..<(4 + sigLen))
+                                    }
                                 }
-                            }
-
-                        case TLSHandshakeType.finished:
-                            if let keys = self.tls13.handshakeKeys {
-                                let expectedVerifyData = kd.finishedPayload(
-                                    trafficSecret: keys.serverTrafficSecret,
-                                    transcript: fullTranscript
-                                )
-                                guard hsBody.count == expectedVerifyData.count,
-                                      constantTimeEqual(hsBody, expectedVerifyData) else {
-                                    throw AnywhereError.tls(.handshakeFailed(detail: "Server Finished verification failed"))
+                                
+                            case TLSHandshakeType.finished:
+                                if let keys = self.tls13.handshakeKeys {
+                                    let expectedVerifyData = kd.finishedPayload(
+                                        trafficSecret: keys.serverTrafficSecret,
+                                        transcript: fullTranscript
+                                    )
+                                    guard hsBody.count == expectedVerifyData.count,
+                                          constantTimeEqual(hsBody, expectedVerifyData) else {
+                                        throw AnywhereError.tls(.handshakeFailed(detail: "Server Finished verification failed"))
+                                    }
                                 }
+                                fullTranscript.append(hsMessage)
+                                foundServerFinished = true
+                                
+                            case TLSHandshakeType.compressedCertificate:
+                                fullTranscript.append(hsMessage)
+                                if let decompressed = decompressCertificate(hsBody) {
+                                    parseTLS13CertificateMessage(decompressed)
+                                } else {
+                                    logger.warning("[TLS] Failed to decompress CompressedCertificate")
+                                }
+                                
+                            default:
+                                fullTranscript.append(hsMessage)
                             }
-                            fullTranscript.append(hsMessage)
-                            foundServerFinished = true
-
-                        case TLSHandshakeType.compressedCertificate:
-                            fullTranscript.append(hsMessage)
-                            if let decompressed = decompressCertificate(hsBody) {
-                                parseTLS13CertificateMessage(decompressed)
-                            } else {
-                                logger.warning("[TLS] Failed to decompress CompressedCertificate")
-                            }
-
-                        default:
-                            fullTranscript.append(hsMessage)
+                            
+                            hsOffset += 4 + hsLen
                         }
-
-                        hsOffset += 4 + hsLen
+                    } catch {
+                        throw AnywhereError.tls(.handshakeFailed(detail: "Record decryption failed"))
                     }
-                } catch {
-                    throw AnywhereError.tls(.handshakeFailed(detail: "Record decryption failed"))
+                }
+                
+                offset += 5 + recordLen
+                
+                if foundServerFinished { break }
+            }
+            
+            let processedOffset = offset
+            tls13.handshakeTranscript = fullTranscript
+            
+            let remainingBuffer = offset < buffer.count ? Data(buffer[offset...]) : nil
+            self.postHandshakeBuffer = remainingBuffer
+            
+            if foundServerFinished {
+                if let ech = echContext, case .rejected(let retryConfigList) = ech.outcome {
+                    throw AnywhereError.tls(.ech(.rejected(retryConfigList: retryConfigList)))
+                }
+                
+                try validateCertificate()
+                
+                let skipVerification = self.configuration.insecureSkipVerify || CertificatePolicy.allowInsecure
+                if !skipVerification {
+                    if let error = TLS13CertificateVerifier.verify(
+                        transcriptBeforeCertVerify: self.tls13.transcriptBeforeCertVerify,
+                        algorithm: self.tls13.certificateVerifyAlgorithm,
+                        signature: self.tls13.certificateVerifySignature,
+                        serverCertificates: self.serverCertificates,
+                        keyDerivation: self.tls13.keyDerivation
+                    ) {
+                        throw error
+                    }
+                }
+                
+                return try await finishTLS13Handshake(fullTranscript: fullTranscript)
+            } else {
+                guard let connection else {
+                    throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
+                }
+                switch try await connection.receive() {
+                case .bytes(let moreData):
+                    buffer.append(moreData)
+                    startOffset = processedOffset
+                    continue
+                case .end:
+                    throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before TLS 1.3 handshake completed"))
                 }
             }
-
-            offset += 5 + recordLen
-
-            if foundServerFinished { break }
         }
-
-        let processedOffset = offset
-        tls13.handshakeTranscript = fullTranscript
-
-        let remainingBuffer = offset < buffer.count ? Data(buffer[offset...]) : nil
-        self.postHandshakeBuffer = remainingBuffer
-
-        if foundServerFinished {
-            // ECH rejected: the handshake terminated against the cover name, not
-            // the intended server. Surface the rejection (with any retry configs)
-            // rather than validating the wrong certificate.
-            if let ech = echContext, case .rejected(let retryConfigList) = ech.outcome {
-                throw AnywhereError.tls(.ech(.rejected(retryConfigList: retryConfigList)))
-            }
-
-            try validateCertificate()
-
-            // CertificateVerify is MANDATORY in a full TLS 1.3 handshake.
-            let skipVerification = self.configuration.insecureSkipVerify || CertificatePolicy.allowInsecure
-            if !skipVerification {
-                if let error = TLS13CertificateVerifier.verify(
-                    transcriptBeforeCertVerify: self.tls13.transcriptBeforeCertVerify,
-                    algorithm: self.tls13.certificateVerifyAlgorithm,
-                    signature: self.tls13.certificateVerifySignature,
-                    serverCertificates: self.serverCertificates,
-                    keyDerivation: self.tls13.keyDerivation
-                ) {
-                    throw error
-                }
-            }
-
-            return try await finishTLS13Handshake(fullTranscript: fullTranscript)
-        } else {
-            guard let connection else {
-                throw AnywhereError.transport(.connectionFailed(endpoint: nil, detail: "Connection cancelled"))
-            }
-            switch try await connection.receive() {
-            case .bytes(let moreData):
-                buffer.append(moreData)
-                startOffset = processedOffset
-                continue
-            case .end:
-                throw AnywhereError.tls(.handshakeFailed(detail: "Connection closed before TLS 1.3 handshake completed"))
-            }
-        }
-        } // while true
     }
 
     // MARK: - TLS 1.3 Certificate Parsing
@@ -404,7 +387,27 @@ extension TLSClient {
 
         var ccsRecord = Data([TLSContentType.changeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01])
 
-        let verifyData = kd.clientFinishedPayload(clientTrafficSecret: keys.clientTrafficSecret, transcript: transcript)
+        let cipherSuite = tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+        var clientSeqNum: UInt64 = 0
+        
+        var finishedTranscript = transcript
+
+        if tls13.clientCertRequested {
+            let certMsg = Data([TLSHandshakeType.certificate, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00])
+            finishedTranscript.append(certMsg)
+
+            let certRecord = try TLSRecordCrypto.encryptHandshakeRecord(
+                plaintext: certMsg,
+                key: SymmetricKey(data: keys.clientKey),
+                iv: keys.clientIV,
+                sequenceNumber: clientSeqNum,
+                cipherSuite: cipherSuite
+            )
+            clientSeqNum += 1
+            ccsRecord.append(certRecord)
+        }
+
+        let verifyData = kd.clientFinishedPayload(clientTrafficSecret: keys.clientTrafficSecret, transcript: finishedTranscript)
 
         var finishedMsg = Data()
         finishedMsg.append(TLSHandshakeType.finished)
@@ -417,8 +420,8 @@ extension TLSClient {
             plaintext: finishedMsg,
             key: SymmetricKey(data: keys.clientKey),
             iv: keys.clientIV,
-            sequenceNumber: 0,
-            cipherSuite: tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+            sequenceNumber: clientSeqNum,
+            cipherSuite: cipherSuite
         )
         ccsRecord.append(finishedRecord)
 
