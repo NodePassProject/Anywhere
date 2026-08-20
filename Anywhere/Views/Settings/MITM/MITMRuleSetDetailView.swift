@@ -15,7 +15,7 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
 
-    @Environment(AppContainer.self) private var container
+    @Environment(Operations.self) private var operations
     @Environment(MITMRuleSetStore.self) private var store
 
     let ruleSet: MITMRuleSet?
@@ -54,7 +54,7 @@ struct MITMRuleSetDetailView: View {
                     set: { newValue in
                         enabled = newValue
                         if let id = ruleSet?.id {
-                            store.setRuleSet(id, enabled: newValue)
+                            operations.mitmRuleSets.setRuleSet(id, enabled: newValue)
                         }
                     }
                 ))
@@ -135,7 +135,7 @@ struct MITMRuleSetDetailView: View {
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-        store.updateRuleSet(id, domainSuffixes: suffixes, rules: rules)
+        operations.mitmRuleSets.updateRuleSet(id, domainSuffixes: suffixes, rules: rules)
     }
 
     @ViewBuilder
@@ -211,7 +211,7 @@ struct MITMRuleSetDetailView: View {
             set: { newValue in
                 parameterValues[parameter.name] = newValue
                 if let id = ruleSet?.id {
-                    store.setParameterValue(id, name: parameter.name, value: newValue)
+                    operations.mitmRuleSets.setParameterValue(id, name: parameter.name, value: newValue)
                 }
             }
         )
@@ -296,7 +296,7 @@ struct MITMRuleSetDetailView: View {
         isUpdating = true
         Task {
             do {
-                let updated = try await container.mitmRuleSetRefresher.refresh(id: id)
+                let updated = try await operations.mitmRuleSets.refresh(id: id)
                 loadState(from: updated)
                 isUpdating = false
                 updateSucceeded = true

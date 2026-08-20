@@ -32,10 +32,8 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
 }
 
 struct AddProxyView: View {
-    @Environment(ProxySelection.self) private var proxySelection
-    @Environment(ConfigurationStore.self) private var configurationStore
-    @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) var dismiss
+    @Environment(Operations.self) private var operations
     @Binding var showingManualAddSheet: Bool
     var deepLinkURL: String?
 
@@ -263,7 +261,7 @@ struct AddProxyView: View {
         if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL)
-                configurationStore.add(configuration); proxySelection.selectIfNone(configuration)
+                operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -296,7 +294,7 @@ struct AddProxyView: View {
                     iconLight: result.iconLight,
                     iconDark: result.iconDark
                 )
-                subscriptionStore.add(subscription, configurations: result.configurations)
+                operations.subscriptions.add(subscription, configurations: result.configurations)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

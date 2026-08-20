@@ -18,6 +18,7 @@ final class WatchSessionManager: NSObject {
     private let configurationStore: ConfigurationStore
     private let chainStore: ChainStore
     private let subscriptionStore: SubscriptionStore
+    private let operations: Operations
 
     private var session: WCSession?
     
@@ -28,13 +29,15 @@ final class WatchSessionManager: NSObject {
         selection: ProxySelection,
         configurationStore: ConfigurationStore,
         chainStore: ChainStore,
-        subscriptionStore: SubscriptionStore
+        subscriptionStore: SubscriptionStore,
+        operations: Operations
     ) {
         self.tunnel = tunnel
         self.selection = selection
         self.configurationStore = configurationStore
         self.chainStore = chainStore
         self.subscriptionStore = subscriptionStore
+        self.operations = operations
         super.init()
     }
     
@@ -63,7 +66,12 @@ final class WatchSessionManager: NSObject {
 
     private func buildSnapshot() -> WatchBridge.Snapshot {
         var sections: [WatchBridge.Section] = []
-        let standalone = configurationStore.standalonePickerItems
+        let picker = PickerQuery(
+            configurations: configurationStore.configurations,
+            chains: chainStore.chains,
+            subscriptions: subscriptionStore.subscriptions
+        )
+        let standalone = picker.standaloneItems
         if !standalone.isEmpty {
             sections.append(WatchBridge.Section(
                 id: WatchBridge.standaloneSectionId,
@@ -71,7 +79,7 @@ final class WatchSessionManager: NSObject {
                 items: standalone.map { WatchBridge.Item(id: $0.id, name: $0.name) }
             ))
         }
-        let chains = chainStore.pickerItems
+        let chains = picker.chainItems
         if !chains.isEmpty {
             sections.append(WatchBridge.Section(
                 id: WatchBridge.chainsSectionId,
@@ -79,7 +87,7 @@ final class WatchSessionManager: NSObject {
                 items: chains.map { WatchBridge.Item(id: $0.id, name: $0.name) }
             ))
         }
-        for section in subscriptionStore.pickerSections {
+        for section in picker.subscriptionSections {
             sections.append(WatchBridge.Section(
                 id: section.id,
                 header: section.header,
@@ -126,7 +134,7 @@ final class WatchSessionManager: NSObject {
             await waitUntilReady()
         case .toggleVPN:
             await waitUntilReady()
-            tunnel.toggle()
+            operations.tunnel.toggle()
         case .select(let id):
             await waitUntilReady()
             select(id: id)
@@ -137,9 +145,9 @@ final class WatchSessionManager: NSObject {
     private func select(id: UUID) {
         let configurations = configurationStore.configurations
         if let chain = chainStore.chains.first(where: { $0.id == id }) {
-            selection.selectChain(chain, configurations: configurations)
+            operations.selection.selectChain(chain, configurations: configurations)
         } else if let configuration = configurations.first(where: { $0.id == id }) {
-            selection.selectedConfiguration = configuration
+            operations.selection.select(configuration)
         }
     }
     

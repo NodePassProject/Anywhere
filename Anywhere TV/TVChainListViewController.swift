@@ -10,13 +10,18 @@ import UIKit
 class TVChainListViewController: UITableViewController {
 
     private let container: AppContainer
-    private var selection: ProxySelection { container.selection }
-    private var latency: LatencyCenter { container.latency }
-    private var coordinator: ChainRowCoordinator { container.chainRows }
+    private lazy var operations = Operations(container: container)
+    private let coordinator: ChainRowCoordinator
     private var dataSource: UITableViewDiffableDataSource<Int, UUID>!
 
     init(container: AppContainer) {
         self.container = container
+        self.coordinator = ChainRowCoordinator(
+            chainStore: container.chainStore,
+            configurationStore: container.configurationStore,
+            selection: container.selection,
+            latency: container.latency
+        )
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -52,9 +57,9 @@ class TVChainListViewController: UITableViewController {
     }
 
     private func configureDataSource() {
-        dataSource = UITableViewDiffableDataSource<Int, UUID>(tableView: tableView) { [container] tableView, indexPath, id in
+        dataSource = UITableViewDiffableDataSource<Int, UUID>(tableView: tableView) { [coordinator] tableView, indexPath, id in
             let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
-            guard let model = container.chainRows.model(for: id) else { return cell }
+            guard let model = coordinator.model(for: id) else { return cell }
             cell.configurationUpdateHandler = { cell, _ in
                 (cell as? TVChainCell)?.configure(model)
             }
@@ -94,7 +99,7 @@ class TVChainListViewController: UITableViewController {
         let configurations = container.configurationStore.configurations
         let proxies = chain.resolveProxies(from: configurations)
         if proxies.count == chain.proxyIds.count && proxies.count >= 2 {
-            selection.selectChain(chain, configurations: configurations)
+            operations.selection.selectChain(chain, configurations: configurations)
         }
     }
 
@@ -112,7 +117,7 @@ class TVChainListViewController: UITableViewController {
 
             if isValid {
                 actions.append(UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                    self.latency.testChainLatency(for: chain, configurations: configurations)
+                    self.operations.latency.testChain(chain)
                 })
             }
 
@@ -121,7 +126,7 @@ class TVChainListViewController: UITableViewController {
             })
 
             actions.append(UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                self.container.chainStore.delete(chain)
+                self.operations.chains.delete(chain)
             })
 
             return UIMenu(children: actions)
@@ -145,15 +150,15 @@ class TVChainListViewController: UITableViewController {
     }
 
     @objc private func testAllTapped() {
-        latency.testAllChainLatencies(chains: container.chainStore.chains, configurations: container.configurationStore.configurations)
+        operations.latency.testChains(container.chainStore.chains)
     }
 
     private func presentEditor(for chain: ProxyChain?) {
-        let editor = TVChainEditorViewController(container: container, chain: chain) { [container] newChain in
+        let editor = TVChainEditorViewController(container: container, chain: chain) { [weak self] newChain in
             if chain != nil {
-                container.chainStore.update(newChain)
+                self?.operations.chains.update(newChain)
             } else {
-                container.chainStore.add(newChain)
+                self?.operations.chains.add(newChain)
             }
         }
         let nav = UINavigationController(rootViewController: editor)

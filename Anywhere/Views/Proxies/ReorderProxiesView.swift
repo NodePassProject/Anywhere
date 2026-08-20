@@ -16,6 +16,7 @@ enum ReorderScope: Hashable, Identifiable {
 }
 
 struct ReorderView: View {
+    @Environment(Operations.self) private var operations
     @Environment(ConfigurationStore.self) private var configurationStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(GroupStore.self) private var groupStore
@@ -80,7 +81,7 @@ struct ReorderView: View {
                     configurationRow(configuration)
                 }
                 .onMove { source, destination in
-                    configurationStore.moveConfigurations(withIds: standalone.map(\.id), fromOffsets: source, toOffset: destination)
+                    operations.configurations.move(withIds: standalone.map(\.id), fromOffsets: source, toOffset: destination)
                 }
             }
         }
@@ -92,7 +93,7 @@ struct ReorderView: View {
                     chainRow(chain)
                 }
                 .onMove { source, destination in
-                    chainStore.moveChains(withIds: chains.map(\.id), fromOffsets: source, toOffset: destination)
+                    operations.chains.move(withIds: chains.map(\.id), fromOffsets: source, toOffset: destination)
                 }
             }
         }
@@ -104,7 +105,7 @@ struct ReorderView: View {
                     groupRow(group)
                 }
                 .onMove { source, destination in
-                    groupStore.move(.servers, fromOffsets: source, toOffset: destination)
+                    operations.groups.move(.servers, fromOffsets: source, toOffset: destination)
                 }
             }
         }
@@ -116,7 +117,7 @@ struct ReorderView: View {
                     groupRow(group)
                 }
                 .onMove { source, destination in
-                    groupStore.move(.chains, fromOffsets: source, toOffset: destination)
+                    operations.groups.move(.chains, fromOffsets: source, toOffset: destination)
                 }
             }
         }
@@ -127,7 +128,7 @@ struct ReorderView: View {
                     subscriptionRow(subscription)
                 }
                 .onMove { source, destination in
-                    subscriptionStore.move(fromOffsets: source, toOffset: destination)
+                    operations.subscriptions.move(fromOffsets: source, toOffset: destination)
                 }
             }
         }
@@ -143,7 +144,7 @@ struct ReorderView: View {
                 configurationRow(configuration)
             }
             .onMove { source, destination in
-                configurationStore.moveConfigurations(withIds: configurations.map(\.id), fromOffsets: source, toOffset: destination)
+                operations.configurations.move(withIds: configurations.map(\.id), fromOffsets: source, toOffset: destination)
             }
         }
     }
@@ -160,7 +161,7 @@ struct ReorderView: View {
                     configurationRow(configuration)
                 }
                 .onMove { source, destination in
-                    groupStore.moveMembers(of: group.id, withIds: members.map(\.id), fromOffsets: source, toOffset: destination)
+                    operations.groups.moveMembers(of: group.id, withIds: members.map(\.id), fromOffsets: source, toOffset: destination)
                 }
             }
         case .chains:
@@ -172,7 +173,7 @@ struct ReorderView: View {
                     chainRow(chain)
                 }
                 .onMove { source, destination in
-                    groupStore.moveMembers(of: group.id, withIds: members.map(\.id), fromOffsets: source, toOffset: destination)
+                    operations.groups.moveMembers(of: group.id, withIds: members.map(\.id), fromOffsets: source, toOffset: destination)
                 }
             }
         }

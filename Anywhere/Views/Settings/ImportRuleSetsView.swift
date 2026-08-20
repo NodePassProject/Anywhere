@@ -11,6 +11,7 @@ import SwiftUI
 
 struct ImportRuleSetsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var routingStore
     @Environment(MITMRuleSetStore.self) private var mitmStore
 
@@ -141,9 +142,9 @@ struct ImportRuleSetsView: View {
     private func performImport() {
         for item in model.items where item.isSelected && item.status == .ready {
             if let routingSet = item.routingSet {
-                routingStore.addCustomRuleSet(routingSet, initialAssignment: item.routingRoute.assignmentId)
+                operations.routingRuleSets.addCustomRuleSet(routingSet, initialAssignment: item.routingRoute.assignmentId)
             } else if let mitmSet = item.mitmSet {
-                mitmStore.addRuleSet(mitmSet)
+                operations.mitmRuleSets.addRuleSet(mitmSet)
             }
         }
         dismiss()

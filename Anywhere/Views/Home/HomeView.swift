@@ -9,12 +9,16 @@ import SwiftUI
 import NetworkExtension
 
 struct HomeView: View {
-    @Environment(AppSettings.self) private var settings
-    @Environment(TunnelController.self) private var tunnel
-    @Environment(ProxySelection.self) private var selection
-    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(AppSettings.self) private var appSettings
+    @Environment(Operations.self) private var operations
+    @Environment(TunnelController.self) private var tunnelController
+    @Environment(ProxySelection.self) private var proxySelection
+    @Environment(LatencyCenter.self) private var latencyCenter
+    @Environment(ConfigurationStore.self) private var configurationStore
     @Environment(ChainStore.self) private var chainStore
+    @Environment(GroupStore.self) private var groupStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
+    @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
     
     private static let horizontalPadding: CGFloat = 20
     private static let paneSpacing: CGFloat = 20
@@ -32,13 +36,13 @@ struct HomeView: View {
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
 
-    private var isLoading: Bool { !configStore.isLoaded }
+    private var isLoading: Bool { !configurationStore.isLoaded }
 
     private var isConnected: Bool {
-        tunnel.rawStatus == .connected
+        tunnelController.rawStatus == .connected
     }
 
-    private var isTransitioning: Bool { tunnel.rawStatus.isTransitioning }
+    private var isTransitioning: Bool { tunnelController.rawStatus.isTransitioning }
 
     var body: some View {
         NavigationStack {
@@ -59,7 +63,7 @@ struct HomeView: View {
                     return .impact
                 }
             }
-            .colorScheme(settings.homeColorScheme.colorSceme)
+            .colorScheme(appSettings.homeColorScheme.colorSceme)
             .onGeometryChange(for: CGSize.self) { proxy in
                 proxy.size
             } action: { size in
@@ -67,29 +71,40 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showingProxiesView) {
                 ProxiesView()
+                    .environment(operations)
+                    .environment(proxySelection)
+                    .environment(latencyCenter)
+                    .environment(configurationStore)
+                    .environment(chainStore)
+                    .environment(groupStore)
+                    .environment(subscriptionStore)
             }
             .sheet(isPresented: $showingSettingsView) {
                 SettingsView()
+                    .environment(appSettings)
+                    .environment(tunnelController)
+                    .environment(routingRuleSetStore)
             }
             .sheet(isPresented: $showingAddSheet) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                     AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                        .environment(operations)
                 }
             }
             .sheet(isPresented: $showingManualAddSheet) {
                 ProxyEditorView { configuration in
-                    configStore.add(configuration); selection.selectIfNone(configuration)
+                    operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
                 }
             }
             .alert("VPN Error", isPresented: Binding(
-                get: { tunnel.startError != nil },
-                set: { if !$0 { tunnel.startError = nil } }
+                get: { tunnelController.startError != nil },
+                set: { if !$0 { tunnelController.startError = nil } }
             )) {
-                Button("OK") { tunnel.startError = nil }
+                Button("OK") { tunnelController.startError = nil }
             } message: {
-                Text(tunnel.startError ?? "")
+                Text(tunnelController.startError ?? "")
             }
-            .onChange(of: tunnel.isManagerReady, initial: true) { _, ready in
+            .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
                 guard ready, !connectionEffectsEnabled else { return }
                 Task { @MainActor in connectionEffectsEnabled = true }
             }
@@ -170,14 +185,14 @@ struct HomeView: View {
             isTransitioning: isTransitioning,
             isLoading: isLoading,
             isDisabled: isLoading
-                || ((!tunnel.isManagerReady || isTransitioning)
-                    && configStore.hasConfigurations),
+                || ((!tunnelController.isManagerReady || isTransitioning)
+                    && configurationStore.hasConfigurations),
             animatesChanges: connectionEffectsEnabled
         ) {
             guard !isLoading else { return }
-            if configStore.hasConfigurations {
+            if configurationStore.hasConfigurations {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    tunnel.toggle()
+                    operations.tunnel.toggle()
                 }
             } else {
                 showingAddSheet = true
@@ -194,7 +209,7 @@ struct HomeView: View {
     }
     
     private var statusLabel: some View {
-        Text(tunnel.status.localizedText)
+        Text(tunnelController.status.localizedText)
             .font(.headline)
             .foregroundStyle(.secondary)
     }
@@ -437,16 +452,17 @@ private struct ProminentCircle<Content: View>: View {
 #if DEBUG
 #Preview("Connected") {
     let container = AppContainer.preview()
-    container.selection.selectedConfiguration = ProxyConfiguration(
+    container.selection.select(ProxyConfiguration(
         name: "🇺🇸 Los Angeles",
         serverAddress: "203.0.113.10",
         serverPort: 443,
         outbound: .socks5(username: nil, password: nil)
-    )
+    ))
     container.tunnel.setStatusForPreview(.connected)
 
     return HomeView()
         .environment(AppSettings())
+        .environment(Operations(container: container))
         .environment(container.tunnel)
         .environment(container.selection)
         .environment(container.latency)

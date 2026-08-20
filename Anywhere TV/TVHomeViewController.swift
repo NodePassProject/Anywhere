@@ -13,6 +13,7 @@ class TVHomeViewController: UIViewController {
     // MARK: - Properties
 
     private let container: AppContainer
+    private lazy var operations = Operations(container: container)
     private var tunnel: TunnelController { container.tunnel }
     private var selection: ProxySelection { container.selection }
     private var lastRenderedConnectedState: Bool?
@@ -432,7 +433,7 @@ class TVHomeViewController: UIViewController {
             addConfigTapped()
             return
         }
-        tunnel.toggle()
+        operations.tunnel.toggle()
     }
 
     @objc private func configCardTapped() {

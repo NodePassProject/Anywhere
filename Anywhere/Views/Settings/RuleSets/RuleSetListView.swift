@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 
 struct RuleSetListView: View {
     @Environment(\.editMode) private var editMode
+    @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
 
     @State var adBlockEnabled = false
@@ -31,7 +32,6 @@ struct RuleSetListView: View {
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
     var body: some View {
-        @Bindable var routingRuleSetStore = routingRuleSetStore
         List {
             Section {
                 Toggle(isOn: $adBlockEnabled) {
@@ -39,11 +39,14 @@ struct RuleSetListView: View {
                 }
                 .onChange(of: adBlockEnabled) { _, newValue in
                     guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
-                    routingRuleSetStore.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
+                    operations.routingRuleSets.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
                 }
             }
             Section {
-                Picker(selection: $routingRuleSetStore.bypassCountryCode) {
+                Picker(selection: Binding(
+                    get: { routingRuleSetStore.bypassCountryCode },
+                    set: { operations.routingRuleSets.setBypassCountryCode($0) }
+                )) {
                     Text("Disable").tag("")
                     ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
                         Text(countryLabel(for: code)).tag(code)
@@ -118,7 +121,7 @@ struct RuleSetListView: View {
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
-                    routingRuleSetStore.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
+                    operations.routingRuleSets.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
                 }
             }
         }
@@ -143,7 +146,7 @@ struct RuleSetListView: View {
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                _ = routingRuleSetStore.addCustomRuleSet(name: name)
+                operations.routingRuleSets.addCustomRuleSet(name: name)
                 customRuleSets = routingRuleSetStore.customRuleSets
                 newRuleSetName = ""
             }
@@ -179,7 +182,7 @@ struct RuleSetListView: View {
         }
         .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
             Button("Reset", role: .destructive) {
-                routingRuleSetStore.resetAssignments()
+                operations.routingRuleSets.resetAssignments()
                 builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
             }
             Button("Cancel", role: .cancel) {}
@@ -195,10 +198,10 @@ struct RuleSetListView: View {
         
         let surviving = Set(localIds)
         for removed in store.customRuleSets where !surviving.contains(removed.id) {
-            store.removeCustomRuleSet(removed.id)
+            operations.routingRuleSets.removeCustomRuleSet(removed.id)
         }
         if store.customRuleSets.map(\.id) != localIds {
-            store.reorderCustomRuleSets(customRuleSets)
+            operations.routingRuleSets.reorderCustomRuleSets(customRuleSets)
         }
     }
 
@@ -260,7 +263,7 @@ struct RuleSetListView: View {
                 ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
                 : parsed.name
             let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
-            routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
+            operations.routingRuleSets.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
             customRuleSets = routingRuleSetStore.customRuleSets
         } catch {
             importError = error.localizedDescription
@@ -292,7 +295,7 @@ struct RuleSetListView: View {
                     ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
                     : parsed.name
                 let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
-                routingRuleSetStore.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
+                operations.routingRuleSets.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
                 customRuleSets = routingRuleSetStore.customRuleSets
             } catch {
                 subscribeError = error.localizedDescription

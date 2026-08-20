@@ -15,9 +15,8 @@ private nonisolated enum ProxySectionID: Hashable {
 class TVProxyListViewController: UITableViewController {
 
     private let container: AppContainer
-    private var selection: ProxySelection { container.selection }
-    private var latency: LatencyCenter { container.latency }
-    private var coordinator: ProxyRowCoordinator { container.proxyRows }
+    private lazy var operations = Operations(container: container)
+    private let coordinator: ProxyRowCoordinator
     private var dataSource: UITableViewDiffableDataSource<ProxySectionID, UUID>!
     private var hasApplied = false
 
@@ -26,6 +25,11 @@ class TVProxyListViewController: UITableViewController {
 
     init(container: AppContainer) {
         self.container = container
+        self.coordinator = ProxyRowCoordinator(
+            configurationStore: container.configurationStore,
+            selection: container.selection,
+            latency: container.latency
+        )
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -62,9 +66,9 @@ class TVProxyListViewController: UITableViewController {
     }
 
     private func configureDataSource() {
-        dataSource = UITableViewDiffableDataSource<ProxySectionID, UUID>(tableView: tableView) { [container] tableView, indexPath, id in
+        dataSource = UITableViewDiffableDataSource<ProxySectionID, UUID>(tableView: tableView) { [coordinator] tableView, indexPath, id in
             let cell = tableView.dequeueReusableCell(withIdentifier: TVProxyCell.reuseIdentifier, for: indexPath) as! TVProxyCell
-            guard let model = container.proxyRows.model(for: id) else { return cell }
+            guard let model = coordinator.model(for: id) else { return cell }
             cell.configurationUpdateHandler = { cell, _ in
                 (cell as? TVProxyCell)?.configure(model)
             }
@@ -157,7 +161,7 @@ class TVProxyListViewController: UITableViewController {
         defer { tableView.deselectRow(at: indexPath, animated: true) }
         guard let id = dataSource.itemIdentifier(for: indexPath),
               let configuration = container.configurationStore.configurations.first(where: { $0.id == id }) else { return }
-        selection.selectedConfiguration = configuration
+        operations.selection.select(configuration)
     }
 
     // MARK: - Context Menu
@@ -172,7 +176,7 @@ class TVProxyListViewController: UITableViewController {
             var actions: [UIAction] = []
 
             actions.append(UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                self.latency.testLatency(for: configuration)
+                self.operations.latency.test(configuration)
             })
 
             actions.append(UIAction(title: String(localized: "Edit"), image: UIImage(systemName: "pencil")) { _ in
@@ -180,7 +184,7 @@ class TVProxyListViewController: UITableViewController {
             })
 
             actions.append(UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                self.container.configurationStore.delete(configuration)
+                self.operations.configurations.delete(configuration)
             })
 
             return UIMenu(children: actions)
@@ -191,7 +195,7 @@ class TVProxyListViewController: UITableViewController {
         UIMenu(children: [
             UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { [weak self] _ in
                 guard let self else { return }
-                self.latency.testLatencies(for: self.container.configurationStore.configurations(for: subscription))
+                self.operations.latency.testAll(self.container.configurationStore.configurations(for: subscription))
             },
             UIAction(title: String(localized: "Rename"), image: UIImage(systemName: "pencil")) { [weak self] _ in
                 self?.presentRenameAlert(for: subscription)
@@ -199,8 +203,8 @@ class TVProxyListViewController: UITableViewController {
             UIAction(title: String(localized: "Update"), image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                 self?.updateSubscription(subscription)
             },
-            UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { [container] _ in
-                container.subscriptionStore.delete(subscription)
+            UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                self?.operations.subscriptions.delete(subscription)
             },
         ])
     }
@@ -220,7 +224,7 @@ class TVProxyListViewController: UITableViewController {
             guard let subId = configuration.subscriptionId else { return true }
             return liveSubscriptionIds.contains(subId) && !collapsedSubscriptions.contains(subId)
         }
-        latency.testLatencies(for: visible)
+        operations.latency.testAll(visible)
     }
 
     private func toggleCollapse(_ subscription: Subscription) {
@@ -235,8 +239,8 @@ class TVProxyListViewController: UITableViewController {
     }
 
     private func presentEditor(for configuration: ProxyConfiguration) {
-        let editor = TVProxyEditorViewController(configuration: configuration) { [container] updated in
-            container.configurationStore.update(updated)
+        let editor = TVProxyEditorViewController(configuration: configuration) { [weak self] updated in
+            self?.operations.configurations.update(updated)
         }
         let nav = UINavigationController(rootViewController: editor)
         nav.modalPresentationStyle = .fullScreen
@@ -249,7 +253,7 @@ class TVProxyListViewController: UITableViewController {
         refreshVisibleHeaders()
         Task {
             do {
-                try await container.subscriptionRefresher.refresh(subscription)
+                try await operations.subscriptions.refresh(subscription)
             } catch {
                 let alert = UIAlertController(title: String(localized: "Update Failed"), message: error.localizedDescription, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
@@ -264,9 +268,9 @@ class TVProxyListViewController: UITableViewController {
         let alert = UIAlertController(title: String(localized: "Rename"), message: nil, preferredStyle: .alert)
         alert.addTextField { $0.text = subscription.name }
         alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
-        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { [container] _ in
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { [weak self] _ in
             if let name = alert.textFields?.first?.text, !name.isEmpty {
-                container.subscriptionStore.rename(subscription, to: name)
+                self?.operations.subscriptions.rename(subscription, to: name)
             }
         })
         present(alert, animated: true)

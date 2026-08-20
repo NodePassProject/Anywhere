@@ -23,14 +23,11 @@ class ConfigurationStore {
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    @ObservationIgnored var onDidMutate: (() -> Void)?
-
     init(syncStore: SyncStore) {
         self.syncStore = syncStore
-        Task { @MainActor in await self.loadInitial() }
     }
-
-    private func loadInitial() async {
+    
+    func loadInitial() async {
         while true {
             let epoch = mutationEpoch
             await saveTask?.value
@@ -46,7 +43,6 @@ class ConfigurationStore {
             configurations = outcome.live
             tombstones = outcome.tombstones
             isLoaded = true
-            onDidMutate?()
             return
         }
     }
@@ -69,7 +65,6 @@ class ConfigurationStore {
             loadedItems = outcome.items
             configurations = outcome.live
             tombstones = outcome.tombstones
-            onDidMutate?()
             return
         }
     }
@@ -83,7 +78,6 @@ class ConfigurationStore {
         stamped.updatedAt = SyncStamp.after(tombstone)
         configurations.append(stamped)
         save()
-        onDidMutate?()
     }
 
     func update(_ configuration: ProxyConfiguration) {
@@ -92,7 +86,6 @@ class ConfigurationStore {
             stamped.updatedAt = SyncStamp.after(configurations[index])
             configurations[index] = stamped
             save()
-            onDidMutate?()
         }
     }
 
@@ -100,7 +93,6 @@ class ConfigurationStore {
         configurations.removeAll { $0.id == configuration.id }
         recordTombstones([configuration])
         save()
-        onDidMutate?()
     }
 
     func deleteConfigurations(for subscriptionId: UUID) {
@@ -108,7 +100,6 @@ class ConfigurationStore {
         configurations.removeAll { $0.subscriptionId == subscriptionId }
         recordTombstones(removed)
         save()
-        onDidMutate?()
     }
     
     func replaceConfigurations(for subscriptionId: UUID, with newConfigurations: [ProxyConfiguration]) {
@@ -140,14 +131,12 @@ class ConfigurationStore {
         recordTombstones(removed)
         tombstones.removeAll { newIds.contains($0.id) }
         save()
-        onDidMutate?()
     }
     
     func moveConfigurations(withIds ids: [UUID], fromOffsets source: IndexSet, toOffset destination: Int) {
         let idSet = Set(ids)
         configurations.moveSubsequence(where: { idSet.contains($0.id) }, fromOffsets: source, toOffset: destination)
         save()
-        onDidMutate?()
     }
 
     // MARK: - Persistence
@@ -192,11 +181,5 @@ extension ConfigurationStore {
 
     func configurations(for subscription: Subscription) -> [ProxyConfiguration] {
         configurations.filter { $0.subscriptionId == subscription.id }
-    }
-
-    var standalonePickerItems: [PickerItem] {
-        configurations
-            .filter { $0.subscriptionId == nil }
-            .map { PickerItem(id: $0.id, name: $0.name) }
     }
 }

@@ -16,17 +16,13 @@ class ChainStore {
     private var tombstones: [ProxyChain] = []
 
     @ObservationIgnored private let syncStore: SyncStore
-    @ObservationIgnored private let configurationStore: ConfigurationStore
     @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    @ObservationIgnored var onDidMutate: (() -> Void)?
-
-    init(syncStore: SyncStore, configurationStore: ConfigurationStore) {
+    init(syncStore: SyncStore) {
         self.syncStore = syncStore
-        self.configurationStore = configurationStore
         let items = syncStore.loadItems(.chains)
         loadedItems = items
         let split = Self.decodeSplit(from: items)
@@ -43,7 +39,6 @@ class ChainStore {
         stamped.updatedAt = SyncStamp.after(tombstone)
         chains.append(stamped)
         save()
-        onDidMutate?()
     }
 
     func update(_ chain: ProxyChain) {
@@ -52,7 +47,6 @@ class ChainStore {
             stamped.updatedAt = SyncStamp.after(chains[index])
             chains[index] = stamped
             save()
-            onDidMutate?()
         }
     }
 
@@ -60,7 +54,6 @@ class ChainStore {
         chains.removeAll { $0.id == chain.id }
         recordTombstone(chain)
         save()
-        onDidMutate?()
     }
     
     func moveChains(withIds ids: [UUID], fromOffsets source: IndexSet, toOffset destination: Int) {
@@ -87,7 +80,6 @@ class ChainStore {
             loadedItems = outcome.items
             chains = outcome.live
             tombstones = outcome.tombstones
-            onDidMutate?()
             return
         }
     }
@@ -114,17 +106,6 @@ class ChainStore {
         saveTask = Task.detached { [syncStore] in
             await previous?.value
             syncStore.save(.chains, items: SyncCodec.encodeItems(snapshot), order: SyncCodec.order(of: live))
-        }
-    }
-}
-
-extension ChainStore {
-    var pickerItems: [PickerItem] {
-        let configurations = configurationStore.configurations
-        return chains.compactMap { chain in
-            let proxies = chain.resolveProxies(from: configurations)
-            guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { return nil }
-            return PickerItem(id: chain.id, name: chain.name)
         }
     }
 }

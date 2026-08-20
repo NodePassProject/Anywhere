@@ -10,21 +10,20 @@ import NetworkExtension
 import Observation
 
 @MainActor
+protocol LatencyTransport: AnyObject, Sendable {
+    var isTunnelActive: Bool { get }
+    func sendRaw(_ data: Data) async -> Data?
+}
+
+@MainActor
 @Observable
 final class LatencyCenter {
     var latencyResults: [UUID: LatencyResult] = [:]
     var chainLatencyResults: [UUID: LatencyResult] = [:]
 
-    @ObservationIgnored private let tunnel: TunnelController
-    
-    @ObservationIgnored var isLiveConfiguration: @MainActor @Sendable (UUID) -> Bool = { _ in true }
-    @ObservationIgnored var isLiveChain: @MainActor @Sendable (UUID) -> Bool = { _ in true }
-    @ObservationIgnored var isResolvableChain: @MainActor @Sendable (UUID) -> Bool = { _ in true }
-
     nonisolated private static let maxConcurrentLatencyTests = 8
 
-    init(tunnel: TunnelController) {
-        self.tunnel = tunnel
+    init() {
         restoreResults()
     }
 
@@ -34,22 +33,30 @@ final class LatencyCenter {
     @ObservationIgnored private var batchLatencyTargetIds: Set<UUID> = []
     @ObservationIgnored private var singleLatencyTasks: [UUID: Task<Void, Never>] = [:]
 
-    func testLatency(for configuration: ProxyConfiguration) {
+    func testLatency(
+        for configuration: ProxyConfiguration,
+        transport: LatencyTransport?,
+        isLive: @escaping @MainActor @Sendable (UUID) -> Bool = { _ in true }
+    ) {
         let configurationId = configuration.id
         singleLatencyTasks[configurationId]?.cancel()
         latencyResults[configurationId] = .testing
-        let send = tunnelSend()
+        let send = Self.tunnelSend(transport)
         singleLatencyTasks[configurationId] = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: configuration, send: send)
             await MainActor.run {
                 guard !Task.isCancelled else { return }
                 self?.singleLatencyTasks[configurationId] = nil
-                self?.recordLatencyResult(result, for: configurationId)
+                self?.recordLatencyResult(result, for: configurationId, isLive: isLive)
             }
         }
     }
 
-    func testLatencies(for targets: [ProxyConfiguration]) {
+    func testLatencies(
+        for targets: [ProxyConfiguration],
+        transport: LatencyTransport?,
+        isLive: @escaping @MainActor @Sendable (UUID) -> Bool = { _ in true }
+    ) {
         batchLatencyTask?.cancel()
         let targetIds = Set(targets.map(\.id))
         restoreDisplacedResults(in: \.latencyResults, stored: storedLatencyResults, previousTargets: batchLatencyTargetIds, newTargets: targetIds)
@@ -57,14 +64,12 @@ final class LatencyCenter {
         for config in targets {
             latencyResults[config.id] = .testing
         }
-        let send = tunnelSend()
+        let send = Self.tunnelSend(transport)
         batchLatencyTask = Task { [weak self] in
-            await Self.runLatencyTests(targets, send: send, isStillWanted: { [weak self] id in
-                self?.isLiveConfiguration(id) ?? false
-            }) { id, result in
+            await Self.runLatencyTests(targets, send: send, isStillWanted: isLive) { id, result in
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
-                    self?.recordLatencyResult(result, for: id)
+                    self?.recordLatencyResult(result, for: id, isLive: isLive)
                 }
             }
         }
@@ -89,23 +94,34 @@ final class LatencyCenter {
     @ObservationIgnored private var batchChainLatencyTargetIds: Set<UUID> = []
     @ObservationIgnored private var singleChainLatencyTasks: [UUID: Task<Void, Never>] = [:]
 
-    func testChainLatency(for chain: ProxyChain, configurations: [ProxyConfiguration]) {
+    func testChainLatency(
+        for chain: ProxyChain,
+        configurations: [ProxyConfiguration],
+        transport: LatencyTransport?,
+        isLiveChain: @escaping @MainActor @Sendable (UUID) -> Bool = { _ in true }
+    ) {
         guard let resolved = chain.resolveComposite(from: configurations) else { return }
         let chainId = chain.id
         singleChainLatencyTasks[chainId]?.cancel()
         chainLatencyResults[chainId] = .testing
-        let send = tunnelSend()
+        let send = Self.tunnelSend(transport)
         singleChainLatencyTasks[chainId] = Task { [weak self] in
             let result = await Self.runSingleLatencyTest(for: resolved, send: send)
             await MainActor.run {
                 guard !Task.isCancelled else { return }
                 self?.singleChainLatencyTasks[chainId] = nil
-                self?.recordChainLatencyResult(result, for: chainId)
+                self?.recordChainLatencyResult(result, for: chainId, isLive: isLiveChain)
             }
         }
     }
 
-    func testAllChainLatencies(chains: [ProxyChain], configurations: [ProxyConfiguration]) {
+    func testAllChainLatencies(
+        chains: [ProxyChain],
+        configurations: [ProxyConfiguration],
+        transport: LatencyTransport?,
+        isLiveChain: @escaping @MainActor @Sendable (UUID) -> Bool = { _ in true },
+        isResolvableChain: @escaping @MainActor @Sendable (UUID) -> Bool = { _ in true }
+    ) {
         batchChainLatencyTask?.cancel()
         var chainData: [(UUID, ProxyConfiguration)] = []
         for chain in chains {
@@ -120,16 +136,16 @@ final class LatencyCenter {
             chainLatencyResults[chainId] = .testing
         }
         let chainIdByConfigId: [UUID: UUID] = Dictionary(uniqueKeysWithValues: chainData.map { ($0.1.id, $0.0) })
-        let send = tunnelSend()
+        let send = Self.tunnelSend(transport)
         batchChainLatencyTask = Task { [weak self] in
-            await Self.runLatencyTests(chainData.map(\.1), send: send, isStillWanted: { [weak self] compositeId in
-                guard let self, let chainId = chainIdByConfigId[compositeId] else { return false }
-                return self.isResolvableChain(chainId)
+            await Self.runLatencyTests(chainData.map(\.1), send: send, isStillWanted: { compositeId in
+                guard let chainId = chainIdByConfigId[compositeId] else { return false }
+                return isResolvableChain(chainId)
             }) { configId, result in
                 if let chainId = chainIdByConfigId[configId] {
                     await MainActor.run {
                         guard !Task.isCancelled else { return }
-                        self?.recordChainLatencyResult(result, for: chainId)
+                        self?.recordChainLatencyResult(result, for: chainId, isLive: isLiveChain)
                     }
                 }
             }
@@ -148,8 +164,12 @@ final class LatencyCenter {
         chainLatencyResults = storedChainLatencyResults
     }
 
-    private func recordLatencyResult(_ result: LatencyResult, for configurationId: UUID) {
-        guard isLiveConfiguration(configurationId) else { return }
+    private func recordLatencyResult(
+        _ result: LatencyResult,
+        for configurationId: UUID,
+        isLive: @MainActor (UUID) -> Bool
+    ) {
+        guard isLive(configurationId) else { return }
         latencyResults[configurationId] = result
         storedLatencyResults[configurationId] = result
         if let data = Self.encodeLatencyResults(storedLatencyResults) {
@@ -157,8 +177,12 @@ final class LatencyCenter {
         }
     }
 
-    private func recordChainLatencyResult(_ result: LatencyResult, for chainId: UUID) {
-        guard isLiveChain(chainId) else { return }
+    private func recordChainLatencyResult(
+        _ result: LatencyResult,
+        for chainId: UUID,
+        isLive: @MainActor (UUID) -> Bool
+    ) {
+        guard isLive(chainId) else { return }
         chainLatencyResults[chainId] = result
         storedChainLatencyResults[chainId] = result
         if let data = Self.encodeLatencyResults(storedChainLatencyResults) {
@@ -211,10 +235,10 @@ final class LatencyCenter {
     }
 
     // MARK: - Execution
-    
-    private func tunnelSend() -> (@Sendable (Data) async -> Data?)? {
-        guard tunnel.rawStatus == .connected else { return nil }
-        return { [weak tunnel] data in await tunnel?.sendRaw(data) }
+
+    private static func tunnelSend(_ transport: LatencyTransport?) -> (@Sendable (Data) async -> Data?)? {
+        guard let transport, transport.isTunnelActive else { return nil }
+        return { [weak transport] data in await transport?.sendRaw(data) }
     }
 
     nonisolated private static func runSingleLatencyTest(

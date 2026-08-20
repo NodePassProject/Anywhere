@@ -10,6 +10,7 @@ import SwiftUI
 @main
 struct AnywhereApp: App {
     @State private var container: AppContainer
+    @State private var operations: Operations
     @State private var settings: AppSettings
     @State private var voyagerStore = VoyagerStore()
     @State private var mitmCertificateController = MITMCertificateController()
@@ -18,6 +19,8 @@ struct AnywhereApp: App {
 
     init() {
         let container = AppContainer()
+        container.start()
+        let operations = Operations(container: container)
 
         let settings = AppSettings()
         settings.onTunnelBehaviorChange = { [weak tunnel = container.tunnel] in
@@ -29,14 +32,15 @@ struct AnywhereApp: App {
             selection: container.selection,
             configurationStore: container.configurationStore,
             chainStore: container.chainStore,
-            subscriptionStore: container.subscriptionStore
+            subscriptionStore: container.subscriptionStore,
+            operations: operations
         )
         watchSession.start()
 
-        let coordinator = container.coordinator
-        CloudBlobSync.start { await coordinator.reloadAll() }
+        CloudBlobSync.start { await operations.reloadAll() }
 
         _container = State(initialValue: container)
+        _operations = State(initialValue: operations)
         _settings = State(initialValue: settings)
         _watchSession = State(initialValue: watchSession)
     }
@@ -44,7 +48,7 @@ struct AnywhereApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(container)
+                .environment(operations)
                 .environment(container.appState)
                 .environment(container.tunnel)
                 .environment(container.selection)

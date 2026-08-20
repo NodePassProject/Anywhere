@@ -15,6 +15,14 @@ struct AssignmentMenuButton: View {
     @Environment(GroupStore.self) private var groupStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
+    private var picker: PickerQuery {
+        PickerQuery(
+            configurations: configurationStore.configurations,
+            chains: chainStore.chains,
+            subscriptions: subscriptionStore.subscriptions
+        )
+    }
+
     var body: some View {
         Menu {
             Picker("Policies", selection: $selection) {
@@ -29,10 +37,10 @@ struct AssignmentMenuButton: View {
                     }
                 }
             }
-            if !chainStore.pickerItems.isEmpty {
+            if !picker.chainItems.isEmpty {
                 Menu("Chains") {
                     Picker("Chains", selection: $selection) {
-                        ForEach(chainStore.pickerItems) { item in
+                        ForEach(picker.chainItems) { item in
                             Text(item.name).tag(item.id.uuidString as String?)
                         }
                     }
@@ -53,7 +61,7 @@ struct AssignmentMenuButton: View {
                 }
             }
             Section("Subscriptions") {
-                ForEach(subscriptionStore.pickerSections) { section in
+                ForEach(picker.subscriptionSections) { section in
                     Menu(section.header ?? "") {
                         Picker(section.header ?? "", selection: $selection) {
                             ForEach(section.items) { item in
@@ -80,7 +88,7 @@ struct AssignmentMenuButton: View {
 
     private var ungroupedProxyItems: [PickerItem] {
         let grouped = Set(serverGroups.flatMap(\.memberIds))
-        return configurationStore.standalonePickerItems.filter { !grouped.contains($0.id) }
+        return picker.standaloneItems.filter { !grouped.contains($0.id) }
     }
 
     private func memberItems(of group: ProxyGroup) -> [PickerItem] {

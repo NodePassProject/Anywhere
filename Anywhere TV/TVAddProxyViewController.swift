@@ -10,7 +10,7 @@ import UIKit
 class TVAddProxyViewController: UITableViewController {
 
     private let container: AppContainer
-    private var selection: ProxySelection { container.selection }
+    private lazy var operations = Operations(container: container)
 
     init(container: AppContainer) {
         self.container = container
@@ -157,7 +157,7 @@ class TVAddProxyViewController: UITableViewController {
                 dismiss(animated: true) { [weak self] in
                     guard let self else { return }
                     let editor = TVProxyEditorViewController { config in
-                        self.container.configurationStore.add(config); self.selection.selectIfNone(config)
+                        self.operations.configurations.add(config); self.operations.selection.selectIfNone(config)
                     }
                     let nav = UINavigationController(rootViewController: editor)
                     nav.modalPresentationStyle = .fullScreen
@@ -232,7 +232,7 @@ class TVAddProxyViewController: UITableViewController {
         if ProxyConfiguration.canParseURL(trimmed) {
             do {
                 let config = try ProxyConfiguration.parse(url: trimmed)
-                container.configurationStore.add(config); self.selection.selectIfNone(config)
+                operations.configurations.add(config); self.operations.selection.selectIfNone(config)
                 dismiss(animated: true)
             } catch {
                 showError(error.localizedDescription)
@@ -254,7 +254,7 @@ class TVAddProxyViewController: UITableViewController {
                         iconLight: fetchedSubscription.iconLight,
                         iconDark: fetchedSubscription.iconDark
                     )
-                    container.subscriptionStore.add(subscription, configurations: fetchedSubscription.configurations)
+                    operations.subscriptions.add(subscription, configurations: fetchedSubscription.configurations)
                     dismiss(animated: true)
                 } catch {
                     showError(error.localizedDescription)

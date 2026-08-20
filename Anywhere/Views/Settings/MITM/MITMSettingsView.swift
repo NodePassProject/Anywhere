@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 
 struct MITMSettingsView: View {
     @Environment(MITMCertificateController.self) private var certificateController
+    @Environment(Operations.self) private var operations
     @Environment(MITMRuleSetStore.self) private var ruleSetStore
 
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "amrs") ?? .data]
@@ -25,10 +26,12 @@ struct MITMSettingsView: View {
     @State private var subscribeError: String?
 
     var body: some View {
-        @Bindable var ruleSetStore = ruleSetStore
         Form {
             Section {
-                Toggle(isOn: $ruleSetStore.enabled) {
+                Toggle(isOn: Binding(
+                    get: { ruleSetStore.enabled },
+                    set: { operations.mitmRuleSets.setEnabled($0) }
+                )) {
                     SettingsItem.mitm.label
                 }
             }
@@ -56,10 +59,10 @@ struct MITMSettingsView: View {
                         }
                     }
                     .onDelete { offsets in
-                        ruleSetStore.removeRuleSets(atOffsets: offsets)
+                        operations.mitmRuleSets.removeRuleSets(atOffsets: offsets)
                     }
                     .onMove { source, destination in
-                        ruleSetStore.moveRuleSets(fromOffsets: source, toOffset: destination)
+                        operations.mitmRuleSets.moveRuleSets(fromOffsets: source, toOffset: destination)
                     }
                 }
             }
@@ -96,7 +99,7 @@ struct MITMSettingsView: View {
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                ruleSetStore.addRuleSet(MITMRuleSet(name: name))
+                operations.mitmRuleSets.addRuleSet(MITMRuleSet(name: name))
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
@@ -195,7 +198,7 @@ struct MITMSettingsView: View {
                 iconLight: parsed.iconLight,
                 iconDark: parsed.iconDark
             )
-            ruleSetStore.addRuleSet(ruleSet)
+            operations.mitmRuleSets.addRuleSet(ruleSet)
         } catch {
             importError = error.localizedDescription
         }
@@ -234,7 +237,7 @@ struct MITMSettingsView: View {
                     iconLight: parsed.iconLight,
                     iconDark: parsed.iconDark
                 )
-                ruleSetStore.addRuleSet(ruleSet)
+                operations.mitmRuleSets.addRuleSet(ruleSet)
             } catch {
                 subscribeError = error.localizedDescription
             }

@@ -10,7 +10,7 @@ import SwiftUI
 struct CustomRuleSetDetailView: View {
     let customRuleSetId: UUID
     @Environment(\.editMode) private var editMode
-    @Environment(AppContainer.self) private var container
+    @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
 
     @State private var rules: [RoutingRule] = []
@@ -106,7 +106,7 @@ struct CustomRuleSetDetailView: View {
             Button("Rename") {
                 let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                ruleSetStore.updateCustomRuleSet(customRuleSetId, name: name)
+                operations.routingRuleSets.updateCustomRuleSet(customRuleSetId, name: name)
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -133,7 +133,7 @@ struct CustomRuleSetDetailView: View {
     
     private func save() {
         guard rules != customRuleSet?.rules else { return }
-        ruleSetStore.updateCustomRuleSet(customRuleSetId, rules: rules)
+        operations.routingRuleSets.updateCustomRuleSet(customRuleSetId, rules: rules)
     }
 
     @ViewBuilder
@@ -160,7 +160,7 @@ struct CustomRuleSetDetailView: View {
         isUpdating = true
         Task {
             do {
-                try await container.customRuleSetRefresher.refresh(customRuleSetId)
+                try await operations.routingRuleSets.refresh(customRuleSetId)
                 loadInitial()
                 isUpdating = false
                 updateSucceeded = true
@@ -198,7 +198,7 @@ struct CustomRuleSetDetailView: View {
             AssignmentMenuButton(selection: Binding(
                 get: { ruleSet.assignedConfigurationId },
                 set: { newValue in
-                    ruleSetStore.updateAssignment(ruleSet, configurationId: newValue)
+                    operations.routingRuleSets.updateAssignment(ruleSet, configurationId: newValue)
                 }
             ))
         }

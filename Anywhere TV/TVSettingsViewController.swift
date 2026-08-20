@@ -10,6 +10,7 @@ import UIKit
 class TVSettingsViewController: UIViewController {
 
     private let container: AppContainer
+    private lazy var operations = Operations(container: container)
     private var tunnel: TunnelController { container.tunnel }
 
     init(container: AppContainer) {
@@ -41,7 +42,7 @@ class TVSettingsViewController: UIViewController {
         get { AWCore.getAlwaysOnEnabled() }
         set {
             AWCore.setAlwaysOnEnabled(newValue)
-            tunnel.reconnect()
+            operations.tunnel.reconnect()
             updateAppearance()
         }
     }

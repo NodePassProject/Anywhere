@@ -10,14 +10,16 @@ import NetworkExtension
 import Observation
 
 @MainActor
-@Observable
 final class AppContainer {
     let syncStore: SyncStore
 
+    // MARK: - Residents
+
     let tunnel: TunnelController
-    let selection: ProxySelection
-    let latency: LatencyCenter
-    let stats: ConnectionStatsModel
+    let selection = ProxySelection()
+    let latency = LatencyCenter()
+    let stats = ConnectionStatsModel()
+    let appState = AppState()
 
     let configurationStore: ConfigurationStore
     let chainStore: ChainStore
@@ -27,131 +29,69 @@ final class AppContainer {
     let mitmRuleSetStore: MITMRuleSetStore
     let certificateStore: CertificateStore
 
-    let proxyRows: ProxyRowCoordinator
-    let chainRows: ChainRowCoordinator
-
-    let routingExporter: RoutingExporter
-    let appState = AppState()
-    let coordinator: StoreCoordinator
-    let subscriptionRefresher: SubscriptionRefresher
-    let customRuleSetRefresher: CustomRuleSetRefresher
-    let mitmRuleSetRefresher: MITMRuleSetRefresher
+    private let routingExportDebouncer = Debouncer(interval: .seconds(2))
+    private var started = false
 
     init(syncStore: SyncStore = .shared, tunnelProvider: TunnelProviding? = nil) {
         self.syncStore = syncStore
         
         LegacyBlobBridge.importAll(into: syncStore)
 
-        let tunnel = TunnelController(provider: tunnelProvider ?? LiveTunnelProvider())
-        let selection = ProxySelection()
-        let latency = LatencyCenter(tunnel: tunnel)
-        let stats = ConnectionStatsModel()
+        tunnel = TunnelController(provider: tunnelProvider ?? LiveTunnelProvider())
+        configurationStore = ConfigurationStore(syncStore: syncStore)
+        chainStore = ChainStore(syncStore: syncStore)
+        groupStore = GroupStore(syncStore: syncStore)
+        subscriptionStore = SubscriptionStore(syncStore: syncStore)
+        routingRuleSetStore = RoutingRuleSetStore(syncStore: syncStore)
+        mitmRuleSetStore = MITMRuleSetStore(syncStore: syncStore)
+        certificateStore = CertificateStore()
+    }
 
-        let configurationStore = ConfigurationStore(syncStore: syncStore)
-        let chainStore = ChainStore(syncStore: syncStore, configurationStore: configurationStore)
-        let groupStore = GroupStore(syncStore: syncStore)
-        let subscriptionStore = SubscriptionStore(syncStore: syncStore, configurationStore: configurationStore)
-        let routingRuleSetStore = RoutingRuleSetStore(syncStore: syncStore)
-        let mitmRuleSetStore = MITMRuleSetStore(syncStore: syncStore)
-        let certificateStore = CertificateStore()
+    // MARK: - Operation Factories
 
-        let routingExporter = RoutingExporter(
+    var exportScheduler: RoutingExportScheduler {
+        RoutingExportScheduler(
+            debouncer: routingExportDebouncer,
             ruleSetStore: routingRuleSetStore,
             configurationStore: configurationStore,
             chainStore: chainStore
         )
+    }
 
-        // MARK: Wiring
-
-        tunnel.configurationProvider = { [weak selection] in
-            selection?.selectedConfiguration
-        }
-        tunnel.onStatusApplied = { [weak tunnel, weak stats] status in
-            guard let stats else { return }
-            if status == .connected {
-                guard let tunnel else { return }
-                stats.startPolling { [weak tunnel] data in
-                    await tunnel?.sendRaw(data)
-                }
-            } else {
-                stats.stopPolling()
-                if status == .disconnected || status == .invalid {
-                    stats.reset()
-                }
-            }
-        }
-        selection.onPersistedChange = { [weak routingExporter] in
-            routingExporter?.scheduleExport()
-        }
-        selection.onSelectionChanged = { [weak tunnel] configuration in
-            if let configuration {
-                tunnel?.pushConfiguration(configuration)
-            }
-        }
-        latency.isLiveConfiguration = { [weak configurationStore] id in
-            configurationStore?.configurations.contains { $0.id == id } ?? false
-        }
-        latency.isLiveChain = { [weak chainStore] id in
-            chainStore?.chains.contains { $0.id == id } ?? false
-        }
-        latency.isResolvableChain = { [weak chainStore, weak configurationStore] id in
-            guard let chain = chainStore?.chains.first(where: { $0.id == id }),
-                  let configurations = configurationStore?.configurations else { return false }
-            return chain.resolveComposite(from: configurations) != nil
-        }
-        routingRuleSetStore.onNeedsExport = { [weak routingExporter] in
-            routingExporter?.scheduleExport()
-        }
-
-        // MARK: Assembly
-
-        self.tunnel = tunnel
-        self.selection = selection
-        self.latency = latency
-        self.stats = stats
-        self.configurationStore = configurationStore
-        self.chainStore = chainStore
-        self.groupStore = groupStore
-        self.subscriptionStore = subscriptionStore
-        self.routingRuleSetStore = routingRuleSetStore
-        self.mitmRuleSetStore = mitmRuleSetStore
-        self.certificateStore = certificateStore
-        self.routingExporter = routingExporter
-
-        proxyRows = ProxyRowCoordinator(
-            configurationStore: configurationStore,
-            selection: selection,
-            latency: latency
-        )
-        chainRows = ChainRowCoordinator(
-            chainStore: chainStore,
-            configurationStore: configurationStore,
-            selection: selection,
-            latency: latency
-        )
-        coordinator = StoreCoordinator(
+    var mutationReaction: StoreMutationReaction {
+        StoreMutationReaction(
             configurationStore: configurationStore,
             chainStore: chainStore,
-            groupStore: groupStore,
-            subscriptionStore: subscriptionStore,
             routingRuleSetStore: routingRuleSetStore,
-            mitmRuleSetStore: mitmRuleSetStore,
             selection: selection,
             latency: latency,
-            routingExporter: routingExporter,
-            appState: appState
+            tunnel: tunnel,
+            appState: appState,
+            exporter: exportScheduler
         )
-        subscriptionRefresher = SubscriptionRefresher(
-            subscriptionStore: subscriptionStore,
-            configurationStore: configurationStore
-        )
-        customRuleSetRefresher = CustomRuleSetRefresher(ruleSetStore: routingRuleSetStore)
-        mitmRuleSetRefresher = MITMRuleSetRefresher(ruleSetStore: mitmRuleSetStore)
+    }
 
-        // MARK: Startup
+    // MARK: - Startup
 
-        coordinator.activate()
-        routingExporter.scheduleExport()
+    func start() {
+        guard !started else { return }
+        started = true
+
+        Task { await LoadOperation(configurationStore: configurationStore, reaction: mutationReaction).run() }
+        observeTunnelStatus()
+        exportScheduler.schedule()
         tunnel.start()
+    }
+    
+    private func observeTunnelStatus() {
+        withObservationTracking {
+            _ = tunnel.rawStatus
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                TunnelSessionReaction(tunnel: self.tunnel, stats: self.stats, selection: self.selection).run()
+                self.observeTunnelStatus()
+            }
+        }
     }
 }

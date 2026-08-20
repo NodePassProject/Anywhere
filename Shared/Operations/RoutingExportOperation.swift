@@ -1,48 +1,53 @@
 //
-//  RoutingExporter.swift
+//  RoutingExportOperation.swift
 //  Anywhere
 //
-//  Created by NodePassProject on 8/3/26.
+//  Created by NodePassProject on 8/20/26.
 //
 
 import Foundation
 
+nonisolated struct RoutingSnapshot {
+    let ruleSets: [RoutingRuleSet]
+    let customRuleSets: [CustomRoutingRuleSet]
+    let configurations: [ProxyConfiguration]
+    let chains: [ProxyChain]
+    let defaultTargetId: String?
+}
+
 @MainActor
-final class RoutingExporter {
-    private let ruleSetStore: RoutingRuleSetStore
-    private let configurationStore: ConfigurationStore
-    private let chainStore: ChainStore
+struct RoutingExportScheduler {
+    let debouncer: Debouncer
+    let ruleSetStore: RoutingRuleSetStore
+    let configurationStore: ConfigurationStore
+    let chainStore: ChainStore
 
-    private var syncTask: Task<Void, Never>?
-    private static let debounceInterval: Duration = .seconds(2)
-
-    init(ruleSetStore: RoutingRuleSetStore, configurationStore: ConfigurationStore, chainStore: ChainStore) {
-        self.ruleSetStore = ruleSetStore
-        self.configurationStore = configurationStore
-        self.chainStore = chainStore
-    }
-
-    func scheduleExport() {
-        let previous = syncTask
-        previous?.cancel()
-        syncTask = Task {
-            try? await Task.sleep(for: Self.debounceInterval)
-            guard !Task.isCancelled else { return }
-            await previous?.value
-            guard !Task.isCancelled else { return }
-            await export()
+    func schedule() {
+        debouncer.schedule { [ruleSetStore, configurationStore, chainStore] in
+            let snapshot = RoutingSnapshot(
+                ruleSets: ruleSetStore.ruleSets,
+                customRuleSets: ruleSetStore.customRuleSets,
+                configurations: configurationStore.configurations,
+                chains: chainStore.chains,
+                defaultTargetId: (AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId())?.uuidString
+            )
+            await RoutingExportOperation(snapshot: snapshot).run()
         }
     }
+}
 
-    private func export() async {
-        let snapshot = ruleSetStore.ruleSets
-        let customSnapshot = ruleSetStore.customRuleSets
-        let configurations = configurationStore.configurations
-        let chains = chainStore.chains
+@MainActor
+struct RoutingExportOperation {
+    let snapshot: RoutingSnapshot
 
-        let defaultTargetId = (AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId())?.uuidString
+    func run() async {
+        let ruleSets = snapshot.ruleSets
+        let customRuleSets = snapshot.customRuleSets
+        let configurations = snapshot.configurations
+        let chains = snapshot.chains
+        let defaultTargetId = snapshot.defaultTargetId
 
-        var idsToResolve = snapshot.compactMap(\.assignedConfigurationId)
+        var idsToResolve = ruleSets.compactMap(\.assignedConfigurationId)
         if let defaultTargetId { idsToResolve.append(defaultTargetId) }
         var resolvedTargets: [String: ProxyConfiguration] = [:]
         for assignedId in idsToResolve {
@@ -68,15 +73,15 @@ final class RoutingExporter {
         await Task.detached {
             var entries: [RoutingBinaryWriter.Entry] = []
             var configurationsById: [String: ProxyConfiguration] = [:]
-            
-            for ruleSet in snapshot.reversed() {
+
+            for ruleSet in ruleSets.reversed() {
                 let fallbackId = ruleSet.id == "ADBlock" ? nil : defaultTargetId
                 guard let assignedId = ruleSet.assignedConfigurationId ?? fallbackId else { continue }
 
                 let rules: [RoutingRule]
                 if ruleSet.isCustom,
                    let customId = UUID(uuidString: ruleSet.id),
-                   let custom = customSnapshot.first(where: { $0.id == customId }) {
+                   let custom = customRuleSets.first(where: { $0.id == customId }) {
                     rules = custom.rules
                 } else {
                     rules = RoutingRuleSetStore.loadRules(for: ruleSet.name)
@@ -133,7 +138,7 @@ final class RoutingExporter {
     }
 }
 
-nonisolated private struct RoutingBinaryWriter {
+nonisolated struct RoutingBinaryWriter {
     struct Entry {
         let tier: RoutingBinaryFormat.Tier
         let action: RoutingBinaryFormat.Action
@@ -163,11 +168,6 @@ nonisolated private struct RoutingBinaryWriter {
             writer.u32(0)  // back-patched once the kept rules are counted
             var kept: UInt32 = 0
             for rule in entry.rules {
-                // Case-fold domain values here, on the host: the extension stores
-                // suffix rules straight from these bytes (no per-rule folding),
-                // and folding once on the memory-rich host matches the lookup
-                // path, which lowercases the queried host. CIDR values are
-                // case-insensitive already and pass through untouched.
                 let value: String
                 switch rule.type {
                 case .domainSuffix, .domainKeyword: value = rule.value.lowercased()
@@ -182,9 +182,7 @@ nonisolated private struct RoutingBinaryWriter {
             }
             writer.patchU32(at: ruleCountOffset, kept)
         }
-
-        // Trailing names section: u32 count (== entry count), then one
-        // u16-length-prefixed UTF-8 name per entry, in entry order.
+        
         writer.u32(UInt32(entries.count))
         for entry in entries {
             let utf8 = Array(entry.name.prefix(64).utf8)

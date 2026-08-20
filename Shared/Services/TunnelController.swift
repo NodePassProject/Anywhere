@@ -24,10 +24,6 @@ final class TunnelController {
     @ObservationIgnored private var statusObserver: Task<Void, Never>?
     @ObservationIgnored private var reassertingDebounceTask: Task<Void, Never>?
     private static let reassertingDebounceInterval: Duration = .seconds(5)
-    
-    @ObservationIgnored var configurationProvider: () -> ProxyConfiguration? = { nil }
-    
-    @ObservationIgnored var onStatusApplied: ((NEVPNStatus) -> Void)?
 
     init(provider: TunnelProviding) {
         self.provider = provider
@@ -45,7 +41,6 @@ final class TunnelController {
             if let self {
                 self.rawStatus = provider.status
                 self.isManagerReady = true
-                self.onStatusApplied?(self.rawStatus)
             }
             for await status in provider.statusUpdates() {
                 guard !Task.isCancelled, let self else { return }
@@ -56,19 +51,8 @@ final class TunnelController {
 
     // MARK: - Actions
 
-    func toggle() {
-        switch rawStatus {
-        case .connected, .connecting:
-            disconnect()
-        case .disconnected, .invalid:
-            connect()
-        default:
-            break
-        }
-    }
-
-    func connect() {
-        guard isManagerReady, let configuration = configurationProvider() else { return }
+    func connect(using configuration: ProxyConfiguration) {
+        guard isManagerReady else { return }
         Task {
             let resolved = await Self.withResolvedIP(configuration)
 
@@ -103,9 +87,15 @@ final class TunnelController {
         pendingReconnect = true
         Task { await provider.stop(disablingAlwaysOn: true) }
     }
+    
+    func consumePendingReconnect() -> Bool {
+        guard pendingReconnect else { return false }
+        pendingReconnect = false
+        return true
+    }
 
     // MARK: - Provider IPC
-    
+
     func pushConfiguration(_ configuration: ProxyConfiguration) {
         guard rawStatus == .connected else { return }
         Task {
@@ -141,21 +131,12 @@ final class TunnelController {
                 guard !Task.isCancelled, let self else { return }
                 // Re-check the live status: apply only if it never recovered.
                 guard self.provider.status == .reasserting else { return }
-                self.applyStatus(.reasserting)
+                self.rawStatus = .reasserting
             }
             return
         }
 
-        applyStatus(status)
-    }
-
-    private func applyStatus(_ status: NEVPNStatus) {
         rawStatus = status
-        onStatusApplied?(status)
-        if status == .disconnected || status == .invalid, pendingReconnect {
-            pendingReconnect = false
-            connect()
-        }
     }
 
     // MARK: - DNS
@@ -185,6 +166,10 @@ final class TunnelController {
             chain: configuration.chain
         )
     }
+}
+
+extension TunnelController: LatencyTransport {
+    var isTunnelActive: Bool { rawStatus == .connected }
 }
 
 #if DEBUG

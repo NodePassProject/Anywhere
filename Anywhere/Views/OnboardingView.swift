@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 
 struct OnboardingView: View {
+    @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Binding var onboardingCompleted: Bool
 
@@ -219,11 +220,11 @@ struct OnboardingView: View {
         
         if adBlockEnabled {
             if let adBlock = ruleSetStore.adBlockRuleSet {
-                ruleSetStore.updateAssignment(adBlock, configurationId: "REJECT")
+                operations.routingRuleSets.updateAssignment(adBlock, configurationId: "REJECT")
             }
         }
         
-        ruleSetStore.bypassCountryCode = bypassCountryCode
+        operations.routingRuleSets.setBypassCountryCode(bypassCountryCode)
 
         AWCore.setOnboardingCompleted(true)
 

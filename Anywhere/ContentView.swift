@@ -10,8 +10,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppState.self) private var appState
     @Environment(AppSettings.self) private var settings
-    @Environment(ProxySelection.self) private var selection
-    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(Operations.self) private var operations
     @Environment(DeepLinkManager.self) private var deepLinkManager
     @State private var onboardingCompleted = AWCore.getOnboardingCompleted()
     @State private var showingDeepLinkAddSheet = false
@@ -37,8 +36,8 @@ struct ContentView: View {
                 }
                 .sheet(isPresented: $showingManualAddSheet) {
                     ProxyEditorView { configuration in
-                        configStore.add(configuration)
-                        selection.selectIfNone(configuration)
+                        operations.configurations.add(configuration)
+                        operations.selection.selectIfNone(configuration)
                     }
                 }
                 .sheet(isPresented: $showingImportRuleSetsSheet, onDismiss: { pendingRuleSetLinks = [] }) {

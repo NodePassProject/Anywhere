@@ -9,6 +9,7 @@ import SwiftUI
 
 struct TrustedCertificatesView: View {
     @Environment(AppSettings.self) private var appSettings
+    @Environment(Operations.self) private var operations
     @Environment(CertificateStore.self) private var certificateStore
     
     @State private var showAddAlert = false
@@ -54,14 +55,14 @@ struct TrustedCertificatesView: View {
                                 Label("Copy", systemImage: "doc.on.doc")
                             }
                             Button(role: .destructive) {
-                                certificateStore.remove(fingerprint)
+                                operations.certificates.remove(fingerprint)
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
                 }
                 .onDelete { offsets in
-                    certificateStore.remove(atOffsets: offsets)
+                    operations.certificates.remove(atOffsets: offsets)
                 }
             }
         }
@@ -90,7 +91,7 @@ struct TrustedCertificatesView: View {
                 .textInputAutocapitalization(.never)
             Button("Add") {
                 let trimmed = newFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !certificateStore.add(trimmed) {
+                if !operations.certificates.add(trimmed) {
                     errorMessage = String(localized: "Invalid fingerprint. Must be a 64-character hex string, or it already exists.")
                     showError = true
                 }

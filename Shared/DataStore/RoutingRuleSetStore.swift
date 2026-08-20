@@ -86,7 +86,6 @@ class RoutingRuleSetStore {
         didSet {
             guard bypassCountryCode != oldValue else { return }
             AWCore.setBypassCountryCode(bypassCountryCode)
-            onNeedsExport?()
         }
     }
 
@@ -106,8 +105,6 @@ class RoutingRuleSetStore {
     @ObservationIgnored private let syncStore: SyncStore
     @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
-
-    @ObservationIgnored var onNeedsExport: (() -> Void)?
 
     init(syncStore: SyncStore) {
         self.syncStore = syncStore
@@ -140,7 +137,6 @@ class RoutingRuleSetStore {
             customRuleSets = outcome.live
             customTombstones = outcome.tombstones
             rebuildRuleSets()
-            onNeedsExport?()
             return
         }
     }
@@ -173,7 +169,6 @@ class RoutingRuleSetStore {
         guard ruleSets[index].assignedConfigurationId != configurationId else { return }
         ruleSets[index].assignedConfigurationId = configurationId
         saveAssignments()
-        onNeedsExport?()
     }
 
     func resetAssignments() {
@@ -186,7 +181,6 @@ class RoutingRuleSetStore {
             ruleSets[index].assignedConfigurationId = nil
         }
         saveAssignments()
-        onNeedsExport?()
     }
     
     func clearOrphanedAssignments(availableIds: Set<String>) -> [String] {
@@ -305,6 +299,5 @@ class RoutingRuleSetStore {
             items: SyncCodec.encodeItems(customRuleSets + customTombstones),
             order: SyncCodec.order(of: customRuleSets)
         )
-        onNeedsExport?()
     }
 }

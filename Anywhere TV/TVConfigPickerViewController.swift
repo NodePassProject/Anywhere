@@ -10,6 +10,7 @@ import UIKit
 class TVConfigPickerViewController: UITableViewController {
 
     private let container: AppContainer
+    private lazy var operations = Operations(container: container)
     private var selection: ProxySelection { container.selection }
     private var sections: [(header: String?, items: [PickerItem])] = []
 
@@ -41,16 +42,21 @@ class TVConfigPickerViewController: UITableViewController {
     }
 
     private func buildSections() -> [(header: String?, items: [PickerItem])] {
+        let picker = PickerQuery(
+            configurations: container.configurationStore.configurations,
+            chains: container.chainStore.chains,
+            subscriptions: container.subscriptionStore.subscriptions
+        )
         var sections: [(header: String?, items: [PickerItem])] = []
-        let standalone = container.configurationStore.standalonePickerItems
+        let standalone = picker.standaloneItems
         if !standalone.isEmpty {
             sections.append((nil, standalone))
         }
-        let chains = container.chainStore.pickerItems
+        let chains = picker.chainItems
         if !chains.isEmpty {
             sections.append((String(localized: "Chains"), chains))
         }
-        for sub in container.subscriptionStore.pickerSections {
+        for sub in picker.subscriptionSections {
             sections.append((sub.header, sub.items))
         }
         return sections
@@ -109,9 +115,9 @@ class TVConfigPickerViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let item = sections[indexPath.section].items[indexPath.row]
         if let configuration = container.configurationStore.configurations.first(where: { $0.id == item.id }) {
-            selection.selectedConfiguration = configuration
+            operations.selection.select(configuration)
         } else if let chain = container.chainStore.chains.first(where: { $0.id == item.id }) {
-            selection.selectChain(chain, configurations: container.configurationStore.configurations)
+            operations.selection.selectChain(chain, configurations: container.configurationStore.configurations)
         }
         dismiss(animated: true)
     }

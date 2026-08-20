@@ -16,15 +16,13 @@ class SubscriptionStore {
     private var tombstones: [Subscription] = []
 
     @ObservationIgnored private let syncStore: SyncStore
-    @ObservationIgnored private let configurationStore: ConfigurationStore
     @ObservationIgnored private var loadedItems: [Data]?
     @ObservationIgnored private var mutationEpoch = 0
 
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    init(syncStore: SyncStore, configurationStore: ConfigurationStore) {
+    init(syncStore: SyncStore) {
         self.syncStore = syncStore
-        self.configurationStore = configurationStore
         let items = syncStore.loadItems(.subscriptions)
         loadedItems = items
         let split = Self.decodeSplit(from: items)
@@ -75,7 +73,6 @@ class SubscriptionStore {
     }
     
     func delete(_ subscription: Subscription) {
-        configurationStore.deleteConfigurations(for: subscription.id)
         subscriptions.removeAll { $0.id == subscription.id }
         recordTombstone(subscription)
         save()
@@ -121,19 +118,6 @@ extension SubscriptionStore {
         guard let subId = configuration.subscriptionId else { return nil }
         return subscriptions.first { $0.id == subId }
     }
-    
-    var pickerSections: [PickerSection] {
-        let configStore = configurationStore
-        return subscriptions.compactMap { subscription in
-            let configs = configStore.configurations(for: subscription)
-            guard !configs.isEmpty else { return nil }
-            return PickerSection(
-                id: subscription.id,
-                header: subscription.name,
-                items: configs.map { PickerItem(id: $0.id, name: $0.name) }
-            )
-        }
-    }
 
     func rename(_ subscription: Subscription, to newName: String) {
         mutate(id: subscription.id) {
@@ -142,18 +126,6 @@ extension SubscriptionStore {
         }
     }
 
-    func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration]) {
-        add(subscription)
-        let tagged = newConfigurations.map { configuration in
-            ProxyConfiguration(
-                id: configuration.id, name: configuration.name,
-                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscription.id,
-                outbound: configuration.outbound
-            )
-        }
-        configurationStore.replaceConfigurations(for: subscription.id, with: tagged)
-    }
     
     func applyRefreshResult(_ result: SubscriptionFetcher.Result, to subscriptionId: UUID) {
         mutate(id: subscriptionId) { record in
