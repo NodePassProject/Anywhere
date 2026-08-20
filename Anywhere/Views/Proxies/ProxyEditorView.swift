@@ -8,10 +8,10 @@
 import SwiftUI
 
 struct ProxyEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    
     let configuration: ProxyConfiguration?
     let onSave: (ProxyConfiguration) -> Void
-
-    @Environment(\.dismiss) private var dismiss
     
     @State private var selectedProtocol: OutboundProtocol = .nowhere
     @State private var name = ""

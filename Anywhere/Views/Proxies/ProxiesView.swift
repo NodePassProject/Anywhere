@@ -153,9 +153,7 @@ struct ProxiesView: View {
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
                 AddProxyView(showingManualAddSheet: $showingManualAddSheet)
-                    .environment(proxySelection)
-                    .environment(configurationStore)
-                    .environment(subscriptionStore)
+                    .environment(operations)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
