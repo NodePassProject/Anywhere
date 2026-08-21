@@ -33,7 +33,7 @@ struct SubscriptionView<Content: View>: View {
             }
             .buttonStyle(.plain)
 
-            VStack(spacing: 10) {
+            LazyVStack(spacing: 10) {
                 content
             }
             .padding(.top, 12)

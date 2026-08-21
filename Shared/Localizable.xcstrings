@@ -6748,6 +6748,15 @@
         }
       }
     },
+    "Exclude APNs" : {
+      "shouldTranslate" : false
+    },
+    "Exclude Cellular Services" : {
+      "shouldTranslate" : false
+    },
+    "Exclude Local Networks" : {
+      "shouldTranslate" : false
+    },
     "Excluded Routes" : {
       "shouldTranslate" : false
     },
@@ -7710,6 +7719,52 @@
         }
       }
     },
+    "Group Actions" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إجراءات المجموعة"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Acciones del grupo"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عملیات گروه"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Действия с группой"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Grup İşlemleri"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thao tác nhóm"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分组操作"
+          }
+        }
+      }
+    },
     "Groups" : {
       "localizations" : {
         "ar" : {
@@ -8562,15 +8617,6 @@
       }
     },
     "Include All Networks" : {
-      "shouldTranslate" : false
-    },
-    "Include APNs" : {
-      "shouldTranslate" : false
-    },
-    "Include Cellular Services" : {
-      "shouldTranslate" : false
-    },
-    "Include Local Networks" : {
       "shouldTranslate" : false
     },
     "Included Routes" : {
@@ -16433,6 +16479,52 @@
         }
       }
     },
+    "Subscription Actions" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إجراءات الاشتراك"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Acciones de la suscripción"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عملیات اشتراک"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Действия с подпиской"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abonelik İşlemleri"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thao tác đăng ký"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "订阅操作"
+          }
+        }
+      }
+    },
     "Subscription Failed" : {
       "localizations" : {
         "ar" : {
@@ -18373,52 +18465,6 @@
         }
       }
     },
-    "Update All" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "تحديث الكل"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Actualizar todo"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "به‌روزرسانی همه"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Обновить все"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tümünü Güncelle"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cập nhật tất cả"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "更新全部"
-          }
-        }
-      }
-    },
     "Update Failed" : {
       "localizations" : {
         "ar" : {
@@ -18467,6 +18513,52 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新失败"
+          }
+        }
+      }
+    },
+    "Update Subscriptions" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تحديث الاشتراكات"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Actualizar suscripciones"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "به‌روزرسانی اشتراک‌ها"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обновить подписки"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abonelikleri Güncelle"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cập nhật đăng ký"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新订阅"
           }
         }
       }

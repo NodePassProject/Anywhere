@@ -50,7 +50,7 @@ struct ProxiesView: View {
     @State private var groupToEdit: ProxyGroup?
     @State private var expandedContainerId: UUID?
     
-    @State private var updatingSubscription: Subscription?
+    @State private var updatingSubscriptionIds: Set<UUID> = []
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
     @State private var renamingSubscription: Subscription?
@@ -225,104 +225,6 @@ struct ProxiesView: View {
             }
         }
         
-        if let subscription = expandedSubscription {
-            ToolbarItem(placement: .bottomBar) {
-                if updatingSubscription?.id == subscription.id {
-                    ProgressView()
-                } else {
-                    Button {
-                        updateSubscription(subscription)
-                    } label: {
-                        Label("Update", systemImage: "arrow.clockwise")
-                    }
-                }
-            }
-            
-            ToolbarItem(placement: .bottomBar) {
-                Menu("More", systemImage: "ellipsis") {
-                    let configurationCount = configurationStore.configurations(for: subscription).count
-                    if configurationCount > 1 {
-                        Button {
-                            reorderScope = .subscription(subscription.id)
-                        } label: {
-                            Label("Reorder", systemImage: "arrow.up.arrow.down")
-                        }
-                    }
-                    if configurationCount > 0 {
-                        Section {
-                            Button {
-                                operations.latency.testAll(configurationStore.configurations(for: subscription))
-                            } label: {
-                                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                            }
-                        }
-                    }
-                    Section {
-                        Button {
-                            renameText = subscription.name
-                            renamingSubscription = subscription
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        Button {
-                            updateSubscription(subscription)
-                        } label: {
-                            Label("Update", systemImage: "arrow.clockwise")
-                        }
-                        Button(role: .destructive) {
-                            operations.subscriptions.delete(subscription)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-        } else if let group = expandedGroup {
-            ToolbarItem(placement: .bottomBar) {
-                Button{
-                    groupToEdit = group
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-            }
-            
-            ToolbarItem(placement: .bottomBar) {
-                Menu("More", systemImage: "ellipsis") {
-                    let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
-                    if memberCount > 1 {
-                        Section {
-                            Button {
-                                reorderScope = .group(group.id)
-                            } label: {
-                                Label("Reorder", systemImage: "arrow.up.arrow.down")
-                            }
-                        }
-                    }
-                    if memberCount > 0 {
-                        Section {
-                            Button {
-                                testGroupLatency(group)
-                            } label: {
-                                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-                            }
-                        }
-                    }
-                    Section {
-                        Button {
-                            groupToEdit = group
-                        } label: {
-                            Label("Edit", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            operations.groups.delete(group)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-        }
-        
         ToolbarItem {
             Button {
                 switch proxyType {
@@ -391,7 +293,73 @@ struct ProxiesView: View {
                         Button {
                             updateAllSubscriptions()
                         } label: {
-                            Label("Update All", systemImage: "arrow.clockwise")
+                            Label("Update Subscriptions", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
+            }
+        }
+        
+        if #available(iOS 26.0, *) {
+            ToolbarSpacer()
+        }
+        
+        if let group = expandedGroup {
+            ToolbarItem {
+                Menu("Group Actions", systemImage: "folder") {
+                    Section {
+                        let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
+                        if memberCount > 1 {
+                            Section {
+                                Button {
+                                    reorderScope = .group(group.id)
+                                } label: {
+                                    Label("Reorder", systemImage: "arrow.up.arrow.down")
+                                }
+                            }
+                        }
+                        Button {
+                            groupToEdit = group
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            operations.groups.delete(group)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+        }
+        
+        if let subscription = expandedSubscription {
+            ToolbarItem {
+                Menu("Subscription Actions", systemImage: "link") {
+                    Section {
+                        let configurationCount = configurationStore.configurations(for: subscription).count
+                        if configurationCount > 1 {
+                            Button {
+                                reorderScope = .subscription(subscription.id)
+                            } label: {
+                                Label("Reorder", systemImage: "arrow.up.arrow.down")
+                            }
+                        }
+                        Button {
+                            renameText = subscription.name
+                            renamingSubscription = subscription
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button {
+                            updateSubscription(subscription)
+                        } label: {
+                            Label("Update", systemImage: "arrow.clockwise")
+                        }
+                        Button(role: .destructive) {
+                            operations.subscriptions.delete(subscription)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
                     }
                 }
@@ -463,7 +431,7 @@ struct ProxiesView: View {
             subscription: subscription,
             configurationCount: configurationStore.configurations(for: subscription).count,
             isExpanded: expansionBinding(for: subscription.id),
-            isUpdating: updatingSubscription?.id == subscription.id,
+            isUpdating: updatingSubscriptionIds.contains(subscription.id),
             onRename: {
                 renameText = subscription.name
                 renamingSubscription = subscription
@@ -474,8 +442,8 @@ struct ProxiesView: View {
     }
     
     private func updateSubscription(_ subscription: Subscription) {
-        guard updatingSubscription == nil else { return }
-        updatingSubscription = subscription
+        guard !updatingSubscriptionIds.contains(subscription.id) else { return }
+        updatingSubscriptionIds.insert(subscription.id)
         Task {
             do {
                 try await operations.subscriptions.refresh(subscription)
@@ -483,24 +451,34 @@ struct ProxiesView: View {
                 subscriptionErrorMessage = error.localizedDescription
                 showingSubscriptionError = true
             }
-            updatingSubscription = nil
+            updatingSubscriptionIds.remove(subscription.id)
         }
     }
-    
+
     private func updateAllSubscriptions() {
-        guard updatingSubscription == nil else { return }
+        guard updatingSubscriptionIds.isEmpty else { return }
+        let subscriptions = subscriptionStore.subscriptions
+        updatingSubscriptionIds = Set(subscriptions.map(\.id))
         Task {
             var failures: [String] = []
-            for id in subscriptionStore.subscriptions.map(\.id) {
-                guard let subscription = subscriptionStore.subscriptions.first(where: { $0.id == id }) else { continue }
-                updatingSubscription = subscription
-                do {
-                    try await operations.subscriptions.refresh(subscription)
-                } catch {
-                    failures.append("\(subscription.name): \(error.localizedDescription)")
+            await withTaskGroup(of: (id: UUID, failure: String?).self) { group in
+                for subscription in subscriptions {
+                    group.addTask {
+                        do {
+                            try await operations.subscriptions.refresh(subscription)
+                            return (subscription.id, nil)
+                        } catch {
+                            return (subscription.id, "\(subscription.name): \(error.localizedDescription)")
+                        }
+                    }
+                }
+                for await result in group {
+                    updatingSubscriptionIds.remove(result.id)
+                    if let failure = result.failure {
+                        failures.append(failure)
+                    }
                 }
             }
-            updatingSubscription = nil
             if !failures.isEmpty {
                 subscriptionErrorMessage = failures.joined(separator: "\n")
                 showingSubscriptionError = true
