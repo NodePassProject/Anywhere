@@ -446,8 +446,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				DeepLinkManager.swift,
-				Views/Settings/MITM/MITMRuleSetParser.swift,
-				Views/Settings/RuleSets/RoutingRuleParser.swift,
+				Views/Pages/MITM/MITMRuleSetParser.swift,
+				Views/Pages/Routing/RoutingRuleParser.swift,
 			);
 			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
 		};

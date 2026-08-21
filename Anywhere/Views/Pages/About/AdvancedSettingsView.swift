@@ -33,9 +33,6 @@ struct AdvancedSettingsView: View {
                         }
                     }
                 ))
-                NavigationLink("Tunnel Scope") {
-                    TunnelScopeSettingsView()
-                }
             }
             
             Section {

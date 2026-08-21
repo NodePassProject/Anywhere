@@ -1,5 +1,5 @@
 //
-//  TrustedNetworkSettingsView.swift
+//  TrustedNetworkView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 6/23/26.
@@ -13,7 +13,7 @@ private struct TrustedSSIDDraft: Identifiable, Equatable {
     var value: String
 }
 
-struct TrustedNetworkSettingsView: View {
+struct TrustedNetworkView: View {
     @Environment(\.editMode) private var editMode
     @Environment(AppSettings.self) private var settings
 

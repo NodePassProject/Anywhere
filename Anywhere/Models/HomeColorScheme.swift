@@ -12,7 +12,7 @@ enum HomeColorScheme: String, CaseIterable {
     case dark
     case light
     
-    var colorSceme: ColorScheme {
+    var colorScheme: ColorScheme {
         switch self {
         case .dark: .dark
         case .light: .light

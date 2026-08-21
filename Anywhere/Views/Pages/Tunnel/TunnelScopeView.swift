@@ -1,5 +1,5 @@
 //
-//  TunnelScopeSettingsView.swift
+//  TunnelScopeView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/18/26.
@@ -12,7 +12,7 @@ private struct RouteDraft: Identifiable, Equatable {
     var value: String
 }
 
-struct TunnelScopeSettingsView: View {
+struct TunnelScopeView: View {
     @Environment(TunnelController.self) private var tunnel
     @Environment(AppSettings.self) private var settings
     @Environment(\.editMode) private var editMode

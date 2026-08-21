@@ -1,5 +1,5 @@
 //
-//  MITMSettingsView.swift
+//  MITMView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/3/26.
@@ -8,7 +8,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct MITMSettingsView: View {
+struct MITMView: View {
     @Environment(MITMCertificateController.self) private var certificateController
     @Environment(Operations.self) private var operations
     @Environment(MITMRuleSetStore.self) private var ruleSetStore
@@ -26,117 +26,119 @@ struct MITMSettingsView: View {
     @State private var subscribeError: String?
 
     var body: some View {
-        Form {
-            Section {
-                Toggle(isOn: Binding(
-                    get: { ruleSetStore.enabled },
-                    set: { operations.mitmRuleSets.setEnabled($0) }
-                )) {
-                    SettingsItem.mitm.label
-                }
-            }
-
-            Section {
-                NavigationLink {
-                    MITMCertificateView()
-                } label: {
-                    HStack {
-                        TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                        Spacer()
-                        Image(systemName: certificateStatusBadgeIcon)
-                            .foregroundStyle(certificateStatusBadgeColor)
+        NavigationStack {
+            List {
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { ruleSetStore.enabled },
+                        set: { operations.mitmRuleSets.setEnabled($0) }
+                    )) {
+                        TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                     }
                 }
-            }
-
-            if !ruleSetStore.ruleSets.isEmpty {
-                Section("Rule Sets") {
-                    ForEach(ruleSetStore.ruleSets) { ruleSet in
-                        NavigationLink {
-                            MITMRuleSetDetailView(ruleSet: ruleSet)
-                        } label: {
-                            ruleSetRow(for: ruleSet)
+                
+                Section {
+                    NavigationLink {
+                        MITMCertificateView()
+                    } label: {
+                        HStack {
+                            TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                            Spacer()
+                            Image(systemName: certificateStatusBadgeIcon)
+                                .foregroundStyle(certificateStatusBadgeColor)
                         }
                     }
-                    .onDelete { offsets in
-                        operations.mitmRuleSets.removeRuleSets(atOffsets: offsets)
-                    }
-                    .onMove { source, destination in
-                        operations.mitmRuleSets.moveRuleSets(fromOffsets: source, toOffset: destination)
+                }
+                
+                if !ruleSetStore.ruleSets.isEmpty {
+                    Section("Rule Sets") {
+                        ForEach(ruleSetStore.ruleSets) { ruleSet in
+                            NavigationLink {
+                                MITMRuleSetDetailView(ruleSet: ruleSet)
+                            } label: {
+                                ruleSetRow(for: ruleSet)
+                            }
+                        }
+                        .onDelete { offsets in
+                            operations.mitmRuleSets.removeRuleSets(atOffsets: offsets)
+                        }
+                        .onMove { source, destination in
+                            operations.mitmRuleSets.moveRuleSets(fromOffsets: source, toOffset: destination)
+                        }
                     }
                 }
             }
-        }
-        .navigationTitle("MITM")
-        .toolbar {
-            ToolbarItem {
-                EditButton()
-            }
-            ToolbarItem {
-                Menu("More", systemImage: "ellipsis") {
-                    Button {
-                        showAddSheet = true
-                    } label: {
-                        Label("Add Rule Set", systemImage: "plus")
-                    }
-                    Button {
-                        importError = nil
-                        showFileImporter = true
-                    } label: {
-                        Label("Import Rule Set", systemImage: "square.and.arrow.down")
-                    }
-                    Button {
-                        subscribeURL = ""
-                        showSubscribeAlert = true
-                    } label: {
-                        Label("Subscribe Rule Set", systemImage: "link")
+            .navigationTitle("MITM")
+            .toolbar {
+                ToolbarItem {
+                    EditButton()
+                }
+                ToolbarItem {
+                    Menu("More", systemImage: "ellipsis") {
+                        Button {
+                            showAddSheet = true
+                        } label: {
+                            Label("Add Rule Set", systemImage: "plus")
+                        }
+                        Button {
+                            importError = nil
+                            showFileImporter = true
+                        } label: {
+                            Label("Import Rule Set", systemImage: "square.and.arrow.down")
+                        }
+                        Button {
+                            subscribeURL = ""
+                            showSubscribeAlert = true
+                        } label: {
+                            Label("Subscribe Rule Set", systemImage: "link")
+                        }
                     }
                 }
             }
-        }
-        .alert("Add Rule Set", isPresented: $showAddSheet) {
-            TextField("Name", text: $newRuleSetName)
-            Button("Add") {
-                let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !name.isEmpty else { return }
-                operations.mitmRuleSets.addRuleSet(MITMRuleSet(name: name))
-                newRuleSetName = ""
+            .alert("Add Rule Set", isPresented: $showAddSheet) {
+                TextField("Name", text: $newRuleSetName)
+                Button("Add") {
+                    let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    operations.mitmRuleSets.addRuleSet(MITMRuleSet(name: name))
+                    newRuleSetName = ""
+                }
+                Button("Cancel", role: .cancel) {
+                    newRuleSetName = ""
+                }
             }
-            Button("Cancel", role: .cancel) {
-                newRuleSetName = ""
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: Self.importAllowedContentTypes
+            ) { result in
+                handleFileImport(result)
             }
-        }
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: Self.importAllowedContentTypes
-        ) { result in
-            handleFileImport(result)
-        }
-        .alert("Import Failed", isPresented: Binding(
-            get: { importError != nil },
-            set: { if !$0 { importError = nil } }
-        )) {
-            Button("OK") { importError = nil }
-        } message: {
-            Text(importError ?? "")
-        }
-        .alert("Subscribe Rule Set", isPresented: $showSubscribeAlert) {
-            TextField("Anywhere MITM Rule Set URL", text: $subscribeURL)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .keyboardType(.URL)
-            Button("Subscribe") {
-                subscribe(to: subscribeURL)
+            .alert("Import Failed", isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
+            )) {
+                Button("OK") { importError = nil }
+            } message: {
+                Text(importError ?? "")
             }
-            Button("Cancel", role: .cancel) {}
-        }
-        .alert("Subscription Failed", isPresented: Binding(
-            get: { subscribeError != nil },
-            set: { if !$0 { subscribeError = nil } }
-        )) {
-            Button("OK") { subscribeError = nil }
-        } message: {
-            Text(subscribeError ?? "")
+            .alert("Subscribe Rule Set", isPresented: $showSubscribeAlert) {
+                TextField("Anywhere MITM Rule Set URL", text: $subscribeURL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                Button("Subscribe") {
+                    subscribe(to: subscribeURL)
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .alert("Subscription Failed", isPresented: Binding(
+                get: { subscribeError != nil },
+                set: { if !$0 { subscribeError = nil } }
+            )) {
+                Button("OK") { subscribeError = nil }
+            } message: {
+                Text(subscribeError ?? "")
+            }
         }
     }
 

@@ -1456,6 +1456,9 @@
         }
       }
     },
+    "About" : {
+
+    },
     "Acknowledgements" : {
       "localizations" : {
         "ar" : {
@@ -4967,6 +4970,9 @@
           }
         }
       }
+    },
+    "Data" : {
+
     },
     "Data (Base64)" : {
       "localizations" : {
@@ -9513,6 +9519,9 @@
       "comment" : "Key for Sudoku protocol",
       "shouldTranslate" : false
     },
+    "Launch Pad" : {
+
+    },
     "Lifetime Access" : {
       "localizations" : {
         "ar" : {
@@ -10090,6 +10099,9 @@
           }
         }
       }
+    },
+    "Mission Control" : {
+
     },
     "MITM" : {
       "shouldTranslate" : false
@@ -11290,6 +11302,9 @@
           }
         }
       }
+    },
+    "Not Connected" : {
+
     },
     "Not Enough Proxies" : {
       "localizations" : {
@@ -14951,6 +14966,7 @@
       }
     },
     "Routing Rules" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -18098,6 +18114,9 @@
         }
       }
     },
+    "Tunnel" : {
+
+    },
     "Tunnel Scope" : {
       "localizations" : {
         "ar" : {
@@ -19049,9 +19068,6 @@
       "shouldTranslate" : false
     },
     "Voyager" : {
-      "shouldTranslate" : false
-    },
-    "Voyager Member Card" : {
       "shouldTranslate" : false
     },
     "Voyager Only" : {

@@ -1,14 +1,15 @@
 //
-//  HomeView.swift
+//  LaunchPadView.swift
 //  Anywhere
 //
-//  Created by NodePassProject on 3/1/26.
+//  Created by NodePassProject on 8/21/26.
 //
 
 import SwiftUI
 import NetworkExtension
 
-struct HomeView: View {
+struct LaunchPadView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(AppSettings.self) private var appSettings
     @Environment(Operations.self) private var operations
     @Environment(TunnelController.self) private var tunnelController
@@ -19,20 +20,15 @@ struct HomeView: View {
     @Environment(GroupStore.self) private var groupStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
-    
+
     private static let horizontalPadding: CGFloat = 20
-    private static let paneSpacing: CGFloat = 20
-    private static let minControlPaneWidth: CGFloat = 320
-    private static let maxControlPaneWidth: CGFloat = 500
+    private static let maxControlWidth: CGFloat = 500
 
-    @Namespace private var namespace
+    @State private var viewportHeight: CGFloat = 0
 
-    @State private var containerSize = CGSize.zero
-    
     @State private var connectionEffectsEnabled = false
-    
+
     @State private var showingProxiesView = false
-    @State private var showingSettingsView = false
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
 
@@ -45,137 +41,60 @@ struct HomeView: View {
     private var isTransitioning: Bool { tunnelController.rawStatus.isTransitioning }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                BackgroundGradient(isConnected: isConnected)
-                    .ignoresSafeArea()
-
-                Group {
-                    if isConnected && Self.allowsSideBySide(contentWidth: contentWidth) {
-                        sideBySideLayout
-                    } else {
-                        stackedLayout
-                    }
+        ZStack {
+            BackgroundGradient(isConnected: isConnected)
+                .ignoresSafeArea()
+            
+            VStack(spacing: 80) {
+                VStack(spacing: 20) {
+                    powerButton
+                    statusLabel
                 }
-                .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
-                .sensoryFeedback(trigger: isConnected) { _, _ in
-                    guard connectionEffectsEnabled else { return nil }
-                    return .impact
-                }
-            }
-            .colorScheme(appSettings.homeColorScheme.colorSceme)
-            .onGeometryChange(for: CGSize.self) { proxy in
-                proxy.size
-            } action: { size in
-                containerSize = size
-            }
-            .sheet(isPresented: $showingProxiesView) {
-                ProxiesView()
-                    .environment(operations)
-                    .environment(proxySelection)
-                    .environment(latencyCenter)
-                    .environment(configurationStore)
-                    .environment(chainStore)
-                    .environment(groupStore)
-                    .environment(subscriptionStore)
-            }
-            .sheet(isPresented: $showingSettingsView) {
-                SettingsView()
-                    .environment(appSettings)
-                    .environment(tunnelController)
-                    .environment(routingRuleSetStore)
-            }
-            .sheet(isPresented: $showingAddSheet) {
-                DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                    AddProxyView(showingManualAddSheet: $showingManualAddSheet)
-                        .environment(operations)
-                }
-            }
-            .sheet(isPresented: $showingManualAddSheet) {
-                ProxyEditorView { configuration in
-                    operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
-                }
-            }
-            .alert("VPN Error", isPresented: Binding(
-                get: { tunnelController.startError != nil },
-                set: { if !$0 { tunnelController.startError = nil } }
-            )) {
-                Button("OK") { tunnelController.startError = nil }
-            } message: {
-                Text(tunnelController.startError ?? "")
-            }
-            .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
-                guard ready, !connectionEffectsEnabled else { return }
-                Task { @MainActor in connectionEffectsEnabled = true }
-            }
-        }
-    }
-
-    // MARK: - Layouts
-
-    private var contentWidth: CGFloat {
-        containerSize.width - 2 * Self.horizontalPadding
-    }
-
-    private static func allowsSideBySide(contentWidth: CGFloat) -> Bool {
-        StatCardSize.columnCount(fitting: contentWidth) > ConnectionStatsView.maxColumnCount
-    }
-
-    private var stackedLayout: some View {
-        DetailRevealScrollView(revealsDetail: isConnected) {
-            connectionControls
-                .padding(.horizontal, Self.horizontalPadding)
-        } detail: {
-            ConnectionStatsView()
-                .padding(.top, 16)
-                .padding(.horizontal, Self.horizontalPadding)
-        }
-    }
-    
-    private var sideBySideLayout: some View {
-        let detailWidth = min(
-            StatCardSize.gridWidth(
-                columns: ConnectionStatsView.maxColumnCount,
-                unitLength: StatCardSize.maxUnitLength
-            ),
-            contentWidth - Self.minControlPaneWidth - Self.paneSpacing
-        )
-        return HStack(spacing: Self.paneSpacing) {
-            ScrollView {
-                connectionControls
-                    .frame(maxWidth: .infinity, minHeight: containerSize.height)
-            }
-            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-
-            ScrollView {
-                ConnectionStatsView()
-                    .padding(.vertical, 16)
-                    .frame(minHeight: containerSize.height)
-            }
-            .frame(width: detailWidth)
-            .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-            .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
-        .frame(maxWidth: Self.maxControlPaneWidth + Self.paneSpacing + detailWidth)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, Self.horizontalPadding)
-    }
-
-    private var connectionControls: some View {
-        VStack(spacing: 80) {
-            VStack(spacing: 20) {
-                powerButton
-                    .matchedGeometryEffect(id: "powerButton", in: namespace)
-                statusLabel
-                    .matchedGeometryEffect(id: "statusLabel", in: namespace)
-            }
-            HStack {
                 configurationCard
-                    .matchedGeometryEffect(id: "configurationCard", in: namespace)
-                settingsButton
-                    .matchedGeometryEffect(id: "settingsButton", in: namespace)
+                    .frame(maxWidth: Self.maxControlWidth)
             }
-            .frame(maxWidth: Self.maxControlPaneWidth)
+            .padding()
+            .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
+            .sensoryFeedback(trigger: isConnected) { _, _ in
+                guard connectionEffectsEnabled else { return nil }
+                return .impact
+            }
+        }
+        .colorScheme(appSettings.homeColorScheme.colorScheme)
+        .toolbar(removing: .title)
+        .toolbarColorScheme(appSettings.homeColorScheme.colorScheme, for: .navigationBar)
+        .sheet(isPresented: $showingProxiesView) {
+            ProxiesView()
+                .environment(operations)
+                .environment(proxySelection)
+                .environment(latencyCenter)
+                .environment(configurationStore)
+                .environment(chainStore)
+                .environment(groupStore)
+                .environment(subscriptionStore)
+        }
+        .sheet(isPresented: $showingAddSheet) {
+            DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                    .environment(operations)
+            }
+        }
+        .sheet(isPresented: $showingManualAddSheet) {
+            ProxyEditorView { configuration in
+                operations.configurations.add(configuration); operations.selection.selectIfNone(configuration)
+            }
+        }
+        .alert("VPN Error", isPresented: Binding(
+            get: { tunnelController.startError != nil },
+            set: { if !$0 { tunnelController.startError = nil } }
+        )) {
+            Button("OK") { tunnelController.startError = nil }
+        } message: {
+            Text(tunnelController.startError ?? "")
+        }
+        .onChange(of: tunnelController.isManagerReady, initial: true) { _, ready in
+            guard ready, !connectionEffectsEnabled else { return }
+            Task { @MainActor in connectionEffectsEnabled = true }
         }
     }
 
@@ -207,59 +126,11 @@ struct HomeView: View {
             showingAddSheet: $showingAddSheet
         )
     }
-    
+
     private var statusLabel: some View {
         Text(tunnelController.status.localizedText)
             .font(.headline)
             .foregroundStyle(.secondary)
-    }
-    
-    private var settingsButton: some View {
-        Button {
-            showingSettingsView = true
-        } label: {
-            ProminentCircle {
-                Image(systemName: "gearshape.fill")
-                    .accessibilityLabel("Settings")
-            }
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Background
-
-private struct BackgroundGradient: View {
-    @Environment(AppSettings.self) private var settings
-
-    let isConnected: Bool
-
-    var body: some View {
-        if isConnected {
-            LinearGradient(
-                colors: [
-                    color(settings.connectedBackgroundStartData, default: .connectedBackgroundStart),
-                    color(settings.connectedBackgroundEndData, default: .connectedBackgroundEnd),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .transition(.blurReplace)
-        } else {
-            LinearGradient(
-                colors: [
-                    color(settings.disconnectedBackgroundStartData, default: .disconnectedBackgroundStart),
-                    color(settings.disconnectedBackgroundEndData, default: .disconnectedBackgroundEnd),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .transition(.blurReplace)
-        }
-    }
-
-    private func color(_ data: Data?, default fallback: Color) -> Color {
-        data.flatMap(Color.init(archivedData:)) ?? fallback
     }
 }
 
@@ -278,16 +149,11 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                if #available(iOS 27.0, *) {
+                if #available(iOS 26.0, *) {
                     Circle()
                         .fill(.clear)
                         .frame(width: Self.circleDiameter)
                         .glassEffect(.regular, in: .circle)
-                } else if #available(iOS 26.0, *) {
-                    Circle()
-                        .fill(.clear)
-                        .frame(width: Self.circleDiameter)
-                        .glassEffect(.clear, in: .circle)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
@@ -373,7 +239,7 @@ private struct ConfigurationCapsule: View {
         }
         .buttonStyle(.plain)
     }
-    
+
     private var loadingCapsule: some View {
         ProminentCapsule {
             HStack(spacing: 12) {
@@ -395,16 +261,11 @@ private struct ProminentCapsule<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 27.0, *) {
+        if #available(iOS 26.0, *) {
             content
                 .padding(16)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive(), in: .capsule)
-        } else if #available(iOS 26.0, *) {
-            content
-                .padding(16)
-                .contentShape(Capsule())
-                .glassEffect(.clear.interactive(), in: .capsule)
         } else {
             content
                 .padding(16)
@@ -425,16 +286,11 @@ private struct ProminentCircle<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 27.0, *) {
+        if #available(iOS 26.0, *) {
             content
                 .padding(16)
                 .contentShape(Circle())
-                .glassEffect(.regular.interactive(), in: .capsule)
-        } else if #available(iOS 26.0, *) {
-            content
-                .padding(16)
-                .contentShape(Circle())
-                .glassEffect(.clear.interactive(), in: .capsule)
+                .glassEffect(.regular.interactive(), in: .circle)
         } else {
             content
                 .padding(16)
@@ -460,7 +316,7 @@ private struct ProminentCircle<Content: View>: View {
     ))
     container.tunnel.setStatusForPreview(.connected)
 
-    return HomeView()
+    return LaunchPadView()
         .environment(AppSettings())
         .environment(Operations(container: container))
         .environment(container.tunnel)

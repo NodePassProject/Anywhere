@@ -1,5 +1,5 @@
 //
-//  RuleSetListView.swift
+//  RoutingView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -7,13 +7,15 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import WidgetKit
 
-struct RuleSetListView: View {
+struct RoutingView: View {
     @Environment(\.editMode) private var editMode
+    @Environment(AppSettings.self) private var appSettings
     @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
 
-    @State var adBlockEnabled = false
+    @State var isGlobalMode: Bool = false
     @State var builtInServiceRuleSets: [RoutingRuleSet] = []
     @State var customRuleSets: [CustomRoutingRuleSet] = []
 
@@ -34,15 +36,9 @@ struct RuleSetListView: View {
     var body: some View {
         List {
             Section {
-                Toggle(isOn: $adBlockEnabled) {
-                    TextWithColorfulIcon(title: "Block Advertisements", comment: nil, systemName: "shield.checkered", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                Toggle(isOn: $isGlobalMode) {
+                    TextWithColorfulIcon(title: "Global Mode", comment: nil, systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
-                .onChange(of: adBlockEnabled) { _, newValue in
-                    guard let adBlockRuleSet = routingRuleSetStore.adBlockRuleSet else { return }
-                    operations.routingRuleSets.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
-                }
-            }
-            Section {
                 Picker(selection: Binding(
                     get: { routingRuleSetStore.bypassCountryCode },
                     set: { operations.routingRuleSets.setBypassCountryCode($0) }
@@ -54,6 +50,7 @@ struct RuleSetListView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Country Bypass", comment: nil, systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
+                .disabled(appSettings.isGlobalMode)
             }
             Section {
                 ForEach($builtInServiceRuleSets) { $ruleSet in
@@ -62,6 +59,7 @@ struct RuleSetListView: View {
                     }
                 }
             }
+            .disabled(appSettings.isGlobalMode)
             if !customRuleSets.isEmpty {
                 Section {
                     ForEach(customRuleSets) { customRuleSet in
@@ -80,10 +78,11 @@ struct RuleSetListView: View {
                         }
                     }
                 }
+                .disabled(appSettings.isGlobalMode)
             }
         }
         .listRowSpacing(8)
-        .navigationTitle("Routing Rules")
+        .navigationTitle("Routing")
         .toolbar {
             if isEditing == true || !customRuleSets.isEmpty {
                 ToolbarItem {
@@ -116,24 +115,6 @@ struct RuleSetListView: View {
                     }
                 }
             }
-        }
-        .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
-            for currentRuleSet in newValue {
-                let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
-                if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
-                    operations.routingRuleSets.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
-                }
-            }
-        }
-        .onChange(of: isEditing) { _, newValue in
-            if newValue == false {
-                save()
-            }
-        }
-        .onAppear {
-            adBlockEnabled = routingRuleSetStore.adBlockRuleSet?.assignedConfigurationId == "REJECT"
-            builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
-            customRuleSets = routingRuleSetStore.customRuleSets
         }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -188,6 +169,28 @@ struct RuleSetListView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Reset all rule set assignments to Default.")
+        }
+        .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
+            for currentRuleSet in newValue {
+                let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
+                if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
+                    operations.routingRuleSets.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
+                }
+            }
+        }
+        .onChange(of: isEditing) { _, newValue in
+            if newValue == false {
+                save()
+            }
+        }
+        .onChange(of: isGlobalMode) {
+            appSettings.isGlobalMode = isGlobalMode
+            ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+        }
+        .onAppear {
+            isGlobalMode = appSettings.isGlobalMode
+            builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
+            customRuleSets = routingRuleSetStore.customRuleSets
         }
     }
     
