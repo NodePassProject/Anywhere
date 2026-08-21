@@ -31,7 +31,7 @@ struct TrustedCertificatesView: View {
                         }
                     }
                 )) {
-                    TextWithColorfulIcon(title: "Allow Insecure", comment: nil, systemName: "exclamationmark.shield.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
+                    TextWithColorfulIcon(title: "Allow Insecure", systemName: "exclamationmark.shield.fill", foregroundStyle: .white, backgroundStyle: .red.gradient)
                 }
                 .tint(.red)
             }

@@ -16,7 +16,7 @@ struct DataView: View {
         @Bindable var appSettings = appSettings
         List {
             Toggle(isOn: $appSettings.iCloudSyncEnabled) {
-                TextWithColorfulIcon(title: "iCloud Sync", comment: nil, systemName: "icloud.fill", foregroundStyle: .blue, backgroundStyle: .white.gradient)
+                TextWithColorfulIcon(title: "iCloud Sync", systemName: "icloud.fill", foregroundStyle: .blue, backgroundStyle: .white.gradient)
             }
         }
         .navigationTitle("Data")

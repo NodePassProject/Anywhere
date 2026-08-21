@@ -94,7 +94,7 @@ struct MITMCertificateView: View {
             if controller.hasCA {
                 Section {
                     HStack {
-                        TextWithColorfulIcon(title: "Install Certificate", comment: nil, systemName: "square.and.arrow.down", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Install Certificate", systemName: "square.and.arrow.down", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(.footnote.bold())

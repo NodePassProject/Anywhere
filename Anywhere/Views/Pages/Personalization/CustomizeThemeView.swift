@@ -25,7 +25,7 @@ struct CustomizeThemeView: View {
                         Text(label(for: scheme)).tag(scheme)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Home Appearance", comment: nil, systemName: "circle.lefthalf.filled", foregroundStyle: .white, backgroundStyle: .black.gradient)
+                    TextWithColorfulIcon(title: "Home Appearance", systemName: "circle.lefthalf.filled", foregroundStyle: .white, backgroundStyle: .black.gradient)
                 }
             }
             

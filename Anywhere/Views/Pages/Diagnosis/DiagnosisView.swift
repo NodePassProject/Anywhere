@@ -14,12 +14,12 @@ struct DiagnosisView: View {
                 NavigationLink {
                     RequestsView()
                 } label: {
-                    TextWithColorfulIcon(title: "Requests", comment: nil, systemName: "mail.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Requests", systemName: "mail.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 NavigationLink {
                     LogsView()
                 } label: {
-                    TextWithColorfulIcon(title: "Logs", comment: nil, systemName: "long.text.page.and.pencil.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Logs", systemName: "long.text.page.and.pencil.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
             }
             .navigationTitle("Diagnosis")

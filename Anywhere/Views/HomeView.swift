@@ -38,39 +38,41 @@ struct HomeView: View {
         NavigationSplitView(preferredCompactColumn: $preferredColumn) {
             List(selection: $selectedPage) {
                 Section {
-                    TextWithColorfulIcon(title: "Launchpad", comment: nil, systemName: "power", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIconAndCustomImage(title: "Launchpad", imageName: "anywhere", foregroundStyle: .white, backgroundStyle: .anywhere.gradient)
                         .tag(Page.launchpad)
-                    TextWithColorfulIcon(title: "Mission Control", comment: nil, systemName: "rectangle.3.group.fill", foregroundStyle: .white, backgroundStyle: .black.gradient)
-                        .tag(Page.missionControl)
+                    if isConnected {
+                        TextWithColorfulIcon(title: "Mission Control", systemName: "rectangle.3.group.fill", foregroundStyle: .white, backgroundStyle: .black.gradient)
+                            .tag(Page.missionControl)
+                    }
                 }
                 Section {
-                    TextWithColorfulIcon(title: "Data", comment: nil, systemName: "cylinder.split.1x2.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                    TextWithColorfulIcon(title: "Data", systemName: "cylinder.split.1x2.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                         .tag(Page.data)
-                    TextWithColorfulIcon(title: "Personalization", comment: nil, systemName: "paintpalette.fill", foregroundStyle: .white, backgroundStyle: .pink.gradient)
+                    TextWithColorfulIcon(title: "Personalization", systemName: "paintpalette.fill", foregroundStyle: .white, backgroundStyle: .pink.gradient)
                         .tag(Page.personalization)
                 }
                 Section {
-                    TextWithColorfulIcon(title: "Tunnel", comment: nil, systemName: "hammer.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                    TextWithColorfulIcon(title: "Tunnel", systemName: "hammer.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                         .tag(Page.tunnel)
-                    TextWithColorfulIcon(title: "Purify", comment: nil, systemName: "drop.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Purify", systemName: "drop.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                         .tag(Page.purify)
-                    TextWithColorfulIcon(title: "Routing", comment: nil, systemName: "arrow.triangle.branch", foregroundStyle: .white, backgroundStyle: .purple.gradient)
+                    TextWithColorfulIcon(title: "Routing", systemName: "arrow.triangle.branch", foregroundStyle: .white, backgroundStyle: .purple.gradient)
                         .tag(Page.routing)
-                    TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
+                    TextWithColorfulIcon(title: "MITM", systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                         .tag(Page.mitm)
                 }
                 
                 Section {
-                    TextWithColorfulIcon(title: "Trusted Certificates", comment: nil, systemName: "checkmark.seal.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                    TextWithColorfulIcon(title: "Trusted Certificates", systemName: "checkmark.seal.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                         .tag(Page.trustedCertificates)
-                    TextWithColorfulIcon(title: "Trusted Network", comment: nil, systemName: "wifi", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Trusted Network", systemName: "wifi", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                         .tag(Page.trustedNetwork)
                 }
                 
                 Section {
-                    TextWithColorfulIcon(title: "Diagnosis", comment: nil, systemName: "stethoscope", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Diagnosis", systemName: "stethoscope", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                         .tag(Page.diagnosis)
-                    TextWithColorfulIcon(title: "About", comment: nil, systemName: "info.circle.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                    TextWithColorfulIcon(title: "About", systemName: "info.circle.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                         .tag(Page.about)
                 }
             }
@@ -105,7 +107,7 @@ struct HomeView: View {
                 LaunchpadView()
             }
         }
-        .navigationSplitViewStyle(.prominentDetail)
+        .navigationSplitViewStyle(.balanced)
     }
 }
 

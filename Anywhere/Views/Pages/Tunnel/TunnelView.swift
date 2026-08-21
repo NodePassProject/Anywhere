@@ -17,7 +17,7 @@ struct TunnelView: View {
             List {
                 Section {
                     Toggle(isOn: $appSettings.alwaysOnEnabled) {
-                        TextWithColorfulIcon(title: "Always On", comment: nil, systemName: "poweron", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                        TextWithColorfulIcon(title: "Always On", systemName: "poweron", foregroundStyle: .white, backgroundStyle: .green.gradient)
                     }
                     .disabled(tunnelController.pendingReconnect)
                 }
@@ -26,7 +26,7 @@ struct TunnelView: View {
                     NavigationLink {
                         TunnelScopeView()
                     } label: {
-                        TextWithColorfulIcon(title: "Tunnel Scope", comment: nil, systemName: "scope", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "Tunnel Scope", systemName: "scope", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                 }
             }

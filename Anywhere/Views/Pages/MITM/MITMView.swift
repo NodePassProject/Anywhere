@@ -33,7 +33,7 @@ struct MITMView: View {
                         get: { ruleSetStore.enabled },
                         set: { operations.mitmRuleSets.setEnabled($0) }
                     )) {
-                        TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
+                        TextWithColorfulIcon(title: "MITM", systemName: "key.horizontal.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                     }
                 }
                 
@@ -42,7 +42,7 @@ struct MITMView: View {
                         MITMCertificateView()
                     } label: {
                         HStack {
-                            TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
+                            TextWithColorfulIcon(title: "Root Certificate", systemName: "lock.rectangle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
                             Spacer()
                             Image(systemName: certificateStatusBadgeIcon)
                                 .foregroundStyle(certificateStatusBadgeColor)

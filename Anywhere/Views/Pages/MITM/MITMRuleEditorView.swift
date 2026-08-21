@@ -85,7 +85,7 @@ struct MITMRuleEditorView: View {
                         .pickerStyle(.segmented)
                         .fixedSize()
                     } label: {
-                        TextWithColorfulIcon(title: "Phase", comment: nil, systemName: "moonphase.last.quarter", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                        TextWithColorfulIcon(title: "Phase", systemName: "moonphase.last.quarter", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
                 }
             }
@@ -96,7 +96,7 @@ struct MITMRuleEditorView: View {
                         Text(kind.label).tag(kind)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Operation", comment: nil, systemName: "wrench.fill", foregroundStyle: .white, backgroundStyle: .purple.gradient)
+                    TextWithColorfulIcon(title: "Operation", systemName: "wrench.fill", foregroundStyle: .white, backgroundStyle: .purple.gradient)
                 }
             }
 
@@ -107,7 +107,7 @@ struct MITMRuleEditorView: View {
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
                 } label: {
-                    TextWithColorfulIcon(title: "URL Pattern", comment: nil, systemName: "asterisk", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                    TextWithColorfulIcon(title: "URL Pattern", systemName: "asterisk", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                 }
 
                 switch operationKind {
@@ -117,7 +117,7 @@ struct MITMRuleEditorView: View {
                             Text(mode.label).tag(mode)
                         }
                     } label: {
-                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .purple.gradient)
+                        TextWithColorfulIcon(title: "Mode", systemName: "gearshape.fill", foregroundStyle: .white, backgroundStyle: .purple.gradient)
                     }
                     switch rewriteMode {
                     case .transparent, .redirect302:
@@ -127,7 +127,7 @@ struct MITMRuleEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(title: "URL", comment: nil, systemName: "link", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                            TextWithColorfulIcon(title: "URL", systemName: "link", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                         }
                     case .reject200Text:
                         LabeledContent {
@@ -136,7 +136,7 @@ struct MITMRuleEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(title: "Body", comment: nil, systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                            TextWithColorfulIcon(title: "Body", systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                         }
                     case .reject200Gif:
                         EmptyView()
@@ -147,7 +147,7 @@ struct MITMRuleEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(title: "Data (Base64)", comment: nil, systemName: "cylinder.split.1x2.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                            TextWithColorfulIcon(title: "Data (Base64)", systemName: "cylinder.split.1x2.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                         }
                     }
                 case .headerAdd:
@@ -157,7 +157,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Name", comment: nil, systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Header Name", systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                     LabeledContent {
                         TextField(String("Anywhere"), text: $headerValue)
@@ -165,7 +165,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Header Value", systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 case .headerDelete:
                     LabeledContent {
@@ -174,7 +174,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Name", comment: nil, systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Header Name", systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 case .headerReplace:
                     LabeledContent {
@@ -183,7 +183,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Name", comment: nil, systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Header Name", systemName: "tag.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                     LabeledContent {
                         TextField(String("Everywhere"), text: $headerValue)
@@ -191,7 +191,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Header Value", systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 case .bodyReplace:
                     LabeledContent {
@@ -200,7 +200,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Search", comment: nil, systemName: "magnifyingglass", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Search", systemName: "magnifyingglass", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                     LabeledContent {
                         TextField(String("Everywhere"), text: $replacement)
@@ -208,7 +208,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Replacement", comment: nil, systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
+                        TextWithColorfulIcon(title: "Replacement", systemName: "text.cursor", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                     }
                 }
             } footer: {

@@ -19,12 +19,12 @@ struct PersonalizationView: View {
                     NavigationLink {
                         CustomizeAppIconView()
                     } label: {
-                        TextWithColorfulIcon(title: "App Icon", comment: nil, systemName: "app.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        TextWithColorfulIcon(title: "App Icon", systemName: "app.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
                     NavigationLink {
                         CustomizeThemeView()
                     } label: {
-                        TextWithColorfulIcon(title: "Theme", comment: nil, systemName: "paintbrush.fill", foregroundStyle: .white, backgroundStyle: .pink.gradient)
+                        TextWithColorfulIcon(title: "Theme", systemName: "paintbrush.fill", foregroundStyle: .white, backgroundStyle: .pink.gradient)
                     }
                 }
             }

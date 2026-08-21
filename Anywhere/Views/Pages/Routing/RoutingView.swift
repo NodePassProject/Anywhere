@@ -39,7 +39,7 @@ struct RoutingView: View {
                         ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
                     }
                 )) {
-                    TextWithColorfulIcon(title: "Global Mode", comment: nil, systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
+                    TextWithColorfulIcon(title: "Global Mode", systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
                 Picker(selection: Binding(
                     get: { routingRuleSetStore.bypassCountryCode },
@@ -50,7 +50,7 @@ struct RoutingView: View {
                         Text(countryLabel(for: code)).tag(code)
                     }
                 } label: {
-                    TextWithColorfulIcon(title: "Country Bypass", comment: nil, systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                    TextWithColorfulIcon(title: "Country Bypass", systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
                 .disabled(appSettings.isGlobalMode)
             }
