@@ -20,8 +20,7 @@ struct HomeView: View {
         case mitm
         case trustedCertificates
         case trustedNetwork
-        case requests
-        case logs
+        case diagnosis
         case about
     }
     
@@ -69,13 +68,8 @@ struct HomeView: View {
                 }
                 
                 Section {
-                    TextWithColorfulIcon(title: "Requests", comment: nil, systemName: "mail.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                        .tag(Page.requests)
-                    TextWithColorfulIcon(title: "Logs", comment: nil, systemName: "long.text.page.and.pencil.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                        .tag(Page.logs)
-                }
-                
-                Section {
+                    TextWithColorfulIcon(title: "Diagnosis", comment: nil, systemName: "stethoscope", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        .tag(Page.diagnosis)
                     TextWithColorfulIcon(title: "About", comment: nil, systemName: "info.circle.fill", foregroundStyle: .white, backgroundStyle: .gray.gradient)
                         .tag(Page.about)
                 }
@@ -103,10 +97,8 @@ struct HomeView: View {
                 TrustedCertificatesView()
             case .trustedNetwork:
                 TrustedNetworkView()
-            case .requests:
-                RequestsView()
-            case .logs:
-                LogListView()
+            case .diagnosis:
+                DiagnosisView()
             case .about:
                 AboutView()
             case .none:

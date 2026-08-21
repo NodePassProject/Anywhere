@@ -58,6 +58,16 @@ struct RoutingRuleSetOperations {
         exporter.schedule()
     }
 
+    func removeCustomRuleSets(atOffsets offsets: IndexSet) {
+        store.removeCustomRuleSets(atOffsets: offsets)
+        exporter.schedule()
+    }
+
+    func moveCustomRuleSets(fromOffsets source: IndexSet, toOffset destination: Int) {
+        store.moveCustomRuleSets(fromOffsets: source, toOffset: destination)
+        exporter.schedule()
+    }
+
     // MARK: - Subscription Refresh
 
     func refresh(_ id: UUID) async throws {

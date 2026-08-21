@@ -15,10 +15,6 @@ struct RoutingView: View {
     @Environment(Operations.self) private var operations
     @Environment(RoutingRuleSetStore.self) private var routingRuleSetStore
 
-    @State var isGlobalMode: Bool = false
-    @State var builtInServiceRuleSets: [RoutingRuleSet] = []
-    @State var customRuleSets: [CustomRoutingRuleSet] = []
-
     @State private var showAddSheet = false
     @State private var newRuleSetName = ""
 
@@ -36,7 +32,13 @@ struct RoutingView: View {
     var body: some View {
         List {
             Section {
-                Toggle(isOn: $isGlobalMode) {
+                Toggle(isOn: Binding(
+                    get: { appSettings.isGlobalMode },
+                    set: {
+                        appSettings.isGlobalMode = $0
+                        ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+                    }
+                )) {
                     TextWithColorfulIcon(title: "Global Mode", comment: nil, systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                 }
                 Picker(selection: Binding(
@@ -53,29 +55,23 @@ struct RoutingView: View {
                 .disabled(appSettings.isGlobalMode)
             }
             Section {
-                ForEach($builtInServiceRuleSets) { $ruleSet in
+                ForEach(routingRuleSetStore.builtInServiceRuleSets) { ruleSet in
                     if !ruleSet.isCustom {
-                        builtInRuleSetRow(for: $ruleSet)
+                        builtInRuleSetRow(for: ruleSet)
                     }
                 }
             }
             .disabled(appSettings.isGlobalMode)
-            if !customRuleSets.isEmpty {
+            if !routingRuleSetStore.customRuleSets.isEmpty {
                 Section {
-                    ForEach(customRuleSets) { customRuleSet in
+                    ForEach(routingRuleSetStore.customRuleSets) { customRuleSet in
                         customRuleSetLink(for: customRuleSet)
                     }
                     .onDelete { offsets in
-                        customRuleSets.remove(atOffsets: offsets)
-                        if isEditing != true {
-                            save()
-                        }
+                        operations.routingRuleSets.removeCustomRuleSets(atOffsets: offsets)
                     }
                     .onMove { source, destination in
-                        customRuleSets.move(fromOffsets: source, toOffset: destination)
-                        if isEditing != true {
-                            save()
-                        }
+                        operations.routingRuleSets.moveCustomRuleSets(fromOffsets: source, toOffset: destination)
                     }
                 }
                 .disabled(appSettings.isGlobalMode)
@@ -84,7 +80,7 @@ struct RoutingView: View {
         .listRowSpacing(8)
         .navigationTitle("Routing")
         .toolbar {
-            if isEditing == true || !customRuleSets.isEmpty {
+            if isEditing == true || !routingRuleSetStore.customRuleSets.isEmpty {
                 ToolbarItem {
                     EditButton()
                 }
@@ -128,7 +124,6 @@ struct RoutingView: View {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
                 operations.routingRuleSets.addCustomRuleSet(name: name)
-                customRuleSets = routingRuleSetStore.customRuleSets
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
@@ -164,47 +159,10 @@ struct RoutingView: View {
         .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
             Button("Reset", role: .destructive) {
                 operations.routingRuleSets.resetAssignments()
-                builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Reset all rule set assignments to Default.")
-        }
-        .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
-            for currentRuleSet in newValue {
-                let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
-                if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
-                    operations.routingRuleSets.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
-                }
-            }
-        }
-        .onChange(of: isEditing) { _, newValue in
-            if newValue == false {
-                save()
-            }
-        }
-        .onChange(of: isGlobalMode) {
-            appSettings.isGlobalMode = isGlobalMode
-            ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
-        }
-        .onAppear {
-            isGlobalMode = appSettings.isGlobalMode
-            builtInServiceRuleSets = routingRuleSetStore.builtInServiceRuleSets
-            customRuleSets = routingRuleSetStore.customRuleSets
-        }
-    }
-    
-    private func save() {
-        let store = routingRuleSetStore
-        let localIds = customRuleSets.map(\.id)
-        guard localIds != store.customRuleSets.map(\.id) else { return }
-        
-        let surviving = Set(localIds)
-        for removed in store.customRuleSets where !surviving.contains(removed.id) {
-            operations.routingRuleSets.removeCustomRuleSet(removed.id)
-        }
-        if store.customRuleSets.map(\.id) != localIds {
-            operations.routingRuleSets.reorderCustomRuleSets(customRuleSets)
         }
     }
 
@@ -217,12 +175,15 @@ struct RoutingView: View {
     }
     
     @ViewBuilder
-    private func builtInRuleSetRow(for ruleSet: Binding<RoutingRuleSet>) -> some View {
+    private func builtInRuleSetRow(for ruleSet: RoutingRuleSet) -> some View {
         HStack {
-            AppIconView(ruleSet.wrappedValue.name)
-            Text(ruleSet.wrappedValue.name)
+            AppIconView(ruleSet.name)
+            Text(ruleSet.name)
             Spacer()
-            AssignmentMenuButton(selection: ruleSet.assignedConfigurationId)
+            AssignmentMenuButton(selection: Binding(
+                get: { ruleSet.assignedConfigurationId },
+                set: { operations.routingRuleSets.updateAssignment(ruleSet, configurationId: $0) }
+            ))
         }
     }
 
@@ -237,7 +198,7 @@ struct RoutingView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if let ruleSet = builtInServiceRuleSets.first(where: { $0.id == ruleSet.id.uuidString }) {
+            if let ruleSet = routingRuleSetStore.ruleSets.first(where: { $0.id == ruleSet.id.uuidString }) {
                 AssignmentLabel(assignedConfigurationId: ruleSet.assignedConfigurationId)
             }
         }
@@ -267,7 +228,6 @@ struct RoutingView: View {
                 : parsed.name
             let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
             operations.routingRuleSets.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
-            customRuleSets = routingRuleSetStore.customRuleSets
         } catch {
             importError = error.localizedDescription
         }
@@ -299,7 +259,6 @@ struct RoutingView: View {
                     : parsed.name
                 let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url, iconLight: parsed.iconLight, iconDark: parsed.iconDark)
                 operations.routingRuleSets.addCustomRuleSet(ruleSet, initialAssignment: parsed.routing.assignmentId)
-                customRuleSets = routingRuleSetStore.customRuleSets
             } catch {
                 subscribeError = error.localizedDescription
             }

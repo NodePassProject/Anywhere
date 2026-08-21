@@ -7,6 +7,7 @@
 
 import Foundation
 import Observation
+import SwiftUI
 
 nonisolated struct RoutingRuleSet: Identifiable, Equatable {
     let id: String   // built-in: name, custom: UUID string
@@ -252,6 +253,19 @@ class RoutingRuleSetStore {
     func reorderCustomRuleSets(_ ordered: [CustomRoutingRuleSet]) {
         guard Set(ordered.map(\.id)) == Set(customRuleSets.map(\.id)) else { return }
         customRuleSets = ordered
+        saveCustomRuleSets()
+        rebuildRuleSets()
+    }
+
+    func removeCustomRuleSets(atOffsets offsets: IndexSet) {
+        let ids = offsets.map { customRuleSets[$0].id }
+        for id in ids {
+            removeCustomRuleSet(id)
+        }
+    }
+
+    func moveCustomRuleSets(fromOffsets source: IndexSet, toOffset destination: Int) {
+        customRuleSets.move(fromOffsets: source, toOffset: destination)
         saveCustomRuleSets()
         rebuildRuleSets()
     }

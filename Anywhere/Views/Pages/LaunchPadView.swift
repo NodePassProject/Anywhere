@@ -149,11 +149,16 @@ private struct PowerButton: View {
     var body: some View {
         Button(action: action) {
             ZStack {
-                if #available(iOS 26.0, *) {
+                if #available(iOS 27.0, *) {
                     Circle()
                         .fill(.clear)
                         .frame(width: Self.circleDiameter)
                         .glassEffect(.regular, in: .circle)
+                } else if #available(iOS 26.0, *) {
+                    Circle()
+                        .fill(.clear)
+                        .frame(width: Self.circleDiameter)
+                        .glassEffect(.clear, in: .circle)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
@@ -261,11 +266,16 @@ private struct ProminentCapsule<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 26.0, *) {
+        if #available(iOS 27.0, *) {
             content
                 .padding(16)
                 .contentShape(Capsule())
                 .glassEffect(.regular.interactive(), in: .capsule)
+        } else if #available(iOS 26.0, *) {
+            content
+                .padding(16)
+                .contentShape(Capsule())
+                .glassEffect(.clear.interactive(), in: .capsule)
         } else {
             content
                 .padding(16)
@@ -286,11 +296,16 @@ private struct ProminentCircle<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 26.0, *) {
+        if #available(iOS 27.0, *) {
             content
                 .padding(16)
                 .contentShape(Circle())
                 .glassEffect(.regular.interactive(), in: .circle)
+        } else if #available(iOS 26.0, *) {
+            content
+                .padding(16)
+                .contentShape(Circle())
+                .glassEffect(.clear.interactive(), in: .circle)
         } else {
             content
                 .padding(16)
