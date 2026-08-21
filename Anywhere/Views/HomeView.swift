@@ -105,6 +105,7 @@ struct HomeView: View {
                 LaunchpadView()
             }
         }
+        .navigationSplitViewStyle(.prominentDetail)
     }
 }
 

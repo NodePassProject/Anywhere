@@ -17,26 +17,31 @@ struct ConnectionStatsView: View {
     private static let udpConnectionCeiling = Double(TunnelLimits.udpMaxFlows)
     private static let memoryCeiling: Double = 50 * 1024 * 1024
 
-    @State private var availableWidth: CGFloat = 353
+    @State private var availableWidth: CGFloat?
 
     private func routeName(_ target: RouteTarget) -> String {
         target.displayName(configStore: configStore, chainStore: chainStore)
     }
 
     var body: some View {
-        Grid(horizontalSpacing: StatCardSize.spacing, verticalSpacing: StatCardSize.spacing) {
-            ForEach(rows, id: \.self) { row in
-                GridRow {
-                    ForEach(row, id: \.self) { unit in
-                        card(for: unit)
-                            .gridCellColumns(unit.size.columnSpan)
+        ZStack {
+            if let availableWidth {
+                let rows = rows(availableWidth: availableWidth)
+                Grid(horizontalSpacing: StatCardSize.spacing, verticalSpacing: StatCardSize.spacing) {
+                    ForEach(rows, id: \.self) { row in
+                        GridRow {
+                            ForEach(row, id: \.self) { unit in
+                                card(for: unit)
+                                    .gridCellColumns(unit.size.columnSpan)
+                            }
+                        }
                     }
                 }
+                .frame(minWidth: 110, maxWidth: .infinity)
+                .environment(\.statCardUnitLength, Self.unitLength(for: availableWidth))
+                .animation(.default, value: rows)
             }
         }
-        .frame(minWidth: 110, maxWidth: .infinity)
-        .environment(\.statCardUnitLength, Self.unitLength(for: availableWidth))
-        .animation(.default, value: rows)
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
         } action: { width in
@@ -65,17 +70,13 @@ struct ConnectionStatsView: View {
         }
     }
 
-    private var rows: [[StatUnit]] {
+    private func rows(availableWidth: CGFloat) -> [[StatUnit]] {
         let units: [StatUnit] = [.upload, .download, .route, .tcp, .udp, .memory, .sleepWake, .dial, .handshake]
         return Self.packRows(units, columns: Self.columnCount(for: availableWidth))
     }
-
-    /// The grid never grows beyond this many columns; anything wider is better
-    /// spent on `HomeView`'s side-by-side layout.
+    
     static let maxColumnCount = 4
-
-    /// At or below this width the grid stays at two columns, each half the
-    /// available width (allowed to dip below `StatCardSize.minUnitLength`).
+    
     private static let compactWidthLimit: CGFloat = 330
 
     private static func columnCount(for width: CGFloat) -> Int {
@@ -433,9 +434,7 @@ private struct RouteBreakdownCard: View {
             .filter { $0.totalBytes > 0 && $0.target.configurationID != nil }
             .sorted { $0.totalBytes > $1.totalBytes }
         let directBytes: Int64 = routes.first { $0.target == .direct }?.totalBytes ?? 0
-
-        // Reserve one row for Direct; the rest go to proxies, with an "Other"
-        // bucket taking a slot when they don't all fit.
+        
         let proxyBudget = Self.maxRows - 1
         let overflow = proxies.count > proxyBudget
         let shownCount = overflow ? proxyBudget - 1 : proxies.count
