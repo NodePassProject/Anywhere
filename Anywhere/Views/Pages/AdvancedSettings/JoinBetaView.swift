@@ -18,7 +18,7 @@ struct JoinBetaView: View {
     var body: some View {
         Form {
             if !voyagerStore.isMember {
-                VoyagerNotice("Public Beta is available to Anywhere Voyager members.")
+                VoyagerNotice(description: "Public Beta is available to Anywhere Voyager members.")
             }
 
             Section {

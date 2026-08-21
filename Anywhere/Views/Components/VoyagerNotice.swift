@@ -12,16 +12,17 @@ struct VoyagerNotice: View {
 
     @State private var isPresentingVoyager = false
 
-    init(_ description: LocalizedStringKey) {
-        self.description = description
-    }
-
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Image(systemName: "sparkles.2")
-                        .foregroundStyle(Color(hex: 0x5060F0))
+                    if #available(iOS 26.0, *) {
+                        Image(systemName: "sparkles.2")
+                            .foregroundStyle(Color(hex: 0x5060F0))
+                    } else {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(Color(hex: 0x5060F0))
+                    }
                     Text("Voyager Only")
                         .font(.headline)
                 }

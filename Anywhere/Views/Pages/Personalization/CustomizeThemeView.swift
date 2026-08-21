@@ -16,7 +16,7 @@ struct CustomizeThemeView: View {
         @Bindable var settings = settings
         Form {
             if !voyagerStore.isMember {
-                VoyagerNotice("Custom themes are available to Anywhere Voyager members.")
+                VoyagerNotice(description: "Custom themes are available to Anywhere Voyager members.")
             }
             
             Section {
