@@ -335,7 +335,7 @@ struct ProxiesView: View {
         
         if let subscription = expandedSubscription {
             ToolbarItem {
-                Menu("Subscription Actions", systemImage: "link") {
+                Menu("Subscription Actions", systemImage: "globe") {
                     Section {
                         let configurationCount = configurationStore.configurations(for: subscription).count
                         if configurationCount > 1 {
