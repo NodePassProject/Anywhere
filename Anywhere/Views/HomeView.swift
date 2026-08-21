@@ -10,7 +10,7 @@ import NetworkExtension
 
 struct HomeView: View {
     private enum Page: Hashable {
-        case launchPad
+        case launchpad
         case missionControl
         case data
         case personalization
@@ -27,7 +27,7 @@ struct HomeView: View {
     @Environment(AppSettings.self) private var appSettings
     @Environment(TunnelController.self) private var tunnelController
 
-    @State private var selectedPage: Page? = .launchPad
+    @State private var selectedPage: Page? = .launchpad
     @State private var preferredColumn = NavigationSplitViewColumn.detail
     
     private var isConnected: Bool {
@@ -38,8 +38,8 @@ struct HomeView: View {
         NavigationSplitView(preferredCompactColumn: $preferredColumn) {
             List(selection: $selectedPage) {
                 Section {
-                    TextWithColorfulIcon(title: "Launch Pad", comment: nil, systemName: "power", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                        .tag(Page.launchPad)
+                    TextWithColorfulIcon(title: "Launchpad", comment: nil, systemName: "power", foregroundStyle: .white, backgroundStyle: .blue.gradient)
+                        .tag(Page.launchpad)
                     TextWithColorfulIcon(title: "Mission Control", comment: nil, systemName: "rectangle.3.group.fill", foregroundStyle: .white, backgroundStyle: .black.gradient)
                         .tag(Page.missionControl)
                 }
@@ -77,8 +77,8 @@ struct HomeView: View {
             .navigationTitle("Anywhere")
         } detail: {
             switch selectedPage {
-            case .launchPad:
-                LaunchPadView()
+            case .launchpad:
+                LaunchpadView()
             case .missionControl:
                 MissionControlView()
             case .data:
@@ -102,7 +102,7 @@ struct HomeView: View {
             case .about:
                 AboutView()
             case .none:
-                LaunchPadView()
+                LaunchpadView()
             }
         }
     }

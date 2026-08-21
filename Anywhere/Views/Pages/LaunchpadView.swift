@@ -1,5 +1,5 @@
 //
-//  LaunchPadView.swift
+//  LaunchpadView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 8/21/26.
@@ -8,7 +8,7 @@
 import SwiftUI
 import NetworkExtension
 
-struct LaunchPadView: View {
+struct LaunchpadView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppSettings.self) private var appSettings
     @Environment(Operations.self) private var operations
@@ -331,7 +331,7 @@ private struct ProminentCircle<Content: View>: View {
     ))
     container.tunnel.setStatusForPreview(.connected)
 
-    return LaunchPadView()
+    return LaunchpadView()
         .environment(AppSettings())
         .environment(Operations(container: container))
         .environment(container.tunnel)
