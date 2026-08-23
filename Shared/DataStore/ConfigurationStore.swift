@@ -139,6 +139,18 @@ class ConfigurationStore {
         save()
     }
 
+    func reorderConfigurations(for subscriptionId: UUID, to orderedIds: [UUID]) {
+        let indices = configurations.indices.filter { configurations[$0].subscriptionId == subscriptionId }
+        let byId = Dictionary(indices.map { (configurations[$0].id, configurations[$0]) }, uniquingKeysWith: { first, _ in first })
+        let reordered = orderedIds.compactMap { byId[$0] }
+        guard reordered.count == indices.count else { return }
+        guard reordered.map(\.id) != indices.map({ configurations[$0].id }) else { return }
+        for (offset, index) in indices.enumerated() {
+            configurations[index] = reordered[offset]
+        }
+        save()
+    }
+
     // MARK: - Persistence
     
     nonisolated private static func decodeSplit(from items: [Data]) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {

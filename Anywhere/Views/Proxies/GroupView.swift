@@ -12,8 +12,6 @@ struct GroupView<Content: View>: View {
     let memberCount: Int
     @Binding var isExpanded: Bool
 
-    let onReorder: () -> Void
-    let onTestLatency: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 

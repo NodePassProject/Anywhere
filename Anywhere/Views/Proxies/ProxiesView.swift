@@ -42,19 +42,17 @@ struct ProxiesView: View {
     
     @State private var proxyType: ProxyType = AWCore.getProxiesPageProxyType().flatMap(ProxyType.init(rawValue:)) ?? .servers
     @State private var showingGroupAddSheet = false
-    @State private var reorderScope: ReorderScope?
     
     @State private var configurationToEdit: ProxyConfiguration?
     @State private var chainToEdit: ProxyChain?
     
     @State private var groupToEdit: ProxyGroup?
+    @State private var subscriptionToEdit: Subscription?
     @State private var expandedContainerId: UUID?
     
     @State private var updatingSubscriptionIds: Set<UUID> = []
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
-    @State private var renamingSubscription: Subscription?
-    @State private var renameText = ""
     
     private var serverGroups: [ProxyGroup] { groupStore.groups(of: .servers) }
     private var chainGroups: [ProxyGroup] { groupStore.groups(of: .chains) }
@@ -144,9 +142,6 @@ struct ProxiesView: View {
                 }
             }
             .navigationTitle("Proxies")
-            .navigationDestination(item: $reorderScope) { scope in
-                ReorderView(scope: scope)
-            }
             .toolbar { toolbar }
             .containerBackground(Color(.systemGroupedBackground), for: .navigation)
         }
@@ -186,6 +181,14 @@ struct ProxiesView: View {
                 operations.groups.update(updated)
             }
         }
+        .sheet(item: $subscriptionToEdit) { subscription in
+            SubscriptionEditorView(subscription: subscription) { name, configurationIds in
+                if name != subscription.name {
+                    operations.subscriptions.rename(subscription, to: name)
+                }
+                operations.configurations.reorder(for: subscription.id, to: configurationIds)
+            }
+        }
         .alert("Update Failed", isPresented: $showingSubscriptionError) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -195,15 +198,6 @@ struct ProxiesView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("A proxy chain needs at least 2 proxies.")
-        }
-        .alert("Rename", isPresented: Binding(get: { renamingSubscription != nil }, set: { if !$0 { renamingSubscription = nil } })) {
-            TextField("Name", text: $renameText)
-            Button("OK") {
-                if let subscription = renamingSubscription, !renameText.isEmpty {
-                    operations.subscriptions.rename(subscription, to: renameText)
-                }
-            }
-            Button("Cancel", role: .cancel) { }
         }
         .onChange(of: proxyType) { _, newValue in
             AWCore.setProxiesPageProxyType(newValue.rawValue)
@@ -223,6 +217,33 @@ struct ProxiesView: View {
             } label: {
                 Label("Close", systemImage: "xmark")
             }
+        }
+        
+        ToolbarItem {
+            Button {
+                switch proxyType {
+                case .servers:
+                    let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
+                    let hiddenGroupMemberIds = Set(serverGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
+                    let visible = configurationStore.configurations.filter { configuration in
+                        guard let subscriptionId = configuration.subscriptionId else {
+                            return !hiddenGroupMemberIds.contains(configuration.id)
+                        }
+                        return liveSubscriptionIds.contains(subscriptionId) && subscriptionId == expandedContainerId
+                    }
+                    operations.latency.testAll(visible)
+                case .chains:
+                    let hiddenChainIds = Set(chainGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
+                    let visibleChains = chainStore.chains.filter { !hiddenChainIds.contains($0.id) }
+                    operations.latency.testChains(visibleChains)
+                }
+            } label: {
+                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+            }
+        }
+        
+        if #available(iOS 26.0, *) {
+            ToolbarSpacer()
         }
         
         ToolbarItem {
@@ -258,34 +279,10 @@ struct ProxiesView: View {
                     } label: {
                         Label("New Group", systemImage: "folder.badge.plus")
                     }
-                    if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 || serverGroups.count > 1 || chainGroups.count > 1 {
-                        NavigationLink {
-                            ReorderView()
-                        } label: {
-                            Label("Reorder", systemImage: "arrow.up.arrow.down")
-                        }
-                    }
-                }
-                Section {
-                    Button {
-                        switch proxyType {
-                        case .servers:
-                            let liveSubscriptionIds = Set(subscriptionStore.subscriptions.map(\.id))
-                            let hiddenGroupMemberIds = Set(serverGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
-                            let visible = configurationStore.configurations.filter { configuration in
-                                guard let subscriptionId = configuration.subscriptionId else {
-                                    return !hiddenGroupMemberIds.contains(configuration.id)
-                                }
-                                return liveSubscriptionIds.contains(subscriptionId) && subscriptionId == expandedContainerId
-                            }
-                            operations.latency.testAll(visible)
-                        case .chains:
-                            let hiddenChainIds = Set(chainGroups.filter { $0.id != expandedContainerId }.flatMap(\.memberIds))
-                            let visibleChains = chainStore.chains.filter { !hiddenChainIds.contains($0.id) }
-                            operations.latency.testChains(visibleChains)
-                        }
+                    NavigationLink {
+                        ReorderView()
                     } label: {
-                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                        Label("Reorder", systemImage: "arrow.up.arrow.down")
                     }
                 }
                 if !subscriptionStore.subscriptions.isEmpty {
@@ -294,72 +291,6 @@ struct ProxiesView: View {
                             updateAllSubscriptions()
                         } label: {
                             Label("Update Subscriptions", systemImage: "arrow.clockwise")
-                        }
-                    }
-                }
-            }
-        }
-        
-        if #available(iOS 26.0, *) {
-            ToolbarSpacer()
-        }
-        
-        if let group = expandedGroup {
-            ToolbarItem {
-                Menu("Group Actions", systemImage: "folder") {
-                    Section {
-                        let memberCount = group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count
-                        if memberCount > 1 {
-                            Section {
-                                Button {
-                                    reorderScope = .group(group.id)
-                                } label: {
-                                    Label("Reorder", systemImage: "arrow.up.arrow.down")
-                                }
-                            }
-                        }
-                        Button {
-                            groupToEdit = group
-                        } label: {
-                            Label("Edit", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            operations.groups.delete(group)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-        }
-        
-        if let subscription = expandedSubscription {
-            ToolbarItem {
-                Menu("Subscription Actions", systemImage: "globe") {
-                    Section {
-                        let configurationCount = configurationStore.configurations(for: subscription).count
-                        if configurationCount > 1 {
-                            Button {
-                                reorderScope = .subscription(subscription.id)
-                            } label: {
-                                Label("Reorder", systemImage: "arrow.up.arrow.down")
-                            }
-                        }
-                        Button {
-                            renameText = subscription.name
-                            renamingSubscription = subscription
-                        } label: {
-                            Label("Rename", systemImage: "pencil")
-                        }
-                        Button {
-                            updateSubscription(subscription)
-                        } label: {
-                            Label("Update", systemImage: "arrow.clockwise")
-                        }
-                        Button(role: .destructive) {
-                            operations.subscriptions.delete(subscription)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
                         }
                     }
                 }
@@ -400,27 +331,10 @@ struct ProxiesView: View {
             group: group,
             memberCount: group.kind == .servers ? serverMembers(of: group).count : chainMembers(of: group).count,
             isExpanded: expansionBinding(for: group.id),
-            onReorder: { reorderScope = .group(group.id) },
-            onTestLatency: { testGroupLatency(group) },
             onEdit: { groupToEdit = group },
             onDelete: { operations.groups.delete(group) },
             content: content
         )
-    }
-    
-    private func testGroupLatency(_ group: ProxyGroup) {
-        switch group.kind {
-        case .servers:
-            let members = group.memberIds.compactMap { id in
-                configurationStore.configurations.first { $0.id == id }
-            }
-            operations.latency.testAll(members)
-        case .chains:
-            let members = group.memberIds.compactMap { id in
-                chainStore.chains.first { $0.id == id }
-            }
-            operations.latency.testChains(members)
-        }
     }
     
     // MARK: - Subscriptions
@@ -432,10 +346,8 @@ struct ProxiesView: View {
             configurationCount: configurationStore.configurations(for: subscription).count,
             isExpanded: expansionBinding(for: subscription.id),
             isUpdating: updatingSubscriptionIds.contains(subscription.id),
-            onRename: {
-                renameText = subscription.name
-                renamingSubscription = subscription
-            },
+            onEdit: { subscriptionToEdit = subscription },
+            onUpdate: { updateSubscription(subscription) },
             onDelete: { operations.subscriptions.delete(subscription) },
             content: content
         )

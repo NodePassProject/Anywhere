@@ -15,7 +15,8 @@ struct SubscriptionView<Content: View>: View {
     @Binding var isExpanded: Bool
     let isUpdating: Bool
 
-    let onRename: () -> Void
+    let onEdit: () -> Void
+    let onUpdate: () -> Void
     let onDelete: () -> Void
 
     @ViewBuilder let content: Content
@@ -107,14 +108,21 @@ struct SubscriptionView<Content: View>: View {
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
-            Button(action: onRename) {
-                Label("Rename", systemImage: "pencil")
+            Button(action: onUpdate) {
+                Label("Update", systemImage: "arrow.clockwise")
             }
-            .tint(.gray)
+            .tint(.blue)
+            Button(action: onEdit) {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.orange)
         }
         .contextMenu {
-            Button(action: onRename) {
-                Label("Rename", systemImage: "pencil")
+            Button(action: onEdit) {
+                Label("Edit", systemImage: "pencil")
+            }
+            Button(action: onUpdate) {
+                Label("Update", systemImage: "arrow.clockwise")
             }
             Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")

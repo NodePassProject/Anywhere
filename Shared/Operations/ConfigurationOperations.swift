@@ -31,4 +31,9 @@ struct ConfigurationOperations {
         store.moveConfigurations(withIds: ids, fromOffsets: source, toOffset: destination)
         reaction.run()
     }
+
+    func reorder(for subscriptionId: UUID, to orderedIds: [UUID]) {
+        store.reorderConfigurations(for: subscriptionId, to: orderedIds)
+        reaction.run()
+    }
 }
