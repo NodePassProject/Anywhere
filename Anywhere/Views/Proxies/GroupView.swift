@@ -19,12 +19,10 @@ struct GroupView<Content: View>: View {
 
     @ViewBuilder let content: Content
 
-    private let animation: Animation = .spring(response: 0.5, dampingFraction: 0.82)
-
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                withAnimation(animation) {
+                withAnimation {
                     isExpanded.toggle()
                 }
             } label: {

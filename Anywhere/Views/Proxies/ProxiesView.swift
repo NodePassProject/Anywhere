@@ -101,7 +101,7 @@ struct ProxiesView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(spacing: 10) {
+                VStack(spacing: 10) {
                     if proxyType == .servers {
                         ForEach(standaloneItems) { item in
                             proxyRow(item)

@@ -23,7 +23,7 @@ struct SubscriptionView<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
+                withAnimation {
                     isExpanded.toggle()
                 }
             } label: {
