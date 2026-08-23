@@ -30,139 +30,141 @@ struct RoutingView: View {
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
     var body: some View {
-        List {
-            Section {
-                Toggle(isOn: Binding(
-                    get: { appSettings.isGlobalMode },
-                    set: {
-                        appSettings.isGlobalMode = $0
-                        ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
-                    }
-                )) {
-                    TextWithColorfulIcon(title: "Global Mode", systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
-                }
-                Picker(selection: Binding(
-                    get: { routingRuleSetStore.bypassCountryCode },
-                    set: { operations.routingRuleSets.setBypassCountryCode($0) }
-                )) {
-                    Text("Disable").tag("")
-                    ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
-                        Text(countryLabel(for: code)).tag(code)
-                    }
-                } label: {
-                    TextWithColorfulIcon(title: "Country Bypass", systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
-                }
-                .disabled(appSettings.isGlobalMode)
-            }
-            Section {
-                ForEach(routingRuleSetStore.builtInServiceRuleSets) { ruleSet in
-                    if !ruleSet.isCustom {
-                        builtInRuleSetRow(for: ruleSet)
-                    }
-                }
-            }
-            .disabled(appSettings.isGlobalMode)
-            if !routingRuleSetStore.customRuleSets.isEmpty {
+        NavigationStack {
+            List {
                 Section {
-                    ForEach(routingRuleSetStore.customRuleSets) { customRuleSet in
-                        customRuleSetLink(for: customRuleSet)
+                    Toggle(isOn: Binding(
+                        get: { appSettings.isGlobalMode },
+                        set: {
+                            appSettings.isGlobalMode = $0
+                            ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+                        }
+                    )) {
+                        TextWithColorfulIcon(title: "Global Mode", systemName: "arrow.merge", foregroundStyle: .white, backgroundStyle: .orange.gradient)
                     }
-                    .onDelete { offsets in
-                        operations.routingRuleSets.removeCustomRuleSets(atOffsets: offsets)
+                    Picker(selection: Binding(
+                        get: { routingRuleSetStore.bypassCountryCode },
+                        set: { operations.routingRuleSets.setBypassCountryCode($0) }
+                    )) {
+                        Text("Disable").tag("")
+                        ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
+                            Text(countryLabel(for: code)).tag(code)
+                        }
+                    } label: {
+                        TextWithColorfulIcon(title: "Country Bypass", systemName: "globe.americas.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                     }
-                    .onMove { source, destination in
-                        operations.routingRuleSets.moveCustomRuleSets(fromOffsets: source, toOffset: destination)
+                    .disabled(appSettings.isGlobalMode)
+                }
+                Section {
+                    ForEach(routingRuleSetStore.builtInServiceRuleSets) { ruleSet in
+                        if !ruleSet.isCustom {
+                            builtInRuleSetRow(for: ruleSet)
+                        }
                     }
                 }
                 .disabled(appSettings.isGlobalMode)
+                if !routingRuleSetStore.customRuleSets.isEmpty {
+                    Section {
+                        ForEach(routingRuleSetStore.customRuleSets) { customRuleSet in
+                            customRuleSetLink(for: customRuleSet)
+                        }
+                        .onDelete { offsets in
+                            operations.routingRuleSets.removeCustomRuleSets(atOffsets: offsets)
+                        }
+                        .onMove { source, destination in
+                            operations.routingRuleSets.moveCustomRuleSets(fromOffsets: source, toOffset: destination)
+                        }
+                    }
+                    .disabled(appSettings.isGlobalMode)
+                }
             }
-        }
-        .listRowSpacing(8)
-        .navigationTitle("Routing")
-        .toolbar {
-            if isEditing == true || !routingRuleSetStore.customRuleSets.isEmpty {
+            .listRowSpacing(8)
+            .navigationTitle("Routing")
+            .toolbar {
+                if isEditing == true || !routingRuleSetStore.customRuleSets.isEmpty {
+                    ToolbarItem {
+                        EditButton()
+                    }
+                }
                 ToolbarItem {
-                    EditButton()
-                }
-            }
-            ToolbarItem {
-                Menu("More", systemImage: "ellipsis") {
-                    Button {
-                        showAddSheet = true
-                    } label: {
-                        Label("Add Rule Set", systemImage: "plus")
-                    }
-                    Button {
-                        importError = nil
-                        showFileImporter = true
-                    } label: {
-                        Label("Import Rule Set", systemImage: "square.and.arrow.down")
-                    }
-                    Button {
-                        subscribeURL = ""
-                        showSubscribeAlert = true
-                    } label: {
-                        Label("Subscribe Rule Set", systemImage: "link")
-                    }
-                    Button(role: .destructive) {
-                        showResetConfirmAlert = true
-                    } label: {
-                        Label("Reset", systemImage: "arrow.clockwise")
+                    Menu("More", systemImage: "ellipsis") {
+                        Button {
+                            showAddSheet = true
+                        } label: {
+                            Label("Add Rule Set", systemImage: "plus")
+                        }
+                        Button {
+                            importError = nil
+                            showFileImporter = true
+                        } label: {
+                            Label("Import Rule Set", systemImage: "square.and.arrow.down")
+                        }
+                        Button {
+                            subscribeURL = ""
+                            showSubscribeAlert = true
+                        } label: {
+                            Label("Subscribe Rule Set", systemImage: "link")
+                        }
+                        Button(role: .destructive) {
+                            showResetConfirmAlert = true
+                        } label: {
+                            Label("Reset", systemImage: "arrow.clockwise")
+                        }
                     }
                 }
             }
-        }
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [UTType(filenameExtension: "arrs") ?? .data]
-        ) { result in
-            handleFileImport(result)
-        }
-        .alert("Add Rule Set", isPresented: $showAddSheet) {
-            TextField("Name", text: $newRuleSetName)
-            Button("Add") {
-                let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !name.isEmpty else { return }
-                operations.routingRuleSets.addCustomRuleSet(name: name)
-                newRuleSetName = ""
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [UTType(filenameExtension: "arrs") ?? .data]
+            ) { result in
+                handleFileImport(result)
             }
-            Button("Cancel", role: .cancel) {
-                newRuleSetName = ""
+            .alert("Add Rule Set", isPresented: $showAddSheet) {
+                TextField("Name", text: $newRuleSetName)
+                Button("Add") {
+                    let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    operations.routingRuleSets.addCustomRuleSet(name: name)
+                    newRuleSetName = ""
+                }
+                Button("Cancel", role: .cancel) {
+                    newRuleSetName = ""
+                }
             }
-        }
-        .alert("Import Failed", isPresented: Binding(
-            get: { importError != nil },
-            set: { if !$0 { importError = nil } }
-        )) {
-            Button("OK") { importError = nil }
-        } message: {
-            Text(importError ?? "")
-        }
-        .alert("Subscribe Rule Set", isPresented: $showSubscribeAlert) {
-            TextField("Anywhere Routing Rule Set URL", text: $subscribeURL)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .keyboardType(.URL)
-            Button("Subscribe") {
-                subscribe(to: subscribeURL)
+            .alert("Import Failed", isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
+            )) {
+                Button("OK") { importError = nil }
+            } message: {
+                Text(importError ?? "")
             }
-            Button("Cancel", role: .cancel) {}
-        }
-        .alert("Subscription Failed", isPresented: Binding(
-            get: { subscribeError != nil },
-            set: { if !$0 { subscribeError = nil } }
-        )) {
-            Button("OK") { subscribeError = nil }
-        } message: {
-            Text(subscribeError ?? "")
-        }
-        .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
-            Button("Reset", role: .destructive) {
-                operations.routingRuleSets.resetAssignments()
+            .alert("Subscribe Rule Set", isPresented: $showSubscribeAlert) {
+                TextField("Anywhere Routing Rule Set URL", text: $subscribeURL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                Button("Subscribe") {
+                    subscribe(to: subscribeURL)
+                }
+                Button("Cancel", role: .cancel) {}
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Reset all rule set assignments to Default.")
+            .alert("Subscription Failed", isPresented: Binding(
+                get: { subscribeError != nil },
+                set: { if !$0 { subscribeError = nil } }
+            )) {
+                Button("OK") { subscribeError = nil }
+            } message: {
+                Text(subscribeError ?? "")
+            }
+            .alert("Reset Assignments", isPresented: $showResetConfirmAlert) {
+                Button("Reset", role: .destructive) {
+                    operations.routingRuleSets.resetAssignments()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Reset all rule set assignments to Default.")
+            }
         }
     }
 
