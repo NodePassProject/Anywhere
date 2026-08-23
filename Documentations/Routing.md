@@ -71,9 +71,12 @@ A rule set is the unit of configuration: a **name**, an ordered list of
 The action is one of **Default**, **DIRECT**, **REJECT**, or a specific proxy
 / chain, chosen per set in **Routing Rules**:
 
-- **Default** means the set is **inactive** — its rules are not loaded into the
-  router and match nothing. A set only participates once you assign it a real
-  target.
+- **Default** loads the set against the app's globally selected proxy, but at
+  the lowest authored priority — the **Neutral** tier (see
+  [Matching: priority and specificity](#matching-priority-and-specificity)). A
+  set left on **Default** never overrides one you gave an explicit target. It
+  is inactive only when there is no global selection to inherit; **ADBlock** on
+  **Default** is always inactive.
 - Because the action is per-*set*, a single set cannot both reject some hosts
   and proxy others. Split divergent policy across multiple sets.
 
@@ -132,19 +135,26 @@ Two things decide which rule wins: which **source tier** it came from, and how
 Rules are grouped by source and the tiers are consulted in a fixed order; the
 first tier that matches decides, and lower tiers are not consulted.
 
-| Order | Tier           | Typical use                                  |
-| ----- | -------------- | -------------------------------------------- |
-| 1     | User (custom)  | your own rule sets                           |
-| 2     | ADBlock        | the bundled ad/tracker block list            |
-| 3     | Built-in       | the per-service rule sets                    |
-| 4     | Country Bypass | direct-route the selected region (implicit)  |
+| Order | Tier           | Typical use                                   |
+| ----- | -------------- | --------------------------------------------- |
+| 1     | ADBlock        | the bundled ad/tracker block list             |
+| 2     | Built-in       | the per-service rule sets                     |
+| 3     | User (custom)  | your own rule sets                            |
+| 4     | Neutral        | any set left on **Default** (implicit)        |
+| 5     | Country Bypass | direct-route the selected region (implicit)   |
 
-Cross-tier priority is by **source, not specificity**: a User rule wins over a
-*more-specific* Built-in rule for the same host. Country Bypass is driven by
-the selected country code and always implies **direct**; it is not authored
-through `.arrs`. All of your custom sets share the single **User** tier, so
-between two custom sets the more-specific rule wins regardless of which set it
-lives in.
+A set lands in the tier matching its **origin** — but only while it carries an
+explicit action. Leaving a set on **Default** drops it out of its origin tier
+and into **Neutral**, whatever it came from, so a set that states a policy
+always outranks one that merely inherits the global selection.
+
+Cross-tier priority is by **source, not specificity**: an ADBlock rule wins
+over a *more-specific* User rule for the same host. Neutral and Country Bypass
+are both implicit — Neutral routes to the globally selected proxy, Country
+Bypass is driven by the selected country code and always implies **direct** —
+and neither is authored through `.arrs`. All of your custom sets share the
+single **User** tier, so between two custom sets the more-specific rule wins
+regardless of which set it lives in.
 
 ### Specificity — within a tier
 
@@ -201,8 +211,8 @@ falls back to the file name (or `Imported` / `Subscription`).
 
 The `routing` value seeds the set's action the first time it is imported or
 subscribed: `1` assigns **DIRECT**, `2` assigns **REJECT**, and `0` — or an
-absent / unrecognized value — leaves the set on **Default** (inactive). It is a
-first-import convenience only: a subscription **refresh ignores it**, so
+absent / unrecognized value — leaves the set on **Default** (Neutral tier). It
+is a first-import convenience only: a subscription **refresh ignores it**, so
 re-fetching never overrides the action you have set locally. A specific proxy
 target cannot be expressed this way — assign one in the app.
 
@@ -297,9 +307,10 @@ name = Direct Nets
 1, fd00::/8
 ```
 
-Assign the set to **DIRECT** so private ranges bypass the proxy. Because User
-rules outrank built-in tiers, this wins over any service rule that would
-otherwise proxy an address in these ranges.
+Assign the set to **DIRECT** so private ranges bypass the proxy. Giving the
+set an explicit action lifts it into the **User** tier, so it beats any service
+set left on **Default**. A built-in service set that you assign a target sits
+in a *higher* tier, though — leave those on **Default** if a LAN rule must win.
 
 ### Prefer a specific subdomain over a broad one
 
@@ -324,12 +335,12 @@ the more-specific suffix wins within the User tier regardless of set order.
   subdomains, never `myexample.com`.
 - **Keyword is a raw substring.** Broader and slower than a suffix; prefer a
   suffix when one expresses the intent.
-- **First tier wins.** User > ADBlock > Built-in > Country Bypass; a User rule
-  beats a more-specific rule in a lower tier.
+- **First tier wins.** ADBlock > Built-in > User > Neutral > Country Bypass; a
+  rule in a higher tier beats a more-specific rule in a lower one.
 - **Most-specific wins within a tier.** Deepest suffix, longest keyword,
   longest CIDR prefix; identical patterns are last-write-wins.
 - **Action is per set.** Every rule in a set shares the set's assigned target;
-  a set assigned **Default** is inactive.
+  a set left on **Default** follows the global selection from the Neutral tier.
 - **No-match fall-through.** Unmatched destinations follow the app's default
   route; rules only override it where they match.
 - **Case-insensitive.** Hosts and rules are folded to lowercase before

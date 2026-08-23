@@ -76,7 +76,8 @@ struct RoutingExportOperation {
 
             for ruleSet in ruleSets.reversed() {
                 let fallbackId = ruleSet.id == "ADBlock" ? nil : defaultTargetId
-                guard let assignedId = ruleSet.assignedConfigurationId ?? fallbackId else { continue }
+                let explicitId = ruleSet.assignedConfigurationId
+                guard let assignedId = explicitId ?? fallbackId else { continue }
 
                 let rules: [RoutingRule]
                 if ruleSet.isCustom,
@@ -103,9 +104,15 @@ struct RoutingExportOperation {
                 } else {
                     continue
                 }
-
-                let tier: RoutingBinaryFormat.Tier = ruleSet.isCustom ? .user
-                    : (ruleSet.name == "ADBlock" ? .adBlock : .builtIn)
+                
+                let tier: RoutingBinaryFormat.Tier
+                if explicitId == nil {
+                    tier = .neutral
+                } else if ruleSet.isCustom {
+                    tier = .user
+                } else {
+                    tier = ruleSet.name == "ADBlock" ? .adBlock : .builtIn
+                }
                 entries.append(.init(tier: tier, action: action, configId: configId, name: ruleSet.name, rules: rules))
             }
 

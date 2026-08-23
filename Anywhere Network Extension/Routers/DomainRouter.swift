@@ -13,12 +13,13 @@ nonisolated private let logger = AnywhereLogger(category: "DomainRouter")
 nonisolated final class DomainRouter: Sendable {
 
     // MARK: - Tier model
-
+    
     fileprivate enum Tier: Int, CaseIterable {
         case adBlock = 0
         case builtIn = 1
         case user = 2
-        case bypass = 3
+        case neutral = 3
+        case bypass = 4
     }
 
     fileprivate struct RulePayload: Hashable, Sendable {
@@ -143,7 +144,6 @@ nonisolated final class DomainRouter: Sendable {
         }
 
         let tiers = state.matcher.tiers
-        logger.debug("[DomainRouter] Loaded tiers — adBlock: \(tiers[Tier.adBlock.rawValue].domainRuleCount)+\(tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(tiers[Tier.builtIn.rawValue].domainRuleCount)+\(tiers[Tier.builtIn.rawValue].ipRuleCount), user: \(tiers[Tier.user.rawValue].domainRuleCount)+\(tiers[Tier.user.rawValue].ipRuleCount), bypass: \(tiers[Tier.bypass.rawValue].domainRuleCount)+\(tiers[Tier.bypass.rawValue].ipRuleCount); \(state.configurationMap.count) configurations")
         return state
     }
 
