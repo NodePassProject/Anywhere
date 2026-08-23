@@ -142,8 +142,7 @@ nonisolated final class DomainRouter: Sendable {
             logger.report("[DomainRouter] Routing payload parse failed", error: error)
             return RoutingState()
         }
-
-        let tiers = state.matcher.tiers
+        
         return state
     }
 
@@ -264,12 +263,14 @@ nonisolated final class DomainRouter: Sendable {
 
         private mutating func readUUID() throws(AnywhereError) -> UUID {
             guard cursor + 16 <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
-            let u = UUID(uuid: (bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
-                                bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],
-                                bytes[cursor + 8], bytes[cursor + 9], bytes[cursor + 10], bytes[cursor + 11],
-                                bytes[cursor + 12], bytes[cursor + 13], bytes[cursor + 14], bytes[cursor + 15]))
+            let uuid = UUID(uuid: (
+                bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3],
+                bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7],
+                bytes[cursor + 8], bytes[cursor + 9], bytes[cursor + 10], bytes[cursor + 11],
+                bytes[cursor + 12], bytes[cursor + 13], bytes[cursor + 14], bytes[cursor + 15])
+            )
             cursor += 16
-            return u
+            return uuid
         }
     }
 

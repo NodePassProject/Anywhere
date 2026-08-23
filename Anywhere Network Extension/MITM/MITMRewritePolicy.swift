@@ -656,14 +656,14 @@ nonisolated enum MITMBinaryReader {
 
         private mutating func readUUID() throws(AnywhereError) -> UUID {
             guard readOffset + 16 <= count else { throw AnywhereError.mitm(.rewriteRulesCorrupted(.truncated)) }
-            let u = UUID(uuid: (
+            let uuid = UUID(uuid: (
                 bytes[readOffset], bytes[readOffset + 1], bytes[readOffset + 2], bytes[readOffset + 3],
                 bytes[readOffset + 4], bytes[readOffset + 5], bytes[readOffset + 6], bytes[readOffset + 7],
                 bytes[readOffset + 8], bytes[readOffset + 9], bytes[readOffset + 10], bytes[readOffset + 11],
                 bytes[readOffset + 12], bytes[readOffset + 13], bytes[readOffset + 14], bytes[readOffset + 15]
             ))
             readOffset += 16
-            return u
+            return uuid
         }
     }
 }

@@ -9,9 +9,6 @@ import CryptoKit
 import Foundation
 
 nonisolated extension UUID {
-    /// Parses a UUID using the VLESS user-ID convention:
-    /// length 32–36 is hex-decoded; length 1–30 is derived as
-    /// `SHA1(zero_uuid || input)[0..<16]` with RFC 4122 v5 + variant bits stamped.
     init?(vlessString: String) {
         let length = vlessString.utf8.count
 
@@ -41,8 +38,12 @@ nonisolated extension UUID {
     private static func from(bytes: Data) -> UUID {
         bytes.withUnsafeBytes { raw in
             let bytePointer = raw.bindMemory(to: UInt8.self).baseAddress!
-            return UUID(uuid: (bytePointer[0], bytePointer[1], bytePointer[2], bytePointer[3], bytePointer[4], bytePointer[5], bytePointer[6], bytePointer[7],
-                               bytePointer[8], bytePointer[9], bytePointer[10], bytePointer[11], bytePointer[12], bytePointer[13], bytePointer[14], bytePointer[15]))
+            return UUID(uuid: (
+                bytePointer[0], bytePointer[1], bytePointer[2], bytePointer[3],
+                bytePointer[4], bytePointer[5], bytePointer[6], bytePointer[7],
+                bytePointer[8], bytePointer[9], bytePointer[10], bytePointer[11],
+                bytePointer[12], bytePointer[13], bytePointer[14], bytePointer[15]
+            ))
         }
     }
 }
