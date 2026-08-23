@@ -13,6 +13,7 @@ struct TunnelStartRequest {
     var excludeLocalNetworks = true
     var excludeAPNs = true
     var excludeCellularServices = true
+    var excludeDeviceCommunication = true
     var alwaysOn = false
     var startMessage: Data
 }

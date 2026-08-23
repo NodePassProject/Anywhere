@@ -59,6 +59,7 @@ final class LiveTunnelProvider: TunnelProviding {
         tunnelProtocol.excludeLocalNetworks = request.excludeLocalNetworks
         tunnelProtocol.excludeAPNs = request.excludeAPNs
         tunnelProtocol.excludeCellularServices = request.excludeCellularServices
+        tunnelProtocol.excludeDeviceCommunication = request.excludeDeviceCommunication
         #endif
 
         manager.protocolConfiguration = tunnelProtocol

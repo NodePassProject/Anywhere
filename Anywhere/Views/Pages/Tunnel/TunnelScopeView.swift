@@ -35,6 +35,7 @@ struct TunnelScopeView: View {
                 Toggle("Exclude Local Networks", isOn: $settings.excludeLocalNetworks)
                 Toggle("Exclude APNs", isOn: $settings.excludeAPNs)
                 Toggle("Exclude Cellular Services", isOn: $settings.excludeCellularServices)
+                Toggle("Exclude Device Communication", isOn: $settings.excludeDeviceCommunication)
             }
             .disabled(!settings.includeAllNetworks)
 

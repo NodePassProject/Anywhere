@@ -292,6 +292,13 @@ final class AppSettings {
         }
     }
 
+    var excludeDeviceCommunication: Bool {
+        didSet {
+            AWCore.setTunnelExcludeDeviceCommunication(excludeDeviceCommunication)
+            onTunnelBehaviorChange?()
+        }
+    }
+
     var excludeLocalNetworks: Bool {
         didSet {
             AWCore.setTunnelExcludeLocalNetworks(excludeLocalNetworks)
@@ -350,6 +357,7 @@ final class AppSettings {
         alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
         excludeAPNs = AWCore.getTunnelExcludeAPNs()
         excludeCellularServices = AWCore.getTunnelExcludeCellularServices()
+        excludeDeviceCommunication = AWCore.getTunnelExcludeDeviceCommunication()
         excludeLocalNetworks = AWCore.getTunnelExcludeLocalNetworks()
         includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
     }

@@ -68,6 +68,7 @@ final class TunnelController {
                 request.excludeLocalNetworks = AWCore.getTunnelExcludeLocalNetworks()
                 request.excludeAPNs = AWCore.getTunnelExcludeAPNs()
                 request.excludeCellularServices = AWCore.getTunnelExcludeCellularServices()
+                request.excludeDeviceCommunication = AWCore.getTunnelExcludeDeviceCommunication()
                 #endif
                 request.alwaysOn = AWCore.getAlwaysOnEnabled()
                 try await provider.start(request)

@@ -6934,6 +6934,9 @@
     "Exclude Cellular Services" : {
       "shouldTranslate" : false
     },
+    "Exclude Device Communication" : {
+      "shouldTranslate" : false
+    },
     "Exclude Local Networks" : {
       "shouldTranslate" : false
     },

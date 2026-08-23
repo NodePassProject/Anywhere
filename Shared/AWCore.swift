@@ -101,6 +101,7 @@ nonisolated final class AWCore {
         static let trustedSSIDs = "trustedSSIDs"
         static let tunnelExcludeAPNs = "tunnelExcludeAPNs"
         static let tunnelExcludeCellularServices = "tunnelExcludeCellularServices"
+        static let tunnelExcludeDeviceCommunication = "tunnelExcludeDeviceCommunication"
         static let tunnelExcludedRoutes = "tunnelExcludedRoutes"
         static let tunnelExcludeLocalNetworks = "tunnelExcludeLocalNetworks"
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
@@ -414,6 +415,17 @@ nonisolated final class AWCore {
 
     static func setTunnelExcludeCellularServices(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeCellularServices)
+    }
+
+    static func getTunnelExcludeDeviceCommunication() -> Bool {
+        if let value = userDefaults.object(forKey: UserDefaultsKey.tunnelExcludeDeviceCommunication) as? Bool {
+            return value
+        }
+        return true
+    }
+
+    static func setTunnelExcludeDeviceCommunication(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelExcludeDeviceCommunication)
     }
 
     static func getTunnelIncludedRoutes() -> [String] {
