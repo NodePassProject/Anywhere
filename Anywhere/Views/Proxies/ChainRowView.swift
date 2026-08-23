@@ -76,6 +76,7 @@ struct ChainRowView: View {
                     .fill(Color(.secondarySystemGroupedBackground))
             }
             .contentShape(RoundedRectangle(cornerRadius: 24))
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
         }
         .buttonStyle(.plain)
         .opacity(item.isValid ? 1 : 0.6)

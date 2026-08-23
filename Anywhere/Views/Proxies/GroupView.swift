@@ -29,26 +29,16 @@ struct GroupView<Content: View>: View {
                 }
             } label: {
                 header
-                    .contentShape(RoundedRectangle(cornerRadius: 24))
                     .padding(.horizontal, isExpanded ? 0 : 12)
             }
             .buttonStyle(.plain)
 
-            LazyVStack(spacing: 10) {
-                content
+            if isExpanded {
+                LazyVStack(spacing: 10) {
+                    content
+                }
+                .padding(.top, 12)
             }
-            .padding(.top, 12)
-            .rotation3DEffect(
-                .degrees(isExpanded ? 0 : -85),
-                axis: (x: 1, y: 0, z: 0),
-                anchor: .top,
-                perspective: 0.4
-            )
-            .opacity(isExpanded ? 1 : 0)
-            .frame(height: isExpanded ? nil : 0, alignment: .top)
-            .clipped()
-            .allowsHitTesting(isExpanded)
-            .accessibilityHidden(!isExpanded)
         }
         .padding(.horizontal, isExpanded ? 7 : 0)
         .padding(.vertical, isExpanded ? 12 : 0)

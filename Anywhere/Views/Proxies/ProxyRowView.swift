@@ -60,6 +60,7 @@ struct ProxyRowView: View {
                     .fill(Color(.secondarySystemGroupedBackground))
             }
             .contentShape(RoundedRectangle(cornerRadius: 24))
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 24))
         }
         .buttonStyle(.plain)
         .contextMenu {
