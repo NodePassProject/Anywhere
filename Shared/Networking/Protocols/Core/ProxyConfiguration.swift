@@ -105,7 +105,7 @@ nonisolated enum Outbound: Hashable, Sendable {
         key: String,
         uplink: NowhereNetwork,
         downlink: NowhereNetwork,
-        pool: Int,
+        multiplex: Bool,
         securityLayer: GenericSecurityLayer
     )
     case vless(
@@ -325,9 +325,11 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
         return .udp
     }
 
-    var nowherePool: Int {
-        if case .nowhere(_, _, _, let pool, _) = outbound { return pool }
-        return 0
+    var nowhereMultiplex: Bool {
+        if case .nowhere(_, let uplink, let downlink, let multiplex, _) = outbound {
+            return multiplex && (uplink == .tcp || downlink == .tcp)
+        }
+        return false
     }
 
     var hasVisionFlow: Bool {
@@ -419,7 +421,7 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
 
     private enum CodingKeys: String, CodingKey {
         case id, name, serverAddress, serverPort, resolvedIP, subscriptionId
-        case nowhereKey, nowhereSNI, nowhereALPN, nowhereTLS, net, up, down, pool
+        case nowhereKey, nowhereSNI, nowhereALPN, nowhereTLS, net, up, down, mux, pool
         case outboundProtocol, uuid, encryption, flow
         case transport, websocket, httpUpgrade, grpc, xhttp
         case security, tls, reality
@@ -469,40 +471,37 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
             }
             let uplink = rawUp.flatMap(NowhereNetwork.init(rawValue:)) ?? legacy ?? .udp
             let downlink = rawDown.flatMap(NowhereNetwork.init(rawValue:)) ?? legacy ?? .udp
-            if rawUp?.isEmpty == false && NowhereNetwork(rawValue: rawUp!) == nil {
+            if let rawUp, !rawUp.isEmpty, NowhereNetwork(rawValue: rawUp) == nil {
                 throw DecodingError.dataCorruptedError(
                     forKey: .up, in: container, debugDescription: "Invalid Nowhere up value"
                 )
             }
-            if rawDown?.isEmpty == false && NowhereNetwork(rawValue: rawDown!) == nil {
+            if let rawDown, !rawDown.isEmpty, NowhereNetwork(rawValue: rawDown) == nil {
                 throw DecodingError.dataCorruptedError(
                     forKey: .down, in: container, debugDescription: "Invalid Nowhere down value"
                 )
             }
-            let supportsPreconnect = uplink == .tcp && downlink == .tcp
-            let pool: Int
-            if !supportsPreconnect {
-                pool = 0
-            } else if !container.contains(.pool) {
-                pool = NowherePool.enabledDefault
-            } else if try container.decodeNil(forKey: .pool) {
-                pool = NowherePool.enabledDefault
-            } else if let value = try? container.decode(Int.self, forKey: .pool) {
-                pool = min(max(value, 0), NowherePool.validRange.upperBound)
-            } else if let raw = try? container.decode(String.self, forKey: .pool), raw.isEmpty {
-                pool = NowherePool.enabledDefault
+            let decodedMultiplex: Bool
+            if !container.contains(.mux) {
+                decodedMultiplex = false
+            } else if try container.decodeNil(forKey: .mux) {
+                decodedMultiplex = false
+            } else if let value = try? container.decode(Bool.self, forKey: .mux) {
+                decodedMultiplex = value
+            } else if let value = try? container.decode(Int.self, forKey: .mux), value == 0 || value == 1 {
+                decodedMultiplex = value == 1
             } else {
                 throw DecodingError.dataCorruptedError(
-                    forKey: .pool,
+                    forKey: .mux,
                     in: container,
-                    debugDescription: "Invalid Nowhere pool value"
+                    debugDescription: "Invalid Nowhere mux value"
                 )
             }
             outbound = .nowhere(
                 key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? "",
                 uplink: uplink,
                 downlink: downlink,
-                pool: supportsPreconnect ? pool : 0,
+                multiplex: (uplink == .tcp || downlink == .tcp) && decodedMultiplex,
                 securityLayer: .tls(TLSConfiguration(
                     serverName: (explicitSNI?.isEmpty == false && explicitSNI != "none" ? explicitSNI : nil)
                         ?? legacyTLS?.serverName
@@ -641,16 +640,14 @@ nonisolated struct ProxyConfiguration: Identifiable, Hashable, Codable, Sendable
 
         try container.encode(outboundProtocol, forKey: .outboundProtocol)
         switch outbound {
-        case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer):
+        case .nowhere(let key, let uplink, let downlink, let multiplex, let securityLayer):
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: serverAddress)
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(key, forKey: .nowhereKey)
             try container.encode(uplink.rawValue, forKey: .up)
             try container.encode(downlink.rawValue, forKey: .down)
-            if uplink == .tcp && downlink == .tcp {
-                try container.encode(pool, forKey: .pool)
-            }
+            try container.encode((uplink == .tcp || downlink == .tcp) && multiplex, forKey: .mux)
             try container.encode(tls.serverName, forKey: .nowhereSNI)
             if let alpn = tls.alpn?.first, !alpn.isEmpty {
                 try container.encode(alpn, forKey: .nowhereALPN)
