@@ -427,9 +427,7 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
         let mode = XHTTPMode(rawValue: (json["mode"] as? String) ?? "auto") ?? .auto
         return build(host: host, path: path, mode: mode, extra: json, downloadSettings: nil)
     }
-
-    /// Parses `downloadSettings` from `extra`; returns nil when absent or unusable
-    /// so callers fall back to a normal single-server connection.
+    
     static func parseDownloadSettings(from json: [String: Any]?, parentExtra: [String: Any] = [:]) -> XHTTPDownloadSettings? {
         guard let json else { return nil }
         guard let address = ((json["address"] as? String) ?? (json["server"] as? String)), !address.isEmpty else {
@@ -443,10 +441,9 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
         } else {
             return nil
         }
-
-        // The wire format treats "" (or an absent key) and "none" the same.
+        
         let securityRaw = (json["security"] as? String ?? "none").lowercased()
-        let security = securityRaw.isEmpty ? "none" : securityRaw
+        var security = securityRaw.isEmpty ? "none" : securityRaw
 
         var tls: TLSConfiguration? = nil
         var reality: RealityConfiguration? = nil
@@ -455,28 +452,43 @@ nonisolated struct XHTTPConfiguration: Codable, Equatable, Hashable {
             tls = mapDownloadTLS(json["tlsSettings"] as? [String: Any], serverAddress: address)
         case "reality":
             guard let r = mapDownloadReality(json["realitySettings"] as? [String: Any], serverAddress: address) else {
-                // Public key missing/invalid — drop detach, fall back to main server.
                 return nil
             }
             reality = r
         default:
-            break
+            if json["security"] == nil,
+               let sni = [json["servername"], json["serverName"], json["sni"]]
+                   .compactMap({ $0 as? String })
+                   .first(where: { !$0.isEmpty }) {
+                security = "tls"
+                tls = mapDownloadTLS(["serverName": sni], serverAddress: address)
+            }
         }
-
-        // The server pairs the upload (POST) and download (GET) legs by session id, so the
-        // download GET must use the SAME session/seq/xPadding placement as the upload leg.
+        
         var mergedExtra = parentExtra
         mergedExtra.removeValue(forKey: "xmux")
         mergedExtra.removeValue(forKey: "downloadSettings")
+        if let compactPath = json["path"] as? String, !compactPath.isEmpty { mergedExtra["path"] = compactPath }
+        if let compactHost = json["host"] as? String, !compactHost.isEmpty { mergedExtra["host"] = compactHost }
         let ownXhttpJSON = (json["xhttpSettings"] as? [String: Any])
             ?? (json["splithttpSettings"] as? [String: Any])
             ?? [:]
         for (key, value) in ownXhttpJSON { mergedExtra[key] = value }
-        let xhttp = parse(fromJSON: mergedExtra, serverAddress: address,
-                          tlsServerName: tls?.serverName, realityServerName: reality?.serverName)
+        let xhttp = parse(
+            fromJSON: mergedExtra,
+            serverAddress: address,
+            tlsServerName: tls?.serverName,
+            realityServerName: reality?.serverName
+        )
 
-        return XHTTPDownloadSettings(serverAddress: address, serverPort: port,
-                                     security: security, tls: tls, reality: reality, xhttp: xhttp)
+        return XHTTPDownloadSettings(
+            serverAddress: address,
+            serverPort: port,
+            security: security,
+            tls: tls,
+            reality: reality,
+            xhttp: xhttp
+        )
     }
 
     private static func mapDownloadTLS(_ json: [String: Any]?, serverAddress: String) -> TLSConfiguration {
