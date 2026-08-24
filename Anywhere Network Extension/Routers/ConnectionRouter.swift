@@ -13,7 +13,6 @@ nonisolated private let logger = AnywhereLogger(category: "ConnectionRouter")
 nonisolated struct RouteDecision {
     enum Action {
         case route(target: RouteTarget, configuration: ProxyConfiguration?, ruleSetName: String?)
-        case routeViaDefault
         case reject(ruleSetName: String?)
         case unreachable
     }
@@ -23,11 +22,6 @@ nonisolated struct RouteDecision {
     let action: Action
 
     var ipRuleLookupPending = false
-
-    var viaDefault: Bool {
-        if case .routeViaDefault = action { return true }
-        return false
-    }
 }
 
 nonisolated final class ConnectionRouter: Sendable {
@@ -55,7 +49,7 @@ nonisolated final class ConnectionRouter: Sendable {
     func decision(forIP ip: String, port: UInt16, proto: String) -> RouteDecision {
         guard FakeIPPool.isFakeIP(ip) else {
             guard let match = domainRouter.matchIP(ip) else {
-                return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .routeViaDefault)
+                return RouteDecision(host: ip, hostIsResolvedDomain: false, action: .route(target: .default, configuration: nil, ruleSetName: nil))
             }
             return RouteDecision(
                 host: ip,
@@ -128,13 +122,13 @@ nonisolated final class ConnectionRouter: Sendable {
                 return RouteDecision(
                     host: domain,
                     hostIsResolvedDomain: true,
-                    action: .routeViaDefault,
+                    action: .route(target: .default, configuration: nil, ruleSetName: nil),
                     ipRuleLookupPending: true
                 )
             }
         }
 
-        return RouteDecision(host: domain, hostIsResolvedDomain: true, action: .routeViaDefault)
+        return RouteDecision(host: domain, hostIsResolvedDomain: true, action: .route(target: .default, configuration: nil, ruleSetName: nil))
     }
 
     private func markingIfRejected(
@@ -227,6 +221,8 @@ nonisolated final class ConnectionRouter: Sendable {
     private func action(for match: DomainRouter.Match, host: String, port: UInt16,
                         ruleKind: String, proto: String) -> RouteDecision.Action {
         switch match.action {
+        case .default:
+            return .route(target: .default, configuration: nil, ruleSetName: match.ruleSetName)
         case .direct:
             return .route(target: .direct, configuration: nil, ruleSetName: match.ruleSetName)
         case .reject:

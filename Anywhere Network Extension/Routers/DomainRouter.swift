@@ -149,7 +149,6 @@ nonisolated final class DomainRouter: Sendable {
     // MARK: - Payload reader
 
     private struct RoutingBinaryReader {
-
         let bytes: UnsafeBufferPointer<UInt8>
         let data: Data
         private var cursor = 0
@@ -175,18 +174,19 @@ nonisolated final class DomainRouter: Sendable {
                 try readEntry(state: &state, entryIndex: UInt16(clamping: entryIndex))
             }
             
-            state.ruleSetNames = readNames(expectedCount: entryCount) ?? []
+            state.ruleSetNames = try readNames(expectedCount: entryCount)
         }
 
-        private mutating func readNames(expectedCount: UInt32) -> [String]? {
-            guard cursor < count,
-                  let nameCount = try? u32(), nameCount == expectedCount else { return nil }
+        private mutating func readNames(expectedCount: UInt32) throws(AnywhereError) -> [String] {
+            let nameCount = try u32()
+            guard nameCount == expectedCount else { throw AnywhereError.routing(.payloadCorrupted(.malformed)) }
             var names: [String] = []
             names.reserveCapacity(Int(nameCount))
             for _ in 0..<nameCount {
-                guard let length = try? u16(), cursor + Int(length) <= count else { return nil }
-                names.append(String(decoding: bytes[cursor..<cursor + Int(length)], as: UTF8.self))
-                cursor += Int(length)
+                let length = Int(try u16())
+                guard cursor + length <= count else { throw AnywhereError.routing(.payloadCorrupted(.truncated)) }
+                names.append(String(decoding: bytes[cursor..<cursor + length], as: UTF8.self))
+                cursor += length
             }
             return names
         }
@@ -222,6 +222,7 @@ nonisolated final class DomainRouter: Sendable {
 
         private mutating func readAction() throws(AnywhereError) -> RouteTarget {
             switch RoutingBinaryFormat.Action(rawValue: try u8()) {
+            case .default: return .default
             case .direct: return .direct
             case .reject: return .reject
             case .proxy: return .proxy(try readUUID())
@@ -274,7 +275,7 @@ nonisolated final class DomainRouter: Sendable {
         }
     }
 
-    // MARK: - Matching (public API)
+    // MARK: - Matching
 
     var hasRules: Bool {
         routingState.withLock { $0.matcher.hasRules }
@@ -302,7 +303,7 @@ nonisolated final class DomainRouter: Sendable {
 
     func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
-        case .direct, .reject:
+        case .default, .direct, .reject:
             return nil
         case .proxy(let id):
             return routingState.withLock { $0.configurationMap[id] }

@@ -12,7 +12,6 @@ nonisolated struct RoutingSnapshot {
     let customRuleSets: [CustomRoutingRuleSet]
     let configurations: [ProxyConfiguration]
     let chains: [ProxyChain]
-    let defaultTargetId: String?
 }
 
 @MainActor
@@ -28,8 +27,7 @@ struct RoutingExportScheduler {
                 ruleSets: ruleSetStore.ruleSets,
                 customRuleSets: ruleSetStore.customRuleSets,
                 configurations: configurationStore.configurations,
-                chains: chainStore.chains,
-                defaultTargetId: (AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId())?.uuidString
+                chains: chainStore.chains
             )
             await RoutingExportOperation(snapshot: snapshot).run()
         }
@@ -45,10 +43,8 @@ struct RoutingExportOperation {
         let customRuleSets = snapshot.customRuleSets
         let configurations = snapshot.configurations
         let chains = snapshot.chains
-        let defaultTargetId = snapshot.defaultTargetId
 
-        var idsToResolve = ruleSets.compactMap(\.assignedConfigurationId)
-        if let defaultTargetId { idsToResolve.append(defaultTargetId) }
+        let idsToResolve = ruleSets.compactMap(\.assignedConfigurationId)
         var resolvedTargets: [String: ProxyConfiguration] = [:]
         for assignedId in idsToResolve {
             guard resolvedTargets[assignedId] == nil,
@@ -75,9 +71,8 @@ struct RoutingExportOperation {
             var configurationsById: [String: ProxyConfiguration] = [:]
 
             for ruleSet in ruleSets.reversed() {
-                let fallbackId = ruleSet.id == "ADBlock" ? nil : defaultTargetId
                 let explicitId = ruleSet.assignedConfigurationId
-                guard let assignedId = explicitId ?? fallbackId else { continue }
+                if explicitId == nil, ruleSet.id == "ADBlock" { continue }
 
                 let rules: [RoutingRule]
                 if ruleSet.isCustom,
@@ -91,11 +86,14 @@ struct RoutingExportOperation {
 
                 let action: RoutingBinaryFormat.Action
                 var configId: UUID?
-                if assignedId == "DIRECT" {
+                if explicitId == nil {
+                    action = .default
+                } else if explicitId == "DIRECT" {
                     action = .direct
-                } else if assignedId == "REJECT" {
+                } else if explicitId == "REJECT" {
                     action = .reject
-                } else if let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
+                } else if let assignedId = explicitId,
+                          let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
                     action = .proxy
                     configId = id
                     configurationsById[assignedId] = configuration.withResolvedIP(
@@ -104,7 +102,7 @@ struct RoutingExportOperation {
                 } else {
                     continue
                 }
-                
+
                 let tier: RoutingBinaryFormat.Tier
                 if explicitId == nil {
                     tier = .neutral

@@ -164,7 +164,7 @@ extension TunnelStack {
         let decision = connectionRouter.decision(forIP: dstIPString, port: dstPort, proto: "TCP")
 
         var connectionConfiguration = defaultConfiguration
-        var routeTarget = defaultRouteTarget
+        var routeTarget: RouteTarget = .default
         var ruleSetName: String? = nil
 
         switch decision.action {
@@ -174,8 +174,6 @@ extension TunnelStack {
             if let configuration {
                 connectionConfiguration = configuration
             }
-        case .routeViaDefault:
-            break
         case .reject(let matchedRuleSet):
             requestLog.record(
                 protocol: .tcp,
@@ -206,7 +204,6 @@ extension TunnelStack {
             dstPort: dstPort,
             configuration: connectionConfiguration,
             routeTarget: routeTarget,
-            viaDefault: decision.viaDefault,
             ruleSetName: ruleSetName,
             sniffSNI: sniffSNI,
             hostIsResolvedDomain: decision.hostIsResolvedDomain,

@@ -16,7 +16,6 @@ nonisolated enum UDPPlaneCommand {
 }
 
 actor UDPPlane {
-
     private unowned let stack: TunnelStack
 
     // MARK: Registry / session state
@@ -172,7 +171,7 @@ actor UDPPlane {
         let dstIsDomain = decision.hostIsResolvedDomain
 
         var flowConfiguration = defaultConfiguration
-        var routeTarget = udpConfig.defaultRouteTarget
+        var routeTarget: RouteTarget = .default
         var ruleSetName: String? = nil
 
         switch decision.action {
@@ -182,8 +181,6 @@ actor UDPPlane {
             if let configuration {
                 flowConfiguration = configuration
             }
-        case .routeViaDefault:
-            break
         case .reject(let matchedRuleSet):
             stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: .reject, ruleSetName: matchedRuleSet)
             return
@@ -192,7 +189,7 @@ actor UDPPlane {
             return
         }
 
-        let isProxied = routeTarget.configurationID != nil
+        let isProxied = routeTarget.resolved(against: udpConfig.defaultRouteTarget).configurationID != nil
         if datagram.dstPort == 443,
            udpConfig.quicPolicy.blocksResolvedQUIC(
             isProxied: isProxied,
@@ -203,7 +200,7 @@ actor UDPPlane {
             return
         }
 
-        stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, viaDefault: decision.viaDefault, ruleSetName: ruleSetName)
+        stack.requestLog.record(protocol: .udp, host: dstHost, port: datagram.dstPort, routeTarget: routeTarget, ruleSetName: ruleSetName)
 
         let flow = UDPFlow(
             stack: stack,
@@ -401,7 +398,7 @@ actor UDPPlane {
         let decision = stack.connectionRouter.decision(forIP: upstream, port: datagram.dstPort, proto: "UDP")
 
         var flowConfiguration = defaultConfiguration
-        var routeTarget = udpConfig.defaultRouteTarget
+        var routeTarget: RouteTarget = .default
         var ruleSetName: String? = nil
 
         switch decision.action {
@@ -409,8 +406,6 @@ actor UDPPlane {
             routeTarget = target
             ruleSetName = matchedRuleSet
             if let ruleConfiguration { flowConfiguration = ruleConfiguration }
-        case .routeViaDefault:
-            break
         case .reject(let matchedRuleSet):
             stack.requestLog.record(
                 protocol: .udp, host: upstream, port: datagram.dstPort,
@@ -424,8 +419,7 @@ actor UDPPlane {
 
         stack.requestLog.record(
             protocol: .udp, host: upstream, port: datagram.dstPort,
-            routeTarget: routeTarget, viaDefault: decision.viaDefault,
-            ruleSetName: ruleSetName
+            routeTarget: routeTarget, ruleSetName: ruleSetName
         )
 
         let flow = UDPFlow(

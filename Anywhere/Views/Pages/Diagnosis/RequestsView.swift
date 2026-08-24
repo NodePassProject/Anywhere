@@ -104,9 +104,10 @@ struct RequestsView: View {
 
     private func icon(for entry: RequestsModel.Entry) -> String {
         switch entry.routeTarget {
+        case .default: "info.circle.fill"
         case .direct: "arrow.right.circle.fill"
         case .reject: "xmark.bin.circle.fill"
-        case .proxy: entry.viaDefault ? "info.circle.fill" : "arrow.trianglehead.turn.up.right.circle.fill"
+        case .proxy: "arrow.trianglehead.turn.up.right.circle.fill"
         }
     }
     
@@ -121,9 +122,10 @@ struct RequestsView: View {
 
     private func label(for entry: RequestsModel.Entry) -> String {
         switch entry.routeTarget {
+        case .default: String(localized: "Default")
         case .direct: String(localized: "DIRECT")
         case .reject: String(localized: "REJECT")
-        case .proxy: entry.viaDefault ? String(localized: "Default") : String(localized: "Proxy")
+        case .proxy: String(localized: "Proxy")
         }
     }
     
@@ -134,15 +136,15 @@ struct RequestsView: View {
 
     private func labelColor(for entry: RequestsModel.Entry) -> Color {
         switch entry.routeTarget {
+        case .default: .blue
         case .direct: .green
         case .reject: .red
-        case .proxy: entry.viaDefault ? .blue : .purple
+        case .proxy: .purple
         }
     }
     
     private func detailLine(for entry: RequestsModel.Entry) -> String? {
-        let ruleSetName = entry.viaDefault ? nil : entry.ruleSetName
-        let parts = [routeName(for: entry), ruleSetName].compactMap(\.self)
+        let parts = [routeName(for: entry), entry.ruleSetName].compactMap(\.self)
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }

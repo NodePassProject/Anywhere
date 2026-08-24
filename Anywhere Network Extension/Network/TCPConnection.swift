@@ -37,7 +37,8 @@ actor TCPConnection: MITMSessionHost {
     private var ruleMatched: Bool
 
     private var bypass: Bool {
-        if case .direct = routeTarget { return true }
+        let resolved = routeTarget.resolved(against: stack?.udpConfig().defaultRouteTarget ?? .direct)
+        if case .direct = resolved { return true }
         return false
     }
 
@@ -137,7 +138,6 @@ actor TCPConnection: MITMSessionHost {
         stack: TunnelStack,
         pcb: LWIPPCBHandle, dstHost: String, dstPort: UInt16,
         configuration: ProxyConfiguration, routeTarget: RouteTarget,
-        viaDefault: Bool,
         ruleSetName: String? = nil,
         sniffSNI: Bool = false,
         hostIsResolvedDomain: Bool = false,
@@ -150,7 +150,7 @@ actor TCPConnection: MITMSessionHost {
         self.configuration = configuration
         self.bridge = bridge
         self.routeTarget = routeTarget
-        self.ruleMatched = !viaDefault
+        self.ruleMatched = ruleSetName != nil
         self.ruleSetName = ruleSetName
         self.hostIsResolvedDomain = hostIsResolvedDomain
         (self.nurseryJobs, self.nurseryJobContinuation) = AsyncStream.makeStream(of: NurseryJob.self)
@@ -250,6 +250,9 @@ actor TCPConnection: MITMSessionHost {
 
         let router = stack.domainRouter
         switch match.action {
+        case .default:
+            ruleMatched = true
+            ruleSetName = match.ruleSetName
         case .direct:
             ruleMatched = true
             ruleSetName = match.ruleSetName
@@ -391,6 +394,13 @@ actor TCPConnection: MITMSessionHost {
         }
 
         switch match.action {
+        case .default:
+            ruleMatched = true
+            ruleSetName = match.ruleSetName
+            routeTarget = .default
+            if let defaultConfiguration = stack.udpConfig().configuration {
+                configuration = defaultConfiguration
+            }
         case .direct:
             ruleMatched = true
             ruleSetName = match.ruleSetName
@@ -435,7 +445,6 @@ actor TCPConnection: MITMSessionHost {
             host: sniffedSNI ?? dstHost,
             port: dstPort,
             routeTarget: routeTarget,
-            viaDefault: !ruleMatched,
             ruleSetName: ruleSetName
         )
         if bypass {
@@ -898,15 +907,13 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private enum UpstreamRoute {
-        case direct
+        case route(target: RouteTarget, configuration: ProxyConfiguration?)
         case reject
-        case proxy(routeTarget: RouteTarget, configuration: ProxyConfiguration)
 
         var target: RouteTarget {
             switch self {
-            case .direct: return .direct
+            case .route(let target, _): return target
             case .reject: return .reject
-            case .proxy(let target, _): return target
             }
         }
     }
@@ -919,9 +926,9 @@ actor TCPConnection: MITMSessionHost {
         switch await commitUpstreamRoute(forDialHost: host, port: port) {
         case .reject:
             throw AnywhereError.routing(.rejectedByRule(host: host))
-        case .direct:
+        case .route(_, nil):
             route = .direct
-        case .proxy(_, let configuration):
+        case .route(_, let configuration?):
             route = .proxy(configuration: configuration,
                            isDefault: stack?.isDefaultConfiguration(configuration.id) ?? false)
         }
@@ -1011,7 +1018,6 @@ actor TCPConnection: MITMSessionHost {
                 try await withTaskCancellationHandler {
                     try await client.connect(to: host, port: port, initialData: nil)
                 } onCancel: {
-                    // Structural cancellation (connection teardown) unblocks the in-flight connect.
                     client.cancel()
                 }
             }
@@ -1048,11 +1054,11 @@ actor TCPConnection: MITMSessionHost {
 
     private func commitUpstreamRoute(forDialHost host: String, port: UInt16) async -> UpstreamRoute {
         let resolved = await resolveUpstreamRoute(forDialHost: host)
-        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: resolved.route.target, viaDefault: resolved.viaDefault, ruleSetName: resolved.ruleSetName)
+        stack?.requestLog.record(protocol: .tcp, host: host, port: port, routeTarget: resolved.route.target, ruleSetName: resolved.ruleSetName)
         guard phase != .closed else { return resolved.route }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
             routeTarget = resolved.route.target
-            if case .proxy(_, let configuration) = resolved.route {
+            if case .route(_, let configuration?) = resolved.route {
                 self.configuration = configuration
             }
             ruleSetName = resolved.ruleSetName
@@ -1060,14 +1066,14 @@ actor TCPConnection: MITMSessionHost {
         return resolved.route
     }
 
-    private func resolveUpstreamRoute(forDialHost host: String) async -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?) {
+    private func resolveUpstreamRoute(forDialHost host: String) async -> (route: UpstreamRoute, ruleSetName: String?) {
         if let router = stack?.domainRouter, let match = router.matchDomain(host),
            let applied = upstreamRoute(applying: match, dialHost: host) {
             return applied
         }
         if host.caseInsensitiveCompare(mitmSNI ?? dstHost) == .orderedSame {
-            let route: UpstreamRoute = bypass ? .direct : .proxy(routeTarget: routeTarget, configuration: configuration)
-            return (route, !ruleMatched, ruleSetName)
+            let route: UpstreamRoute = .route(target: routeTarget, configuration: bypass ? nil : configuration)
+            return (route, ruleSetName)
         }
         if let router = stack?.domainRouter,
            let ip = await ipRuleCandidate(forDialHost: host),
@@ -1075,21 +1081,23 @@ actor TCPConnection: MITMSessionHost {
            let applied = upstreamRoute(applying: match, dialHost: host) {
             return applied
         }
-        return (defaultUpstreamRoute(), true, nil)
+        return (defaultUpstreamRoute(), nil)
     }
 
-    private func upstreamRoute(applying match: DomainRouter.Match, dialHost host: String) -> (route: UpstreamRoute, viaDefault: Bool, ruleSetName: String?)? {
+    private func upstreamRoute(applying match: DomainRouter.Match, dialHost host: String) -> (route: UpstreamRoute, ruleSetName: String?)? {
         switch match.action {
+        case .default:
+            return (defaultUpstreamRoute(), match.ruleSetName)
         case .direct:
-            return (.direct, false, match.ruleSetName)
+            return (.route(target: .direct, configuration: nil), match.ruleSetName)
         case .reject:
-            return (.reject, false, match.ruleSetName)
+            return (.reject, match.ruleSetName)
         case .proxy:
             guard let configuration = stack?.domainRouter.resolveConfiguration(action: match.action) else {
                 logger.report("[TCP] MITM dial route", error: AnywhereError.routing(.configurationMissing(host: host)))
                 return nil
             }
-            return (.proxy(routeTarget: match.action, configuration: configuration), false, match.ruleSetName)
+            return (.route(target: match.action, configuration: configuration), match.ruleSetName)
         }
     }
 
@@ -1114,12 +1122,10 @@ actor TCPConnection: MITMSessionHost {
     }
 
     private func defaultUpstreamRoute() -> UpstreamRoute {
-        guard let config = stack?.udpConfig(),
-              case .proxy = config.defaultRouteTarget,
-              let configuration = config.configuration else {
-            return .direct
+        guard let config = stack?.udpConfig(), case .proxy = config.defaultRouteTarget else {
+            return .route(target: .default, configuration: nil)
         }
-        return .proxy(routeTarget: config.defaultRouteTarget, configuration: configuration)
+        return .route(target: .default, configuration: config.configuration)
     }
 
     // MARK: - Close / abort / teardown

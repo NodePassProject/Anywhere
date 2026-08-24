@@ -11,10 +11,8 @@ import Synchronization
 nonisolated private let logger = AnywhereLogger(category: "OutboundConnector")
 
 nonisolated enum OutboundConnector {
-
     struct Dialed {
         let connection: ProxyConnection
-        /// Retained for the connection's lifetime so the proxy transport stays alive; nil for direct dials.
         let proxyClient: ProxyClient?
     }
 
@@ -44,56 +42,55 @@ nonisolated enum OutboundConnector {
 
     // MARK: - Route resolution
     
-    static func resolveRoute(host: String) async -> (target: RouteTarget, viaDefault: Bool, ruleSetName: String?) {
-        guard let context = routingContext() else { return (.direct, false, nil) }
+    static func resolveRoute(host: String) async -> (target: RouteTarget, ruleSetName: String?) {
+        guard let context = routingContext() else { return (.direct, nil) }
         let router = context.domainRouter
 
         let literal = isIPLiteral(host)
         let matched = literal ? router.matchIP(host) : router.matchDomain(host)
-        if let matched { return (matched.action, false, matched.ruleSetName) }
-        
-        if isLoopbackOrPrivate(host) { return (.direct, false, nil) }
-        
+        if let matched { return (matched.action, matched.ruleSetName) }
+
+        if isLoopbackOrPrivate(host) { return (.direct, nil) }
+
         if !literal, !context.preventDNSLeak,
            let ip = await RuleResolver.shared.resolveIPv4(for: host),
            let ruleMatch = router.matchIP(ip) {
-            return (ruleMatch.action, false, ruleMatch.ruleSetName)
+            return (ruleMatch.action, ruleMatch.ruleSetName)
         }
 
-        return (context.defaultRouteTarget, true, nil)
+        return (.default, nil)
     }
 
     // MARK: - Dial
     
     static func dial(host: String, port: UInt16) async throws -> Dialed {
-        let (route, viaDefault, ruleSetName) = await resolveRoute(host: host)
-        routingContext()?.requestLog.record(
+        let (route, ruleSetName) = await resolveRoute(host: host)
+        let context = routingContext()
+        context?.requestLog.record(
             protocol: .unknown,
             host: host,
             port: port,
             routeTarget: route,
-            viaDefault: viaDefault,
             ruleSetName: ruleSetName
         )
-        switch route {
+        switch route.resolved(against: context?.defaultRouteTarget ?? .direct) {
         case .reject:
             throw AnywhereError.routing(.rejectedByRule(host: host))
-        case .direct:
+        case .default, .direct:
             return try await dialDirect(host: host, port: port)
-        case .proxy:
-            guard let context = routingContext(),
-                  let configuration = resolveConfiguration(for: route, context: context) else {
-                // An unresolvable proxy configuration dials direct rather than failing outright.
+        case .proxy(let id):
+            guard let context,
+                  let configuration = resolveConfiguration(for: id, context: context) else {
                 logger.warning("[OutboundConnector] No configuration resolved for \(host); dialing direct")
                 return try await dialDirect(host: host, port: port)
             }
             return try await dialProxy(configuration: configuration, host: host, port: port)
         }
     }
-    
-    private static func resolveConfiguration(for route: RouteTarget, context: RoutingContext) -> ProxyConfiguration? {
-        if let resolved = context.domainRouter.resolveConfiguration(action: route) { return resolved }
-        if route == context.defaultRouteTarget { return context.defaultConfiguration }
+
+    private static func resolveConfiguration(for id: UUID, context: RoutingContext) -> ProxyConfiguration? {
+        if let resolved = context.domainRouter.resolveConfiguration(action: .proxy(id)) { return resolved }
+        if id == context.defaultConfiguration?.id || .proxy(id) == context.defaultRouteTarget { return context.defaultConfiguration }
         return nil
     }
 

@@ -26,7 +26,6 @@ class RequestsModel {
         let host: String
         let port: UInt16
         let routeTarget: RouteTarget
-        let viaDefault: Bool
         let ruleSetName: String?
     }
 
@@ -75,7 +74,6 @@ class RequestsModel {
                 host: entry.host,
                 port: entry.port,
                 routeTarget: entry.routeTarget,
-                viaDefault: entry.viaDefault,
                 ruleSetName: entry.ruleSetName
             )
         }

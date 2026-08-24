@@ -19,7 +19,6 @@ nonisolated final class RequestLog: Sendable {
         host: String,
         port: UInt16,
         routeTarget: RouteTarget,
-        viaDefault: Bool = false,
         ruleSetName: String? = nil
     ) {
         let now = CFAbsoluteTimeGetCurrent()
@@ -29,7 +28,6 @@ nonisolated final class RequestLog: Sendable {
             host: host,
             port: port,
             routeTarget: routeTarget,
-            viaDefault: viaDefault,
             ruleSetName: ruleSetName
         )
         entries.withLock { entries in

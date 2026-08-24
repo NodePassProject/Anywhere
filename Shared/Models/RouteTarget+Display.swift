@@ -10,6 +10,8 @@ import Foundation
 extension RouteTarget {
     func displayName(configStore: ConfigurationStore, chainStore: ChainStore) -> String {
         switch self {
+        case .default:
+            return String(localized: "Default")
         case .direct:
             return String(localized: "DIRECT")
         case .reject:

@@ -85,7 +85,8 @@ actor UDPFlow {
     nonisolated let routeTarget: RouteTarget
 
     private var bypass: Bool {
-        if case .direct = routeTarget { return true }
+        let resolved = routeTarget.resolved(against: stack?.udpConfig().defaultRouteTarget ?? .direct)
+        if case .direct = resolved { return true }
         return false
     }
 

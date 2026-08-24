@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// `.proxy` id is the authoritative configuration/chain id — never the dialing
-/// `ProxyConfiguration` id, which gets regenerated.
 nonisolated enum RouteTarget: Hashable, Sendable {
+    case `default`
     case direct
     case reject
     case proxy(UUID)
@@ -18,14 +17,20 @@ nonisolated enum RouteTarget: Hashable, Sendable {
         if case .proxy(let id) = self { return id }
         return nil
     }
+    
+    func resolved(against defaultTarget: RouteTarget) -> RouteTarget {
+        if case .default = self { return defaultTarget }
+        return self
+    }
 }
 
-// MARK: - Codable (compact string form)
+// MARK: - Codable
 
 nonisolated extension RouteTarget: Codable {
     init(from decoder: any Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         switch raw {
+        case "default": self = .default
         case "direct": self = .direct
         case "reject": self = .reject
         default:
@@ -44,10 +49,10 @@ nonisolated extension RouteTarget: Codable {
         var container = encoder.singleValueContainer()
         try container.encode(storageKey)
     }
-
-    /// Also used as the `Codable` representation.
+    
     var storageKey: String {
         switch self {
+        case .default: return "default"
         case .direct: return "direct"
         case .reject: return "reject"
         case .proxy(let id): return "proxy:\(id.uuidString)"
