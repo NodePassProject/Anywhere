@@ -8,7 +8,6 @@
 import Foundation
 import Synchronization
 
-/// Applies the ordinary Nowhere FlowRequest/FlowResult handshake inside one Mux stream.
 nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTerminationObservable {
     private enum Phase: PhaseTransitionable {
         case opening
@@ -34,7 +33,6 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
     }
 
     private let stream: NowhereMuxStream
-    /// Non-nil only when this flow owns a non-pooled carrier supplied by a parent chain.
     private let ownedCarrier: NowhereMuxCarrier?
     private let state = Mutex(State())
     private let termination = TerminationLatch()
@@ -198,8 +196,6 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
     }
 
     private func handleTermination(_ error: Error?) {
-        // A clean FIN may follow a final DATA frame already queued for the reader.
-        // Notify paired UoT users immediately, but let ordinary readers drain it.
         guard let error else {
             termination.fire(nil)
             return

@@ -39,8 +39,6 @@ actor NowhereUDPConnection {
         var controlStreamID: Int64?
     }
 
-    /// Callback entry points are nonisolated, so lifecycle state lives in one
-    /// lock-protected value while packet sequencing remains actor-isolated.
     private nonisolated let lifecycle = Mutex(Lifecycle())
 
     // MARK: Control stream (handshake)
@@ -299,8 +297,6 @@ actor NowhereUDPConnection {
         }
         termination.fire(error)
         if sendAdvisory {
-            // Keep the route reserved until CLOSE is submitted so a newly opened
-            // flow cannot reuse the same ID and receive this advisory by mistake.
             Task { [self] in
                 await sendCloseFrame()
                 finishTeardown(

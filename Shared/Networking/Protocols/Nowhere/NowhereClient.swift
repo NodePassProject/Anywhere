@@ -389,9 +389,6 @@ nonisolated final class NowhereClient: Sendable {
         }
     }
 
-    /// Permanently prevents a registry client from creating another session.
-    /// This differs from an ordinary stale-network invalidation, which keeps a
-    /// direct client reusable so it can reconnect after transient failures.
     private func retire() {
         let resources: (NowhereSession?, [ProxyClient])? = state.withLock { state in
             guard !state.retired else { return nil }

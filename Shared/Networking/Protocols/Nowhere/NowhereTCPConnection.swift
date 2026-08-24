@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-/// One dedicated Nowhere TLS carrier. The connection performs the complete TLS,
-/// authentication, and flow handshake before publishing itself as ready.
 actor NowhereTCPConnection: ProxyConnection, NowhereTerminationObservable {
     private enum Phase: PhaseTransitionable {
         case idle

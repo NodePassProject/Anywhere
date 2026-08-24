@@ -66,7 +66,6 @@ nonisolated struct NowhereConfiguration: Hashable, Sendable {
         self.authKey = try NowhereProtocol.deriveAuthKey(sharedKey: key)
     }
 
-    /// Both dedicated TLS lanes and Mux carriers use the same strict TLS profile.
     var tcpTLSConfiguration: TLSConfiguration {
         TLSConfiguration(
             serverName: tls.serverName,

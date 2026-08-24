@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-/// A small cancellation-aware, bounded, single-consumer queue. Unlike a bounded
-/// `AsyncStream`, a full queue parks its producer instead of dropping a frame.
 nonisolated final class NowhereMuxAsyncQueue<Element: Sendable>: Sendable {
     private struct State {
         var elements: [Element] = []
@@ -95,7 +93,6 @@ nonisolated final class NowhereMuxAsyncQueue<Element: Sendable>: Sendable {
         }
     }
 
-    /// Returns the next value. Buffered values are delivered before the terminal error.
     func next() async throws -> Element? {
         while true {
             try Task.checkCancellation()
@@ -124,7 +121,6 @@ nonisolated final class NowhereMuxAsyncQueue<Element: Sendable>: Sendable {
         }
     }
 
-    /// Finishes the queue and optionally discards/returns its buffered elements.
     @discardableResult
     func finish(throwing error: Error? = nil, discardingBuffered: Bool = false) -> [Element] {
         state.withLock { state in

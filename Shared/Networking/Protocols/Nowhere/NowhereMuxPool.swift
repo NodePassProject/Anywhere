@@ -8,8 +8,6 @@
 import Foundation
 import Synchronization
 
-/// Owns one pool per stable Nowhere route. Configuration changes replace the
-/// old route atomically, while sealing prevents teardown races from recreating it.
 nonisolated final class NowhereMuxShardRegistry: Sendable {
     static let shared = NowhereMuxShardRegistry()
 
@@ -57,8 +55,6 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
             if let existing = state.pools[key] { return existing }
             guard !state.sealed else { return nil }
 
-            // A configuration ID identifies one effective route. If any route
-            // input changed, retire its old carriers before publishing the new pool.
             let staleKeys = state.pools.keys.filter { $0.configurationID == configurationID }
             for staleKey in staleKeys {
                 guard let stale = state.pools.removeValue(forKey: staleKey) else { continue }
@@ -96,8 +92,6 @@ nonisolated extension NowhereMuxShardRegistry: TransportPool {
     func reclaim() { closeAll() }
 }
 
-/// A route-local collection of Mux Shards. Stream reservation happens while
-/// holding the shared pool gate; opening the stream and all network I/O happen off-lock.
 nonisolated private final class NowhereMuxShardPool: Sendable {
     private struct PendingBuild: Sendable {
         let identifier: UInt64
@@ -238,8 +232,6 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
         }
     }
 
-    /// Waits cancellation-responsively without propagating one caller's
-    /// cancellation into a build shared by other acquisitions.
     private func waitForBuild(_ pending: PendingBuild) async throws -> NowhereMuxCarrier {
         let resultInbox = AsyncInbox<Result<NowhereMuxCarrier, Error>>()
         let observer = Task {

@@ -78,8 +78,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
     private let writer = SerialSender()
     private let readerTask = Mutex<Task<Void, Never>?>(nil)
 
-    /// Starts decoding an already authenticated Mux TLS carrier immediately.
-    /// The caller must have written `AuthFrame || NowhereMuxConstants.marker` first.
     init(
         transport: any ByteTransport,
         tlsVersion: TLSVersion?,
@@ -106,8 +104,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
 
     var activeStreamCount: Int { state.withLock { $0.flows.count } }
 
-    /// Installs the owning pool's eviction callback. If the carrier closed while
-    /// it was being adopted, the callback is invoked immediately off-lock.
     func installCloseHandler(_ handler: @escaping @Sendable () -> Void) {
         let immediate: (@Sendable () -> Void)? = state.withLock { state in
             guard !state.closeHandlerInstalled else { return nil }
@@ -119,7 +115,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
         immediate?()
     }
 
-    /// Opens a logical stream and serializes its SYN before returning it.
     func openStream(flowID: UInt32) async throws -> NowhereMuxStream {
         guard let reservation = try reserveStream(
             flowID: flowID,
@@ -130,8 +125,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
         return try await openStream(reservation)
     }
 
-    /// Reserves capacity synchronously so a Shard pool can select under its lock,
-    /// then serialize the SYN without holding that lock across an `await`.
     func reserveStream(
         flowID: UInt32,
         maximumActiveFlows: Int,
@@ -187,10 +180,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
             throw error
         }
 
-        // `writeFrame` makes an admitted frame cancellation-atomic: once the SYN
-        // has entered the writer it is allowed to finish even if this caller is
-        // cancelled. Pair that committed SYN with an ordered RST before removing
-        // local state so Portal can never retain an orphan logical flow.
         if Task.isCancelled {
             prepareLocalClose(flowID: reservation.flowID, reset: true)
             await Task.detached { [self] in
@@ -291,7 +280,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
             )
             try await writeFrame(header: header, payload: Data())
         } catch {
-            // `writeFrame` already closes the carrier for an actual transport failure.
         }
     }
 
@@ -439,8 +427,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
                 return
             }
 
-            // A final stream-local WINDOW may cross the close frame. It has no
-            // authority over connection credit and is safe to ignore.
             guard var flow = state.flows[header.flowID] else { return }
             guard flow.sendCredit + credit <= NowhereMuxConstants.streamWindowBytes else {
                 throw AnywhereError.proxy(
@@ -656,9 +642,6 @@ nonisolated final class NowhereMuxCarrier: Multiplexer, Sendable {
             }
         }
         if shieldCancellation {
-            // AsyncThrowingStream waiters are cancellation-aware, but the submitted
-            // writer job is not retractable. SYN admission uses a detached waiter so
-            // cancellation cannot report failure while the frame still reaches Portal.
             let committed = Task.detached {
                 try await pending.value()
             }
@@ -893,8 +876,6 @@ nonisolated final class NowhereMuxStream: ProxyConnection, NowhereTerminationObs
             return
         }
         termination.fire(AnywhereError.proxy(.nowhere, .streamClosed))
-        // Keep the serial pump alive through the terminal frame even when this
-        // stream is being deinitialized immediately after `finish` returns.
         let sender = operations
         Task {
             try? await submitted.value()

@@ -832,8 +832,6 @@ nonisolated extension ProxyClient {
         return try await NowhereClient.acquireChained(
             configuration: nwConfig,
             chain: chain,
-            // Builder must be self-free: one build is shared across concurrent
-            // waiters and outlives any single caller's ProxyClient.
             builder: {
                 let holders = Mutex<[ProxyClient]>([])
                 do {

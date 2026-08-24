@@ -8,7 +8,6 @@
 import Foundation
 
 nonisolated enum NowhereMuxConstants {
-    /// Written once after the TLS AuthFrame to select the Mux decoder.
     static let marker: UInt8 = 0xff
 
     static let headerSize = 8
