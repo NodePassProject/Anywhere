@@ -193,7 +193,7 @@ nonisolated extension ProxyClient {
                 let replaySafe = !attempt.hasStartedEarlyDataWrite || explicitReplacement
                 if retriesLeft > 0, replaySafe, Self.isRetryableLogicalNowhereFailure(error) {
                     if explicitReplacement, nwConfig.multiplex {
-                        NowhereMuxShardRegistry.shared.invalidate(
+                        NowhereMultiplexerRegistry.shared.invalidate(
                             configurationID: configuration.id
                         )
                     }
@@ -277,7 +277,7 @@ nonisolated extension ProxyClient {
                 if inheritedTunnel != nil { setChainTunnel(nil) }
                 let chain = inheritedTunnel == nil ? configuredNowhereChain : nil
                 do {
-                    let connection = try await openMultiplexedNowhereHalf(
+                    let connection = try await openNowhereMultiplexerHalf(
                         nwConfig: nwConfig,
                         destination: destination,
                         flowHeader: header,
@@ -398,7 +398,7 @@ nonisolated extension ProxyClient {
                 inheritedUplinkTunnel?.cancel()
                 throw AnywhereError.proxy(
                     .nowhere,
-                    .protocolViolation(detail: "Mixed Nowhere Mux needs a rebuildable parent chain for its second carrier")
+                    .protocolViolation(detail: "Mixed Nowhere Multiplexer needs a rebuildable parent chain for its second carrier")
                 )
             }
             rebuiltChain = parentChain
@@ -511,7 +511,7 @@ nonisolated extension ProxyClient {
     ) async throws -> ProxyConnection {
         if carrier == .tcp {
             if nwConfig.multiplex {
-                let connection = try await openMultiplexedNowhereHalf(
+                let connection = try await openNowhereMultiplexerHalf(
                     nwConfig: nwConfig,
                     destination: destination,
                     flowHeader: header,
@@ -624,7 +624,7 @@ nonisolated extension ProxyClient {
         )
     }
 
-    private func openMultiplexedNowhereHalf(
+    private func openNowhereMultiplexerHalf(
         nwConfig: NowhereConfiguration,
         destination: NowhereProtocol.Target,
         flowHeader: NowhereProtocol.FlowHeader,
@@ -633,25 +633,25 @@ nonisolated extension ProxyClient {
         providedTunnel: ProxyConnection?,
         chain: [ProxyConfiguration]?
     ) async throws -> ProxyConnection {
-        let stream: NowhereMuxStream
-        let ownedCarrier: NowhereMuxCarrier?
+        let stream: NowhereMultiplexerStream
+        let ownedMultiplexer: NowhereMultiplexer?
 
         if let providedTunnel {
-            let carrier = try await Self.makeNowhereMuxCarrier(
+            let multiplexer = try await Self.makeNowhereMultiplexer(
                 configuration: nwConfig,
                 connectHost: directDialHost,
                 tunnel: providedTunnel
             )
             do {
-                stream = try await carrier.openStream(flowID: flowHeader.flowID)
-                ownedCarrier = carrier
+                stream = try await multiplexer.openStream(flowID: flowHeader.flowID)
+                ownedMultiplexer = multiplexer
             } catch {
-                carrier.abort()
+                multiplexer.abort()
                 throw error
             }
         } else {
-            let carrierChain: [ProxyConfiguration]
-            let carrierBuilder: @Sendable () async throws -> NowhereMuxCarrier
+            let multiplexerChain: [ProxyConfiguration]
+            let multiplexerBuilder: @Sendable () async throws -> NowhereMultiplexer
             let connectHost = directDialHost
 
             if let chain, !chain.isEmpty {
@@ -659,11 +659,11 @@ nonisolated extension ProxyClient {
                     chain: chain,
                     lastDeliver: .tcp
                 ).get()
-                carrierChain = chain
+                multiplexerChain = chain
                 let proxyHost = configuration.serverAddress
                 let proxyPort = configuration.serverPort
                 let useResolvedAddress = useResolvedAddressForDirectDial
-                carrierBuilder = {
+                multiplexerBuilder = {
                     let holders = Mutex<[ProxyClient]>([])
                     do {
                         let tunnel = try await ProxyClient.buildDetachedChainTunnel(
@@ -674,7 +674,7 @@ nonisolated extension ProxyClient {
                             track: { client in holders.withLock { $0.append(client) } }
                         )
                         let snapshot = holders.withLock { $0 }
-                        return try await Self.makeNowhereMuxCarrier(
+                        return try await Self.makeNowhereMultiplexer(
                             configuration: nwConfig,
                             connectHost: connectHost,
                             tunnel: tunnel,
@@ -687,9 +687,9 @@ nonisolated extension ProxyClient {
                     }
                 }
             } else {
-                carrierChain = []
-                carrierBuilder = {
-                    try await Self.makeNowhereMuxCarrier(
+                multiplexerChain = []
+                multiplexerBuilder = {
+                    try await Self.makeNowhereMultiplexer(
                         configuration: nwConfig,
                         connectHost: connectHost,
                         tunnel: nil
@@ -697,20 +697,20 @@ nonisolated extension ProxyClient {
                 }
             }
 
-            stream = try await NowhereMuxShardRegistry.shared.acquire(
+            stream = try await NowhereMultiplexerRegistry.shared.acquire(
                 configurationID: configuration.id,
                 configuration: nwConfig,
                 connectHost: connectHost,
-                chain: carrierChain,
+                chain: multiplexerChain,
                 flowID: flowHeader.flowID,
-                builder: carrierBuilder
+                builder: multiplexerBuilder
             )
-            ownedCarrier = nil
+            ownedMultiplexer = nil
         }
 
-        let connection = NowhereMuxFlowConnection(
+        let connection = NowhereMultiplexerConnection(
             stream: stream,
-            ownedCarrier: ownedCarrier
+            ownedMultiplexer: ownedMultiplexer
         )
         guard !isCancelled, attempt.bind(connection) else {
             connection.abort()
@@ -730,12 +730,12 @@ nonisolated extension ProxyClient {
         }
     }
 
-    private static func makeNowhereMuxCarrier(
+    private static func makeNowhereMultiplexer(
         configuration: NowhereConfiguration,
         connectHost: String,
         tunnel: ProxyConnection?,
         chainHolders: [ProxyClient] = []
-    ) async throws -> NowhereMuxCarrier {
+    ) async throws -> NowhereMultiplexer {
         let client = TLSClient(configuration: configuration.tcpTLSConfiguration)
         let record: TLSRecordConnection
         if let tunnel {
@@ -766,14 +766,14 @@ nonisolated extension ProxyClient {
             )
             let transport = TLSByteTransport(record)
             var bootstrap = auth
-            bootstrap.append(NowhereMuxConstants.marker)
+            bootstrap.append(NowhereMultiplexerConstants.marker)
             do {
                 try await transport.send(bootstrap)
             } catch {
                 transport.cancel()
                 throw error
             }
-            return NowhereMuxCarrier(
+            return NowhereMultiplexer(
                 transport: transport,
                 tlsVersion: TLSVersion(rawValue: record.tlsVersion),
                 chainHolders: chainHolders

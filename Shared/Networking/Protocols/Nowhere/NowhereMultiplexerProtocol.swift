@@ -1,5 +1,5 @@
 //
-//  NowhereMuxProtocol.swift
+//  NowhereMultiplexerProtocol.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 8/24/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated enum NowhereMuxConstants {
+nonisolated enum NowhereMultiplexerConstants {
     static let marker: UInt8 = 0xff
 
     static let headerSize = 8
@@ -15,7 +15,7 @@ nonisolated enum NowhereMuxConstants {
     static let streamWindowBytes = 512 * 1024
     static let connectionWindowBytes = 512 * 1024
     static let maximumStreams = 256
-    static let maximumActiveFlowsPerShard = 12
+    static let maximumActiveFlowsPerMultiplexer = 12
     static let outboundFrameLimit = 512
     static let inboundFrameLimit = 512
     static let windowUpdateThreshold = 4 * 1024
@@ -23,13 +23,13 @@ nonisolated enum NowhereMuxConstants {
     static let idleTimeout: TimeInterval = 30
 }
 
-nonisolated enum NowhereMuxFrameKind: UInt8, Sendable {
+nonisolated enum NowhereMultiplexerFrameKind: UInt8, Sendable {
     case stream = 0x01
     case window = 0x02
     case datagram = 0x03
 }
 
-nonisolated struct NowhereMuxFrameFlags: OptionSet, Sendable {
+nonisolated struct NowhereMultiplexerFrameFlags: OptionSet, Sendable {
     let rawValue: UInt8
 
     static let syn = Self(rawValue: 0x01)
@@ -39,7 +39,7 @@ nonisolated struct NowhereMuxFrameFlags: OptionSet, Sendable {
     static let known: Self = [.syn, .fin, .rst]
 }
 
-nonisolated enum NowhereMuxWireError: Error, Equatable, Sendable {
+nonisolated enum NowhereMultiplexerWireError: Error, Equatable, Sendable {
     case invalidHeaderLength(Int)
     case unknownKind(UInt8)
     case valueTooLarge
@@ -49,40 +49,40 @@ nonisolated enum NowhereMuxWireError: Error, Equatable, Sendable {
     case invalidReset
 }
 
-extension NowhereMuxWireError: LocalizedError {
+extension NowhereMultiplexerWireError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidHeaderLength(let length):
-            "invalid mux header length: \(length)"
+            "invalid multiplexer header length: \(length)"
         case .unknownKind(let kind):
-            "unknown mux frame kind: \(kind)"
+            "unknown multiplexer frame kind: \(kind)"
         case .valueTooLarge:
-            "mux frame value exceeds u16"
+            "multiplexer frame value exceeds u16"
         case .reservedFlags:
-            "reserved mux frame flags are non-zero"
+            "reserved multiplexer frame flags are non-zero"
         case .invalidFlowID:
-            "invalid zero mux flow ID"
+            "invalid zero multiplexer flow ID"
         case .invalidWindow:
-            "mux window credit must be non-zero"
+            "multiplexer window credit must be non-zero"
         case .invalidReset:
-            "mux RST must be the only flag and carry no data"
+            "multiplexer RST must be the only flag and carry no data"
         }
     }
 }
 
-nonisolated struct NowhereMuxFrameHeader: Equatable, Sendable {
-    let kind: NowhereMuxFrameKind
-    let flags: NowhereMuxFrameFlags
+nonisolated struct NowhereMultiplexerFrameHeader: Equatable, Sendable {
+    let kind: NowhereMultiplexerFrameKind
+    let flags: NowhereMultiplexerFrameFlags
     let value: UInt16
     let flowID: UInt32
 
     static func stream(
         flowID: UInt32,
-        flags: NowhereMuxFrameFlags = [],
+        flags: NowhereMultiplexerFrameFlags = [],
         payloadLength: Int
     ) throws -> Self {
         guard let value = UInt16(exactly: payloadLength) else {
-            throw NowhereMuxWireError.valueTooLarge
+            throw NowhereMultiplexerWireError.valueTooLarge
         }
         let header = Self(kind: .stream, flags: flags, value: value, flowID: flowID)
         try header.validate()
@@ -91,7 +91,7 @@ nonisolated struct NowhereMuxFrameHeader: Equatable, Sendable {
 
     static func window(flowID: UInt32, credit: Int) throws -> Self {
         guard let value = UInt16(exactly: credit) else {
-            throw NowhereMuxWireError.valueTooLarge
+            throw NowhereMultiplexerWireError.valueTooLarge
         }
         let header = Self(kind: .window, flags: [], value: value, flowID: flowID)
         try header.validate()
@@ -101,21 +101,21 @@ nonisolated struct NowhereMuxFrameHeader: Equatable, Sendable {
     func validate() throws {
         switch kind {
         case .stream:
-            guard flowID != 0 else { throw NowhereMuxWireError.invalidFlowID }
+            guard flowID != 0 else { throw NowhereMultiplexerWireError.invalidFlowID }
             guard flags.subtracting(.known).isEmpty else {
-                throw NowhereMuxWireError.reservedFlags
+                throw NowhereMultiplexerWireError.reservedFlags
             }
             if flags.contains(.rst), flags != .rst || value != 0 {
-                throw NowhereMuxWireError.invalidReset
+                throw NowhereMultiplexerWireError.invalidReset
             }
 
         case .window:
-            guard flags.isEmpty else { throw NowhereMuxWireError.reservedFlags }
-            guard value != 0 else { throw NowhereMuxWireError.invalidWindow }
+            guard flags.isEmpty else { throw NowhereMultiplexerWireError.reservedFlags }
+            guard value != 0 else { throw NowhereMultiplexerWireError.invalidWindow }
 
         case .datagram:
-            guard flowID != 0 else { throw NowhereMuxWireError.invalidFlowID }
-            guard flags.isEmpty else { throw NowhereMuxWireError.reservedFlags }
+            guard flowID != 0 else { throw NowhereMultiplexerWireError.invalidFlowID }
+            guard flags.isEmpty else { throw NowhereMultiplexerWireError.reservedFlags }
         }
     }
 
@@ -134,16 +134,16 @@ nonisolated struct NowhereMuxFrameHeader: Equatable, Sendable {
     }
 
     static func decode(_ input: Data) throws -> Self {
-        guard input.count == NowhereMuxConstants.headerSize else {
-            throw NowhereMuxWireError.invalidHeaderLength(input.count)
+        guard input.count == NowhereMultiplexerConstants.headerSize else {
+            throw NowhereMultiplexerWireError.invalidHeaderLength(input.count)
         }
         let bytes = [UInt8](input)
-        guard let kind = NowhereMuxFrameKind(rawValue: bytes[0]) else {
-            throw NowhereMuxWireError.unknownKind(bytes[0])
+        guard let kind = NowhereMultiplexerFrameKind(rawValue: bytes[0]) else {
+            throw NowhereMultiplexerWireError.unknownKind(bytes[0])
         }
         let header = Self(
             kind: kind,
-            flags: NowhereMuxFrameFlags(rawValue: bytes[1]),
+            flags: NowhereMultiplexerFrameFlags(rawValue: bytes[1]),
             value: UInt16(bytes[2]) << 8 | UInt16(bytes[3]),
             flowID: UInt32(bytes[4]) << 24
                 | UInt32(bytes[5]) << 16

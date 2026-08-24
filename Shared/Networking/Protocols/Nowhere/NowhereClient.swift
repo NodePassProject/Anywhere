@@ -461,7 +461,7 @@ nonisolated extension NowhereClient {
     private final class Pool: TransportPool {
         func reclaim() {
             NowhereClient.closeAll()
-            NowhereMuxShardRegistry.shared.closeAll()
+            NowhereMultiplexerRegistry.shared.closeAll()
             NowhereTransportIdentityRegistry.shared.reset()
         }
     }

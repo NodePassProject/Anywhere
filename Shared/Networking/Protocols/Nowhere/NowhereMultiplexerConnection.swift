@@ -1,5 +1,5 @@
 //
-//  NowhereMuxConnection.swift
+//  NowhereMultiplexerConnection.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 8/24/26.
@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTerminationObservable {
+nonisolated final class NowhereMultiplexerConnection: ProxyConnection, NowhereTerminationObservable {
     private enum Phase: PhaseTransitionable {
         case opening
         case ready
@@ -32,14 +32,14 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
         var terminalError: Error?
     }
 
-    private let stream: NowhereMuxStream
-    private let ownedCarrier: NowhereMuxCarrier?
+    private let stream: NowhereMultiplexerStream
+    private let ownedMultiplexer: NowhereMultiplexer?
     private let state = Mutex(State())
     private let termination = TerminationLatch()
 
-    init(stream: NowhereMuxStream, ownedCarrier: NowhereMuxCarrier? = nil) {
+    init(stream: NowhereMultiplexerStream, ownedMultiplexer: NowhereMultiplexer? = nil) {
         self.stream = stream
-        self.ownedCarrier = ownedCarrier
+        self.ownedMultiplexer = ownedMultiplexer
         stream.setNowhereTerminationHandler { [weak self] error in
             self?.handleTermination(error)
         }
@@ -82,7 +82,7 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
                 guard let chunk = try await stream.receiveRaw() else {
                     throw AnywhereError.proxy(
                         .nowhere,
-                        .connectionClosed(detail: "Mux stream closed before complete READY")
+                        .connectionClosed(detail: "Multiplexer stream closed before complete READY")
                     )
                 }
                 buffer.append(chunk)
@@ -158,7 +158,7 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
         guard closeState(error: error) else { return }
         stream.setNowhereTerminationHandler(nil)
         stream.abort()
-        ownedCarrier?.abort()
+        ownedMultiplexer?.abort()
         termination.fire(error)
     }
 
@@ -178,12 +178,12 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
     }
 
     private func closeStreamGracefully() {
-        guard let ownedCarrier else {
+        guard let ownedMultiplexer else {
             stream.cancel()
             return
         }
         stream.closeGracefully {
-            ownedCarrier.close()
+            ownedMultiplexer.close()
         }
     }
 
@@ -191,7 +191,7 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
         guard closeState(error: error) else { return }
         stream.setNowhereTerminationHandler(nil)
         stream.abort()
-        ownedCarrier?.abort()
+        ownedMultiplexer?.abort()
         termination.fire(error)
     }
 
@@ -201,7 +201,7 @@ nonisolated final class NowhereMuxFlowConnection: ProxyConnection, NowhereTermin
             return
         }
         guard closeState(error: error) else { return }
-        ownedCarrier?.abort()
+        ownedMultiplexer?.abort()
         termination.fire(error)
     }
 

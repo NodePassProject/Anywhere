@@ -1,5 +1,5 @@
 //
-//  NowhereMuxPool.swift
+//  NowhereMultiplexerPool.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 8/24/26.
@@ -8,8 +8,8 @@
 import Foundation
 import Synchronization
 
-nonisolated final class NowhereMuxShardRegistry: Sendable {
-    static let shared = NowhereMuxShardRegistry()
+nonisolated final class NowhereMultiplexerRegistry: Sendable {
+    static let shared = NowhereMultiplexerRegistry()
 
     private struct Key: Hashable {
         let configurationID: UUID
@@ -19,7 +19,7 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
     }
 
     private struct State {
-        var pools: [Key: NowhereMuxShardPool] = [:]
+        var pools: [Key: NowhereMultiplexerPool] = [:]
         var sealed = false
     }
 
@@ -41,8 +41,8 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
         connectHost: String,
         chain: [ProxyConfiguration],
         flowID: UInt32,
-        builder: @escaping @Sendable () async throws -> NowhereMuxCarrier
-    ) async throws -> NowhereMuxStream {
+        builder: @escaping @Sendable () async throws -> NowhereMultiplexer
+    ) async throws -> NowhereMultiplexerStream {
         let key = Key(
             configurationID: configurationID,
             configuration: configuration,
@@ -50,8 +50,8 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
             chain: chain
         )
 
-        var replaced: [NowhereMuxShardPool] = []
-        let selected = state.withLock { state -> NowhereMuxShardPool? in
+        var replaced: [NowhereMultiplexerPool] = []
+        let selected = state.withLock { state -> NowhereMultiplexerPool? in
             if let existing = state.pools[key] { return existing }
             guard !state.sealed else { return nil }
 
@@ -60,7 +60,7 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
                 guard let stale = state.pools.removeValue(forKey: staleKey) else { continue }
                 replaced.append(stale)
             }
-            let created = NowhereMuxShardPool(builder: builder)
+            let created = NowhereMultiplexerPool(builder: builder)
             state.pools[key] = created
             return created
         }
@@ -71,7 +71,7 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
     }
 
     func invalidate(configurationID: UUID) {
-        let removed: [NowhereMuxShardPool] = state.withLock { state in
+        let removed: [NowhereMultiplexerPool] = state.withLock { state in
             let keys = state.pools.keys.filter { $0.configurationID == configurationID }
             return keys.compactMap { state.pools.removeValue(forKey: $0) }
         }
@@ -79,7 +79,7 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
     }
 
     func closeAll() {
-        let snapshot: [NowhereMuxShardPool] = state.withLock { state in
+        let snapshot: [NowhereMultiplexerPool] = state.withLock { state in
             let pools = Array(state.pools.values)
             state.pools.removeAll(keepingCapacity: false)
             return pools
@@ -88,14 +88,14 @@ nonisolated final class NowhereMuxShardRegistry: Sendable {
     }
 }
 
-nonisolated extension NowhereMuxShardRegistry: TransportPool {
+nonisolated extension NowhereMultiplexerRegistry: TransportPool {
     func reclaim() { closeAll() }
 }
 
-nonisolated private final class NowhereMuxShardPool: Sendable {
+nonisolated private final class NowhereMultiplexerPool: Sendable {
     private struct PendingBuild: Sendable {
         let identifier: UInt64
-        let task: Task<NowhereMuxCarrier, Error>
+        let task: Task<NowhereMultiplexer, Error>
     }
 
     private struct Extra: Sendable {
@@ -103,10 +103,10 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
         var pendingBuild: PendingBuild?
     }
 
-    private typealias Base = MultiplexerPool<NowhereMuxCarrier, Extra>
+    private typealias Base = MultiplexerPool<NowhereMultiplexer, Extra>
     private typealias ReservedStream = (
-        carrier: NowhereMuxCarrier,
-        reservation: NowhereMuxCarrier.StreamReservation
+        multiplexer: NowhereMultiplexer,
+        reservation: NowhereMultiplexer.StreamReservation
     )
 
     private enum Acquisition {
@@ -116,36 +116,36 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
 
     private static let bucket = "nowhere"
     private static let policy = MultiplexerPolicy(
-        idleTimeout: NowhereMuxConstants.idleTimeout,
+        idleTimeout: NowhereMultiplexerConstants.idleTimeout,
         idleCheckInterval: 5
     )
 
     private let pool = Base(extra: Extra())
-    private let builder: @Sendable () async throws -> NowhereMuxCarrier
+    private let builder: @Sendable () async throws -> NowhereMultiplexer
 
-    init(builder: @escaping @Sendable () async throws -> NowhereMuxCarrier) {
+    init(builder: @escaping @Sendable () async throws -> NowhereMultiplexer) {
         self.builder = builder
         pool.startIdleEviction(Self.policy)
     }
 
-    func acquire(flowID: UInt32) async throws -> NowhereMuxStream {
+    func acquire(flowID: UInt32) async throws -> NowhereMultiplexerStream {
         while true {
             try Task.checkCancellation()
             switch try acquisition(flowID: flowID) {
             case .reserved(let reserved):
                 do {
-                    return try await reserved.carrier.openStream(reserved.reservation)
+                    return try await reserved.multiplexer.openStream(reserved.reservation)
                 } catch {
-                    if reserved.carrier.isClosed {
-                        pool.removeMultiplexer(reserved.carrier, key: Self.bucket)
+                    if reserved.multiplexer.isClosed {
+                        pool.removeMultiplexer(reserved.multiplexer, key: Self.bucket)
                     }
                     throw error
                 }
 
             case .build(let pending):
-                let carrier: NowhereMuxCarrier
+                let multiplexer: NowhereMultiplexer
                 do {
-                    carrier = try await waitForBuild(pending)
+                    multiplexer = try await waitForBuild(pending)
                 } catch {
                     if !Task.isCancelled {
                         clearPendingBuild(identifier: pending.identifier)
@@ -153,15 +153,15 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
                     throw error
                 }
 
-                let adoption = adopt(carrier, from: pending)
+                let adoption = adopt(multiplexer, from: pending)
                 guard adoption.accepted else {
-                    carrier.close()
+                    multiplexer.close()
                     throw AnywhereError.transport(.terminated)
                 }
                 if adoption.inserted {
-                    carrier.installCloseHandler { [weak self, weak carrier] in
-                        guard let carrier else { return }
-                        self?.pool.removeMultiplexer(carrier, key: Self.bucket)
+                    multiplexer.installCloseHandler { [weak self, weak multiplexer] in
+                        guard let multiplexer else { return }
+                        self?.pool.removeMultiplexer(multiplexer, key: Self.bucket)
                     }
                 }
             }
@@ -170,7 +170,7 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
 
     func closeAll() {
         pool.retire()
-        let pending = pool.state.withLock { state -> Task<NowhereMuxCarrier, Error>? in
+        let pending = pool.state.withLock { state -> Task<NowhereMultiplexer, Error>? in
             let task = state.extra.pendingBuild?.task
             state.extra.pendingBuild = nil
             return task
@@ -192,22 +192,22 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
             let candidates = live.sorted { lhs, rhs in
                 lhs.activeStreamCount < rhs.activeStreamCount
             }
-            for carrier in candidates {
-                let onEnd: @Sendable () -> Void = { [weak self, weak carrier] in
-                    guard let self, let carrier else { return }
-                    self.noteStreamEnded(carrier)
+            for multiplexer in candidates {
+                let onEnd: @Sendable () -> Void = { [weak self, weak multiplexer] in
+                    guard let self, let multiplexer else { return }
+                    self.noteStreamEnded(multiplexer)
                 }
                 do {
-                    if let reservation = try carrier.reserveStream(
+                    if let reservation = try multiplexer.reserveStream(
                         flowID: flowID,
-                        maximumActiveFlows: NowhereMuxConstants.maximumActiveFlowsPerShard,
+                        maximumActiveFlows: NowhereMultiplexerConstants.maximumActiveFlowsPerMultiplexer,
                         onEnd: onEnd
                     ) {
-                        state.lastActivity[ObjectIdentifier(carrier)] = MonotonicClock.now
-                        return .reserved((carrier, reservation))
+                        state.lastActivity[ObjectIdentifier(multiplexer)] = MonotonicClock.now
+                        return .reserved((multiplexer, reservation))
                     }
                 } catch {
-                    if carrier.isClosed { continue }
+                    if multiplexer.isClosed { continue }
                     throw error
                 }
             }
@@ -232,10 +232,10 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
         }
     }
 
-    private func waitForBuild(_ pending: PendingBuild) async throws -> NowhereMuxCarrier {
-        let resultInbox = AsyncInbox<Result<NowhereMuxCarrier, Error>>()
+    private func waitForBuild(_ pending: PendingBuild) async throws -> NowhereMultiplexer {
+        let resultInbox = AsyncInbox<Result<NowhereMultiplexer, Error>>()
         let observer = Task {
-            let result: Result<NowhereMuxCarrier, Error>
+            let result: Result<NowhereMultiplexer, Error>
             do {
                 result = .success(try await pending.task.value)
             } catch {
@@ -253,7 +253,7 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
     }
 
     private func adopt(
-        _ carrier: NowhereMuxCarrier,
+        _ multiplexer: NowhereMultiplexer,
         from pending: PendingBuild
     ) -> (accepted: Bool, inserted: Bool) {
         var inserted = false
@@ -261,11 +261,11 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
             if state.extra.pendingBuild?.identifier == pending.identifier {
                 state.extra.pendingBuild = nil
             }
-            guard state.phase == .open, !carrier.isClosed else { return false }
+            guard state.phase == .open, !multiplexer.isClosed else { return false }
 
-            let identifier = ObjectIdentifier(carrier)
-            if state.multiplexers[Self.bucket]?.contains(where: { $0 === carrier }) != true {
-                state.multiplexers[Self.bucket, default: []].append(carrier)
+            let identifier = ObjectIdentifier(multiplexer)
+            if state.multiplexers[Self.bucket]?.contains(where: { $0 === multiplexer }) != true {
+                state.multiplexers[Self.bucket, default: []].append(multiplexer)
                 state.lastActivity[identifier] = MonotonicClock.now
                 inserted = true
             }
@@ -274,9 +274,9 @@ nonisolated private final class NowhereMuxShardPool: Sendable {
         return (accepted, inserted)
     }
 
-    private func noteStreamEnded(_ carrier: NowhereMuxCarrier) {
+    private func noteStreamEnded(_ multiplexer: NowhereMultiplexer) {
         pool.state.withLock { state in
-            let identifier = ObjectIdentifier(carrier)
+            let identifier = ObjectIdentifier(multiplexer)
             if state.lastActivity[identifier] != nil {
                 state.lastActivity[identifier] = MonotonicClock.now
             }

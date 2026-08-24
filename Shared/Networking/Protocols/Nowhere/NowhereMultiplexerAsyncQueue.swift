@@ -1,5 +1,5 @@
 //
-//  NowhereMuxAsyncQueue.swift
+//  NowhereMultiplexerAsyncQueue.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 8/24/26.
@@ -8,7 +8,7 @@
 import Foundation
 import Synchronization
 
-nonisolated final class NowhereMuxAsyncQueue<Element: Sendable>: Sendable {
+nonisolated final class NowhereMultiplexerAsyncQueue<Element: Sendable>: Sendable {
     private struct State {
         var elements: [Element] = []
         var headIndex = 0
