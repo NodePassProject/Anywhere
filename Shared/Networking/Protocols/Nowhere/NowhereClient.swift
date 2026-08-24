@@ -445,7 +445,6 @@ nonisolated final class NowhereClient: Sendable {
             state.entries.removeAll(keepingCapacity: false)
             let pending = Array(state.pending.values)
             state.pending.removeAll(keepingCapacity: false)
-            // Bumping the epoch makes any in-flight build discard its result and fail its joiners.
             state.epoch &+= 1
             return (clients, pending)
         }

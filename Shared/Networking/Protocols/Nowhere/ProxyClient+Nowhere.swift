@@ -19,7 +19,6 @@ nonisolated private struct NowhereLogicalOpenError: Error {
     let context: NowhereLogicalFailureContext
 }
 
-/// Keeps the session-scoped UInt32 flow ID reserved for the lifetime of the logical flow.
 nonisolated private final class NowhereLeasedConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let lease: NowhereFlowIDLease
@@ -68,9 +67,6 @@ nonisolated private final class NowhereLeasedConnection: ProxyConnection {
 }
 
 nonisolated extension ProxyClient {
-    /// Connects through a Nowhere server. The iOS TUN stack already splits
-    /// TCP and UDP flows, so this goes directly to Nowhere stream/DATAGRAM
-    /// sessions instead of using the SOCKS5 ingress.
     func connectWithNowhere(
         command: ProxyCommand,
         destinationHost: String,
@@ -139,8 +135,6 @@ nonisolated extension ProxyClient {
         deadline: ContinuousClock.Instant,
         retriesLeft: Int
     ) async throws -> ProxyConnection {
-        // The idle-close timer / SessionReplaced can race an open; retries share the
-        // absolute 30 s `deadline` so the total budget spans all attempts.
         var retriesLeft = retriesLeft
         while true {
             let flowLease = try NowhereTransportIdentityRegistry.shared.leaseFlowID(
@@ -423,8 +417,6 @@ nonisolated extension ProxyClient {
             }
         }
 
-        // Race the two carrier halves; the first hard failure aborts the sibling. A half
-        // that already succeeded is bound to `attempt`, so the caller's teardown reaches it.
         return try await withThrowingTaskGroup(of: (isUplink: Bool, connection: ProxyConnection).self) { group in
             group.addTask {
                 do {
@@ -467,9 +459,6 @@ nonisolated extension ProxyClient {
                     else { downlink = result.connection }
                 }
             } catch {
-                // First hard failure aborts the sibling: cancelling the attempt tears down
-                // the already-bound (or in-flight) half so its open unblocks promptly, then
-                // the group drains before we rethrow.
                 attempt.cancel()
                 inheritedUplinkTunnel?.cancel()
                 group.cancelAll()

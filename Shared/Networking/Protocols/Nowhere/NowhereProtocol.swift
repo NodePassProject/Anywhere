@@ -9,7 +9,6 @@ import Foundation
 import CryptoKit
 import Darwin
 
-/// Nowhere's compact application protocol. All multibyte integers use network byte order.
 nonisolated enum NowhereProtocol {
     static let closeErrCodeOK: UInt64 = 0x100
     static let defaultALPN = "now/1"
@@ -407,8 +406,6 @@ nonisolated enum NowhereProtocol {
         }
     }
 
-    /// Validates only the common header so unknown or pre-READY routes can be dropped
-    /// before the callback-backed payload is copied.
     static func decodeUDPEnvelope(_ data: Data) -> (type: UDPType, flowID: UInt32)? {
         guard data.count >= udpHeaderSize else { return nil }
         let flags = data.byte(at: 0)

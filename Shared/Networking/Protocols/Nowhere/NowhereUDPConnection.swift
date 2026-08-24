@@ -43,14 +43,10 @@ actor NowhereUDPConnection {
 
     // MARK: Control stream (handshake)
 
-    /// Control-stream bytes for the flow-open handshake. Producer is `Sendable` (ngtcp2 queue);
-    /// single consumer via `nextControlChunk()`.
     private let controlInbox = AsyncInbox<Data>()
 
     // MARK: Inbound datagrams
 
-    /// Bounded so a burst that outruns the reader drops the newest rather than growing without
-    /// limit; single consumer via `nextDatagram()`.
     private let datagramInbox = AsyncInbox<NowhereQueuedDatagram>(capacity: NowhereUDPConnection.maxBufferedDatagrams)
     private static let maxBufferedDatagrams = 64
     private var nextPacketID: UInt32 = 1
@@ -134,7 +130,6 @@ actor NowhereUDPConnection {
                 }
             }
 
-            // Handshake done: the control stream is no longer needed.
             releaseControlStream(reset: false)
             if flowHeader.role != .open {
                 session.activateUDPSession(flowHeader.flowID)
@@ -154,7 +149,6 @@ actor NowhereUDPConnection {
 
     // MARK: - Demux feed (nonisolated; driven on the ngtcp2 queue)
 
-    /// Control-stream bytes / FIN — the flow-open handshake response.
     nonisolated func handleControlStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty { controlInbox.yield(Data(data)) }
         if fin { controlInbox.finish() }
@@ -164,7 +158,6 @@ actor NowhereUDPConnection {
         if let error { controlInbox.finish(throwing: error) } else { controlInbox.finish() }
     }
 
-    /// One inbound `.data` datagram (the session filters `.close` into `handleFlowClose`).
     nonisolated func handleIncomingDatagram(_ datagram: NowhereQueuedDatagram) {
         datagramInbox.yield(datagram)
     }
@@ -192,7 +185,6 @@ actor NowhereUDPConnection {
         return datagram.payload
     }
 
-    /// Called by the logical split-flow coordinator after the selected downlink has READY.
     nonisolated func activatePairedFlow() {
         let opening = lifecycle.withLock { state in
             if case .opening = state.phase { true } else { false }
@@ -206,7 +198,6 @@ actor NowhereUDPConnection {
         guard isConnected else {
             throw AnywhereError.proxy(.nowhere, .streamClosed)
         }
-        // Packet IDs are allocated only when the final PMTU requires fragmentation.
         try await attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1)
     }
 
@@ -233,7 +224,6 @@ actor NowhereUDPConnection {
                 maxDatagramSize: maxSize
             )
         } catch AnywhereError.proxy(.nowhere, .packetTooLarge) {
-            // UDP is lossy by contract. Drop only this packet; keep the flow alive.
             return
         }
         do {
@@ -244,8 +234,6 @@ actor NowhereUDPConnection {
                 guard isConnected else {
                     throw AnywhereError.proxy(.nowhere, .streamClosed)
                 }
-                // A new identity prevents the receiver from mixing fragments encoded with
-                // different geometry after the path MTU changed mid-send.
                 try await attemptSend(
                     data: data,
                     maxSizeOverride: maxBound,
@@ -254,10 +242,10 @@ actor NowhereUDPConnection {
                 return
             }
             if case AnywhereError.quic(.datagramTooLarge) = error {
-                return  // path bound changed again; drop without closing the flow
+                return
             }
             if case AnywhereError.quic(.datagramQueueFull) = error {
-                return  // reject newest packet; preserve queued packets and the flow
+                return
             }
             throw error
         }
@@ -361,7 +349,6 @@ actor NowhereUDPConnection {
 
     // MARK: - Helpers
 
-    /// Next PacketID. Actor-isolated, so concurrent sends never collide.
     private func newPacketID() -> UInt32 {
         let packetID = nextPacketID
         nextPacketID = nextPacketID == UInt32.max ? 1 : nextPacketID + 1
