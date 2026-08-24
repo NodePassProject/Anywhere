@@ -45,13 +45,23 @@ struct LaunchpadView: View {
             BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
             
-            VStack(spacing: 80) {
-                VStack(spacing: 20) {
-                    powerButton
-                    statusLabel
+            ViewThatFits {
+                VStack(spacing: 100) {
+                    VStack(spacing: 20) {
+                        powerButton
+                        statusLabel
+                    }
+                    configurationCard
+                        .frame(maxWidth: Self.maxControlWidth)
                 }
-                configurationCard
-                    .frame(maxWidth: Self.maxControlWidth)
+                HStack(spacing: 50) {
+                    VStack(spacing: 20) {
+                        powerButton
+                        statusLabel
+                    }
+                    configurationCard
+                        .frame(maxWidth: Self.maxControlWidth)
+                }
             }
             .padding()
             .animation(connectionEffectsEnabled ? Animation.bouncy : nil, value: isConnected)
