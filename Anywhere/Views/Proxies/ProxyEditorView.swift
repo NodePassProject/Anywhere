@@ -21,8 +21,7 @@ struct ProxyEditorView: View {
     @State private var nowhereKey = ""
     @State private var nowhereUplink: NowhereNetwork = .udp
     @State private var nowhereDownlink: NowhereNetwork = .udp
-    @State private var nowherePreconnectEnabled = true
-    @State private var nowherePoolSliderValue = Double(NowherePool.enabledDefault)
+    @State private var nowhereMultiplex = false
     @State private var nowhereSNI = ""
     @State private var nowhereALPN = ""
 
@@ -129,14 +128,6 @@ struct ProxyEditorView: View {
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isSudoku: Bool { selectedProtocol == .sudoku }
     private var isNaive: Bool { selectedProtocol.isNaive }
-    
-    private var nowherePoolLevel: Int {
-        switch nowherePoolSliderValue {
-        case 1...3: 0
-        case 4...6: 1
-        default: 2
-        }
-    }
     
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
@@ -477,21 +468,9 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Download", systemName: "arrow.down.circle.fill", foregroundStyle: .white, backgroundStyle: .blue.gradient)
                 }
-                if nowhereUplink == .tcp && nowhereDownlink == .tcp {
-                    Toggle(isOn: $nowherePreconnectEnabled) {
-                        TextWithColorfulIcon(title: "Preconnect", systemName: "bolt.horizontal.circle.fill", foregroundStyle: .white, backgroundStyle: .green.gradient)
-                    }
-                    if nowherePreconnectEnabled {
-                        Slider(
-                            value: $nowherePoolSliderValue,
-                            in: Double(NowherePool.sliderRange.lowerBound)...Double(NowherePool.sliderRange.upperBound)
-                        ) {
-                            Text("Connections")
-                        } minimumValueLabel: {
-                            Image(systemName: "dial.low").foregroundStyle(.secondary)
-                        } maximumValueLabel: {
-                            Image(systemName: "dial.high").foregroundStyle(.secondary)
-                        }
+                if nowhereUplink == .tcp || nowhereDownlink == .tcp {
+                    Toggle(isOn: $nowhereMultiplex) {
+                        TextWithColorfulIcon(title: "Multiplex", systemName: "rectangle.split.3x1.fill", foregroundStyle: .white, backgroundStyle: .teal.gradient)
                     }
                 }
             }
@@ -1015,13 +994,12 @@ struct ProxyEditorView: View {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        if case .nowhere(let key, let uplink, let downlink, let pool, let securityLayer) = configuration.outbound {
+        if case .nowhere(let key, let uplink, let downlink, let multiplex, let securityLayer) = configuration.outbound {
             let tls = securityLayer.tlsConfiguration ?? TLSConfiguration(serverName: "")
             nowhereKey = key
             nowhereUplink = uplink
             nowhereDownlink = downlink
-            nowherePreconnectEnabled = uplink == .tcp && downlink == .tcp && pool > 0
-            nowherePoolSliderValue = Double(pool > 0 ? pool : NowherePool.enabledDefault)
+            nowhereMultiplex = (uplink == .tcp || downlink == .tcp) && multiplex
             nowhereSNI = tls.serverName
             nowhereALPN = tls.alpn?.first ?? ""
         }
@@ -1298,19 +1276,13 @@ struct ProxyEditorView: View {
         let outbound: Outbound
         switch selectedProtocol {
         case .nowhere:
-            let pool = nowhereUplink == .tcp && nowhereDownlink == .tcp && nowherePreconnectEnabled
-                ? min(
-                    NowherePool.sliderRange.upperBound,
-                    max(NowherePool.sliderRange.lowerBound, Int(nowherePoolSliderValue.rounded()))
-                )
-                : 0
             let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
             let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
             outbound = .nowhere(
                 key: nowhereKey,
                 uplink: nowhereUplink,
                 downlink: nowhereDownlink,
-                pool: pool,
+                multiplex: (nowhereUplink == .tcp || nowhereDownlink == .tcp) && nowhereMultiplex,
                 securityLayer: .tls(TLSConfiguration(serverName: sni, alpn: alpn))
             )
         case .vless:
